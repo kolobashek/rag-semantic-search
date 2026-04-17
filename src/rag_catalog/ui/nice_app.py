@@ -1269,10 +1269,6 @@ def _build_page(initial_screen: str = "search") -> None:
             if state.header_explorer_actions is not None:
                 state.header_explorer_actions.clear()
                 with state.header_explorer_actions:
-                    up_button = ui.button(icon="arrow_upward", on_click=lambda: (_log_app_event(state, "explorer", "up", details={"path": str(current.parent)}), open_folder(current.parent)), color=None).props("flat round dense")
-                    up_button.tooltip("На уровень выше")
-                    if current == root:
-                        up_button.disable()
                     active = _is_favorite(state, str(current))
                     fav = ui.button(icon="star" if active else "star_border", color=None).props("flat round dense")
                     fav.classes("rag-favorite-star header active" if active else "rag-favorite-star header")
@@ -1284,7 +1280,12 @@ def _build_page(initial_screen: str = "search") -> None:
             page_files = files[state.explorer_page * PAGE_SIZE : (state.explorer_page + 1) * PAGE_SIZE]
 
             with entries_area:
-                ui.label(f"{current} · папок {len(dirs)} · файлов {total_files}").classes("rag-path")
+                with ui.row().classes("w-full items-center gap-2"):
+                    up_button = ui.button(icon="arrow_upward", on_click=lambda: (_log_app_event(state, "explorer", "up", details={"path": str(current.parent)}), open_folder(current.parent)), color=None).props("outline round dense")
+                    up_button.tooltip("На уровень выше")
+                    if current == root:
+                        up_button.disable()
+                    ui.label(f"{current} · папок {len(dirs)} · файлов {total_files}").classes("rag-path")
 
                 if state.favorites:
                     with ui.row().classes("rag-bookmarks"):
