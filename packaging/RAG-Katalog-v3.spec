@@ -5,7 +5,7 @@ a = Analysis(
     ['windows_app.py'],
     pathex=['.', 'src'],
     binaries=[],
-    datas=[('config.json', '.'), ('icon.ico', '.'), ('src', 'src')],
+    datas=[('config.example.json', '.'), ('icon.ico', '.'), ('src', 'src')],
     hiddenimports=['rag_catalog', 'rag_catalog.core.rag_core', 'rag_catalog.ui.windows_app', 'sentence_transformers', 'qdrant_client', 'PyQt6'],
     hookspath=[],
     hooksconfig={},

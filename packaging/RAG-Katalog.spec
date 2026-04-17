@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('config.json', '.'), ('icon.ico', '.'), ('src', 'src')]
+datas = [('config.example.json', '.'), ('icon.ico', '.'), ('src', 'src')]
 binaries = []
 hiddenimports = [
     'rag_catalog',

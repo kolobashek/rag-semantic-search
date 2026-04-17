@@ -113,13 +113,6 @@ st.markdown(
         box-shadow: 0 6px 16px rgba(15, 23, 42, 0.10);
         border-color: #60a5fa;
     }
-    .search-shell {
-        border: 1px solid var(--border-color, #d8dee9);
-        border-radius: 8px;
-        padding: 0.75rem;
-        margin: 0.6rem 0 1rem;
-        background: color-mix(in srgb, var(--background-color) 92%, #ffffff 8%);
-    }
     .result-group-title {
         display: flex;
         align-items: center;
@@ -274,6 +267,8 @@ _STATE_KEYS = {
     "last_content_only": False,
     "trigger_search": False,
     "preset_query": "",
+    "search_history": [],
+    "active_screen": "Поиск",
     "stats_cache": None,
     "stats_cache_time": 0.0,
     "index_stats_cache": None,
@@ -284,9 +279,28 @@ _STATE_KEYS = {
     "explorer_filter": "",        # фильтр по имени
     "explorer_page": 0,           # страница файлов
 }
-for _k, _v in _STATE_KEYS.items():
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
+
+
+def _ensure_session_state() -> None:
+    """Initialize Streamlit session keys for the current browser session."""
+    for key, value in _STATE_KEYS.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+_ensure_session_state()
+
+
+_SEARCH_PRESETS = [
+    ("Договоры", "договоры"),
+    ("Паспорта", "паспорта"),
+    ("Счета", "счета на оплату"),
+    ("Служебные записки", "служебная записка"),
+    ("Финансовые", "финансовый отчёт"),
+    ("Юридические", "юридический"),
+    ("Масса техники", "масса PC300"),
+    ("Акты", "акты выполненных работ"),
+]
 
 
 _SVG_PATHS: Dict[str, str] = {
@@ -333,7 +347,8 @@ def _init_searcher(cfg: Dict[str, Any]) -> None:
 
 
 def _get_searcher() -> Optional[RAGSearcher]:
-    return st.session_state.searcher
+    _ensure_session_state()
+    return st.session_state.get("searcher")
 
 
 def _users_db_path(cfg: Dict[str, Any]) -> str:
@@ -695,6 +710,122 @@ def _db_query_dicts(db_path: Path, query: str, params: Optional[tuple] = None) -
         conn.close()
 
 
+def _dedupe_queries(values: List[str], limit: int = 12) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        q = re.sub(r"\s+", " ", str(value or "")).strip()
+        key = q.lower()
+        if not q or key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _remember_search_query(query: str) -> None:
+    q = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not q:
+        return
+    current = list(st.session_state.get("search_history") or [])
+    st.session_state.search_history = _dedupe_queries([q, *current], limit=20)
+
+
+def _submit_current_query() -> None:
+    query = str(st.session_state.get("query_input") or "").strip()
+    if query:
+        st.session_state.trigger_search = True
+
+
+def _choose_search_query(query: str) -> None:
+    st.session_state.query_input = query
+    st.session_state.preset_query = query
+    st.session_state.trigger_search = True
+
+
+def _recent_search_queries(cfg: Dict[str, Any], limit: int = 12) -> List[str]:
+    db_path = _telemetry_db_path(cfg)
+    rows = _db_query_dicts(
+        db_path,
+        """
+        SELECT query
+        FROM search_logs
+        WHERE query <> ''
+        ORDER BY id DESC
+        LIMIT 80
+        """,
+    )
+    return _dedupe_queries([str(row.get("query") or "") for row in rows], limit=limit)
+
+
+def _search_suggestions(cfg: Dict[str, Any]) -> List[str]:
+    session_history = list(st.session_state.get("search_history") or [])
+    telemetry_history = _recent_search_queries(cfg, limit=12)
+    presets = [query for _, query in _SEARCH_PRESETS]
+    return _dedupe_queries([*session_history, *telemetry_history, *presets], limit=18)
+
+
+def _open_in_explorer(path: str) -> None:
+    value = str(path or "").strip()
+    if not value:
+        return
+    p = Path(value)
+    if p.is_file():
+        p = p.parent
+    st.session_state.explorer_path = str(p)
+    st.session_state.explorer_page = 0
+    st.session_state.explorer_filter = ""
+    st.session_state.active_screen = "Проводник"
+
+
+def _open_parent_in_explorer(path: str) -> None:
+    value = str(path or "").strip()
+    if not value:
+        return
+    p = Path(value)
+    st.session_state.explorer_path = str(p.parent if p.suffix else p)
+    st.session_state.explorer_page = 0
+    st.session_state.explorer_filter = ""
+    st.session_state.active_screen = "Проводник"
+
+
+def _format_file_size(size_b: int) -> str:
+    if size_b >= 1_048_576:
+        return f"{size_b / 1_048_576:.1f} МБ"
+    if size_b >= 1024:
+        return f"{size_b / 1024:.1f} КБ"
+    return f"{size_b} Б"
+
+
+def _directory_children(path: str, limit: int = 40) -> Dict[str, Any]:
+    p = Path(path)
+    out: Dict[str, Any] = {"exists": p.exists(), "is_dir": p.is_dir(), "dirs": [], "files": []}
+    if not p.exists() or not p.is_dir():
+        return out
+    try:
+        entries = sorted(
+            [x for x in p.iterdir() if not x.name.startswith(".") and not x.name.startswith("~$")],
+            key=lambda x: (not x.is_dir(), x.name.lower()),
+        )
+    except Exception as exc:
+        out["error"] = str(exc)
+        return out
+    for child in entries[:limit]:
+        item = {"name": child.name, "path": str(child)}
+        if child.is_dir():
+            out["dirs"].append(item)
+        elif child.is_file():
+            try:
+                item["size"] = _format_file_size(child.stat().st_size)
+            except Exception:
+                item["size"] = ""
+            out["files"].append(item)
+    out["truncated"] = len(entries) > limit
+    return out
+
+
 def _get_index_telemetry_snapshot(cfg: Dict[str, Any]) -> Dict[str, Any]:
     db_path = _telemetry_db_path(cfg)
     out: Dict[str, Any] = {
@@ -787,14 +918,14 @@ def _colorize_log_line(line: str) -> str:
 
 def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
     """Боковая панель: статус, параметры поиска, быстрый поиск, настройки."""
-    st.sidebar.title("Настройки")
+    st.sidebar.title("RAG Каталог")
 
     # Статус подключения
     searcher = _get_searcher()
     if st.session_state.qdrant_connected and searcher:
         stats = _get_stats(searcher)
         pts = stats.get("points_count", "?")
-        label = f"Qdrant подключён  |  Точек: {pts:,}" if isinstance(pts, int) else f"Qdrant подключён  |  Точек: {pts}"
+        label = f"Qdrant подключён\n\nТочек: {pts:,}" if isinstance(pts, int) else f"Qdrant подключён\n\nТочек: {pts}"
         st.sidebar.success(label)
     else:
         st.sidebar.error("Нет подключения к Qdrant")
@@ -803,46 +934,28 @@ def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
         _init_searcher(cfg)
         st.rerun()
 
-    st.sidebar.divider()
-
-    # Параметры поиска
-    st.sidebar.subheader("Параметры поиска")
-
-    limit = st.sidebar.slider("Количество результатов", 5, 50, 10, step=5)
-
-    file_type = st.sidebar.selectbox(
-        "Тип файла",
-        options=["Все", ".docx", ".xlsx", ".xls", ".pdf"],
-    )
-    file_type_val: Optional[str] = None if file_type == "Все" else file_type
-
-    content_only = st.sidebar.checkbox("Только содержимое (без метаданных)")
-
-    st.sidebar.divider()
+    with st.sidebar.expander("Параметры поиска", expanded=True):
+        limit = st.slider("Количество результатов", 5, 50, 10, step=5)
+        file_type = st.selectbox(
+            "Тип файла",
+            options=["Все", ".docx", ".xlsx", ".xls", ".pdf"],
+        )
+        file_type_val: Optional[str] = None if file_type == "Все" else file_type
+        content_only = st.checkbox("Только содержимое")
 
     # Быстрый поиск
-    st.sidebar.subheader("Быстрый поиск")
-    presets = [
-        ("Договоры",           "договоры"),
-        ("Паспорта",            "паспорта"),
-        ("Счета",               "счета на оплату"),
-        ("Служебные записки",   "служебная записка"),
-        ("Финансовые",          "финансовый отчёт"),
-        ("Юридические",         "юридический"),
-    ]
-    for label, query in presets:
-        if st.sidebar.button(label, use_container_width=True):
-            st.session_state.preset_query = query
-            st.session_state.trigger_search = True
-            st.rerun()
-
-    st.sidebar.divider()
+    with st.sidebar.expander("Быстрый поиск", expanded=False):
+        for label, query in _SEARCH_PRESETS[:6]:
+            if st.button(label, use_container_width=True, key=f"quick_{label}"):
+                _choose_search_query(query)
+                st.session_state.active_screen = "Поиск"
+                st.rerun()
 
     if str(user.get("role", "user")) != "admin":
         return limit, file_type_val, content_only
 
     # Настройки путей доступны только администратору.
-    with st.sidebar.expander("Пути и интеграции (config.json)"):
+    with st.sidebar.expander("Администрирование", expanded=False):
         new_catalog = st.text_input("Папка каталога", value=cfg.get("catalog_path", ""))
         new_qdrant  = st.text_input("База Qdrant",     value=cfg.get("qdrant_db_path", ""))
         new_log     = st.text_input("Лог файл",         value=cfg.get("log_file", ""))
@@ -1030,80 +1143,81 @@ def _where_found_comment(result: Dict[str, Any]) -> str:
 
 
 def render_result_card(result: Dict[str, Any], index: int) -> None:
-    """
-    Отрисовать карточку одного результата.
-    Все пользовательские данные экранируются через html.escape() для защиты от XSS.
-    """
-    filename  = html.escape(result.get("filename") or "")
-    path_str  = html.escape(result.get("path") or "")
-    ext       = html.escape(result.get("extension") or "unknown")
-    type_str  = html.escape(result.get("type") or "")
+    """Отрисовать карточку одного результата нативными Streamlit-компонентами."""
+    filename = str(result.get("filename") or "")
+    path_str = str(result.get("path") or "")
+    ext = str(result.get("extension") or "unknown")
+    type_str = str(result.get("type") or "")
     full_path = result.get("full_path") or ""
     text_raw  = _clean_display_text(result.get("text") or "")
-    text_preview = html.escape(text_raw[:400]) + ("…" if len(text_raw) > 400 else "")
+    text_preview = text_raw[:400] + ("…" if len(text_raw) > 400 else "")
     ctx = _extract_context_bits(text_raw)
     where_found = _where_found_comment(result)
 
     score    = result.get("score", 0)
     size_mb  = result.get("size_mb")
     modified = result.get("modified")
+    score_text = f"{float(score or 0):.3f}"
 
-    pct = max(0, min(100, int(score * 100)))
-    score_bar = (
-        f'<span class="score-bar-bg"><span class="score-bar-fill" '
-        f'style="width:{pct}%"></span></span> {score:.2f}'
-    )
-
-    meta_parts = []
+    meta_parts = [f"score {score_text}", ext, type_str]
     if size_mb is not None:
-        meta_parts.append(f"<strong>Размер:</strong> {html.escape(str(size_mb))} МБ")
+        meta_parts.append(f"{size_mb} МБ")
     if modified:
-        meta_parts.append(f"<strong>Изменён:</strong> {html.escape(str(modified)[:10])}")
-    meta_html = "  &nbsp;|&nbsp;  ".join(meta_parts)
+        meta_parts.append(str(modified)[:10])
 
     furl = _file_url(full_path)
     durl = _folder_url(full_path)
-    links_html = ""
-    if furl:
-        links_html = (
-            f'<a class="file-link" href="{html.escape(furl)}" target="_blank">'
-            f'{_icon("open", "icon-doc")}Открыть файл</a>'
-        )
-    if durl:
-        links_html += (
-            f'&nbsp;&nbsp;|&nbsp;&nbsp;'
-            f'<a class="file-link" href="{html.escape(durl)}" target="_blank">'
-            f'{_icon("folder", "icon-folder")}Открыть папку</a>'
-        )
+    p = Path(full_path) if full_path else None
 
-    st.markdown(
-        f"""
-<div class="result-card">
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-    <div>
-      <strong style="color:#1f77b4;font-size:1rem;">{_ext_icon(result.get("extension") or "")}[{index}] {filename}</strong>
-    </div>
-    <div>
-      <span class="badge badge-score">{score_bar}</span>
-      <span class="badge badge-ext">{ext}</span>
-      <span class="badge badge-type">{type_str}</span>
-    </div>
-  </div>
-  <p style="color:#888;font-size:0.83rem;margin:6px 0 2px;">
-    <strong>Путь:</strong> {path_str}
-    {("&nbsp;&nbsp;|&nbsp;&nbsp;" + links_html) if links_html else ""}
-  </p>
-  {"<p style='color:#888;font-size:0.82rem;margin:0;'>" + meta_html + "</p>" if meta_parts else ""}
-  <div class="result-comment">
-    <div><span class="label">Где найдено:</span> {html.escape(where_found)}</div>
-    {"<div><span class='label'>Заголовок:</span> " + html.escape(ctx["title"]) + "</div>" if ctx["title"] else ""}
-    {"<div><span class='label'>Контекст:</span> " + html.escape(ctx["context"]) + "</div>" if ctx["context"] else ""}
-  </div>
-  <div class="text-preview">{text_preview}</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    with st.container(border=True):
+        st.markdown(f"**[{index}] {filename}**")
+        st.caption(" | ".join(x for x in meta_parts if x))
+        if path_str:
+            st.caption(path_str)
+
+        if furl or durl or full_path:
+            link_cols = st.columns([1, 1, 1, 1, 4])
+            if furl:
+                with link_cols[0]:
+                    st.link_button("Открыть", furl, use_container_width=True)
+            if durl:
+                with link_cols[1]:
+                    st.link_button("Папка ОС", durl, use_container_width=True)
+            if full_path:
+                with link_cols[2]:
+                    if st.button("В проводник", key=f"goto_file_{index}_{full_path}", use_container_width=True):
+                        _open_parent_in_explorer(full_path)
+                        st.rerun()
+            if p and p.exists() and p.is_file():
+                try:
+                    size_b = p.stat().st_size
+                except Exception:
+                    size_b = 0
+                with link_cols[3]:
+                    if size_b <= 50 * 1_048_576:
+                        try:
+                            st.download_button(
+                                "Скачать",
+                                data=p.read_bytes(),
+                                file_name=p.name,
+                                key=f"download_{index}_{full_path}",
+                                use_container_width=True,
+                            )
+                        except Exception:
+                            st.button("Скачать", disabled=True, key=f"download_disabled_{index}_{full_path}", use_container_width=True)
+                    else:
+                        st.button("Скачать", disabled=True, help="Файл больше 50 МБ", key=f"download_big_{index}_{full_path}", use_container_width=True)
+
+        st.markdown(f"**Где найдено:** {where_found}")
+        if ctx["title"]:
+            st.markdown(f"**Заголовок:** {ctx['title']}")
+        if ctx["context"]:
+            st.markdown(f"**Контекст:** {ctx['context']}")
+        with st.expander("Просмотреть фрагмент в приложении", expanded=False):
+            if text_preview:
+                st.text(text_preview)
+            else:
+                st.info("Для этого результата нет текстового фрагмента.")
 
 
 def _classify_result(result: Dict[str, Any]) -> str:
@@ -1139,21 +1253,50 @@ def _parent_catalog(path: str) -> str:
 
 def render_folder_result(result: Dict[str, Any], index: int) -> None:
     full_path = result.get("full_path") or ""
-    durl = _folder_url(full_path)
-    link = (
-        f'<a class="file-link" href="{html.escape(durl)}" target="_blank">{_icon("folder", "icon-folder")}Открыть папку</a>'
-        if durl else ""
-    )
-    st.markdown(
-        f"""
-<div class="folder-result">
-  <div><strong>{_icon("folder", "icon-folder")}[{index}] {html.escape(result.get("filename") or "")}</strong></div>
-  <div style="font-size:0.84rem;margin-top:0.25rem;">{html.escape(result.get("path") or "")}</div>
-  <div style="font-size:0.82rem;margin-top:0.35rem;">Score: {float(result.get("score") or 0):.3f} &nbsp; {link}</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    durl = _file_url(full_path)
+    with st.container(border=True):
+        st.markdown(f"**[{index}] {result.get('filename') or ''}**")
+        st.caption(str(result.get("path") or ""))
+        st.caption(f"score {float(result.get('score') or 0):.3f}")
+        cols = st.columns([1, 1, 6])
+        if durl:
+            with cols[0]:
+                st.link_button("Папка ОС", durl, use_container_width=True)
+        if full_path:
+            with cols[1]:
+                if st.button("В проводник", key=f"goto_dir_{index}_{full_path}", use_container_width=True):
+                    _open_in_explorer(full_path)
+                    st.rerun()
+
+        with st.expander("Раскрыть каталог", expanded=False):
+            children = _directory_children(full_path)
+            if not children["exists"]:
+                st.info("Каталог недоступен на диске.")
+            elif not children["is_dir"]:
+                st.info("Путь результата не является каталогом.")
+            elif children.get("error"):
+                st.error(f"Не удалось прочитать каталог: {children['error']}")
+            else:
+                dirs = children["dirs"]
+                files = children["files"]
+                if not dirs and not files:
+                    st.info("Каталог пуст.")
+                if dirs:
+                    st.markdown("**Папки**")
+                    for item in dirs:
+                        if st.button(
+                            f":material/folder: {item['name']}",
+                            key=f"result_child_dir_{index}_{item['path']}",
+                            use_container_width=True,
+                        ):
+                            _open_in_explorer(item["path"])
+                            st.rerun()
+                if files:
+                    st.markdown("**Файлы**")
+                    for item in files:
+                        st.caption(f"{item['name']}  {item.get('size', '')}")
+                if children.get("truncated"):
+                    st.caption("Показаны первые элементы. Откройте каталог в проводнике приложения для полного списка.")
 
 
 def render_grouped_results(results: List[Dict[str, Any]]) -> None:
@@ -1178,10 +1321,7 @@ def render_grouped_results(results: List[Dict[str, Any]]) -> None:
         total = sum(len(v) for v in grouped[group_name].values())
         with st.expander(f"{group_name} ({total})", expanded=(idx == 1)):
             for catalog, items in sorted(grouped[group_name].items()):
-                st.markdown(
-                    f'<div class="result-group-title">{_icon("folder", "icon-folder")}{html.escape(catalog)} ({len(items)})</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f"**{catalog} ({len(items)})**")
                 for item in sorted(items, key=lambda x: float(x.get("score") or 0), reverse=True):
                     if item.get("type") == "folder_metadata":
                         render_folder_result(item, idx)
@@ -1757,10 +1897,11 @@ def render_telegram_tab(cfg: Dict[str, Any]) -> None:
 # ═══════════════════════════ main ══════════════════════════════════════
 
 def main() -> None:
+    _ensure_session_state()
     cfg = load_config()
 
     # Инициализируем searcher один раз за сессию
-    if st.session_state.searcher is None:
+    if st.session_state.get("searcher") is None:
         _init_searcher(cfg)
 
     # Заголовок
@@ -1773,14 +1914,9 @@ def main() -> None:
         else:
             st.error("Не подключено")
 
-    st.markdown(
-        f"""
-<div class="hero">
-  <div class="hero-title">{_app_icon_img()}<span>Поиск по документам + извлечение фактов</span></div>
-  <div class="hero-sub">Задавайте вопросы естественным языком. Система пытается извлечь факт (например массу техники) и показывает источник.</div>
-</div>
-""",
-        unsafe_allow_html=True,
+    st.info(
+        "Поиск по документам и извлечение фактов. "
+        "Задавайте вопросы естественным языком, система покажет найденные источники."
     )
 
     user = render_auth_gate(cfg)
@@ -1795,39 +1931,53 @@ def main() -> None:
     # Боковая панель
     limit, file_type_val, content_only = render_sidebar(cfg, user)
 
-    # ── Вкладки ──────────────────────────────────────────────────────
-    tab_search, tab_explorer, tab_index, tab_telegram = st.tabs(
-        [
-            ":material/search: Поиск",
-            ":material/folder: Проводник",
-            ":material/monitoring: Индексирование",
-            ":material/smart_toy: Telegram",
-        ]
+    # ── Экраны приложения. Значение хранится в session_state, поэтому переходы
+    # из результатов в проводник сохраняют состояние.
+    screen = st.segmented_control(
+        "Раздел",
+        ["Поиск", "Проводник", "Индексирование", "Telegram"],
+        key="active_screen",
+        label_visibility="collapsed",
+        width="stretch",
     )
 
     # ════════════════════ Вкладка: Поиск ═════════════════════════════
-    with tab_search:
+    if screen == "Поиск":
         st.divider()
 
-        # Поисковая форма
+        # Поисковая строка: обычный input сохраняет нормальное редактирование
+        # текста, а история/подсказки вынесены в отдельный popover.
         initial_query = st.session_state.get("preset_query", "")
-        if st.session_state.trigger_search and initial_query:
-            st.session_state.trigger_search = False
+        if initial_query:
+            st.session_state.query_input = initial_query
 
-        st.markdown('<div class="search-shell">', unsafe_allow_html=True)
-        with st.form("search_form", clear_on_submit=False):
-            q_col, b_col = st.columns([6, 1])
+        suggestions = _search_suggestions(cfg)
+
+        with st.container(border=True):
+            q_col, s_col, b_col = st.columns([6, 1.4, 1])
             with q_col:
                 query = st.text_input(
                     "Поисковый запрос",
-                    value=initial_query,
                     placeholder="Введите что ищете: договоры, паспорта, счета, масса PC300...",
                     label_visibility="collapsed",
                     key="query_input",
+                    on_change=_submit_current_query,
                 )
+            with s_col:
+                with st.popover("История", use_container_width=True):
+                    st.caption("История и подсказки")
+                    if not suggestions:
+                        st.info("История пока пуста.")
+                    for idx, suggestion in enumerate(suggestions[:12]):
+                        if st.button(
+                            suggestion,
+                            key=f"search_history_{idx}_{abs(hash(suggestion))}",
+                            use_container_width=True,
+                        ):
+                            _choose_search_query(suggestion)
+                            st.rerun()
             with b_col:
-                submitted = st.form_submit_button("Найти", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+                submitted = st.button("Найти", use_container_width=True, type="primary")
 
         if initial_query:
             st.session_state.preset_query = ""
@@ -1870,6 +2020,7 @@ def main() -> None:
                 st.session_state.last_file_type = file_type_val
                 st.session_state.last_content_only = content_only
                 st.session_state.last_fact_answer = fact
+                _remember_search_query(query.strip())
 
         st.divider()
 
@@ -1913,17 +2064,17 @@ def main() -> None:
                     st.metric("Статус", stats["status"])
 
     # ════════════════════ Вкладка: Проводник ═════════════════════════
-    with tab_explorer:
+    elif screen == "Проводник":
         st.divider()
         render_explorer_tab(cfg)
 
     # ════════════════════ Вкладка: Индексирование ═════════════════════
-    with tab_index:
+    elif screen == "Индексирование":
         st.divider()
         render_indexing_tab(cfg)
 
     # ════════════════════ Вкладка: Telegram ═══════════════════════════
-    with tab_telegram:
+    elif screen == "Telegram":
         st.divider()
         render_telegram_tab(cfg)
 
