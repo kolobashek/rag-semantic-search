@@ -2,6 +2,7 @@
 telemetry_db.py — SQLite-телеметрия для индексации и поисковых запросов.
 """
 
+import json
 import sqlite3
 import threading
 import uuid
@@ -46,7 +47,8 @@ class TelemetryDB:
                         results_count INTEGER NOT NULL DEFAULT 0,
                         duration_ms INTEGER NOT NULL DEFAULT 0,
                         ok INTEGER NOT NULL DEFAULT 1,
-                        error TEXT
+                        error TEXT,
+                        username TEXT NOT NULL DEFAULT ''
                     );
 
                     CREATE TABLE IF NOT EXISTS fact_logs (
@@ -99,16 +101,62 @@ class TelemetryDB:
                         FOREIGN KEY(run_id) REFERENCES index_runs(run_id)
                     );
 
+                    CREATE TABLE IF NOT EXISTS app_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts TEXT NOT NULL,
+                        username TEXT NOT NULL DEFAULT '',
+                        screen TEXT NOT NULL DEFAULT '',
+                        feature TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT '',
+                        ok INTEGER NOT NULL DEFAULT 1,
+                        details_json TEXT NOT NULL DEFAULT '{}'
+                    );
+
+                    CREATE TABLE IF NOT EXISTS ocr_runs (
+                        ocr_run_id TEXT PRIMARY KEY,
+                        ts_started TEXT NOT NULL,
+                        ts_updated TEXT NOT NULL,
+                        ts_finished TEXT,
+                        status TEXT NOT NULL,
+                        collection_name TEXT NOT NULL DEFAULT '',
+                        found_scanned INTEGER NOT NULL DEFAULT 0,
+                        processed_pdfs INTEGER NOT NULL DEFAULT 0,
+                        index_run_id TEXT,
+                        note TEXT NOT NULL DEFAULT ''
+                    );
+                    """
+                )
+                self._migrate_schema(conn)
+                conn.executescript(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_search_logs_ts
                       ON search_logs(ts);
+                    CREATE INDEX IF NOT EXISTS idx_search_logs_username
+                      ON search_logs(username, ts);
                     CREATE INDEX IF NOT EXISTS idx_fact_logs_ts
                       ON fact_logs(ts);
                     CREATE INDEX IF NOT EXISTS idx_index_runs_started
                       ON index_runs(ts_started);
                     CREATE INDEX IF NOT EXISTS idx_stage_run
                       ON index_stage_progress(run_id, stage);
+                    CREATE INDEX IF NOT EXISTS idx_app_events_ts
+                      ON app_events(ts);
+                    CREATE INDEX IF NOT EXISTS idx_app_events_feature
+                      ON app_events(feature, action, ts);
+                    CREATE INDEX IF NOT EXISTS idx_ocr_runs_ts
+                      ON ocr_runs(ts_started);
+                    CREATE INDEX IF NOT EXISTS idx_ocr_runs_status
+                      ON ocr_runs(status);
                     """
                 )
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Добавить отсутствующие столбцы для обратной совместимости."""
+        search_cols = {row["name"] for row in conn.execute("PRAGMA table_info(search_logs)").fetchall()}
+        if "username" not in search_cols:
+            conn.execute("ALTER TABLE search_logs ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+
+    # ── search ────────────────────────────────────────────────────────
 
     def log_search(
         self,
@@ -122,6 +170,7 @@ class TelemetryDB:
         duration_ms: int,
         ok: bool,
         error: str = "",
+        username: str = "",
     ) -> None:
         with self._lock:
             with self._connect() as conn:
@@ -129,9 +178,9 @@ class TelemetryDB:
                     """
                     INSERT INTO search_logs (
                         ts, source, query, limit_value, file_type, content_only,
-                        results_count, duration_ms, ok, error
+                        results_count, duration_ms, ok, error, username
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         _utc_now(),
@@ -144,8 +193,11 @@ class TelemetryDB:
                         int(duration_ms),
                         1 if ok else 0,
                         error or "",
+                        (username or "").strip().lower(),
                     ),
                 )
+
+    # ── fact ──────────────────────────────────────────────────────────
 
     def log_fact(
         self,
@@ -180,6 +232,38 @@ class TelemetryDB:
                         error or "",
                     ),
                 )
+
+    # ── app events ────────────────────────────────────────────────────
+
+    def log_app_event(
+        self,
+        *,
+        username: str,
+        screen: str,
+        feature: str,
+        action: str,
+        ok: bool = True,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO app_events (ts, username, screen, feature, action, ok, details_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _utc_now(),
+                        (username or "").strip().lower(),
+                        screen or "",
+                        feature or "",
+                        action or "",
+                        1 if ok else 0,
+                        json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
+
+    # ── index runs ────────────────────────────────────────────────────
 
     def start_index_run(
         self,
@@ -362,6 +446,108 @@ class TelemetryDB:
                         run_id,
                     ),
                 )
+
+    # ── OCR runs ──────────────────────────────────────────────────────
+
+    def start_ocr_run(
+        self,
+        *,
+        collection_name: str = "",
+        found_scanned: int = 0,
+        note: str = "",
+    ) -> str:
+        """Создать запись о начале OCR-прохода. Возвращает ocr_run_id."""
+        ocr_run_id = str(uuid.uuid4())
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO ocr_runs (
+                        ocr_run_id, ts_started, ts_updated, status,
+                        collection_name, found_scanned, processed_pdfs, note
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ocr_run_id, now, now, "running",
+                        collection_name or "",
+                        int(found_scanned),
+                        0,
+                        note or "",
+                    ),
+                )
+        return ocr_run_id
+
+    def update_ocr_progress(
+        self,
+        *,
+        ocr_run_id: str,
+        found_scanned: Optional[int] = None,
+        processed_pdfs: Optional[int] = None,
+        index_run_id: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        """Обновить прогресс OCR-прохода."""
+        sets = ["ts_updated=?"]
+        params: List[Any] = [_utc_now()]
+        if found_scanned is not None:
+            sets.append("found_scanned=?")
+            params.append(int(found_scanned))
+        if processed_pdfs is not None:
+            sets.append("processed_pdfs=?")
+            params.append(int(processed_pdfs))
+        if index_run_id is not None:
+            sets.append("index_run_id=?")
+            params.append(index_run_id)
+        if note is not None:
+            sets.append("note=?")
+            params.append(note)
+        params.append(ocr_run_id)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    f"UPDATE ocr_runs SET {', '.join(sets)} WHERE ocr_run_id=?",
+                    params,
+                )
+
+    def finish_ocr_run(
+        self,
+        *,
+        ocr_run_id: str,
+        status: str,
+        processed_pdfs: int = 0,
+        note: str = "",
+    ) -> None:
+        """Завершить OCR-проход (status: 'completed', 'failed', 'cancelled')."""
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE ocr_runs
+                    SET ts_updated=?, ts_finished=?, status=?, processed_pdfs=?,
+                        note=CASE WHEN ? = '' THEN note ELSE ? END
+                    WHERE ocr_run_id=?
+                    """,
+                    (now, now, status, int(processed_pdfs), note or "", note or "", ocr_run_id),
+                )
+
+    def get_active_ocr_run(self) -> Optional[Dict[str, Any]]:
+        """Вернуть активный OCR-проход (status='running') или None."""
+        rows = self.fetch_dicts(
+            "SELECT * FROM ocr_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 1"
+        )
+        return rows[0] if rows else None
+
+    def get_last_ocr_runs(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Вернуть последние N OCR-проходов."""
+        return self.fetch_dicts(
+            "SELECT * FROM ocr_runs ORDER BY ts_started DESC LIMIT ?",
+            [int(limit)],
+        )
+
+    # ── generic ───────────────────────────────────────────────────────
 
     def fetch_dicts(self, query: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         with self._lock:

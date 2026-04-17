@@ -835,6 +835,8 @@ def _get_index_telemetry_snapshot(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "stages": [],
         "windows": {},
         "search_recent": [],
+        "ocr_active": None,
+        "ocr_recent": [],
     }
     if not db_path.exists():
         return out
@@ -898,6 +900,25 @@ def _get_index_telemetry_snapshot(cfg: Dict[str, Any]) -> Dict[str, Any]:
         LIMIT 20
         """,
     )
+
+    # ── OCR runs ──────────────────────────────────────────────────────
+    # Таблица появляется только после первого запуска ocr_pdfs.py
+    try:
+        active_ocr = _db_query_dicts(
+            db_path,
+            "SELECT * FROM ocr_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 1",
+        )
+        out["ocr_active"] = active_ocr[0] if active_ocr else None
+
+        out["ocr_recent"] = _db_query_dicts(
+            db_path,
+            "SELECT * FROM ocr_runs ORDER BY ts_started DESC LIMIT 5",
+        )
+    except Exception:
+        # Таблица ещё не создана (старая БД без OCR-прохода)
+        out["ocr_active"] = None
+        out["ocr_recent"] = []
+
     return out
 
 
@@ -1769,6 +1790,84 @@ def render_indexing_tab(cfg: Dict[str, Any]) -> None:
                     f"status={row.get('status', '-')}"
                 )
 
+        # ── OCR распознавание ────────────────────────────────────────────
+        st.divider()
+        st.subheader("📄 OCR распознавание PDF")
+
+        ocr_active = telemetry.get("ocr_active")
+        ocr_recent = telemetry.get("ocr_recent") or []
+
+        if ocr_active:
+            # Активный OCR-проход — показываем прогрессбар «живым»
+            found = int(ocr_active.get("found_scanned") or 0)
+            processed_ocr = int(ocr_active.get("processed_pdfs") or 0)
+            pct_ocr = min(100.0, processed_ocr / found * 100.0) if found > 0 else 0.0
+            # Пульсирующий статус
+            st.info(
+                f"🔄 **OCR выполняется** — найдено сканов: **{found:,}**, "
+                f"обработано: **{processed_ocr:,}** ({pct_ocr:.1f}%)"
+            )
+            st.progress(min(1.0, pct_ocr / 100.0))
+            ts_started = ocr_active.get("ts_started", "")
+            ts_updated = ocr_active.get("ts_updated", "")
+            note = ocr_active.get("note", "")
+            st.caption(
+                f"Запущен: {ts_started} · Обновлён: {ts_updated}"
+                + (f" · {note}" if note else "")
+            )
+            # Авто-обновление каждые 10 секунд пока идёт OCR
+            st.markdown(
+                '<meta http-equiv="refresh" content="10">',
+                unsafe_allow_html=True,
+            )
+        elif ocr_recent:
+            last_ocr = ocr_recent[0]
+            status_ocr = last_ocr.get("status", "unknown")
+            found = int(last_ocr.get("found_scanned") or 0)
+            processed_ocr = int(last_ocr.get("processed_pdfs") or 0)
+            pct_ocr = min(100.0, processed_ocr / found * 100.0) if found > 0 else 0.0
+
+            _status_icon = {
+                "completed": "✅",
+                "failed": "❌",
+                "cancelled": "⚠️",
+                "running": "🔄",
+            }.get(status_ocr, "ℹ️")
+
+            st.markdown(
+                f"{_status_icon} **Последний OCR-проход**: `{status_ocr}` — "
+                f"найдено сканов: **{found:,}**, обработано: **{processed_ocr:,}**"
+            )
+            if found > 0:
+                st.progress(min(1.0, pct_ocr / 100.0))
+                st.caption(f"{pct_ocr:.1f}% обработано")
+            ts_started = last_ocr.get("ts_started", "—")
+            ts_finished = last_ocr.get("ts_finished") or "—"
+            note = last_ocr.get("note", "")
+            st.caption(
+                f"Запущен: {ts_started} · Завершён: {ts_finished}"
+                + (f" · {note}" if note else "")
+            )
+        else:
+            st.info(
+                "OCR-проходов пока не было.\n\n"
+                "Чтобы запустить OCR для сканированных PDF:\n"
+                "```\npython ocr_pdfs.py\n```"
+            )
+
+        # Таблица последних OCR-проходов
+        if len(ocr_recent) > 1:
+            with st.expander("История OCR-проходов"):
+                for row in ocr_recent:
+                    status_r = row.get("status", "?")
+                    _icon = {"completed": "✅", "failed": "❌", "cancelled": "⚠️", "running": "🔄"}.get(status_r, "ℹ️")
+                    found_r = int(row.get("found_scanned") or 0)
+                    done_r = int(row.get("processed_pdfs") or 0)
+                    st.write(
+                        f"{_icon} `{status_r}` · {row.get('ts_started', '?')} · "
+                        f"сканов: {found_r:,}, обработано: {done_r:,}"
+                    )
+
         st.markdown("**Изменения при повторных индексациях (по времени):**")
         wcols = st.columns(3)
         for idx_col, label in enumerate(("24ч", "7д", "30д")):
@@ -1967,127 +2066,4 @@ def main() -> None:
                 with st.popover("История", use_container_width=True):
                     st.caption("История и подсказки")
                     if not suggestions:
-                        st.info("История пока пуста.")
-                    for idx, suggestion in enumerate(suggestions[:12]):
-                        if st.button(
-                            suggestion,
-                            key=f"search_history_{idx}_{abs(hash(suggestion))}",
-                            use_container_width=True,
-                        ):
-                            _choose_search_query(suggestion)
-                            st.rerun()
-            with b_col:
-                submitted = st.button("Найти", use_container_width=True, type="primary")
-
-        if initial_query:
-            st.session_state.preset_query = ""
-
-        should_search = (submitted or st.session_state.trigger_search) and bool(query.strip())
-        st.session_state.trigger_search = False
-
-        # Выполнить поиск
-        if should_search:
-            searcher = _get_searcher()
-            if not searcher or not searcher.connected:
-                st.error("Нет подключения к Qdrant. Запустите индексирование и обновите страницу.")
-            else:
-                with st.spinner("Поиск…"):
-                    if searcher._embedder is None:
-                        st.info("Первый запуск — загружается модель эмбеддинга (~5 сек)…")
-                    try:
-                        source_user = str(user.get("username") or "unknown")
-                        results = searcher.search(
-                            query.strip(),
-                            limit=limit,
-                            file_type=file_type_val,
-                            content_only=content_only,
-                            source=f"streamlit_ui:{source_user}",
-                        )
-                        fact = searcher.answer_fact_question(
-                            query.strip(), limit=max(20, limit * 2)
-                        )
-                    except ConnectionError as exc:
-                        st.error(f"Ошибка инфраструктуры: {exc}")
-                        results = []
-                        fact = {"ok": False, "error": str(exc)}
-                    except RuntimeError as exc:
-                        st.error(f"Ошибка выполнения поиска: {exc}")
-                        results = []
-                        fact = {"ok": False, "error": str(exc)}
-                st.session_state.last_results = results
-                st.session_state.last_query = query.strip()
-                st.session_state.last_limit = limit
-                st.session_state.last_file_type = file_type_val
-                st.session_state.last_content_only = content_only
-                st.session_state.last_fact_answer = fact
-                _remember_search_query(query.strip())
-
-        st.divider()
-
-        # Показать результаты
-        results = st.session_state.last_results
-        render_fact_answer(st.session_state.get("last_fact_answer"))
-        if results:
-            params_changed = (
-                limit != st.session_state.last_limit
-                or file_type_val != st.session_state.last_file_type
-                or content_only != st.session_state.last_content_only
-            )
-            if params_changed:
-                st.warning("Параметры изменены. Нажмите «Найти» чтобы обновить результаты.")
-
-            st.success(f"Найдено результатов: {len(results)}")
-            render_grouped_results(results)
-        elif should_search:
-            st.info("По вашему запросу ничего не найдено.")
-        else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.info("Введите запрос или используйте быстрый поиск в боковой панели")
-            with c2:
-                st.info("Например: договоры, паспорта, счета, акты")
-            with c3:
-                st.info("Фильтруйте по типу файла: .docx, .xlsx, .pdf")
-
-        st.divider()
-
-        # Статистика Qdrant
-        searcher = _get_searcher()
-        if searcher and st.session_state.qdrant_connected:
-            st.subheader("Статистика коллекции")
-            stats = _get_stats(searcher)
-            if stats:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.metric("Индексировано точек", f"{stats['points_count']:,}")
-                with c2:
-                    st.metric("Статус", stats["status"])
-
-    # ════════════════════ Вкладка: Проводник ═════════════════════════
-    elif screen == "Проводник":
-        st.divider()
-        render_explorer_tab(cfg)
-
-    # ════════════════════ Вкладка: Индексирование ═════════════════════
-    elif screen == "Индексирование":
-        st.divider()
-        render_indexing_tab(cfg)
-
-    # ════════════════════ Вкладка: Telegram ═══════════════════════════
-    elif screen == "Telegram":
-        st.divider()
-        render_telegram_tab(cfg)
-
-    # Footer
-    st.markdown(
-        """
-<div style="text-align:center;color:#aaa;font-size:0.8rem;padding:1rem 0;">
-    RAG Semantic Search &nbsp;|&nbsp; DOCX · XLSX · PDF &nbsp;|&nbsp; Qdrant + all-MiniLM embeddings
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-if __name__ == "__main__":
-    main()
+                   

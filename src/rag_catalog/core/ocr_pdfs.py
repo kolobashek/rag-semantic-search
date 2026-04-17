@@ -32,6 +32,7 @@ from ._platform_compat import apply_windows_platform_workarounds
 apply_windows_platform_workarounds()
 
 from .rag_core import load_config
+from .telemetry_db import TelemetryDB
 
 logging.basicConfig(
     level=logging.INFO,
@@ -252,6 +253,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # ── Инициализация телеметрии ─────────────────────────────────────────────
+    telemetry_path = (cfg.get("telemetry_db_path") or "").strip()
+    if not telemetry_path:
+        telemetry_path = str(Path(args.state_dir) / "rag_telemetry.db")
+    telemetry = TelemetryDB(telemetry_path)
+
     # ── 1. Найти сканы в Qdrant ──────────────────────────────────────────────
     scanned = find_scanned_pdfs(
         qdrant_url=args.qdrant_url,
@@ -274,16 +281,34 @@ def main() -> int:
         logger.info("--dry-run: индексатор не запущен.")
         return 0
 
+    # ── Создать запись OCR-прохода в телеметрии ──────────────────────────────
+    ocr_run_id = telemetry.start_ocr_run(
+        collection_name=args.collection,
+        found_scanned=len(scanned),
+        note=f"min_text_len={args.min_text_len}",
+    )
+    logger.info("OCR run_id: %s", ocr_run_id)
+
     # ── 2. Убрать их из state.json, чтобы индексатор переобработал ──────────
     state_path = Path(args.state_dir) / "index_state.json"
     removed = remove_from_state(state_path, scanned)
     if removed == 0 and state_path.exists():
         logger.warning("Записи не найдены в state.json — продолжаю всё равно")
 
+    telemetry.update_ocr_progress(
+        ocr_run_id=ocr_run_id,
+        note=f"state_entries_removed={removed}",
+    )
+
     # ── 3. Запустить index_rag.py без --no-ocr ───────────────────────────────
     index_script = Path(__file__).parent / "index_rag.py"
     if not index_script.exists():
         logger.error("index_rag.py не найден в %s", index_script.parent)
+        telemetry.finish_ocr_run(
+            ocr_run_id=ocr_run_id,
+            status="failed",
+            note="index_rag.py not found",
+        )
         return 1
 
     cmd = [sys.executable, "-u", str(index_script)]
@@ -296,6 +321,7 @@ def main() -> int:
         "--db",         cfg["qdrant_db_path"],
         "--collection", args.collection,
         "--workers",    str(args.workers),
+        "--stage",      "large",  # сканированные PDF — этап large
         # НЕТ --no-ocr: OCR включён
     ]
 
@@ -309,12 +335,30 @@ def main() -> int:
 
     try:
         result = subprocess.run(cmd, check=False)
-        return result.returncode
+        exit_code = result.returncode
+        status = "completed" if exit_code == 0 else "failed"
+        telemetry.finish_ocr_run(
+            ocr_run_id=ocr_run_id,
+            status=status,
+            processed_pdfs=len(scanned),
+            note=f"exit_code={exit_code}",
+        )
+        return exit_code
     except KeyboardInterrupt:
         logger.info("OCR прерван пользователем (Ctrl+C)")
+        telemetry.finish_ocr_run(
+            ocr_run_id=ocr_run_id,
+            status="cancelled",
+            note="interrupted by user",
+        )
         return 0
     except Exception as exc:
         logger.error("Ошибка запуска индексатора: %s", exc)
+        telemetry.finish_ocr_run(
+            ocr_run_id=ocr_run_id,
+            status="failed",
+            note=str(exc),
+        )
         return 1
 
 
