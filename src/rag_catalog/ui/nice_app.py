@@ -540,6 +540,26 @@ def _file_rows(path: Path, state: PageState) -> tuple[List[Path], List[Path], in
     return dirs, files, len(files)
 
 
+def _event_input_value(event: Any, fallback: Any = "") -> str:
+    value = getattr(event, "value", None)
+    if value is not None:
+        return str(value)
+    args = getattr(event, "args", None)
+    if isinstance(args, dict):
+        for key in ("value", "modelValue"):
+            if args.get(key) is not None:
+                return str(args[key])
+        target = args.get("target")
+        if isinstance(target, dict) and target.get("value") is not None:
+            return str(target["value"])
+    return str(fallback or "")
+
+
+def _apply_explorer_filter_input(state: PageState, event: Any, fallback: Any = "") -> None:
+    state.explorer_filter = _event_input_value(event, fallback)
+    state.explorer_page = 0
+
+
 def _install_css() -> None:
     ui.add_css(
         """
@@ -1335,7 +1355,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
         with toolbar:
             with ui.row().classes("rag-card w-full p-3 gap-3 items-center"):
-                filter_input = ui.input(placeholder="Фильтр по имени", value=state.explorer_filter).props("dense outlined clearable").classes("min-w-64 flex-1")
+                filter_input = ui.input(placeholder="Фильтр по имени", value=state.explorer_filter).props("dense outlined clearable debounce=0").classes("min-w-64 flex-1")
 
                 def update_explorer_setting(attr: str, value: Any) -> None:
                     setattr(state, attr, value)
@@ -1349,12 +1369,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.select(["По имени", "По размеру", "По дате"], value=state.explorer_sort, on_change=lambda e: update_explorer_setting("explorer_sort", e.value)).props("dense outlined").classes("w-40")
                 ui.select(["По возрастанию", "По убыванию"], value="По убыванию" if state.explorer_desc else "По возрастанию", on_change=lambda e: update_explorer_setting("explorer_desc", e.value == "По убыванию")).props("dense outlined").classes("w-44")
 
-                def apply_filter(_: events.GenericEventArguments | None = None) -> None:
-                    state.explorer_filter = str(filter_input.value or "")
-                    state.explorer_page = 0
+                def apply_filter(event: events.ValueChangeEventArguments | events.GenericEventArguments | None = None) -> None:
+                    _apply_explorer_filter_input(state, event, filter_input.value)
                     render_entries()
 
-                filter_input.on("input", apply_filter)
+                filter_input.on_value_change(apply_filter)
 
         render_entries()
 
