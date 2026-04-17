@@ -111,7 +111,11 @@ class TelemetryDB:
                         ok INTEGER NOT NULL DEFAULT 1,
                         details_json TEXT NOT NULL DEFAULT '{}'
                     );
-
+                    """
+                )
+                self._migrate_schema(conn)
+                conn.executescript(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_search_logs_ts
                       ON search_logs(ts);
                     CREATE INDEX IF NOT EXISTS idx_search_logs_username
@@ -128,7 +132,6 @@ class TelemetryDB:
                       ON app_events(feature, action, ts);
                     """
                 )
-                self._migrate_schema(conn)
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         search_cols = {row["name"] for row in conn.execute("PRAGMA table_info(search_logs)").fetchall()}
