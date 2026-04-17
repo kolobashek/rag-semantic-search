@@ -435,7 +435,7 @@ class UserAuthDB:
                 data.pop("password_hash", None)
                 return data
 
-    def create_session(self, *, username: str, ttl_days: int = 14) -> str:
+    def create_session(self, *, username: str, ttl_days: int = 7) -> str:
         usr = (username or "").strip().lower()
         if not usr:
             raise ValueError("username is required")

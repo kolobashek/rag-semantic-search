@@ -55,6 +55,21 @@ def test_session_token_restores_and_revokes_user(tmp_path) -> None:
     assert db.get_user_by_session(token) is None
 
 
+def test_session_default_ttl_is_seven_days(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    token = db.create_session(username="admin")
+
+    with db._connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT created_at, expires_at FROM user_sessions WHERE token=?",
+            (token,),
+        ).fetchone()
+
+    created_at = datetime.fromisoformat(row["created_at"])
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    assert expires_at - created_at == timedelta(days=7)
+
+
 def test_verification_expired(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     req = db.request_verification(
