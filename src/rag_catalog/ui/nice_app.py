@@ -18,6 +18,7 @@ from urllib.parse import quote
 from nicegui import app, events, run, ui
 
 from rag_catalog.core.rag_core import RAGSearcher, load_config
+from rag_catalog.core.user_auth_db import UserAuthDB
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -60,6 +61,9 @@ class PageState:
     explorer_desc: bool = False
     explorer_view: str = "Таблица"
     explorer_page: int = 0
+    auth_db: Optional[UserAuthDB] = None
+    current_user: Optional[Dict[str, Any]] = None
+    auth_token: str = ""
 
 
 def _file_url(full_path: str) -> str:
@@ -91,6 +95,28 @@ def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     if explicit:
         return Path(explicit)
     return Path(str(cfg.get("qdrant_db_path") or "")) / "rag_telemetry.db"
+
+
+def _users_db_path(cfg: Dict[str, Any]) -> Path:
+    explicit = str(cfg.get("users_db_path") or "").strip()
+    if explicit:
+        return Path(explicit)
+    return Path(str(cfg.get("qdrant_db_path") or ".")) / "rag_users.db"
+
+
+def _get_auth_db(state: PageState) -> UserAuthDB:
+    path = _users_db_path(state.cfg)
+    if state.auth_db is None or Path(getattr(state.auth_db, "db_path", "")) != path:
+        state.auth_db = UserAuthDB(str(path))
+    return state.auth_db
+
+
+def _refresh_current_user(state: PageState) -> None:
+    if not state.current_user:
+        return
+    user = _get_auth_db(state).get_user(username=str(state.current_user.get("username") or ""))
+    if user:
+        state.current_user = user
 
 
 def _db_query_dicts(db_path: Path, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
@@ -435,6 +461,16 @@ def _install_css() -> None:
           background: #ffffff;
           border-right: 1px solid var(--rag-border);
         }
+        .rag-drawer-body {
+          min-height: calc(100vh - 92px);
+          display: flex;
+          flex-direction: column;
+        }
+        .rag-drawer-bottom {
+          margin-top: auto;
+          padding-top: 12px;
+          border-top: 1px solid var(--rag-border);
+        }
         .rag-page {
           width: min(1440px, calc(100vw - 32px));
           margin: 0 auto;
@@ -568,6 +604,13 @@ def _build_page(initial_screen: str = "search") -> None:
     state.screen = initial_screen
     state.explorer_path = str(Path(str(state.cfg.get("catalog_path") or "")))
     _install_css()
+    try:
+        stored_token = str(app.storage.user.get("auth_token") or "")
+        if stored_token:
+            state.auth_token = stored_token
+            state.current_user = _get_auth_db(state).get_user_by_session(stored_token)
+    except Exception:
+        pass
 
     with ui.header(fixed=True, elevated=False).classes("rag-header h-16 px-3 md:px-5"):
         ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round").classes("text-slate-700")
@@ -580,9 +623,11 @@ def _build_page(initial_screen: str = "search") -> None:
         ui.label(status_text).classes("hidden sm:block rag-chip")
 
     with ui.left_drawer(value=True, fixed=True, bordered=True).classes("rag-drawer w-80 p-4") as drawer:
-        ui.label("Меню").classes("text-xl font-semibold mb-2")
-        nav_area = ui.column().classes("w-full gap-2")
-        settings_area = ui.column().classes("w-full gap-3 mt-4")
+        with ui.column().classes("rag-drawer-body w-full"):
+            ui.label("Меню").classes("text-xl font-semibold mb-2")
+            nav_area = ui.column().classes("w-full gap-2")
+            settings_area = ui.column().classes("w-full gap-3 mt-4")
+            bottom_nav_area = ui.column().classes("rag-drawer-bottom w-full gap-2")
 
     with ui.column().classes("rag-page gap-5"):
         content = ui.column().classes("w-full gap-5")
@@ -630,6 +675,14 @@ def _build_page(initial_screen: str = "search") -> None:
             with ui.expansion("Пути", icon="storage").classes("w-full"):
                 ui.label(str(state.cfg.get("catalog_path") or "Каталог не задан")).classes("rag-path")
                 ui.label(str(state.cfg.get("qdrant_url") or state.cfg.get("qdrant_db_path") or "Qdrant не задан")).classes("rag-path")
+
+        bottom_nav_area.clear()
+        with bottom_nav_area:
+            color = "primary" if state.screen == "settings" else None
+            user_label = "Настройки"
+            if state.current_user:
+                user_label = f"Настройки · {state.current_user.get('username')}"
+            ui.button(user_label, icon="settings", on_click=lambda: set_screen("settings"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
     async def run_search() -> None:
         query = re.sub(r"\s+", " ", str(state.query or "")).strip()
@@ -958,6 +1011,183 @@ def _build_page(initial_screen: str = "search") -> None:
             for ext, count in list(stats.get("by_ext", {}).items())[:20]:
                 ui.label(f"{ext}: {count}").classes("rag-meta")
 
+    def render_index_dashboard() -> None:
+        stats = _read_index_stats(state.cfg)
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Дашборд индексирования").classes("text-xl font-semibold")
+            if not stats["found"]:
+                ui.label(f"Состояние индекса не найдено: {stats['state_file']}").classes("rag-meta")
+                return
+            with ui.row().classes("w-full gap-3"):
+                ui.label(f"Файлов: {stats['total']}").classes("rag-chip")
+                ui.label(f"Обновлен: {stats.get('last_modified', 'неизвестно')}").classes("rag-chip")
+            if stats.get("by_ext"):
+                for ext, count in list(stats["by_ext"].items())[:12]:
+                    ui.label(f"{ext}: {count}").classes("rag-meta")
+
+    def render_admin_users(auth_db: UserAuthDB) -> None:
+        with ui.column().classes("rag-card w-full p-4 gap-4"):
+            ui.label("Админ-панель пользователей").classes("text-xl font-semibold")
+            with ui.expansion("Создать пользователя", icon="person_add").classes("w-full"):
+                new_username = ui.input("Логин").props("dense outlined").classes("w-full")
+                new_display = ui.input("Имя").props("dense outlined").classes("w-full")
+                new_telegram = ui.input("Telegram chat id").props("dense outlined").classes("w-full")
+                new_password = ui.input("Временный пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                new_role = ui.select(["user", "admin"], value="user", label="Роль").props("dense outlined").classes("w-full")
+                new_status = ui.select(["active", "pending", "blocked"], value="active", label="Статус").props("dense outlined").classes("w-full")
+                new_must_change = ui.checkbox("Потребовать смену пароля", value=True)
+
+                def create_user() -> None:
+                    ok = auth_db.admin_create_user(
+                        username=str(new_username.value or ""),
+                        display_name=str(new_display.value or ""),
+                        telegram_chat_id=str(new_telegram.value or ""),
+                        password=str(new_password.value or ""),
+                        role=str(new_role.value or "user"),
+                        status=str(new_status.value or "active"),
+                        must_change_password=bool(new_must_change.value),
+                    )
+                    ui.notify("Пользователь создан." if ok else "Не удалось создать пользователя.", type="positive" if ok else "negative")
+                    render()
+
+                ui.button("Создать", icon="person_add", on_click=create_user).props("unelevated")
+
+            users = auth_db.list_users()
+            for user in users:
+                username = str(user.get("username") or "")
+                role = str(user.get("role") or "user")
+                status = str(user.get("status") or "")
+                with ui.expansion(f"{username} · {role} · {status}", icon="person").classes("w-full"):
+                    display_input = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
+                    telegram_input = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
+                    role_input = ui.select(["user", "admin"], value=role, label="Роль").props("dense outlined").classes("w-full")
+                    status_input = ui.select(["active", "pending", "blocked"], value=status or "active", label="Статус").props("dense outlined").classes("w-full")
+                    must_input = ui.checkbox("Потребовать смену пароля", value=bool(int(user.get("must_change_password") or 0)))
+                    reset_password = ui.input("Новый временный пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+                    def save_user(
+                        username: str = username,
+                        display_input: Any = display_input,
+                        telegram_input: Any = telegram_input,
+                        role_input: Any = role_input,
+                        status_input: Any = status_input,
+                        must_input: Any = must_input,
+                    ) -> None:
+                        ok = auth_db.admin_update_user(
+                            username=username,
+                            display_name=str(display_input.value or ""),
+                            telegram_chat_id=str(telegram_input.value or ""),
+                            role=str(role_input.value or "user"),
+                            status=str(status_input.value or "active"),
+                            must_change_password=bool(must_input.value),
+                        )
+                        ui.notify("Пользователь обновлен." if ok else "Не удалось обновить пользователя.", type="positive" if ok else "negative")
+                        _refresh_current_user(state)
+                        render()
+
+                    def set_password(
+                        username: str = username,
+                        reset_password: Any = reset_password,
+                    ) -> None:
+                        ok = auth_db.admin_set_password(
+                            username=username,
+                            new_password=str(reset_password.value or ""),
+                            must_change_password=True,
+                        )
+                        ui.notify("Пароль обновлен." if ok else "Введите новый пароль.", type="positive" if ok else "warning")
+                        render()
+
+                    with ui.row().classes("gap-2"):
+                        ui.button("Сохранить", icon="save", on_click=save_user).props("outline")
+                        ui.button("Сбросить пароль", icon="key", on_click=set_password).props("outline")
+
+    def render_settings_screen() -> None:
+        auth_db = _get_auth_db(state)
+        ui.label("Настройки").classes("text-2xl font-semibold")
+        if state.current_user is None:
+            with ui.column().classes("rag-card w-full max-w-xl p-4 gap-3"):
+                ui.label("Вход пользователя").classes("text-xl font-semibold")
+                ui.label("Для первого входа администратора используйте admin / admin, затем смените пароль.").classes("rag-meta")
+                username_input = ui.input("Логин").props("dense outlined").classes("w-full")
+                password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+                def login() -> None:
+                    user = auth_db.login(username=str(username_input.value or ""), password=str(password_input.value or ""))
+                    if not user:
+                        ui.notify("Неверный логин или пароль.", type="negative")
+                        return
+                    state.current_user = user
+                    state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
+                    try:
+                        app.storage.user["auth_token"] = state.auth_token
+                    except Exception:
+                        pass
+                    ui.notify("Вход выполнен.", type="positive")
+                    render()
+
+                password_input.on("keyup.enter", lambda _: login())
+                ui.button("Войти", icon="login", on_click=login).props("unelevated")
+            return
+
+        user = state.current_user
+        is_admin = str(user.get("role") or "user") == "admin"
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Настройки пользователя").classes("text-xl font-semibold")
+            ui.label(f"Логин: {user.get('username')} · роль: {user.get('role')} · статус: {user.get('status')}").classes("rag-meta")
+            display_input = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
+            telegram_input = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
+
+            def save_profile() -> None:
+                ok = auth_db.update_profile(
+                    username=str(user.get("username") or ""),
+                    display_name=str(display_input.value or ""),
+                    telegram_chat_id=str(telegram_input.value or ""),
+                )
+                _refresh_current_user(state)
+                ui.notify("Профиль сохранен." if ok else "Не удалось сохранить профиль.", type="positive" if ok else "negative")
+                render()
+
+            ui.button("Сохранить профиль", icon="save", on_click=save_profile).props("outline")
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Смена пароля").classes("text-xl font-semibold")
+            old_password = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+            new_password = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+            new_password2 = ui.input("Повторите пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+            def change_password() -> None:
+                if str(new_password.value or "") != str(new_password2.value or ""):
+                    ui.notify("Новые пароли не совпадают.", type="warning")
+                    return
+                ok = auth_db.change_password(
+                    username=str(user.get("username") or ""),
+                    old_password=str(old_password.value or ""),
+                    new_password=str(new_password.value or ""),
+                )
+                if ok:
+                    _refresh_current_user(state)
+                ui.notify("Пароль изменен." if ok else "Не удалось изменить пароль.", type="positive" if ok else "negative")
+                render()
+
+            with ui.row().classes("gap-2"):
+                ui.button("Сменить пароль", icon="key", on_click=change_password).props("outline")
+                def logout() -> None:
+                    if state.auth_token:
+                        auth_db.revoke_session(state.auth_token)
+                    state.current_user = None
+                    state.auth_token = ""
+                    try:
+                        app.storage.user.pop("auth_token", None)
+                    except Exception:
+                        pass
+                    render()
+
+                ui.button("Выйти", icon="logout", on_click=logout).props("flat")
+
+        if is_admin:
+            render_index_dashboard()
+            render_admin_users(auth_db)
+
     def render_telegram_screen() -> None:
         enabled = bool(state.cfg.get("telegram_enabled"))
         token_set = bool(str(state.cfg.get("telegram_bot_token") or "").strip())
@@ -974,6 +1204,7 @@ def _build_page(initial_screen: str = "search") -> None:
             "explorer": "Проводник",
             "index": "Индекс",
             "telegram": "Telegram",
+            "settings": "Настройки",
         }.get(state.screen, "Поиск"))
         update_nav()
         content.clear()
@@ -984,6 +1215,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 render_index_screen()
             elif state.screen == "telegram":
                 render_telegram_screen()
+            elif state.screen == "settings":
+                render_settings_screen()
             else:
                 render_search_screen()
 
@@ -1015,6 +1248,11 @@ def telegram_page() -> None:
     _build_page("telegram")
 
 
+@ui.page("/settings")
+def settings_page() -> None:
+    _build_page("settings")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Запустить NiceGUI-интерфейс RAG Каталога.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -1030,6 +1268,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         reload=False,
         show=not args.no_show,
         dark=False,
+        storage_secret="rag-catalog-local-secret",
     )
 
 

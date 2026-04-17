@@ -470,3 +470,127 @@ class UserAuthDB:
                     (usr,),
                 ).fetchone()
                 return dict(row) if row else None
+
+    def list_users(self) -> list[Dict[str, Any]]:
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT username, display_name, telegram_chat_id, role, must_change_password,
+                           status, verified_at, created_at, last_login_at
+                    FROM users
+                    ORDER BY role='admin' DESC, username
+                    """
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+    def update_profile(self, *, username: str, display_name: str, telegram_chat_id: str) -> bool:
+        usr = (username or "").strip().lower()
+        if not usr:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE users
+                    SET display_name=?, telegram_chat_id=?
+                    WHERE username=?
+                    """,
+                    ((display_name or "").strip(), str(telegram_chat_id or "").strip(), usr),
+                )
+                return cur.rowcount > 0
+
+    def admin_update_user(
+        self,
+        *,
+        username: str,
+        display_name: str,
+        telegram_chat_id: str,
+        role: str,
+        status: str,
+        must_change_password: bool,
+    ) -> bool:
+        usr = (username or "").strip().lower()
+        role_value = "admin" if str(role or "").strip().lower() == "admin" else "user"
+        status_value = str(status or "").strip().lower()
+        if status_value not in {"active", "pending", "blocked"}:
+            status_value = "active"
+        if not usr:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE users
+                    SET display_name=?, telegram_chat_id=?, role=?, status=?, must_change_password=?
+                    WHERE username=?
+                    """,
+                    (
+                        (display_name or "").strip(),
+                        str(telegram_chat_id or "").strip(),
+                        role_value,
+                        status_value,
+                        1 if must_change_password else 0,
+                        usr,
+                    ),
+                )
+                return cur.rowcount > 0
+
+    def admin_set_password(self, *, username: str, new_password: str, must_change_password: bool = True) -> bool:
+        usr = (username or "").strip().lower()
+        if not usr or not new_password:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE users SET password_hash=?, must_change_password=? WHERE username=?",
+                    (_hash_password(new_password), 1 if must_change_password else 0, usr),
+                )
+                return cur.rowcount > 0
+
+    def admin_create_user(
+        self,
+        *,
+        username: str,
+        display_name: str = "",
+        telegram_chat_id: str = "",
+        password: str,
+        role: str = "user",
+        status: str = "active",
+        must_change_password: bool = True,
+    ) -> bool:
+        usr = (username or "").strip().lower()
+        role_value = "admin" if str(role or "").strip().lower() == "admin" else "user"
+        status_value = str(status or "").strip().lower()
+        if status_value not in {"active", "pending", "blocked"}:
+            status_value = "active"
+        if not usr or not password:
+            return False
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO users (
+                            username, display_name, telegram_chat_id, password_hash,
+                            role, must_change_password, status, created_at,
+                            verified_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            usr,
+                            (display_name or "").strip(),
+                            str(telegram_chat_id or "").strip(),
+                            _hash_password(password),
+                            role_value,
+                            1 if must_change_password else 0,
+                            status_value,
+                            now,
+                            now if status_value == "active" else None,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    return False
+        return True
