@@ -703,13 +703,31 @@ def _install_css() -> None:
           gap: 8px;
           overflow-x: auto;
           padding: 8px 0;
+          align-items: center;
         }
         .rag-bookmark {
           flex: 0 0 auto;
-          max-width: 240px;
+          width: 220px;
+          min-width: 160px;
           border: 1px solid var(--rag-border);
           background: #ffffff;
           border-radius: 8px;
+          overflow: hidden;
+        }
+        .rag-bookmark .q-btn {
+          min-width: 0;
+          width: 100%;
+        }
+        .rag-bookmark .q-btn__content {
+          min-width: 0;
+          flex-wrap: nowrap;
+          overflow: hidden;
+        }
+        .rag-bookmark .block {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         .rag-context-menu {
           position: fixed;
@@ -734,6 +752,13 @@ def _install_css() -> None:
           cursor: pointer;
         }
         .rag-context-menu button:hover { background: #eef6fb; }
+        .rag-favorites-dialog-row {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto auto;
+          gap: 8px;
+          align-items: center;
+          width: 100%;
+        }
         .rag-explorer-name {
           width: 100%;
           min-width: 0;
@@ -1106,19 +1131,6 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(str(path))})")
             ui.notify("Путь скопирован.", type="positive")
 
-        def render_context_menu(path: Path, is_dir: bool) -> None:
-            with ui.context_menu():
-                _log_app_event(state, "context_menu", "open", details={"path": str(path), "item_type": "folder" if is_dir else "file"})
-                if is_dir:
-                    ui.menu_item("Открыть", on_click=lambda p=path: open_folder(p))
-                else:
-                    ui.menu_item("Открыть", on_click=lambda p=path: open_file(p))
-                    ui.menu_item("Скачать", on_click=lambda p=path: (_log_app_event(state, "context_menu", "download", details={"path": str(p)}), ui.download(p, filename=p.name)))
-                ui.menu_item("Показать в ОС", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p)))
-                fav_label = "Убрать из избранного" if _is_favorite(state, str(path)) else "Добавить в избранное"
-                ui.menu_item(fav_label, on_click=lambda p=path, t=("folder" if is_dir else "file"): (_toggle_favorite(state, p, item_type=t), render()))
-                ui.menu_item("Поделиться путем", on_click=lambda p=path: copy_path(p))
-
         def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
             active = _is_favorite(state, str(path))
             icon = "star" if active else "star_border"
@@ -1132,6 +1144,25 @@ def _build_page(initial_screen: str = "search") -> None:
 
             star.on("click.stop", toggle)
 
+        def open_favorites_dialog() -> None:
+            with ui.dialog() as dialog, ui.card().classes("w-[min(900px,92vw)] max-h-[80vh] overflow-auto gap-3"):
+                ui.label("Избранное").classes("text-xl font-semibold")
+                if not state.favorites:
+                    ui.label("Закладок пока нет.").classes("rag-meta")
+                for fav in state.favorites:
+                    fav_path = Path(str(fav.get("path") or ""))
+                    item_type = str(fav.get("item_type") or "file")
+                    label = str(fav.get("title") or fav_path.name or fav_path)
+                    with ui.element("div").classes("rag-favorites-dialog-row"):
+                        ui.icon("folder" if item_type == "folder" else "description")
+                        ui.label(label).classes("font-medium truncate")
+                        action = (lambda p=fav_path: (dialog.close(), open_folder(p))) if item_type == "folder" else (lambda p=fav_path: (dialog.close(), open_file(p)))
+                        ui.button("Открыть", on_click=action).props("outline dense")
+                        ui.button(icon="delete", on_click=lambda p=fav_path: (_toggle_favorite(state, p), dialog.close(), render())).props("flat round dense")
+                    ui.label(str(fav_path)).classes("rag-path ml-8")
+                ui.button("Закрыть", on_click=dialog.close).props("flat")
+            dialog.open()
+
         def render_tile(path: Path, is_dir: bool, size_class: str) -> None:
             icon = _file_icon_svg(str(path), "Каталог" if is_dir else "Файл")
             click = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
@@ -1141,7 +1172,6 @@ def _build_page(initial_screen: str = "search") -> None:
                 with ui.column().classes("items-center gap-1 cursor-pointer").on("click", click):
                     ui.html(icon, sanitize=False)
                     ui.label(path.name).classes("rag-explorer-name text-center text-sm")
-                render_context_menu(path, is_dir)
 
         def render_row(path: Path, is_dir: bool, compact: bool = False) -> None:
             try:
@@ -1162,7 +1192,6 @@ def _build_page(initial_screen: str = "search") -> None:
                         ui.button("Скачать", icon="download", on_click=lambda p=path: (_log_app_event(state, "explorer", "download", details={"path": str(p)}), ui.download(p, filename=p.name))).props("outline dense")
                     ui.button("ОС", icon="open_in_new", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("flat dense")
                 render_star(path, item_type="folder" if is_dir else "file")
-                render_context_menu(path, is_dir)
 
         def render_entries() -> None:
             entries_area.clear()
@@ -1218,8 +1247,10 @@ def _build_page(initial_screen: str = "search") -> None:
                             icon = "folder" if item_type == "folder" else "description"
                             action = (lambda p=fav_path: open_folder(p)) if item_type == "folder" else (lambda p=fav_path: open_file(p))
                             with ui.row().classes("rag-bookmark items-center gap-1 px-2 py-1"):
-                                ui.button(label, icon=icon, on_click=action, color=None).props("flat dense no-caps").classes("rag-nav-button")
+                                button = ui.button(label, icon=icon, on_click=action, color=None).props("flat dense no-caps").classes("rag-nav-button")
+                                button.tooltip(label)
                                 render_star(fav_path, item_type=item_type)
+                        ui.button(icon="more_horiz", on_click=open_favorites_dialog, color=None).props("outline round dense").tooltip("Показать все избранное")
 
                 if not dirs and not files:
                     ui.label("Нет элементов, соответствующих фильтру.").classes("rag-card p-4 rag-meta")
