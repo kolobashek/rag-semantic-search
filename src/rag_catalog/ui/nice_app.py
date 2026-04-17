@@ -1610,6 +1610,27 @@ def _build_page(initial_screen: str = "search") -> None:
                         ui.button("Сохранить", icon="save", on_click=save_user).props("outline")
                         ui.button("Сбросить пароль", icon="key", on_click=set_password).props("outline")
 
+    def render_admin_security_settings(auth_db: UserAuthDB) -> None:
+        current_ttl = auth_db.get_session_ttl_days()
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Безопасность").classes("text-xl font-semibold")
+            ui.label("Максимальная длительность новой сессии пользователя. Допустимый диапазон: 1-7 дней.").classes("rag-meta")
+            ttl_input = ui.number(
+                "Срок сессии, дней",
+                value=current_ttl,
+                min=1,
+                max=7,
+                step=1,
+            ).props("dense outlined").classes("w-full max-w-xs")
+
+            def save_session_ttl() -> None:
+                saved = auth_db.set_session_ttl_days(int(ttl_input.value or current_ttl))
+                _log_app_event(state, "settings", "session_ttl", details={"days": saved})
+                ui.notify(f"Срок новых сессий: {saved} дн.", type="positive")
+                render()
+
+            ui.button("Сохранить срок сессии", icon="save", on_click=save_session_ttl).props("outline")
+
     def render_settings_screen() -> None:
         auth_db = _get_auth_db(state)
         ui.label("Настройки").classes("text-2xl font-semibold")
@@ -1728,6 +1749,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.button("Выйти", icon="logout", on_click=logout).props("flat")
 
         if is_admin:
+            render_admin_security_settings(auth_db)
             render_index_dashboard()
             render_admin_users(auth_db)
 

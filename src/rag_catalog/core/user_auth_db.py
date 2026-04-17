@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+DEFAULT_SESSION_TTL_DAYS = 7
+MIN_SESSION_TTL_DAYS = 1
+MAX_SESSION_TTL_DAYS = 7
+SESSION_TTL_SETTING_KEY = "session_ttl_days"
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -108,6 +114,12 @@ class UserAuthDB:
                     CREATE TABLE IF NOT EXISTS user_settings (
                         username TEXT PRIMARY KEY,
                         settings_json TEXT NOT NULL DEFAULT '{}',
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
 
@@ -435,13 +447,48 @@ class UserAuthDB:
                 data.pop("password_hash", None)
                 return data
 
-    def create_session(self, *, username: str, ttl_days: int = 7) -> str:
+    def _normalize_session_ttl_days(self, value: Any) -> int:
+        try:
+            days = int(value)
+        except (TypeError, ValueError):
+            days = DEFAULT_SESSION_TTL_DAYS
+        return max(MIN_SESSION_TTL_DAYS, min(MAX_SESSION_TTL_DAYS, days))
+
+    def get_session_ttl_days(self) -> int:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT value FROM app_settings WHERE key=?",
+                    (SESSION_TTL_SETTING_KEY,),
+                ).fetchone()
+        if row is None:
+            return DEFAULT_SESSION_TTL_DAYS
+        return self._normalize_session_ttl_days(row["value"])
+
+    def set_session_ttl_days(self, ttl_days: int) -> int:
+        value = self._normalize_session_ttl_days(ttl_days)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at
+                    """,
+                    (SESSION_TTL_SETTING_KEY, str(value), _utc_now()),
+                )
+        return value
+
+    def create_session(self, *, username: str, ttl_days: Optional[int] = None) -> str:
         usr = (username or "").strip().lower()
         if not usr:
             raise ValueError("username is required")
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
-        expires = now + timedelta(days=max(1, int(ttl_days)))
+        ttl = self._normalize_session_ttl_days(ttl_days) if ttl_days is not None else self.get_session_ttl_days()
+        expires = now + timedelta(days=ttl)
         with self._lock:
             with self._connect() as conn:
                 conn.execute(

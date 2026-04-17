@@ -70,6 +70,22 @@ def test_session_default_ttl_is_seven_days(tmp_path) -> None:
     assert expires_at - created_at == timedelta(days=7)
 
 
+def test_session_ttl_setting_controls_new_sessions_and_is_clamped(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+
+    assert db.set_session_ttl_days(3) == 3
+    token = db.create_session(username="admin")
+    with db._connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT created_at, expires_at FROM user_sessions WHERE token=?",
+            (token,),
+        ).fetchone()
+    assert datetime.fromisoformat(row["expires_at"]) - datetime.fromisoformat(row["created_at"]) == timedelta(days=3)
+
+    assert db.set_session_ttl_days(30) == 7
+    assert db.get_session_ttl_days() == 7
+
+
 def test_verification_expired(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     req = db.request_verification(
