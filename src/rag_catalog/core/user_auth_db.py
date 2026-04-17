@@ -19,6 +19,7 @@ DEFAULT_SESSION_TTL_DAYS = 7
 MIN_SESSION_TTL_DAYS = 1
 MAX_SESSION_TTL_DAYS = 7
 SESSION_TTL_SETTING_KEY = "session_ttl_days"
+SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
 
 
 def _utc_now() -> str:
@@ -465,8 +466,15 @@ class UserAuthDB:
             return DEFAULT_SESSION_TTL_DAYS
         return self._normalize_session_ttl_days(row["value"])
 
-    def set_session_ttl_days(self, ttl_days: int) -> int:
-        value = self._normalize_session_ttl_days(ttl_days)
+    def _get_app_setting(self, key: str, default: str = "") -> str:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return default
+        return str(row["value"] or "")
+
+    def _set_app_setting(self, key: str, value: str) -> None:
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -477,8 +485,20 @@ class UserAuthDB:
                         value=excluded.value,
                         updated_at=excluded.updated_at
                     """,
-                    (SESSION_TTL_SETTING_KEY, str(value), _utc_now()),
+                    (key, value, _utc_now()),
                 )
+
+    def set_session_ttl_days(self, ttl_days: int) -> int:
+        value = self._normalize_session_ttl_days(ttl_days)
+        self._set_app_setting(SESSION_TTL_SETTING_KEY, str(value))
+        return value
+
+    def get_show_system_files_for_admin(self) -> bool:
+        return self._get_app_setting(SHOW_SYSTEM_FILES_SETTING_KEY, "0") == "1"
+
+    def set_show_system_files_for_admin(self, enabled: bool) -> bool:
+        value = bool(enabled)
+        self._set_app_setting(SHOW_SYSTEM_FILES_SETTING_KEY, "1" if value else "0")
         return value
 
     def create_session(self, *, username: str, ttl_days: Optional[int] = None) -> str:

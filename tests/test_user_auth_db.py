@@ -86,6 +86,17 @@ def test_session_ttl_setting_controls_new_sessions_and_is_clamped(tmp_path) -> N
     assert db.get_session_ttl_days() == 7
 
 
+def test_show_system_files_setting_is_persisted(tmp_path) -> None:
+    db_path = tmp_path / "users.db"
+    db = UserAuthDB(str(db_path))
+
+    assert db.get_show_system_files_for_admin() is False
+    assert db.set_show_system_files_for_admin(True) is True
+
+    reopened = UserAuthDB(str(db_path))
+    assert reopened.get_show_system_files_for_admin() is True
+
+
 def test_verification_expired(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     req = db.request_verification(

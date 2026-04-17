@@ -36,6 +36,33 @@ SEARCH_PRESETS = [
 
 FILE_PREVIEW_EXTENSIONS = {".txt", ".log", ".csv", ".json", ".md", ".py", ".ps1", ".xml", ".html", ".css"}
 PAGE_SIZE = 80
+SYSTEM_FILE_EXTENSIONS = {
+    ".dll",
+    ".exe",
+    ".msi",
+    ".sys",
+    ".inf",
+    ".cat",
+    ".pnf",
+    ".bak",
+    ".tmp",
+    ".temp",
+    ".dat",
+    ".db",
+    ".db3",
+    ".sqlite",
+    ".sqlite-journal",
+    ".db-shm",
+    ".db-wal",
+    ".lock",
+    ".cfg",
+    ".ini",
+    ".config",
+    ".lnk",
+    ".chm",
+    ".toc",
+    ".cldbin",
+}
 
 if LOGO_PATH.exists():
     app.add_static_file(local_file=LOGO_PATH, url_path="/rag-logo.png")
@@ -410,6 +437,35 @@ def _ensure_searcher(state: PageState) -> Optional[RAGSearcher]:
     return state.searcher
 
 
+def _is_admin(state: PageState) -> bool:
+    return str((state.current_user or {}).get("role") or "") == "admin"
+
+
+def _show_system_files(state: PageState) -> bool:
+    if not _is_admin(state):
+        return False
+    try:
+        auth = state.auth_db if state.auth_db is not None else _get_auth_db(state)
+        return bool(auth.get_show_system_files_for_admin())
+    except Exception:
+        return False
+
+
+def _is_system_file(path_or_ext: str | Path) -> bool:
+    value = str(path_or_ext or "")
+    ext = Path(value).suffix.lower() or value.lower()
+    name = Path(value).name.lower()
+    if not ext:
+        return False
+    if ext in SYSTEM_FILE_EXTENSIONS:
+        return True
+    if ext.endswith("_"):
+        return True
+    if ext in {".sample", ".backup", ".sav", ".asd"}:
+        return True
+    return name.startswith("~$") or name.endswith(".tmp")
+
+
 def _result_kind(result: Dict[str, Any]) -> str:
     if result.get("type") == "folder_metadata":
         return "Каталог"
@@ -484,6 +540,16 @@ def _file_icon_svg(path_or_ext: str, kind: str = "Файл") -> str:
         color, label = "#7b4ab8", "IMG"
     elif ext in {".txt", ".log", ".md"}:
         color, label = "#64748b", "TXT"
+    elif ext in {".mp3", ".wav", ".flac"}:
+        color, label = "#0e7490", "AUD"
+    elif ext in {".mp4", ".avi", ".mov", ".mkv"}:
+        color, label = "#7c3aed", "VID"
+    elif ext in {".json", ".xml", ".html", ".htm", ".css", ".js", ".py", ".ps1", ".cmd", ".bat"}:
+        color, label = "#475569", "DEV"
+    elif ext in {".dwg", ".svg", ".psd", ".ico"}:
+        color, label = "#0891b2", "ART"
+    elif _is_system_file(path_or_ext):
+        color, label = "#94a3b8", (ext.replace(".", "").upper()[:3] or "SYS")
     else:
         color, label = "#0f766e", (ext.replace(".", "").upper()[:3] or "FILE")
 
@@ -506,7 +572,8 @@ def _file_icon_svg(path_or_ext: str, kind: str = "Файл") -> str:
           <path fill="none" stroke="#cbd5e1" d="M12.5 4.5h21.3L43.5 14v35.5a4 4 0 0 1-4 4h-27a4 4 0 0 1-4-4v-41a4 4 0 0 1 4-4z"/>
         </svg>
         """
-    return f'<span class="rag-file-icon">{svg}</span>'
+    icon_class = "rag-file-icon system" if kind != "Каталог" and _is_system_file(path_or_ext) else "rag-file-icon"
+    return f'<span class="{icon_class}">{svg}</span>'
 
 
 def _path_sort_key(path: Path, sort_by: str) -> Any:
@@ -535,6 +602,8 @@ def _file_rows(path: Path, state: PageState) -> tuple[List[Path], List[Path], in
 
     dirs = [x for x in entries if x.is_dir()]
     files = [x for x in entries if x.is_file()]
+    if not _show_system_files(state):
+        files = [x for x in files if not _is_system_file(x)]
     needle = state.explorer_filter.strip().lower()
     if needle:
         dirs = [x for x in dirs if needle in x.name.lower()]
@@ -681,6 +750,10 @@ def _install_css() -> None:
           height: 42px;
           flex: 0 0 42px;
         }
+        .rag-file-icon.system {
+          opacity: .42;
+          filter: grayscale(1);
+        }
         .rag-file-icon svg { width: 42px; height: 42px; display: block; }
         .rag-explorer-grid {
           display: grid;
@@ -703,6 +776,15 @@ def _install_css() -> None:
         .rag-explorer-item:hover {
           background: #eef6fb;
           border-color: #bdd7e9;
+        }
+        .rag-explorer-item.system {
+          opacity: .55;
+          color: #64748b;
+        }
+        .rag-explorer-item.system:hover {
+          opacity: .78;
+          background: #f1f5f9;
+          border-color: #cbd5e1;
         }
         .rag-explorer-item { position: relative; }
         .rag-explorer-grid.small .rag-explorer-item {
@@ -1323,7 +1405,8 @@ def _build_page(initial_screen: str = "search") -> None:
         def render_tile(path: Path, is_dir: bool, size_class: str) -> None:
             icon = _file_icon_svg(str(path), "Каталог" if is_dir else "Файл")
             click = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
-            tile = ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}")
+            system_class = " system" if not is_dir and _is_system_file(path) else ""
+            tile = ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}{system_class}")
             tile.props(explorer_context_props(path, is_dir=is_dir))
             with tile:
                 with ui.element("div").classes("rag-tile-star-wrap"):
@@ -1343,7 +1426,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 modified = time.strftime("%d.%m.%Y %H:%M", time.localtime(stat.st_mtime))
             except Exception:
                 size, modified = "", ""
-            row = ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3")
+            system_class = " system" if not is_dir and _is_system_file(path) else ""
+            row = ui.row().classes(f"rag-explorer-item w-full p-2 items-center gap-3{system_class}")
             row.props(explorer_context_props(path, is_dir=is_dir))
             with row:
                 ui.html(_file_icon_svg(str(path), "Каталог" if is_dir else "Файл"), sanitize=False)
@@ -1612,6 +1696,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_admin_security_settings(auth_db: UserAuthDB) -> None:
         current_ttl = auth_db.get_session_ttl_days()
+        current_show_system = auth_db.get_show_system_files_for_admin()
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             ui.label("Безопасность").classes("text-xl font-semibold")
             ui.label("Максимальная длительность новой сессии пользователя. Допустимый диапазон: 1-7 дней.").classes("rag-meta")
@@ -1622,14 +1707,25 @@ def _build_page(initial_screen: str = "search") -> None:
                 max=7,
                 step=1,
             ).props("dense outlined").classes("w-full max-w-xs")
+            show_system_input = ui.checkbox(
+                "Показывать служебные файлы администратору",
+                value=current_show_system,
+            )
+            ui.label("Обычные пользователи служебные файлы не видят независимо от этой настройки.").classes("rag-meta")
 
             def save_session_ttl() -> None:
                 saved = auth_db.set_session_ttl_days(int(ttl_input.value or current_ttl))
-                _log_app_event(state, "settings", "session_ttl", details={"days": saved})
-                ui.notify(f"Срок новых сессий: {saved} дн.", type="positive")
+                show_system = auth_db.set_show_system_files_for_admin(bool(show_system_input.value))
+                _log_app_event(
+                    state,
+                    "settings",
+                    "security",
+                    details={"session_ttl_days": saved, "show_system_files_for_admin": show_system},
+                )
+                ui.notify(f"Сохранено: сессии {saved} дн., служебные файлы {'видны админу' if show_system else 'скрыты'}.", type="positive")
                 render()
 
-            ui.button("Сохранить срок сессии", icon="save", on_click=save_session_ttl).props("outline")
+            ui.button("Сохранить настройки безопасности", icon="save", on_click=save_session_ttl).props("outline")
 
     def render_settings_screen() -> None:
         auth_db = _get_auth_db(state)
