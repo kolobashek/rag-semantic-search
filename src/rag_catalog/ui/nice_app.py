@@ -701,6 +701,7 @@ def _install_css() -> None:
           min-height: 96px;
           max-height: 106px;
           padding: 6px;
+          overflow: hidden;
         }
         .rag-explorer-grid.small .rag-file-icon,
         .rag-explorer-grid.small .rag-file-icon svg {
@@ -714,6 +715,11 @@ def _install_css() -> None:
           right: 2px;
           z-index: 2;
           background: rgba(255, 255, 255, 0.72);
+        }
+        .rag-explorer-grid.small .rag-explorer-opener {
+          width: 100%;
+          min-width: 0;
+          overflow: hidden;
         }
         .rag-favorite-star {
           opacity: 0;
@@ -862,12 +868,14 @@ def _install_css() -> None:
         }
         .rag-explorer-grid.small .rag-explorer-name {
           display: -webkit-box;
+          width: 100%;
+          max-width: 100%;
           -webkit-line-clamp: 2;
           -webkit-box-orient: vertical;
           overflow: hidden;
           text-overflow: ellipsis;
-          overflow-wrap: normal;
-          word-break: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
           font-size: 12px;
           line-height: 1.15;
         }
@@ -1311,7 +1319,7 @@ def _build_page(initial_screen: str = "search") -> None:
             with tile:
                 with ui.element("div").classes("rag-tile-star-wrap"):
                     render_star(path, item_type="folder" if is_dir else "file")
-                opener = ui.column().classes("items-center gap-1 cursor-pointer").on("click", click)
+                opener = ui.column().classes("rag-explorer-opener items-center gap-1 cursor-pointer").on("click", click)
                 opener.props("data-rag-open")
                 with opener:
                     ui.html(icon, sanitize=False)
