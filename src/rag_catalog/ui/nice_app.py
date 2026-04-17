@@ -57,6 +57,8 @@ class PageState:
     explorer_filter: str = ""
     explorer_ext: str = "Все"
     explorer_sort: str = "По имени"
+    explorer_desc: bool = False
+    explorer_view: str = "Таблица"
     explorer_page: int = 0
 
 
@@ -369,6 +371,24 @@ def _file_icon_svg(path_or_ext: str, kind: str = "Файл") -> str:
     return f'<span class="rag-file-icon">{svg}</span>'
 
 
+def _path_sort_key(path: Path, sort_by: str) -> Any:
+    if sort_by == "По размеру":
+        name = path.name.lower()
+        if path.is_file():
+            try:
+                return (path.stat().st_size, name)
+            except Exception:
+                return (0, name)
+        return (-1, name)
+    if sort_by == "По дате":
+        name = path.name.lower()
+        try:
+            return (path.stat().st_mtime, name)
+        except Exception:
+            return (0, name)
+    return path.name.lower()
+
+
 def _file_rows(path: Path, state: PageState) -> tuple[List[Path], List[Path], int]:
     try:
         entries = [x for x in path.iterdir() if not x.name.startswith(".") and not x.name.startswith("~$")]
@@ -384,13 +404,9 @@ def _file_rows(path: Path, state: PageState) -> tuple[List[Path], List[Path], in
     if state.explorer_ext != "Все":
         files = [x for x in files if x.suffix.lower() == state.explorer_ext.lower()]
 
-    dirs.sort(key=lambda x: x.name.lower())
-    if state.explorer_sort == "По размеру":
-        files.sort(key=lambda x: x.stat().st_size if x.exists() else 0, reverse=True)
-    elif state.explorer_sort == "По дате":
-        files.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
-    else:
-        files.sort(key=lambda x: x.name.lower())
+    reverse = bool(state.explorer_desc)
+    dirs.sort(key=lambda x: _path_sort_key(x, state.explorer_sort), reverse=reverse)
+    files.sort(key=lambda x: _path_sort_key(x, state.explorer_sort), reverse=reverse)
     return dirs, files, len(files)
 
 
@@ -501,6 +517,32 @@ def _install_css() -> None:
           grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
           gap: 10px;
         }
+        .rag-explorer-grid.medium { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+        .rag-explorer-grid.small { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+        .rag-explorer-item {
+          width: 100%;
+          min-width: 0;
+          background: #ffffff;
+          border: 1px solid transparent;
+          border-radius: 8px;
+          color: var(--rag-text);
+        }
+        .rag-explorer-item:hover {
+          background: #eef6fb;
+          border-color: #bdd7e9;
+        }
+        .rag-explorer-name {
+          width: 100%;
+          min-width: 0;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          line-height: 1.2;
+        }
+        .rag-explorer-list {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 4px;
+        }
         .rag-code {
           white-space: pre-wrap;
           word-break: break-word;
@@ -521,9 +563,9 @@ def _install_css() -> None:
     )
 
 
-@ui.page("/")
-def index() -> None:
+def _build_page(initial_screen: str = "search") -> None:
     state = PageState(cfg=load_config())
+    state.screen = initial_screen
     state.explorer_path = str(Path(str(state.cfg.get("catalog_path") or "")))
     _install_css()
 
@@ -531,6 +573,8 @@ def index() -> None:
         ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round").classes("text-slate-700")
         ui.image("/rag-logo.png").classes("w-9 h-9 rounded") if LOGO_PATH.exists() else ui.icon("manage_search").classes("text-3xl")
         ui.label("RAG Каталог").classes("font-semibold text-lg")
+        ui.icon("chevron_right").classes("text-slate-400")
+        header_title = ui.label("").classes("font-semibold text-base text-slate-700")
         ui.space()
         status_text = "Qdrant готов" if _ensure_searcher(state) and state.searcher and state.searcher.connected else "Qdrant недоступен"
         ui.label(status_text).classes("hidden sm:block rag-chip")
@@ -545,6 +589,7 @@ def index() -> None:
 
     def set_screen(screen: str) -> None:
         state.screen = screen
+        ui.run_javascript(f"history.pushState(null, '', '/{screen}')")
         render()
 
     def go_explorer(path: str) -> None:
@@ -762,93 +807,145 @@ def index() -> None:
 
     def render_explorer_screen() -> None:
         root = Path(str(state.cfg.get("catalog_path") or ""))
-        current = _safe_explorer_path(state)
-        ui.label("Проводник").classes("rag-title")
-        ui.label("Состояние папки сохраняется при переходе между разделами приложения.").classes("rag-subtitle")
         if not root.exists():
             ui.label(f"Каталог не найден: {root}").classes("text-red-700 rag-card p-4")
             return
-        if not current.exists():
-            state.explorer_path = str(root)
-            current = root
 
-        parts: List[Path] = []
-        p = current
-        while True:
-            parts.append(p)
-            if p == root or p == p.parent:
-                break
-            p = p.parent
-        parts.reverse()
+        toolbar = ui.column().classes("w-full gap-3")
+        entries_area = ui.column().classes("w-full gap-3")
 
-        with ui.row().classes("w-full items-center gap-2"):
-            for idx, part in enumerate(parts):
-                label = "Корень" if part == root else part.name
-                ui.button(label, on_click=lambda p=part: (setattr(state, "explorer_path", str(p)), setattr(state, "explorer_page", 0), render()), color=None).props("flat dense no-caps")
-                if idx < len(parts) - 1:
-                    ui.icon("chevron_right").classes("text-slate-400")
-            ui.space()
-            up_button = ui.button("Выше", icon="arrow_upward", on_click=lambda: (setattr(state, "explorer_path", str(current.parent)), setattr(state, "explorer_page", 0), render()), color=None).props("outline")
-            if current == root:
-                up_button.disable()
+        def open_folder(path: Path) -> None:
+            state.explorer_path = str(path)
+            state.explorer_page = 0
+            render()
 
-        with ui.row().classes("rag-card w-full p-3 gap-3 items-center"):
-            filter_input = ui.input(placeholder="Фильтр по имени", value=state.explorer_filter).props("dense outlined clearable").classes("min-w-72 flex-1")
-            ui.select(["Все", ".docx", ".xlsx", ".xls", ".pdf"], value=state.explorer_ext, on_change=lambda e: (setattr(state, "explorer_ext", e.value), setattr(state, "explorer_page", 0), render())).props("dense outlined").classes("w-36")
-            ui.select(["По имени", "По размеру", "По дате"], value=state.explorer_sort, on_change=lambda e: (setattr(state, "explorer_sort", e.value), render())).props("dense outlined").classes("w-40")
+        def open_file(path: Path) -> None:
+            url = _file_url(str(path))
+            if url:
+                ui.run_javascript(f"window.open({json.dumps(url)}, '_blank')")
 
-            def apply_filter() -> None:
-                state.explorer_filter = str(filter_input.value or "")
-                state.explorer_page = 0
-                render()
+        def copy_path(path: Path) -> None:
+            ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(str(path))})")
+            ui.notify("Путь скопирован.", type="positive")
 
-            filter_input.on("keydown.enter", apply_filter)
-            ui.button("Фильтр", icon="filter_alt", on_click=apply_filter).props("outline")
+        def render_context_menu(path: Path, is_dir: bool) -> None:
+            with ui.context_menu():
+                if is_dir:
+                    ui.menu_item("Открыть", on_click=lambda p=path: open_folder(p))
+                else:
+                    ui.menu_item("Открыть", on_click=lambda p=path: open_file(p))
+                    ui.menu_item("Скачать", on_click=lambda p=path: ui.download(p, filename=p.name))
+                ui.menu_item("Показать в ОС", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p)))
+                ui.menu_item("Поделиться путем", on_click=lambda p=path: copy_path(p))
 
-        dirs, files, total_files = _file_rows(current, state)
-        ui.label(f"{current} · папок {len(dirs)} · файлов {total_files}").classes("rag-path")
+        def render_tile(path: Path, is_dir: bool, size_class: str) -> None:
+            icon = _file_icon_svg(str(path), "Каталог" if is_dir else "Файл")
+            click = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
+            with ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}").on("click", click):
+                ui.html(icon, sanitize=False)
+                ui.label(path.name).classes("rag-explorer-name text-center text-sm")
+                if state.explorer_view == "Мелкие значки":
+                    render_context_menu(path, is_dir)
 
-        if dirs:
-            ui.label("Папки").classes("text-lg font-semibold")
-            with ui.element("div").classes("rag-explorer-grid w-full"):
-                for d in dirs:
-                    with ui.row().classes("rag-card p-3 items-center gap-2"):
-                        ui.icon("folder").classes("text-amber-600 text-2xl")
-                    ui.button(d.name, on_click=lambda p=d: (setattr(state, "explorer_path", str(p)), setattr(state, "explorer_page", 0), render()), color=None).props("flat align=left no-caps").classes("flex-1 rag-nav-button")
+        def render_row(path: Path, is_dir: bool, compact: bool = False) -> None:
+            try:
+                stat = path.stat()
+                size = "" if is_dir else _format_file_size(stat.st_size)
+                modified = time.strftime("%d.%m.%Y %H:%M", time.localtime(stat.st_mtime))
+            except Exception:
+                size, modified = "", ""
+            with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                ui.html(_file_icon_svg(str(path), "Каталог" if is_dir else "Файл"), sanitize=False)
+                action = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
+                with ui.column().classes("flex-1 gap-0"):
+                    ui.button(path.name, on_click=action, color=None).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                    if not compact:
+                        ui.label(f"{'Папка' if is_dir else path.suffix or 'без расширения'} · {size} · {modified}").classes("rag-meta")
+                if not compact:
+                    if not is_dir:
+                        ui.button("Скачать", icon="download", on_click=lambda p=path: ui.download(p, filename=p.name)).props("outline dense")
+                    ui.button("ОС", icon="open_in_new", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("flat dense")
+                render_context_menu(path, is_dir)
 
-        if not files:
-            ui.label("Файлов, соответствующих фильтру, нет.").classes("rag-card p-4 rag-meta")
-            return
-        state.explorer_page = max(0, min(state.explorer_page, max(0, (len(files) - 1) // PAGE_SIZE)))
-        page_files = files[state.explorer_page * PAGE_SIZE : (state.explorer_page + 1) * PAGE_SIZE]
-        ui.label("Файлы").classes("text-lg font-semibold")
-        with ui.column().classes("w-full gap-2"):
-            for file_path in page_files:
-                try:
-                    stat = file_path.stat()
-                    size = _format_file_size(stat.st_size)
-                    modified = time.strftime("%d.%m.%Y %H:%M", time.localtime(stat.st_mtime))
-                except Exception:
-                    size, modified = "", ""
-                with ui.row().classes("rag-card w-full p-3 items-center gap-3"):
-                    ui.html(_file_icon_svg(str(file_path)), sanitize=False)
-                    with ui.column().classes("flex-1 gap-0"):
-                        ui.label(file_path.name).classes("font-medium")
-                        ui.label(f"{file_path.suffix or 'без расширения'} · {size} · {modified}").classes("rag-meta")
-                    url = _file_url(str(file_path))
-                    if url:
-                        ui.link("Открыть", url, new_tab=True).classes("q-btn q-btn--outline q-btn--rectangle q-btn--no-uppercase")
-                    ui.button("Скачать", icon="download", on_click=lambda p=file_path: ui.download(p, filename=p.name)).props("outline")
-                    ui.button("ОС", icon="open_in_new", on_click=lambda p=str(file_path.parent): _open_os_path(p)).props("flat")
+        def render_entries() -> None:
+            entries_area.clear()
+            current = _safe_explorer_path(state)
+            if not current.exists():
+                state.explorer_path = str(root)
+                current = root
 
-        if total_files > PAGE_SIZE:
-            with ui.row().classes("items-center gap-2"):
-                ui.button("Назад", on_click=lambda: (setattr(state, "explorer_page", max(0, state.explorer_page - 1)), render())).props("outline")
-                ui.label(f"Страница {state.explorer_page + 1} из {(total_files + PAGE_SIZE - 1) // PAGE_SIZE}").classes("rag-meta")
-                ui.button("Вперед", on_click=lambda: (setattr(state, "explorer_page", state.explorer_page + 1), render())).props("outline")
+            parts: List[Path] = []
+            p = current
+            while True:
+                parts.append(p)
+                if p == root or p == p.parent:
+                    break
+                p = p.parent
+            parts.reverse()
+
+            dirs, files, total_files = _file_rows(current, state)
+            state.explorer_page = max(0, min(state.explorer_page, max(0, (len(files) - 1) // PAGE_SIZE)))
+            page_files = files[state.explorer_page * PAGE_SIZE : (state.explorer_page + 1) * PAGE_SIZE]
+
+            with entries_area:
+                with ui.row().classes("w-full items-center gap-2"):
+                    up_button = ui.button("Выше", icon="arrow_upward", on_click=lambda: open_folder(current.parent), color=None).props("outline dense")
+                    if current == root:
+                        up_button.disable()
+                    for idx, part in enumerate(parts):
+                        label = "Корень" if part == root else part.name
+                        ui.button(label, on_click=lambda p=part: open_folder(p), color=None).props("flat dense no-caps")
+                        if idx < len(parts) - 1:
+                            ui.icon("chevron_right").classes("text-slate-400")
+
+                ui.label(f"{current} · папок {len(dirs)} · файлов {total_files}").classes("rag-path")
+
+                if not dirs and not files:
+                    ui.label("Нет элементов, соответствующих фильтру.").classes("rag-card p-4 rag-meta")
+                    return
+
+                if state.explorer_view in {"Крупные значки", "Средние значки", "Мелкие значки"}:
+                    grid_class = {
+                        "Крупные значки": "",
+                        "Средние значки": "medium",
+                        "Мелкие значки": "small",
+                    }[state.explorer_view]
+                    with ui.element("div").classes(f"rag-explorer-grid {grid_class} w-full"):
+                        for path in [*dirs, *page_files]:
+                            render_tile(path, path.is_dir(), grid_class)
+                elif state.explorer_view == "Список":
+                    with ui.column().classes("rag-explorer-list w-full"):
+                        for path in [*dirs, *page_files]:
+                            render_row(path, path.is_dir(), compact=True)
+                else:
+                    with ui.column().classes("w-full gap-2"):
+                        for path in [*dirs, *page_files]:
+                            render_row(path, path.is_dir(), compact=False)
+
+                if total_files > PAGE_SIZE:
+                    with ui.row().classes("items-center gap-2"):
+                        ui.button("Назад", on_click=lambda: (setattr(state, "explorer_page", max(0, state.explorer_page - 1)), render_entries())).props("outline")
+                        ui.label(f"Страница {state.explorer_page + 1} из {(total_files + PAGE_SIZE - 1) // PAGE_SIZE}").classes("rag-meta")
+                        ui.button("Вперед", on_click=lambda: (setattr(state, "explorer_page", state.explorer_page + 1), render_entries())).props("outline")
+
+        with toolbar:
+            with ui.row().classes("rag-card w-full p-3 gap-3 items-center"):
+                filter_input = ui.input(placeholder="Фильтр по имени", value=state.explorer_filter).props("dense outlined clearable").classes("min-w-64 flex-1")
+                ui.select(["Все", ".docx", ".xlsx", ".xls", ".pdf"], value=state.explorer_ext, on_change=lambda e: (setattr(state, "explorer_ext", e.value), setattr(state, "explorer_page", 0), render_entries())).props("dense outlined").classes("w-36")
+                ui.select(["Крупные значки", "Средние значки", "Мелкие значки", "Список", "Таблица"], value=state.explorer_view, on_change=lambda e: (setattr(state, "explorer_view", e.value), render_entries())).props("dense outlined").classes("w-44")
+                ui.select(["По имени", "По размеру", "По дате"], value=state.explorer_sort, on_change=lambda e: (setattr(state, "explorer_sort", e.value), render_entries())).props("dense outlined").classes("w-40")
+                ui.select(["По возрастанию", "По убыванию"], value="По убыванию" if state.explorer_desc else "По возрастанию", on_change=lambda e: (setattr(state, "explorer_desc", e.value == "По убыванию"), render_entries())).props("dense outlined").classes("w-44")
+
+                def apply_filter(_: events.GenericEventArguments | None = None) -> None:
+                    state.explorer_filter = str(filter_input.value or "")
+                    state.explorer_page = 0
+                    render_entries()
+
+                filter_input.on("input", apply_filter)
+
+        render_entries()
 
     def render_index_screen() -> None:
-        ui.label("Индекс").classes("rag-title")
         stats = _read_index_stats(state.cfg)
         if not stats["found"]:
             ui.label(f"Состояние индекса не найдено: {stats['state_file']}").classes("rag-card p-4 rag-meta")
@@ -862,7 +959,6 @@ def index() -> None:
                 ui.label(f"{ext}: {count}").classes("rag-meta")
 
     def render_telegram_screen() -> None:
-        ui.label("Telegram").classes("rag-title")
         enabled = bool(state.cfg.get("telegram_enabled"))
         token_set = bool(str(state.cfg.get("telegram_bot_token") or "").strip())
         with ui.column().classes("rag-card w-full p-4 gap-2"):
@@ -873,6 +969,12 @@ def index() -> None:
                 ui.link("Открыть бота", bot_link, new_tab=True)
 
     def render() -> None:
+        header_title.set_text({
+            "search": "Поиск",
+            "explorer": "Проводник",
+            "index": "Индекс",
+            "telegram": "Telegram",
+        }.get(state.screen, "Поиск"))
         update_nav()
         content.clear()
         with content:
@@ -886,6 +988,31 @@ def index() -> None:
                 render_search_screen()
 
     render()
+
+
+@ui.page("/")
+def root_page() -> None:
+    ui.navigate.to("/search")
+
+
+@ui.page("/search")
+def search_page() -> None:
+    _build_page("search")
+
+
+@ui.page("/explorer")
+def explorer_page() -> None:
+    _build_page("explorer")
+
+
+@ui.page("/index")
+def index_page() -> None:
+    _build_page("index")
+
+
+@ui.page("/telegram")
+def telegram_page() -> None:
+    _build_page("telegram")
 
 
 def main(argv: Optional[List[str]] = None) -> None:
