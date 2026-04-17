@@ -680,7 +680,10 @@ def _install_css() -> None:
           gap: 10px;
         }
         .rag-explorer-grid.medium { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-        .rag-explorer-grid.small { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+        .rag-explorer-grid.small {
+          grid-template-columns: repeat(auto-fill, minmax(82px, 92px));
+          gap: 8px;
+        }
         .rag-explorer-item {
           width: 100%;
           min-width: 0;
@@ -694,6 +697,24 @@ def _install_css() -> None:
           border-color: #bdd7e9;
         }
         .rag-explorer-item { position: relative; }
+        .rag-explorer-grid.small .rag-explorer-item {
+          min-height: 96px;
+          max-height: 106px;
+          padding: 6px;
+        }
+        .rag-explorer-grid.small .rag-file-icon,
+        .rag-explorer-grid.small .rag-file-icon svg {
+          width: 34px;
+          height: 34px;
+          flex-basis: 34px;
+        }
+        .rag-explorer-grid.small .rag-favorite-star {
+          position: absolute;
+          top: 2px;
+          right: 2px;
+          z-index: 2;
+          background: rgba(255, 255, 255, 0.72);
+        }
         .rag-favorite-star {
           opacity: 0;
           color: rgba(0, 0, 0, 0.45);
@@ -709,6 +730,12 @@ def _install_css() -> None:
         }
         .rag-favorite-star.active {
           color: #f6b700;
+        }
+        .rag-tile-star-wrap {
+          position: absolute;
+          top: 4px;
+          right: 4px;
+          z-index: 2;
         }
         .rag-favorite-star.header {
           opacity: .65;
@@ -833,6 +860,17 @@ def _install_css() -> None:
           word-break: break-word;
           line-height: 1.2;
         }
+        .rag-explorer-grid.small .rag-explorer-name {
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          overflow-wrap: normal;
+          word-break: normal;
+          font-size: 12px;
+          line-height: 1.15;
+        }
         .rag-explorer-list {
           display: grid;
           grid-template-columns: 1fr;
@@ -865,25 +903,46 @@ def _install_css() -> None:
           window.__ragContextMenuInstalled = true;
           const menu = () => document.getElementById('rag-global-context-menu');
           const hide = () => { const m = menu(); if (m) m.style.display = 'none'; };
+          const addButton = (m, label, action) => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            b.onclick = () => { hide(); action(); };
+            m.appendChild(b);
+          };
           const show = (event) => {
             const root = event.target.closest('.q-layout');
             if (!root) return;
             event.preventDefault();
             const m = menu();
             if (!m) return;
-            const path = location.pathname;
-            const buttons = [
-              ['Обновить экран', () => location.reload()],
-              ['Скопировать адрес экрана', () => navigator.clipboard && navigator.clipboard.writeText(location.href)],
-              ['Настройки', () => { location.href = '/settings'; }]
-            ];
+            const item = event.target.closest('[data-rag-context="explorer-item"]');
             m.innerHTML = '';
-            buttons.forEach(([label, action]) => {
-              const b = document.createElement('button');
-              b.textContent = label;
-              b.onclick = () => { hide(); action(); };
-              m.appendChild(b);
-            });
+            if (item) {
+              const itemType = item.dataset.ragType || 'file';
+              const itemPath = decodeURIComponent(item.dataset.ragPath || '');
+              const itemUrl = item.dataset.ragUrl || '';
+              addButton(m, 'Открыть', () => {
+                if (itemUrl) window.open(itemUrl, '_blank');
+                else item.querySelector('[data-rag-open]')?.click();
+              });
+              if (itemType === 'file' && itemUrl) {
+                addButton(m, 'Скачать', () => {
+                  const a = document.createElement('a');
+                  a.href = itemUrl;
+                  a.download = '';
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                });
+              }
+              addButton(m, 'Показать в ОС', () => item.querySelector('[data-rag-os]')?.click());
+              addButton(m, item.dataset.ragFavorite === 'true' ? 'Убрать из избранного' : 'Добавить в избранное', () => item.querySelector('[data-rag-favorite-button]')?.click());
+              addButton(m, 'Поделиться путем', () => navigator.clipboard && navigator.clipboard.writeText(itemPath));
+            } else {
+              addButton(m, 'Обновить экран', () => location.reload());
+              addButton(m, 'Скопировать адрес экрана', () => navigator.clipboard && navigator.clipboard.writeText(location.href));
+              addButton(m, 'Настройки', () => { location.href = '/settings'; });
+            }
             m.style.left = Math.min(event.clientX, window.innerWidth - 240) + 'px';
             m.style.top = Math.min(event.clientY, window.innerHeight - 160) + 'px';
             m.style.display = 'block';
@@ -1198,10 +1257,23 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(str(path))})")
             ui.notify("Путь скопирован.", type="positive")
 
+        def explorer_context_props(path: Path, *, is_dir: bool) -> str:
+            item_type = "folder" if is_dir else "file"
+            item_url = "" if is_dir else _file_url(str(path))
+            favorite = "true" if _is_favorite(state, str(path)) else "false"
+            attrs = {
+                "data-rag-context": "explorer-item",
+                "data-rag-type": item_type,
+                "data-rag-path": quote(str(path), safe=""),
+                "data-rag-url": item_url,
+                "data-rag-favorite": favorite,
+            }
+            return " ".join(f'{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items())
+
         def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
             active = _is_favorite(state, str(path))
             icon = "star" if active else "star_border"
-            star = ui.button(icon=icon, color=None).props("flat round dense")
+            star = ui.button(icon=icon, color=None).props("flat round dense data-rag-favorite-button")
             star.classes("rag-favorite-star active" if active else "rag-favorite-star")
             star.tooltip("Убрать из избранного" if active else "Добавить в избранное")
 
@@ -1234,12 +1306,18 @@ def _build_page(initial_screen: str = "search") -> None:
         def render_tile(path: Path, is_dir: bool, size_class: str) -> None:
             icon = _file_icon_svg(str(path), "Каталог" if is_dir else "Файл")
             click = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
-            with ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}"):
-                with ui.row().classes("w-full justify-end"):
+            tile = ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}")
+            tile.props(explorer_context_props(path, is_dir=is_dir))
+            with tile:
+                with ui.element("div").classes("rag-tile-star-wrap"):
                     render_star(path, item_type="folder" if is_dir else "file")
-                with ui.column().classes("items-center gap-1 cursor-pointer").on("click", click):
+                opener = ui.column().classes("items-center gap-1 cursor-pointer").on("click", click)
+                opener.props("data-rag-open")
+                with opener:
                     ui.html(icon, sanitize=False)
                     ui.label(path.name).classes("rag-explorer-name text-center text-sm")
+                os_button = ui.button(on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("data-rag-os")
+                os_button.classes("hidden")
 
         def render_row(path: Path, is_dir: bool, compact: bool = False) -> None:
             try:
@@ -1248,17 +1326,22 @@ def _build_page(initial_screen: str = "search") -> None:
                 modified = time.strftime("%d.%m.%Y %H:%M", time.localtime(stat.st_mtime))
             except Exception:
                 size, modified = "", ""
-            with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+            row = ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3")
+            row.props(explorer_context_props(path, is_dir=is_dir))
+            with row:
                 ui.html(_file_icon_svg(str(path), "Каталог" if is_dir else "Файл"), sanitize=False)
                 action = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
                 with ui.column().classes("flex-1 gap-0"):
-                    ui.button(path.name, on_click=action, color=None).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                    ui.button(path.name, on_click=action, color=None).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
                     if not compact:
                         ui.label(f"{'Папка' if is_dir else path.suffix or 'без расширения'} · {size} · {modified}").classes("rag-meta")
                 if not compact:
                     if not is_dir:
                         ui.button("Скачать", icon="download", on_click=lambda p=path: (_log_app_event(state, "explorer", "download", details={"path": str(p)}), ui.download(p, filename=p.name))).props("outline dense")
-                    ui.button("ОС", icon="open_in_new", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("flat dense")
+                    ui.button("ОС", icon="open_in_new", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("flat dense data-rag-os")
+                else:
+                    os_button = ui.button(on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("data-rag-os")
+                    os_button.classes("hidden")
                 render_star(path, item_type="folder" if is_dir else "file")
 
         def render_entries() -> None:
