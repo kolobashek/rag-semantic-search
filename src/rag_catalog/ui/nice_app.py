@@ -704,19 +704,61 @@ def _install_css() -> None:
           overflow-x: auto;
           padding: 8px 0;
           align-items: center;
+          flex-wrap: nowrap;
         }
         .rag-bookmark {
+          position: relative;
           flex: 0 0 auto;
           width: 220px;
           min-width: 160px;
+          height: 42px;
           border: 1px solid var(--rag-border);
           background: #ffffff;
           border-radius: 8px;
           overflow: hidden;
+          transition: background .12s ease, border-color .12s ease, box-shadow .12s ease;
+        }
+        .rag-bookmark:hover {
+          background: #eef6fb;
+          border-color: #bdd7e9;
+        }
+        .rag-bookmark-main {
+          position: absolute;
+          inset: 0 36px 0 0;
+          display: flex;
+          align-items: center;
+          min-width: 0;
+        }
+        .rag-bookmark:hover .rag-bookmark-main {
+          box-shadow: 18px 0 24px rgba(23, 32, 44, 0.12);
+        }
+        .rag-bookmark-remove {
+          position: absolute;
+          right: 0;
+          top: 0;
+          width: 36px;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          opacity: 0;
+          background: #ffffff;
+          border-left: 1px solid var(--rag-border);
+          color: #7b8794;
+          transition: opacity .12s ease, color .12s ease, background .12s ease;
+        }
+        .rag-bookmark:hover .rag-bookmark-remove {
+          opacity: 1;
+        }
+        .rag-bookmark-remove:hover {
+          background: #fff1f1;
+          color: #b42318;
         }
         .rag-bookmark .q-btn {
           min-width: 0;
           width: 100%;
+          height: 100%;
+          padding-right: 4px;
         }
         .rag-bookmark .q-btn__content {
           min-width: 0;
@@ -728,6 +770,11 @@ def _install_css() -> None:
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+        .rag-bookmark-more {
+          flex: 0 0 auto;
+          width: 42px;
+          height: 42px;
         }
         .rag-context-menu {
           position: fixed;
@@ -754,7 +801,7 @@ def _install_css() -> None:
         .rag-context-menu button:hover { background: #eef6fb; }
         .rag-favorites-dialog-row {
           display: grid;
-          grid-template-columns: auto minmax(0, 1fr) auto auto;
+          grid-template-columns: auto minmax(0, 1fr) auto;
           gap: 8px;
           align-items: center;
           width: 100%;
@@ -1155,11 +1202,12 @@ def _build_page(initial_screen: str = "search") -> None:
                     label = str(fav.get("title") or fav_path.name or fav_path)
                     with ui.element("div").classes("rag-favorites-dialog-row"):
                         ui.icon("folder" if item_type == "folder" else "description")
-                        ui.label(label).classes("font-medium truncate")
+                        with ui.column().classes("min-w-0 gap-0"):
+                            ui.label(label).classes("font-medium truncate")
+                            ui.label(str(fav_path)).classes("rag-path truncate")
                         action = (lambda p=fav_path: (dialog.close(), open_folder(p))) if item_type == "folder" else (lambda p=fav_path: (dialog.close(), open_file(p)))
                         ui.button("Открыть", on_click=action).props("outline dense")
-                        ui.button(icon="delete", on_click=lambda p=fav_path: (_toggle_favorite(state, p), dialog.close(), render())).props("flat round dense")
-                    ui.label(str(fav_path)).classes("rag-path ml-8")
+                        ui.button(icon="close", on_click=lambda p=fav_path: (_toggle_favorite(state, p), dialog.close(), render())).props("flat round dense").tooltip("Убрать из избранного")
                 ui.button("Закрыть", on_click=dialog.close).props("flat")
             dialog.open()
 
@@ -1246,11 +1294,15 @@ def _build_page(initial_screen: str = "search") -> None:
                             label = str(fav.get("title") or fav_path.name or fav_path)
                             icon = "folder" if item_type == "folder" else "description"
                             action = (lambda p=fav_path: open_folder(p)) if item_type == "folder" else (lambda p=fav_path: open_file(p))
-                            with ui.row().classes("rag-bookmark items-center gap-1 px-2 py-1"):
-                                button = ui.button(label, icon=icon, on_click=action, color=None).props("flat dense no-caps").classes("rag-nav-button")
-                                button.tooltip(label)
-                                render_star(fav_path, item_type=item_type)
-                        ui.button(icon="more_horiz", on_click=open_favorites_dialog, color=None).props("outline round dense").tooltip("Показать все избранное")
+                            with ui.element("div").classes("rag-bookmark"):
+                                with ui.element("div").classes("rag-bookmark-main"):
+                                    button = ui.button(label, icon=icon, on_click=action, color=None).props("flat dense no-caps").classes("rag-nav-button")
+                                    button.tooltip(label)
+                                with ui.element("div").classes("rag-bookmark-remove"):
+                                    remove_button = ui.button(icon="close", color=None).props("flat round dense")
+                                    remove_button.tooltip("Убрать из избранного")
+                                    remove_button.on("click.stop", lambda p=fav_path: (_toggle_favorite(state, p), render()))
+                        ui.button(icon="more_horiz", on_click=open_favorites_dialog, color=None).props("outline round dense").classes("rag-bookmark-more").tooltip("Показать все избранное")
 
                 if not dirs and not files:
                     ui.label("Нет элементов, соответствующих фильтру.").classes("rag-card p-4 rag-meta")
