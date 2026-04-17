@@ -283,6 +283,92 @@ def _result_kind(result: Dict[str, Any]) -> str:
     return "Файл"
 
 
+def _result_group(result: Dict[str, Any]) -> str:
+    text = " ".join(
+        str(result.get(key, "") or "").lower()
+        for key in ("filename", "path", "type", "text", "extension")
+    )
+    if str(result.get("type") or "") == "folder_metadata":
+        return "Каталоги"
+    if any(word in text for word in ("птс", "псм", "стс", "техпаспорт", "техническ", "паспорт транспорт", "экскаватор")):
+        return "Техпаспорта ТС"
+    if any(word in text for word in ("паспорт", "удостоверен")):
+        return "Паспорта и удостоверения"
+    if any(word in text for word in ("договор", "соглашен", "контракт")):
+        return "Договоры"
+    if any(word in text for word in ("счет", "счёт", "оплат", "платеж")):
+        return "Счета и платежи"
+    if str(result.get("extension") or "").lower() in {".xlsx", ".xls", ".csv"}:
+        return "Таблицы"
+    if str(result.get("extension") or "").lower() == ".pdf":
+        return "PDF"
+    return "Другие файлы"
+
+
+def _grouped_results(results: List[Dict[str, Any]]) -> List[tuple[str, List[Dict[str, Any]]]]:
+    order = [
+        "Каталоги",
+        "Техпаспорта ТС",
+        "Паспорта и удостоверения",
+        "Договоры",
+        "Счета и платежи",
+        "Таблицы",
+        "PDF",
+        "Другие файлы",
+    ]
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for result in results:
+        grouped.setdefault(_result_group(result), []).append(result)
+    return [
+        (group, sorted(grouped[group], key=lambda item: float(item.get("score") or 0), reverse=True))
+        for group in order
+        if group in grouped
+    ]
+
+
+def _file_icon_svg(path_or_ext: str, kind: str = "Файл") -> str:
+    ext = Path(str(path_or_ext or "")).suffix.lower() or str(path_or_ext or "").lower()
+    if kind == "Каталог":
+        color, label = "#f2b84b", ""
+    elif ext in {".doc", ".docx"}:
+        color, label = "#2b579a", "W"
+    elif ext in {".xls", ".xlsx", ".csv"}:
+        color, label = "#217346", "X"
+    elif ext in {".ppt", ".pptx"}:
+        color, label = "#d24726", "P"
+    elif ext == ".pdf":
+        color, label = "#d32f2f", "PDF"
+    elif ext in {".zip", ".rar", ".7z"}:
+        color, label = "#d39a18", "ZIP"
+    elif ext in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+        color, label = "#7b4ab8", "IMG"
+    elif ext in {".txt", ".log", ".md"}:
+        color, label = "#64748b", "TXT"
+    else:
+        color, label = "#0f766e", (ext.replace(".", "").upper()[:3] or "FILE")
+
+    if kind == "Каталог":
+        svg = f"""
+        <svg viewBox="0 0 56 56" aria-hidden="true">
+          <path fill="#d99d2b" d="M5 15a6 6 0 0 1 6-6h12l5 6h17a6 6 0 0 1 6 6v4H5z"/>
+          <path fill="{color}" d="M5 20h46v21a6 6 0 0 1-6 6H11a6 6 0 0 1-6-6z"/>
+          <path fill="#ffd56d" opacity=".75" d="M8 23h40v4H8z"/>
+        </svg>
+        """
+    else:
+        font_size = "12" if len(label) <= 1 else "9"
+        svg = f"""
+        <svg viewBox="0 0 56 56" aria-hidden="true">
+          <path fill="#ffffff" d="M12 4h22l10 10v36a4 4 0 0 1-4 4H12a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z"/>
+          <path fill="#dbe4ef" d="M34 4v10h10z"/>
+          <path fill="{color}" d="M6 29h37a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H6z"/>
+          <text x="25" y="42" fill="#fff" text-anchor="middle" font-family="Arial, sans-serif" font-size="{font_size}" font-weight="700">{html.escape(label)}</text>
+          <path fill="none" stroke="#cbd5e1" d="M12.5 4.5h21.3L43.5 14v35.5a4 4 0 0 1-4 4h-27a4 4 0 0 1-4-4v-41a4 4 0 0 1 4-4z"/>
+        </svg>
+        """
+    return f'<span class="rag-file-icon">{svg}</span>'
+
+
 def _file_rows(path: Path, state: PageState) -> tuple[List[Path], List[Path], int]:
     try:
         entries = [x for x in path.iterdir() if not x.name.startswith(".") and not x.name.startswith("~$")]
@@ -371,6 +457,8 @@ def _install_css() -> None:
           border-radius: 8px;
           padding: 16px;
           box-shadow: 0 8px 24px rgba(23, 32, 44, 0.05);
+          width: 100%;
+          box-sizing: border-box;
         }
         .rag-meta { color: var(--rag-muted); font-size: 13px; }
         .rag-chip {
@@ -391,7 +479,23 @@ def _install_css() -> None:
           font-size: 13px;
         }
         .rag-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-        .rag-nav-button { justify-content: flex-start; border-radius: 8px; }
+        .rag-nav-button { justify-content: flex-start; border-radius: 8px; text-align: left; }
+        .rag-nav-button .q-btn__content { justify-content: flex-start; width: 100%; text-align: left; }
+        .rag-nav-button .q-icon { margin-right: 10px; }
+        .rag-group-panel {
+          width: 100%;
+          border: 1px solid var(--rag-border);
+          border-radius: 8px;
+          background: #ffffff;
+          overflow: hidden;
+        }
+        .rag-file-icon {
+          display: inline-flex;
+          width: 42px;
+          height: 42px;
+          flex: 0 0 42px;
+        }
+        .rag-file-icon svg { width: 42px; height: 42px; display: block; }
         .rag-explorer-grid {
           display: grid;
           grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -461,7 +565,7 @@ def index() -> None:
                 ("telegram", "Telegram", "send"),
             ]:
                 color = "primary" if state.screen == screen else None
-                ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s), color=color).props("flat").classes("rag-nav-button w-full")
+                ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
         settings_area.clear()
         with settings_area:
@@ -477,7 +581,7 @@ def index() -> None:
                 ui.checkbox("Искать только в содержимом", value=state.content_only, on_change=lambda e: setattr(state, "content_only", bool(e.value)))
             with ui.expansion("Быстрый поиск", icon="bolt").classes("w-full"):
                 for label, query in SEARCH_PRESETS:
-                    ui.button(label, on_click=lambda q=query: choose_query(q), color=None).props("flat dense").classes("rag-nav-button w-full")
+                    ui.button(label, on_click=lambda q=query: choose_query(q), color=None).props("flat dense align=left no-caps").classes("rag-nav-button w-full")
             with ui.expansion("Пути", icon="storage").classes("w-full"):
                 ui.label(str(state.cfg.get("catalog_path") or "Каталог не задан")).classes("rag-path")
                 ui.label(str(state.cfg.get("qdrant_url") or state.cfg.get("qdrant_db_path") or "Qdrant не задан")).classes("rag-path")
@@ -525,7 +629,7 @@ def index() -> None:
                 ui.label("История и подсказки").classes("rag-meta px-3 py-1")
                 for item in suggestions:
                     icon = "history" if item in state.history else "north_east"
-                    ui.button(item, icon=icon, on_click=lambda q=item: choose_query(q), color=None).props("flat no-caps").classes("rag-nav-button w-full")
+                    ui.button(item, icon=icon, on_click=lambda q=item: choose_query(q), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
     def render_search_box() -> None:
         with ui.column().classes("rag-search-shell w-full max-w-5xl"):
@@ -536,15 +640,20 @@ def index() -> None:
                     value=state.query,
                     autocomplete=_search_suggestions(state),
                 ).props("borderless dense clearable input-class=text-base").classes("flex-1")
-                ui.button(icon="search", on_click=run_search, color="primary").props("unelevated round")
+                ui.button(icon="search", on_click=lambda: submit_from_input(), color="primary").props("unelevated round")
 
             def handle_input(_: events.GenericEventArguments | None = None) -> None:
                 state.query = str(search_input.value or "")
                 render_suggestions(suggest_area, state.query)
 
+            def submit_from_input(_: events.GenericEventArguments | None = None) -> None:
+                state.query = str(search_input.value or "")
+                suggest_area.clear()
+                ui.timer(0.01, run_search, once=True)
+
             search_input.on("focus", handle_input)
             search_input.on("input", handle_input)
-            search_input.on("keydown.enter", run_search)
+            search_input.on("keyup.enter", submit_from_input)
 
     def render_results_loading() -> None:
         content.clear()
@@ -571,7 +680,7 @@ def index() -> None:
 
         with ui.column().classes("rag-result gap-3"):
             with ui.row().classes("w-full items-start gap-3"):
-                ui.icon("folder" if kind == "Каталог" else "description").classes("text-3xl text-cyan-800")
+                ui.html(_file_icon_svg(full_path or path, kind), sanitize=False)
                 with ui.column().classes("flex-1 gap-1"):
                     ui.label(f"{index}. {name}").classes("text-lg font-semibold")
                     ui.label(path or full_path).classes("rag-path")
@@ -608,7 +717,7 @@ def index() -> None:
                             ui.label("Папки").classes("font-semibold")
                             with ui.column().classes("w-full gap-1"):
                                 for item in children["dirs"]:
-                                    ui.button(item["name"], icon="folder", on_click=lambda p=item["path"]: go_explorer(p), color=None).props("flat no-caps").classes("rag-nav-button w-full")
+                                    ui.button(item["name"], icon="folder", on_click=lambda p=item["path"]: go_explorer(p), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
                         if children["files"]:
                             ui.label("Файлы").classes("font-semibold mt-2")
                             for item in children["files"]:
@@ -639,8 +748,17 @@ def index() -> None:
         if not state.results:
             ui.label("Совпадений не найдено.").classes("rag-card p-4 rag-meta")
             return
-        for index, result in enumerate(state.results, start=1):
-            render_result(result, index)
+        grouped = _grouped_results(state.results)
+        with ui.row().classes("w-full gap-2"):
+            for group_name, items in grouped:
+                ui.label(f"{group_name}: {len(items)}").classes("rag-chip")
+        index = 1
+        for group_name, items in grouped:
+            with ui.expansion(f"{group_name} ({len(items)})", value=True).classes("rag-group-panel"):
+                with ui.column().classes("w-full gap-3 p-3"):
+                    for result in items:
+                        render_result(result, index)
+                        index += 1
 
     def render_explorer_screen() -> None:
         root = Path(str(state.cfg.get("catalog_path") or ""))
@@ -696,7 +814,7 @@ def index() -> None:
                 for d in dirs:
                     with ui.row().classes("rag-card p-3 items-center gap-2"):
                         ui.icon("folder").classes("text-amber-600 text-2xl")
-                        ui.button(d.name, on_click=lambda p=d: (setattr(state, "explorer_path", str(p)), setattr(state, "explorer_page", 0), render()), color=None).props("flat no-caps").classes("flex-1 rag-nav-button")
+                    ui.button(d.name, on_click=lambda p=d: (setattr(state, "explorer_path", str(p)), setattr(state, "explorer_page", 0), render()), color=None).props("flat align=left no-caps").classes("flex-1 rag-nav-button")
 
         if not files:
             ui.label("Файлов, соответствующих фильтру, нет.").classes("rag-card p-4 rag-meta")
@@ -713,7 +831,7 @@ def index() -> None:
                 except Exception:
                     size, modified = "", ""
                 with ui.row().classes("rag-card w-full p-3 items-center gap-3"):
-                    ui.icon("description").classes("text-cyan-800 text-2xl")
+                    ui.html(_file_icon_svg(str(file_path)), sanitize=False)
                     with ui.column().classes("flex-1 gap-0"):
                         ui.label(file_path.name).classes("font-medium")
                         ui.label(f"{file_path.suffix or 'без расширения'} · {size} · {modified}").classes("rag-meta")
