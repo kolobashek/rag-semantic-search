@@ -4,9 +4,15 @@ config.json
 # ── Логи ──────────────────────────────────────────────────────────────
 *.log
 *.log.err
+logs/*
+!logs/.gitkeep
+!logs/archive/
+logs/archive/*
+!logs/archive/.gitkeep
 
 # ── Python ────────────────────────────────────────────────────────────
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *.pyo
 *.pyd
@@ -25,8 +31,17 @@ env/
 
 # ── PyInstaller (билд EXE) ────────────────────────────────────────────
 *.spec
+!packaging/*.spec
 dist/
 build/
+dist_*/
+build_*/
+
+# ── Project work dirs ─────────────────────────────────────────────────
+artifacts/*
+!artifacts/.gitkeep
+tmp/*
+!tmp/.gitkeep
 
 # ── Qdrant база данных ────────────────────────────────────────────────
 qdrant_db/
@@ -35,6 +50,9 @@ qdrant_db/
 
 # ── Временные файлы Office ────────────────────────────────────────────
 ~$*
+
+# ── Claude Code ───────────────────────────────────────────────────────
+.claude/
 
 # ── IDE / редакторы ───────────────────────────────────────────────────
 .vscode/

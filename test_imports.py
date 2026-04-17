@@ -12,10 +12,8 @@ def test(name, fn):
 
 test("platform patch", lambda: None)
 
-import platform as _p
-_p.processor = lambda: 'Intel64 Family 6'
-if hasattr(_p, '_wmi_query'):
-    _p._wmi_query = lambda *a, **kw: ('10.0.19041', '1', 'Multiprocessor Free', '0', '0')
+from _platform_compat import apply_windows_platform_workarounds
+apply_windows_platform_workarounds()
 
 test("import qdrant_client", lambda: __import__("qdrant_client"))
 test("import streamlit",     lambda: __import__("streamlit"))

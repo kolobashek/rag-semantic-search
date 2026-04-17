@@ -3,12 +3,30 @@
 # Выход:  Ctrl+C
 
 param(
-    [string]$LogFile    = "O:\rag_automation.log",
+    [string]$LogFile    = "",
     [string]$QdrantUrl  = "http://localhost:6333",
     [string]$Collection = "catalog",
     [int]   $Interval   = 5,       # секунды между обновлениями
     [int]   $TotalFiles = 58058    # всего файлов в каталоге
 )
+
+function Resolve-DefaultLogFile {
+    try {
+        $cfgPath = Join-Path $PSScriptRoot "config.json"
+        if (Test-Path $cfgPath) {
+            $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+            if ($cfg.log_file -and $cfg.log_file.Trim().Length -gt 0) {
+                return [string]$cfg.log_file
+            }
+        }
+    } catch {
+    }
+    return (Join-Path $PSScriptRoot "rag_automation.log")
+}
+
+if (-not $LogFile -or $LogFile.Trim().Length -eq 0) {
+    $LogFile = Resolve-DefaultLogFile
+}
 
 $ChunksPerFile = 15  # среднее кол-во чанков на файл
 

@@ -160,13 +160,24 @@ def main() -> bool:
     logger.info("=" * 60)
 
     index_script = str(Path(__file__).parent / "index_rag.py")
+    index_stage = str(cfg.get("index_default_stage", "all")).strip().lower()
+    if index_stage not in {"all", "metadata", "small", "large"}:
+        index_stage = "all"
+    index_workers = int(cfg.get("index_read_workers", 4))
+    index_max_chunks = int(cfg.get("index_max_chunks", 2000))
+    index_skip_ocr = bool(cfg.get("index_skip_ocr", False))
     index_args = [
         sys.executable,
         index_script,
         "--catalog", CATALOG_PATH,
         "--db", QDRANT_DB_PATH,
         "--collection", COLLECTION_NAME,
+        "--stage", index_stage,
+        "--workers", str(index_workers),
+        "--max-chunks", str(index_max_chunks),
     ]
+    if index_skip_ocr:
+        index_args.append("--no-ocr")
     if args.recreate:
         index_args.append("--recreate")
 
@@ -226,7 +237,7 @@ def main() -> bool:
     logger.info("Запуск интерфейсов:")
     logger.info("  Веб UI:        streamlit run app_ui.py")
     logger.info("  Windows-приложение: python windows_app.py")
-    logger.info("  CLI:           python rag_search_fixed.py --query \"запрос\"")
+    logger.info("  CLI:           python rag_search.py --query \"запрос\"")
     logger.info("Лог файл: %s", LOG_FILE)
     logger.info("=" * 60)
 

@@ -8,7 +8,7 @@ _SRC = Path(__file__).resolve().parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-_module = importlib.import_module("rag_catalog.core.ocr_pdfs")
+_module = importlib.import_module("rag_catalog.core.user_auth_db")
 globals().update(_module.__dict__)
 
 if __name__ == "__main__":

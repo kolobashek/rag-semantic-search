@@ -25,7 +25,7 @@ python -m pip show qdrant-client >nul 2>&1
 if errorlevel 1 python -m pip install qdrant-client
 
 REM Clean previous builds (dist и build — временные артефакты PyInstaller)
-REM НЕ удаляем RAG-Katalog.spec — он настроен и переиспользуется!
+REM НЕ удаляем packaging\RAG-Katalog.spec — он настроен и переиспользуется!
 echo.
 echo Cleaning previous builds...
 if exist "dist"  rmdir /s /q dist  >nul 2>&1
@@ -41,16 +41,22 @@ echo Building RAG-Katalog.exe...
 echo This may take 5-10 minutes...
 echo.
 
-if exist "RAG-Katalog.spec" (
-    echo Using existing RAG-Katalog.spec...
-    python -m PyInstaller RAG-Katalog.spec
+if exist "packaging\RAG-Katalog.spec" (
+    echo Using existing packaging\RAG-Katalog.spec...
+    python -m PyInstaller packaging\RAG-Katalog.spec
 ) else (
     echo Spec not found — building from scratch...
     python -m PyInstaller --name="RAG-Katalog" ^
         --onefile ^
         --windowed ^
+        --paths=src ^
         --add-data="config.json;." ^
+        --add-data="icon.ico;." ^
         --add-data="rag_core.py;." ^
+        --add-data="src;src" ^
+        --hidden-import=rag_catalog ^
+        --hidden-import=rag_catalog.core.rag_core ^
+        --hidden-import=rag_catalog.ui.windows_app ^
         --hidden-import=sentence_transformers ^
         --hidden-import=qdrant_client ^
         --hidden-import=PyQt6 ^
