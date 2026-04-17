@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rag_catalog.ui.nice_app import PageState, _apply_explorer_filter_input, _file_rows
+from rag_catalog.ui.nice_app import (
+    PageState,
+    _apply_explorer_filter_input,
+    _file_rows,
+    _normalize_search_results,
+)
 
 
 @dataclass
@@ -28,3 +33,9 @@ def test_explorer_filter_uses_current_input_event_value(tmp_path) -> None:
     assert [path.name for path in dirs] == ["Passports"]
     assert [path.name for path in files] == ["passport.pdf"]
     assert total_files == 1
+
+
+def test_search_results_are_normalized_when_backend_returns_none() -> None:
+    assert _normalize_search_results(None) == []
+    assert _normalize_search_results({"filename": "passport.pdf"}) == []
+    assert _normalize_search_results([{"filename": "passport.pdf"}, None, "bad"]) == [{"filename": "passport.pdf"}]

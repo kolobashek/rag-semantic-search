@@ -283,6 +283,14 @@ def _remember_query(state: PageState, query: str) -> None:
         state.history = _dedupe_queries([clean, *state.history], limit=24)
 
 
+def _normalize_search_results(results: Any) -> List[Dict[str, Any]]:
+    if results is None:
+        return []
+    if not isinstance(results, list):
+        return []
+    return [item for item in results if isinstance(item, dict)]
+
+
 def _format_file_size(size_b: int) -> str:
     if size_b >= 1_048_576:
         return f"{size_b / 1_048_576:.1f} МБ"
@@ -1078,7 +1086,7 @@ def _build_page(initial_screen: str = "search") -> None:
             render()
             return
         try:
-            state.results = await run.io_bound(
+            raw_results = await run.io_bound(
                 searcher.search,
                 query,
                 limit=state.limit,
@@ -1087,6 +1095,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 source="nicegui",
                 username=_username(state),
             )
+            state.results = _normalize_search_results(raw_results)
             _log_app_event(state, "search", "run", details={"query": query, "results": len(state.results)})
         except Exception as exc:
             state.search_error = str(exc)
