@@ -40,6 +40,7 @@ $shims = @(
     'user_auth_db.py',
     'telemetry_db.py',
     'app_ui.py',
+    'nice_app.py',
     'run_automation.py'
 )
 
@@ -70,7 +71,8 @@ $cliShims = @(
     @{script='rag_search.py';       marker='--content-only'},
     @{script='rag_search_fixed.py'; marker='--content-only'},
     @{script='index_rag.py';        marker='--stage'},
-    @{script='ocr_pdfs.py';         marker='--dry-run'}
+    @{script='ocr_pdfs.py';         marker='--dry-run'},
+    @{script='nice_app.py';         marker='--no-show'}
 )
 
 foreach ($c in $cliShims) {

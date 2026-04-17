@@ -27,6 +27,7 @@ def test_cli_entrypoint_help_commands() -> None:
         "rag_search_fixed.py": "--content-only",
         "index_rag.py": "--stage",
         "ocr_pdfs.py": "--dry-run",
+        "nice_app.py": "--no-show",
     }
 
     for script, marker in expected.items():
@@ -47,6 +48,7 @@ def test_legacy_import_shims_alias_package_modules() -> None:
     import telemetry_db as root_telemetry_db
     import user_auth_db as root_user_auth_db
     import windows_app as root_windows_app
+    import nice_app as root_nice_app
     from rag_catalog.cli import rag_search as package_rag_search
     from rag_catalog.cli import rag_search_fixed as package_rag_search_fixed
     from rag_catalog.core import index_rag as package_index_rag
@@ -56,6 +58,7 @@ def test_legacy_import_shims_alias_package_modules() -> None:
     from rag_catalog.core import user_auth_db as package_user_auth_db
     from rag_catalog.integrations import telegram_bot as package_telegram_bot
     from rag_catalog.ui import windows_app as package_windows_app
+    from rag_catalog.ui import nice_app as package_nice_app
 
     assert root_rag_search.main is package_rag_search.main
     assert root_rag_search_fixed.main is package_rag_search_fixed.main
@@ -66,3 +69,4 @@ def test_legacy_import_shims_alias_package_modules() -> None:
     assert root_rag_core.RAGSearcher is package_rag_core.RAGSearcher
     assert root_user_auth_db.UserAuthDB is package_user_auth_db.UserAuthDB
     assert root_telemetry_db.TelemetryDB is package_telemetry_db.TelemetryDB
+    assert root_nice_app.main is package_nice_app.main
