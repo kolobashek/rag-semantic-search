@@ -18,6 +18,7 @@ from urllib.parse import quote
 from nicegui import app, events, run, ui
 
 from rag_catalog.core.rag_core import RAGSearcher, load_config
+from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 
@@ -64,6 +65,10 @@ class PageState:
     auth_db: Optional[UserAuthDB] = None
     current_user: Optional[Dict[str, Any]] = None
     auth_token: str = ""
+    favorites: List[Dict[str, Any]] = field(default_factory=list)
+    header_explorer_actions: Optional[ui.row] = None
+    header_breadcrumbs: Optional[ui.row] = None
+    telemetry: Optional[TelemetryDB] = None
 
 
 def _file_url(full_path: str) -> str:
@@ -117,6 +122,105 @@ def _refresh_current_user(state: PageState) -> None:
     user = _get_auth_db(state).get_user(username=str(state.current_user.get("username") or ""))
     if user:
         state.current_user = user
+
+
+def _username(state: PageState) -> str:
+    return str((state.current_user or {}).get("username") or "").strip().lower()
+
+
+def _get_telemetry(state: PageState) -> TelemetryDB:
+    path = _telemetry_db_path(state.cfg)
+    if state.telemetry is None or Path(getattr(state.telemetry, "db_path", "")) != path:
+        state.telemetry = TelemetryDB(str(path))
+    return state.telemetry
+
+
+def _log_app_event(
+    state: PageState,
+    feature: str,
+    action: str,
+    *,
+    ok: bool = True,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        _get_telemetry(state).log_app_event(
+            username=_username(state),
+            screen=state.screen,
+            feature=feature,
+            action=action,
+            ok=ok,
+            details=details or {},
+        )
+    except Exception:
+        pass
+
+
+def _load_user_state(state: PageState) -> None:
+    username = _username(state)
+    if not username:
+        return
+    auth_db = _get_auth_db(state)
+    settings = auth_db.get_user_settings(username=username)
+    explorer = settings.get("explorer") if isinstance(settings.get("explorer"), dict) else {}
+    if explorer:
+        state.explorer_view = str(explorer.get("view") or state.explorer_view)
+        state.explorer_sort = str(explorer.get("sort") or state.explorer_sort)
+        state.explorer_desc = bool(explorer.get("desc", state.explorer_desc))
+        state.explorer_ext = str(explorer.get("ext") or state.explorer_ext)
+    state.favorites = auth_db.list_favorites(username=username)
+
+
+def _save_explorer_settings(state: PageState) -> None:
+    username = _username(state)
+    if not username:
+        return
+    auth_db = _get_auth_db(state)
+    settings = auth_db.get_user_settings(username=username)
+    settings["explorer"] = {
+        "view": state.explorer_view,
+        "sort": state.explorer_sort,
+        "desc": state.explorer_desc,
+        "ext": state.explorer_ext,
+    }
+    auth_db.save_user_settings(username=username, settings=settings)
+    _log_app_event(state, "explorer", "save_settings", details=settings["explorer"])
+
+
+def _favorite_key(path: str) -> str:
+    return str(path or "").strip().casefold()
+
+
+def _is_favorite(state: PageState, path: str) -> bool:
+    key = _favorite_key(path)
+    return any(_favorite_key(str(item.get("path") or "")) == key for item in state.favorites)
+
+
+def _favorite_type(path: Path) -> str:
+    return "folder" if path.is_dir() else "file"
+
+
+def _toggle_favorite(state: PageState, path: Path, *, item_type: Optional[str] = None, title: str = "") -> bool:
+    username = _username(state)
+    if not username:
+        ui.notify("Войдите, чтобы сохранять избранное.", type="warning")
+        return False
+    auth_db = _get_auth_db(state)
+    path_value = str(path)
+    active = _is_favorite(state, path_value)
+    if active:
+        auth_db.remove_favorite(username=username, path=path_value)
+        _log_app_event(state, "favorites", "remove", details={"path": path_value})
+    else:
+        auth_db.add_favorite(
+            username=username,
+            item_type=item_type or _favorite_type(path),
+            path=path_value,
+            title=title or path.name or path_value,
+        )
+        _log_app_event(state, "favorites", "add", details={"path": path_value, "item_type": item_type or _favorite_type(path)})
+    state.favorites = auth_db.list_favorites(username=username)
+    return not active
 
 
 def _db_query_dicts(db_path: Path, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
@@ -457,6 +561,8 @@ def _install_css() -> None:
           border-bottom: 1px solid var(--rag-border);
           backdrop-filter: blur(16px);
         }
+        .rag-header-breadcrumbs .q-btn { min-height: 32px; padding: 0 6px; }
+        .rag-header-actions .q-btn { min-width: 34px; min-height: 34px; }
         .rag-drawer {
           background: #ffffff;
           border-right: 1px solid var(--rag-border);
@@ -567,6 +673,67 @@ def _install_css() -> None:
           background: #eef6fb;
           border-color: #bdd7e9;
         }
+        .rag-explorer-item { position: relative; }
+        .rag-favorite-star {
+          opacity: 0;
+          color: rgba(0, 0, 0, 0.45);
+          transition: opacity .12s ease, color .12s ease, transform .12s ease;
+        }
+        .rag-explorer-item:hover .rag-favorite-star,
+        .rag-favorite-star.active {
+          opacity: 1;
+        }
+        .rag-favorite-star:hover {
+          color: #d89b00;
+          transform: scale(1.08);
+        }
+        .rag-favorite-star.active {
+          color: #f6b700;
+        }
+        .rag-favorite-star.header {
+          opacity: .65;
+        }
+        .rag-favorite-star.header:hover {
+          opacity: 1;
+          color: #d89b00;
+        }
+        .rag-bookmarks {
+          display: flex;
+          width: 100%;
+          gap: 8px;
+          overflow-x: auto;
+          padding: 8px 0;
+        }
+        .rag-bookmark {
+          flex: 0 0 auto;
+          max-width: 240px;
+          border: 1px solid var(--rag-border);
+          background: #ffffff;
+          border-radius: 8px;
+        }
+        .rag-context-menu {
+          position: fixed;
+          z-index: 10000;
+          min-width: 220px;
+          background: #ffffff;
+          border: 1px solid var(--rag-border);
+          border-radius: 8px;
+          box-shadow: 0 18px 48px rgba(23, 32, 44, 0.18);
+          padding: 6px;
+          display: none;
+        }
+        .rag-context-menu button {
+          display: block;
+          width: 100%;
+          padding: 8px 10px;
+          border: 0;
+          background: transparent;
+          text-align: left;
+          border-radius: 8px;
+          color: var(--rag-text);
+          cursor: pointer;
+        }
+        .rag-context-menu button:hover { background: #eef6fb; }
         .rag-explorer-name {
           width: 100%;
           min-width: 0;
@@ -597,6 +764,46 @@ def _install_css() -> None:
         }
         """
     )
+    ui.add_body_html(
+        """
+        <div id="rag-global-context-menu" class="rag-context-menu" role="menu"></div>
+        <script>
+        (() => {
+          if (window.__ragContextMenuInstalled) return;
+          window.__ragContextMenuInstalled = true;
+          const menu = () => document.getElementById('rag-global-context-menu');
+          const hide = () => { const m = menu(); if (m) m.style.display = 'none'; };
+          const show = (event) => {
+            const root = event.target.closest('.q-layout');
+            if (!root) return;
+            event.preventDefault();
+            const m = menu();
+            if (!m) return;
+            const path = location.pathname;
+            const buttons = [
+              ['Обновить экран', () => location.reload()],
+              ['Скопировать адрес экрана', () => navigator.clipboard && navigator.clipboard.writeText(location.href)],
+              ['Настройки', () => { location.href = '/settings'; }]
+            ];
+            m.innerHTML = '';
+            buttons.forEach(([label, action]) => {
+              const b = document.createElement('button');
+              b.textContent = label;
+              b.onclick = () => { hide(); action(); };
+              m.appendChild(b);
+            });
+            m.style.left = Math.min(event.clientX, window.innerWidth - 240) + 'px';
+            m.style.top = Math.min(event.clientY, window.innerHeight - 160) + 'px';
+            m.style.display = 'block';
+          };
+          document.addEventListener('contextmenu', show);
+          document.addEventListener('click', hide);
+          document.addEventListener('scroll', hide, true);
+          document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+        })();
+        </script>
+        """
+    )
 
 
 def _build_page(initial_screen: str = "search") -> None:
@@ -609,6 +816,9 @@ def _build_page(initial_screen: str = "search") -> None:
         if stored_token:
             state.auth_token = stored_token
             state.current_user = _get_auth_db(state).get_user_by_session(stored_token)
+            if state.current_user:
+                _load_user_state(state)
+                _get_auth_db(state).log_auth_event(username=_username(state), event_type="session_restore", ok=True)
     except Exception:
         pass
 
@@ -618,6 +828,10 @@ def _build_page(initial_screen: str = "search") -> None:
         ui.label("RAG Каталог").classes("font-semibold text-lg")
         ui.icon("chevron_right").classes("text-slate-400")
         header_title = ui.label("").classes("font-semibold text-base text-slate-700")
+        header_breadcrumbs = ui.row().classes("rag-header-breadcrumbs items-center gap-1 hidden md:flex")
+        header_actions = ui.row().classes("rag-header-actions items-center gap-1")
+        state.header_breadcrumbs = header_breadcrumbs
+        state.header_explorer_actions = header_actions
         ui.space()
         status_text = "Qdrant готов" if _ensure_searcher(state) and state.searcher and state.searcher.connected else "Qdrant недоступен"
         ui.label(status_text).classes("hidden sm:block rag-chip")
@@ -635,6 +849,7 @@ def _build_page(initial_screen: str = "search") -> None:
     def set_screen(screen: str) -> None:
         state.screen = screen
         ui.run_javascript(f"history.pushState(null, '', '/{screen}')")
+        _log_app_event(state, "navigation", "open_screen", details={"screen": screen})
         render()
 
     def go_explorer(path: str) -> None:
@@ -656,6 +871,9 @@ def _build_page(initial_screen: str = "search") -> None:
             ]:
                 color = "primary" if state.screen == screen else None
                 ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+            if str((state.current_user or {}).get("role") or "") == "admin":
+                color = "primary" if state.screen == "stats" else None
+                ui.button("Статистика", icon="query_stats", on_click=lambda: set_screen("stats"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
         settings_area.clear()
         with settings_area:
@@ -708,9 +926,12 @@ def _build_page(initial_screen: str = "search") -> None:
                 file_type=state.file_type,
                 content_only=state.content_only,
                 source="nicegui",
+                username=_username(state),
             )
+            _log_app_event(state, "search", "run", details={"query": query, "results": len(state.results)})
         except Exception as exc:
             state.search_error = str(exc)
+            _log_app_event(state, "search", "run", ok=False, details={"query": query, "error": str(exc)})
         render()
 
     def choose_query(query: str) -> None:
@@ -870,11 +1091,15 @@ def _build_page(initial_screen: str = "search") -> None:
         def open_folder(path: Path) -> None:
             state.explorer_path = str(path)
             state.explorer_page = 0
+            _get_auth_db(state).touch_favorite(username=_username(state), path=str(path))
+            _log_app_event(state, "explorer", "open_folder", details={"path": str(path)})
             render()
 
         def open_file(path: Path) -> None:
             url = _file_url(str(path))
             if url:
+                _get_auth_db(state).touch_favorite(username=_username(state), path=str(path))
+                _log_app_event(state, "explorer", "open_file", details={"path": str(path)})
                 ui.run_javascript(f"window.open({json.dumps(url)}, '_blank')")
 
         def copy_path(path: Path) -> None:
@@ -883,22 +1108,40 @@ def _build_page(initial_screen: str = "search") -> None:
 
         def render_context_menu(path: Path, is_dir: bool) -> None:
             with ui.context_menu():
+                _log_app_event(state, "context_menu", "open", details={"path": str(path), "item_type": "folder" if is_dir else "file"})
                 if is_dir:
                     ui.menu_item("Открыть", on_click=lambda p=path: open_folder(p))
                 else:
                     ui.menu_item("Открыть", on_click=lambda p=path: open_file(p))
-                    ui.menu_item("Скачать", on_click=lambda p=path: ui.download(p, filename=p.name))
+                    ui.menu_item("Скачать", on_click=lambda p=path: (_log_app_event(state, "context_menu", "download", details={"path": str(p)}), ui.download(p, filename=p.name)))
                 ui.menu_item("Показать в ОС", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p)))
+                fav_label = "Убрать из избранного" if _is_favorite(state, str(path)) else "Добавить в избранное"
+                ui.menu_item(fav_label, on_click=lambda p=path, t=("folder" if is_dir else "file"): (_toggle_favorite(state, p, item_type=t), render()))
                 ui.menu_item("Поделиться путем", on_click=lambda p=path: copy_path(p))
+
+        def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
+            active = _is_favorite(state, str(path))
+            icon = "star" if active else "star_border"
+            star = ui.button(icon=icon, color=None).props("flat round dense")
+            star.classes("rag-favorite-star active" if active else "rag-favorite-star")
+            star.tooltip("Убрать из избранного" if active else "Добавить в избранное")
+
+            def toggle() -> None:
+                _toggle_favorite(state, path, item_type=item_type)
+                render()
+
+            star.on("click.stop", toggle)
 
         def render_tile(path: Path, is_dir: bool, size_class: str) -> None:
             icon = _file_icon_svg(str(path), "Каталог" if is_dir else "Файл")
             click = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
-            with ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}").on("click", click):
-                ui.html(icon, sanitize=False)
-                ui.label(path.name).classes("rag-explorer-name text-center text-sm")
-                if state.explorer_view == "Мелкие значки":
-                    render_context_menu(path, is_dir)
+            with ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}"):
+                with ui.row().classes("w-full justify-end"):
+                    render_star(path, item_type="folder" if is_dir else "file")
+                with ui.column().classes("items-center gap-1 cursor-pointer").on("click", click):
+                    ui.html(icon, sanitize=False)
+                    ui.label(path.name).classes("rag-explorer-name text-center text-sm")
+                render_context_menu(path, is_dir)
 
         def render_row(path: Path, is_dir: bool, compact: bool = False) -> None:
             try:
@@ -916,8 +1159,9 @@ def _build_page(initial_screen: str = "search") -> None:
                         ui.label(f"{'Папка' if is_dir else path.suffix or 'без расширения'} · {size} · {modified}").classes("rag-meta")
                 if not compact:
                     if not is_dir:
-                        ui.button("Скачать", icon="download", on_click=lambda p=path: ui.download(p, filename=p.name)).props("outline dense")
+                        ui.button("Скачать", icon="download", on_click=lambda p=path: (_log_app_event(state, "explorer", "download", details={"path": str(p)}), ui.download(p, filename=p.name))).props("outline dense")
                     ui.button("ОС", icon="open_in_new", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("flat dense")
+                render_star(path, item_type="folder" if is_dir else "file")
                 render_context_menu(path, is_dir)
 
         def render_entries() -> None:
@@ -936,22 +1180,46 @@ def _build_page(initial_screen: str = "search") -> None:
                 p = p.parent
             parts.reverse()
 
+            if state.header_breadcrumbs is not None:
+                state.header_breadcrumbs.clear()
+                with state.header_breadcrumbs:
+                    for idx, part in enumerate(parts):
+                        label = "Корень" if part == root else part.name
+                        ui.button(label, on_click=lambda p=part: (_log_app_event(state, "explorer", "breadcrumb", details={"path": str(p)}), open_folder(p)), color=None).props("flat dense no-caps")
+                        if idx < len(parts) - 1:
+                            ui.icon("chevron_right").classes("text-slate-400")
+
+            if state.header_explorer_actions is not None:
+                state.header_explorer_actions.clear()
+                with state.header_explorer_actions:
+                    up_button = ui.button(icon="arrow_upward", on_click=lambda: (_log_app_event(state, "explorer", "up", details={"path": str(current.parent)}), open_folder(current.parent)), color=None).props("flat round dense")
+                    up_button.tooltip("На уровень выше")
+                    if current == root:
+                        up_button.disable()
+                    active = _is_favorite(state, str(current))
+                    fav = ui.button(icon="star" if active else "star_border", color=None).props("flat round dense")
+                    fav.classes("rag-favorite-star header active" if active else "rag-favorite-star header")
+                    fav.tooltip("Убрать текущую папку из избранного" if active else "Добавить текущую папку в избранное")
+                    fav.on("click", lambda p=current: (_toggle_favorite(state, p, item_type="folder"), render()))
+
             dirs, files, total_files = _file_rows(current, state)
             state.explorer_page = max(0, min(state.explorer_page, max(0, (len(files) - 1) // PAGE_SIZE)))
             page_files = files[state.explorer_page * PAGE_SIZE : (state.explorer_page + 1) * PAGE_SIZE]
 
             with entries_area:
-                with ui.row().classes("w-full items-center gap-2"):
-                    up_button = ui.button("Выше", icon="arrow_upward", on_click=lambda: open_folder(current.parent), color=None).props("outline dense")
-                    if current == root:
-                        up_button.disable()
-                    for idx, part in enumerate(parts):
-                        label = "Корень" if part == root else part.name
-                        ui.button(label, on_click=lambda p=part: open_folder(p), color=None).props("flat dense no-caps")
-                        if idx < len(parts) - 1:
-                            ui.icon("chevron_right").classes("text-slate-400")
-
                 ui.label(f"{current} · папок {len(dirs)} · файлов {total_files}").classes("rag-path")
+
+                if state.favorites:
+                    with ui.row().classes("rag-bookmarks"):
+                        for fav in state.favorites:
+                            fav_path = Path(str(fav.get("path") or ""))
+                            item_type = str(fav.get("item_type") or "file")
+                            label = str(fav.get("title") or fav_path.name or fav_path)
+                            icon = "folder" if item_type == "folder" else "description"
+                            action = (lambda p=fav_path: open_folder(p)) if item_type == "folder" else (lambda p=fav_path: open_file(p))
+                            with ui.row().classes("rag-bookmark items-center gap-1 px-2 py-1"):
+                                ui.button(label, icon=icon, on_click=action, color=None).props("flat dense no-caps").classes("rag-nav-button")
+                                render_star(fav_path, item_type=item_type)
 
                 if not dirs and not files:
                     ui.label("Нет элементов, соответствующих фильтру.").classes("rag-card p-4 rag-meta")
@@ -984,10 +1252,18 @@ def _build_page(initial_screen: str = "search") -> None:
         with toolbar:
             with ui.row().classes("rag-card w-full p-3 gap-3 items-center"):
                 filter_input = ui.input(placeholder="Фильтр по имени", value=state.explorer_filter).props("dense outlined clearable").classes("min-w-64 flex-1")
-                ui.select(["Все", ".docx", ".xlsx", ".xls", ".pdf"], value=state.explorer_ext, on_change=lambda e: (setattr(state, "explorer_ext", e.value), setattr(state, "explorer_page", 0), render_entries())).props("dense outlined").classes("w-36")
-                ui.select(["Крупные значки", "Средние значки", "Мелкие значки", "Список", "Таблица"], value=state.explorer_view, on_change=lambda e: (setattr(state, "explorer_view", e.value), render_entries())).props("dense outlined").classes("w-44")
-                ui.select(["По имени", "По размеру", "По дате"], value=state.explorer_sort, on_change=lambda e: (setattr(state, "explorer_sort", e.value), render_entries())).props("dense outlined").classes("w-40")
-                ui.select(["По возрастанию", "По убыванию"], value="По убыванию" if state.explorer_desc else "По возрастанию", on_change=lambda e: (setattr(state, "explorer_desc", e.value == "По убыванию"), render_entries())).props("dense outlined").classes("w-44")
+
+                def update_explorer_setting(attr: str, value: Any) -> None:
+                    setattr(state, attr, value)
+                    state.explorer_page = 0
+                    _save_explorer_settings(state)
+                    _log_app_event(state, "explorer", "change_setting", details={attr: value})
+                    render_entries()
+
+                ui.select(["Все", ".docx", ".xlsx", ".xls", ".pdf"], value=state.explorer_ext, on_change=lambda e: update_explorer_setting("explorer_ext", e.value)).props("dense outlined").classes("w-36")
+                ui.select(["Крупные значки", "Средние значки", "Мелкие значки", "Список", "Таблица"], value=state.explorer_view, on_change=lambda e: update_explorer_setting("explorer_view", e.value)).props("dense outlined").classes("w-44")
+                ui.select(["По имени", "По размеру", "По дате"], value=state.explorer_sort, on_change=lambda e: update_explorer_setting("explorer_sort", e.value)).props("dense outlined").classes("w-40")
+                ui.select(["По возрастанию", "По убыванию"], value="По убыванию" if state.explorer_desc else "По возрастанию", on_change=lambda e: update_explorer_setting("explorer_desc", e.value == "По убыванию")).props("dense outlined").classes("w-44")
 
                 def apply_filter(_: events.GenericEventArguments | None = None) -> None:
                     state.explorer_filter = str(filter_input.value or "")
@@ -1024,6 +1300,36 @@ def _build_page(initial_screen: str = "search") -> None:
             if stats.get("by_ext"):
                 for ext, count in list(stats["by_ext"].items())[:12]:
                     ui.label(f"{ext}: {count}").classes("rag-meta")
+
+    def render_login_screen() -> None:
+        auth_db = _get_auth_db(state)
+        with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
+            with ui.column().classes("rag-card w-full max-w-xl p-5 gap-3"):
+                ui.label("Вход в RAG Каталог").classes("text-2xl font-semibold")
+                ui.label("Введите учетные данные, чтобы открыть приложение.").classes("rag-meta")
+                username_input = ui.input("Логин").props("dense outlined").classes("w-full")
+                password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+                def login() -> None:
+                    username = str(username_input.value or "")
+                    user = auth_db.login(username=username, password=str(password_input.value or ""))
+                    if not user:
+                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
+                        ui.notify("Неверный логин или пароль.", type="negative")
+                        return
+                    state.current_user = user
+                    state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
+                    auth_db.log_auth_event(username=_username(state), event_type="login", ok=True)
+                    _load_user_state(state)
+                    try:
+                        app.storage.user["auth_token"] = state.auth_token
+                    except Exception:
+                        pass
+                    ui.notify("Вход выполнен.", type="positive")
+                    render()
+
+                password_input.on("keyup.enter", lambda _: login())
+                ui.button("Войти", icon="login", on_click=login).props("unelevated")
 
     def render_admin_users(auth_db: UserAuthDB) -> None:
         with ui.column().classes("rag-card w-full p-4 gap-4"):
@@ -1150,6 +1456,39 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.button("Сохранить профиль", icon="save", on_click=save_profile).props("outline")
 
         with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Настройки проводника").classes("text-xl font-semibold")
+            ui.label(f"Вид: {state.explorer_view} · сортировка: {state.explorer_sort} · {'убывание' if state.explorer_desc else 'возрастание'} · тип: {state.explorer_ext}").classes("rag-meta")
+
+            def reset_explorer_settings() -> None:
+                auth_db.reset_user_settings(username=str(user.get("username") or ""))
+                state.explorer_view = "Таблица"
+                state.explorer_sort = "По имени"
+                state.explorer_desc = False
+                state.explorer_ext = "Все"
+                _log_app_event(state, "settings", "reset_explorer")
+                ui.notify("Настройки проводника сброшены.", type="positive")
+                render()
+
+            ui.button("Сбросить настройки проводника", icon="restart_alt", on_click=reset_explorer_settings).props("outline")
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Избранное").classes("text-xl font-semibold")
+            if not state.favorites:
+                ui.label("Закладок пока нет. Добавьте файл или папку звездочкой в проводнике.").classes("rag-meta")
+            for fav in state.favorites:
+                fav_path = Path(str(fav.get("path") or ""))
+                item_type = str(fav.get("item_type") or "")
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.icon("folder" if item_type == "folder" else "description")
+                    ui.label(str(fav.get("title") or fav_path.name or fav_path)).classes("font-medium")
+                    ui.label(str(fav_path)).classes("rag-path flex-1")
+                    if item_type == "folder":
+                        ui.button("Открыть", on_click=lambda p=fav_path: go_explorer(str(p))).props("outline dense")
+                    else:
+                        ui.button("Открыть", on_click=lambda p=fav_path: ui.run_javascript(f"window.open({json.dumps(_file_url(str(p)))}, '_blank')")).props("outline dense")
+                    ui.button(icon="delete", on_click=lambda p=fav_path: (_toggle_favorite(state, p), render())).props("flat round dense")
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
             ui.label("Смена пароля").classes("text-xl font-semibold")
             old_password = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
             new_password = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
@@ -1174,6 +1513,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 def logout() -> None:
                     if state.auth_token:
                         auth_db.revoke_session(state.auth_token)
+                    auth_db.log_auth_event(username=_username(state), event_type="logout", ok=True)
                     state.current_user = None
                     state.auth_token = ""
                     try:
@@ -1198,6 +1538,114 @@ def _build_page(initial_screen: str = "search") -> None:
             if bot_link:
                 ui.link("Открыть бота", bot_link, new_tab=True)
 
+    def render_stats_screen() -> None:
+        if str((state.current_user or {}).get("role") or "") != "admin":
+            ui.label("Раздел доступен только администратору.").classes("rag-card p-4 text-red-700")
+            return
+        telemetry_path = _telemetry_db_path(state.cfg)
+        auth_db = _get_auth_db(state)
+        ui.label("Статистика использования").classes("text-2xl font-semibold")
+        searches_by_day = _db_query_dicts(
+            telemetry_path,
+            """
+            SELECT substr(ts, 1, 10) AS day, COUNT(*) AS count
+            FROM search_logs
+            GROUP BY substr(ts, 1, 10)
+            ORDER BY day
+            LIMIT 30
+            """,
+        )
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Поиски по дням").classes("text-xl font-semibold")
+            ui.echart({
+                "tooltip": {"trigger": "axis"},
+                "xAxis": {"type": "category", "data": [row["day"] for row in searches_by_day]},
+                "yAxis": {"type": "value"},
+                "series": [{"type": "bar", "data": [row["count"] for row in searches_by_day], "name": "Поиски"}],
+            }).classes("w-full h-72")
+
+        top_queries = _db_query_dicts(
+            telemetry_path,
+            """
+            SELECT query, COUNT(*) AS count
+            FROM search_logs
+            WHERE query <> ''
+            GROUP BY lower(query)
+            ORDER BY count DESC
+            LIMIT 20
+            """,
+        )
+        top_users = _db_query_dicts(
+            telemetry_path,
+            """
+            SELECT COALESCE(NULLIF(username, ''), source, 'unknown') AS username, COUNT(*) AS count
+            FROM search_logs
+            GROUP BY COALESCE(NULLIF(username, ''), source, 'unknown')
+            ORDER BY count DESC
+            LIMIT 20
+            """,
+        )
+        top_features = _db_query_dicts(
+            telemetry_path,
+            """
+            SELECT feature || ':' || action AS name, COUNT(*) AS count
+            FROM app_events
+            GROUP BY feature, action
+            ORDER BY count DESC
+            LIMIT 20
+            """,
+        )
+        recent_searches = _db_query_dicts(
+            telemetry_path,
+            """
+            SELECT ts, username, query, results_count, duration_ms, ok, error
+            FROM search_logs
+            ORDER BY id DESC
+            LIMIT 50
+            """,
+        )
+        auth_events = auth_db.list_auth_events(limit=50)
+
+        with ui.row().classes("w-full gap-3 items-start"):
+            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
+                ui.label("Топ запросов").classes("text-xl font-semibold")
+                for row in top_queries:
+                    ui.label(f"{row['query']}: {row['count']}").classes("rag-meta")
+            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
+                ui.label("Топ пользователей").classes("text-xl font-semibold")
+                for row in top_users:
+                    ui.label(f"{row['username']}: {row['count']}").classes("rag-meta")
+            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
+                ui.label("Функции").classes("text-xl font-semibold")
+                for row in top_features:
+                    ui.label(f"{row['name']}: {row['count']}").classes("rag-meta")
+
+        with ui.expansion("История запросов", value=True).classes("rag-group-panel w-full"):
+            ui.table(
+                rows=recent_searches,
+                columns=[
+                    {"name": "ts", "label": "Время", "field": "ts"},
+                    {"name": "username", "label": "Пользователь", "field": "username"},
+                    {"name": "query", "label": "Запрос", "field": "query"},
+                    {"name": "results_count", "label": "Результаты", "field": "results_count"},
+                    {"name": "duration_ms", "label": "мс", "field": "duration_ms"},
+                    {"name": "error", "label": "Ошибка", "field": "error"},
+                ],
+                pagination=10,
+            ).classes("w-full")
+        with ui.expansion("История входов", value=False).classes("rag-group-panel w-full"):
+            ui.table(
+                rows=auth_events,
+                columns=[
+                    {"name": "ts", "label": "Время", "field": "ts"},
+                    {"name": "username", "label": "Пользователь", "field": "username"},
+                    {"name": "event_type", "label": "Событие", "field": "event_type"},
+                    {"name": "ok", "label": "OK", "field": "ok"},
+                    {"name": "error", "label": "Ошибка", "field": "error"},
+                ],
+                pagination=10,
+            ).classes("w-full")
+
     def render() -> None:
         header_title.set_text({
             "search": "Поиск",
@@ -1205,11 +1653,31 @@ def _build_page(initial_screen: str = "search") -> None:
             "index": "Индекс",
             "telegram": "Telegram",
             "settings": "Настройки",
+            "stats": "Статистика",
         }.get(state.screen, "Поиск"))
+        if state.header_breadcrumbs is not None:
+            state.header_breadcrumbs.clear()
+        if state.header_explorer_actions is not None:
+            state.header_explorer_actions.clear()
         update_nav()
         content.clear()
         with content:
+            if state.current_user is None:
+                try:
+                    drawer.set_visibility(False)
+                except Exception:
+                    pass
+                render_login_screen()
+                return
+            try:
+                drawer.set_visibility(True)
+            except Exception:
+                pass
             if state.screen == "explorer":
+                try:
+                    drawer.set_visibility(True)
+                except Exception:
+                    pass
                 render_explorer_screen()
             elif state.screen == "index":
                 render_index_screen()
@@ -1217,6 +1685,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 render_telegram_screen()
             elif state.screen == "settings":
                 render_settings_screen()
+            elif state.screen == "stats":
+                render_stats_screen()
             else:
                 render_search_screen()
 
@@ -1251,6 +1721,11 @@ def telegram_page() -> None:
 @ui.page("/settings")
 def settings_page() -> None:
     _build_page("settings")
+
+
+@ui.page("/stats")
+def stats_page() -> None:
+    _build_page("stats")
 
 
 def main(argv: Optional[List[str]] = None) -> None:

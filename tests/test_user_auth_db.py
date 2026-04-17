@@ -127,3 +127,55 @@ def test_registration_cannot_overwrite_active_user_password(tmp_path) -> None:
             password="hacked",
         )
     assert db.login(username="admin", password="admin") is not None
+
+
+def test_user_settings_are_saved_reset_and_isolated(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+
+    db.save_user_settings(
+        username="admin",
+        settings={"explorer": {"view": "Список", "sort": "По дате", "desc": True, "ext": ".pdf"}},
+    )
+    db.save_user_settings(
+        username="other",
+        settings={"explorer": {"view": "Таблица"}},
+    )
+
+    assert db.get_user_settings(username="admin")["explorer"]["view"] == "Список"
+    assert db.get_user_settings(username="admin")["explorer"]["desc"] is True
+    assert db.get_user_settings(username="other")["explorer"]["view"] == "Таблица"
+
+    db.reset_user_settings(username="admin")
+    assert db.get_user_settings(username="admin") == {}
+    assert db.get_user_settings(username="other")["explorer"]["view"] == "Таблица"
+
+
+def test_user_favorites_support_files_folders_dedupe_and_isolation(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+
+    db.add_favorite(username="admin", item_type="folder", path="O:\\Docs", title="Docs")
+    db.add_favorite(username="admin", item_type="file", path="O:\\Docs\\a.pdf", title="A")
+    db.add_favorite(username="admin", item_type="file", path="O:\\Docs\\a.pdf", title="A2")
+    db.add_favorite(username="other", item_type="folder", path="O:\\Docs", title="Other Docs")
+
+    admin_favorites = db.list_favorites(username="admin")
+    assert len(admin_favorites) == 2
+    assert {item["item_type"] for item in admin_favorites} == {"folder", "file"}
+    assert any(item["title"] == "A2" for item in admin_favorites)
+    assert len(db.list_favorites(username="other")) == 1
+
+    assert db.remove_favorite(username="admin", path="O:\\Docs\\a.pdf") is True
+    assert len(db.list_favorites(username="admin")) == 1
+    assert len(db.list_favorites(username="other")) == 1
+
+
+def test_auth_events_are_logged(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+
+    db.log_auth_event(username="admin", event_type="login", ok=True)
+    db.log_auth_event(username="admin", event_type="login_failed", ok=False, error="bad_credentials")
+
+    events = db.list_auth_events(limit=10)
+    assert [event["event_type"] for event in events] == ["login_failed", "login"]
+    assert events[0]["ok"] == 0
+    assert events[0]["error"] == "bad_credentials"

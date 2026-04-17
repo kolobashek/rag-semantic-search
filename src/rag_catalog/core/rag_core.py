@@ -157,6 +157,7 @@ class RAGSearcher:
         file_type: Optional[str] = None,
         content_only: bool = False,
         source: str = "unknown",
+        username: str = "",
     ) -> List[Dict[str, Any]]:
         """
         Семантический поиск по индексированным файлам.
@@ -193,6 +194,7 @@ class RAGSearcher:
                 duration_ms=0,
                 ok=False,
                 error="not_connected",
+                username=username,
             )
             raise ConnectionError("Нет подключения к Qdrant")
 
@@ -212,6 +214,7 @@ class RAGSearcher:
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 ok=False,
                 error=f"embed_error: {exc}",
+                username=username,
             )
             raise RuntimeError(f"Не удалось построить эмбеддинг запроса: {exc}") from exc
 
@@ -265,6 +268,7 @@ class RAGSearcher:
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 ok=False,
                 error=f"qdrant_error: {exc}",
+                username=username,
             )
             raise RuntimeError(f"Ошибка поиска в Qdrant: {exc}") from exc
 
@@ -304,6 +308,7 @@ class RAGSearcher:
             duration_ms=int((time.perf_counter() - started) * 1000),
             ok=True,
             error=truncated_note,
+            username=username,
         )
         return results
 

@@ -4,6 +4,7 @@ user_auth_db.py — SQLite-хранилище пользователей и Tele
 
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 import threading
@@ -104,6 +105,34 @@ class UserAuthDB:
                         revoked_at TEXT
                     );
 
+                    CREATE TABLE IF NOT EXISTS user_settings (
+                        username TEXT PRIMARY KEY,
+                        settings_json TEXT NOT NULL DEFAULT '{}',
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS user_favorites (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL,
+                        item_type TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        title TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        last_used_at TEXT,
+                        UNIQUE(username, path)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS auth_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts TEXT NOT NULL,
+                        username TEXT NOT NULL DEFAULT '',
+                        event_type TEXT NOT NULL,
+                        ok INTEGER NOT NULL DEFAULT 1,
+                        ip TEXT NOT NULL DEFAULT '',
+                        user_agent TEXT NOT NULL DEFAULT '',
+                        error TEXT NOT NULL DEFAULT ''
+                    );
+
                     CREATE INDEX IF NOT EXISTS idx_users_status
                       ON users(status);
                     CREATE INDEX IF NOT EXISTS idx_tokens_code
@@ -112,6 +141,10 @@ class UserAuthDB:
                       ON password_reset_tokens(code, telegram_chat_id, status);
                     CREATE INDEX IF NOT EXISTS idx_user_sessions_username
                       ON user_sessions(username, revoked_at, expires_at);
+                    CREATE INDEX IF NOT EXISTS idx_user_favorites_username
+                      ON user_favorites(username, item_type, title);
+                    CREATE INDEX IF NOT EXISTS idx_auth_events_ts
+                      ON auth_events(ts);
                     """
                 )
                 self._migrate_schema(conn)
@@ -594,3 +627,153 @@ class UserAuthDB:
                 except sqlite3.IntegrityError:
                     return False
         return True
+
+    def get_user_settings(self, *, username: str) -> Dict[str, Any]:
+        usr = (username or "").strip().lower()
+        if not usr:
+            return {}
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT settings_json FROM user_settings WHERE username=?",
+                    (usr,),
+                ).fetchone()
+                if row is None:
+                    return {}
+                try:
+                    data = json.loads(str(row["settings_json"] or "{}"))
+                except json.JSONDecodeError:
+                    return {}
+                return data if isinstance(data, dict) else {}
+
+    def save_user_settings(self, *, username: str, settings: Dict[str, Any]) -> None:
+        usr = (username or "").strip().lower()
+        if not usr:
+            return
+        payload = json.dumps(settings or {}, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_settings (username, settings_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(username) DO UPDATE SET
+                        settings_json=excluded.settings_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (usr, payload, _utc_now()),
+                )
+
+    def reset_user_settings(self, *, username: str) -> None:
+        usr = (username or "").strip().lower()
+        if not usr:
+            return
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM user_settings WHERE username=?", (usr,))
+
+    def list_favorites(self, *, username: str) -> list[Dict[str, Any]]:
+        usr = (username or "").strip().lower()
+        if not usr:
+            return []
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, username, item_type, path, title, created_at, last_used_at
+                    FROM user_favorites
+                    WHERE username=?
+                    ORDER BY lower(title), lower(path)
+                    """,
+                    (usr,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+    def add_favorite(self, *, username: str, item_type: str, path: str, title: str = "") -> bool:
+        usr = (username or "").strip().lower()
+        path_value = str(path or "").strip()
+        type_value = "folder" if str(item_type or "").strip().lower() == "folder" else "file"
+        title_value = (title or "").strip() or Path(path_value).name or path_value
+        if not usr or not path_value:
+            return False
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_favorites (username, item_type, path, title, created_at, last_used_at)
+                    VALUES (?, ?, ?, ?, ?, NULL)
+                    ON CONFLICT(username, path) DO UPDATE SET
+                        item_type=excluded.item_type,
+                        title=excluded.title
+                    """,
+                    (usr, type_value, path_value, title_value, now),
+                )
+        return True
+
+    def remove_favorite(self, *, username: str, path: str) -> bool:
+        usr = (username or "").strip().lower()
+        path_value = str(path or "").strip()
+        if not usr or not path_value:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "DELETE FROM user_favorites WHERE username=? AND path=?",
+                    (usr, path_value),
+                )
+                return cur.rowcount > 0
+
+    def touch_favorite(self, *, username: str, path: str) -> None:
+        usr = (username or "").strip().lower()
+        path_value = str(path or "").strip()
+        if not usr or not path_value:
+            return
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE user_favorites SET last_used_at=? WHERE username=? AND path=?",
+                    (_utc_now(), usr, path_value),
+                )
+
+    def log_auth_event(
+        self,
+        *,
+        username: str,
+        event_type: str,
+        ok: bool,
+        ip: str = "",
+        user_agent: str = "",
+        error: str = "",
+    ) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO auth_events (ts, username, event_type, ok, ip, user_agent, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _utc_now(),
+                        (username or "").strip().lower(),
+                        (event_type or "unknown").strip(),
+                        1 if ok else 0,
+                        ip or "",
+                        user_agent or "",
+                        error or "",
+                    ),
+                )
+
+    def list_auth_events(self, *, limit: int = 200) -> list[Dict[str, Any]]:
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT ts, username, event_type, ok, ip, user_agent, error
+                    FROM auth_events
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (max(1, int(limit)),),
+                ).fetchall()
+                return [dict(row) for row in rows]

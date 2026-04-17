@@ -5,6 +5,7 @@ telemetry_db.py — SQLite-телеметрия для индексации и �
 import sqlite3
 import threading
 import uuid
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -46,7 +47,8 @@ class TelemetryDB:
                         results_count INTEGER NOT NULL DEFAULT 0,
                         duration_ms INTEGER NOT NULL DEFAULT 0,
                         ok INTEGER NOT NULL DEFAULT 1,
-                        error TEXT
+                        error TEXT,
+                        username TEXT NOT NULL DEFAULT ''
                     );
 
                     CREATE TABLE IF NOT EXISTS fact_logs (
@@ -99,16 +101,39 @@ class TelemetryDB:
                         FOREIGN KEY(run_id) REFERENCES index_runs(run_id)
                     );
 
+                    CREATE TABLE IF NOT EXISTS app_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts TEXT NOT NULL,
+                        username TEXT NOT NULL DEFAULT '',
+                        screen TEXT NOT NULL DEFAULT '',
+                        feature TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT '',
+                        ok INTEGER NOT NULL DEFAULT 1,
+                        details_json TEXT NOT NULL DEFAULT '{}'
+                    );
+
                     CREATE INDEX IF NOT EXISTS idx_search_logs_ts
                       ON search_logs(ts);
+                    CREATE INDEX IF NOT EXISTS idx_search_logs_username
+                      ON search_logs(username, ts);
                     CREATE INDEX IF NOT EXISTS idx_fact_logs_ts
                       ON fact_logs(ts);
                     CREATE INDEX IF NOT EXISTS idx_index_runs_started
                       ON index_runs(ts_started);
                     CREATE INDEX IF NOT EXISTS idx_stage_run
                       ON index_stage_progress(run_id, stage);
+                    CREATE INDEX IF NOT EXISTS idx_app_events_ts
+                      ON app_events(ts);
+                    CREATE INDEX IF NOT EXISTS idx_app_events_feature
+                      ON app_events(feature, action, ts);
                     """
                 )
+                self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        search_cols = {row["name"] for row in conn.execute("PRAGMA table_info(search_logs)").fetchall()}
+        if "username" not in search_cols:
+            conn.execute("ALTER TABLE search_logs ADD COLUMN username TEXT NOT NULL DEFAULT ''")
 
     def log_search(
         self,
@@ -122,6 +147,7 @@ class TelemetryDB:
         duration_ms: int,
         ok: bool,
         error: str = "",
+        username: str = "",
     ) -> None:
         with self._lock:
             with self._connect() as conn:
@@ -129,9 +155,9 @@ class TelemetryDB:
                     """
                     INSERT INTO search_logs (
                         ts, source, query, limit_value, file_type, content_only,
-                        results_count, duration_ms, ok, error
+                        results_count, duration_ms, ok, error, username
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         _utc_now(),
@@ -144,6 +170,35 @@ class TelemetryDB:
                         int(duration_ms),
                         1 if ok else 0,
                         error or "",
+                        (username or "").strip().lower(),
+                    ),
+                )
+
+    def log_app_event(
+        self,
+        *,
+        username: str,
+        screen: str,
+        feature: str,
+        action: str,
+        ok: bool = True,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO app_events (ts, username, screen, feature, action, ok, details_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _utc_now(),
+                        (username or "").strip().lower(),
+                        screen or "",
+                        feature or "",
+                        action or "",
+                        1 if ok else 0,
+                        json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
                     ),
                 )
 
