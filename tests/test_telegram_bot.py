@@ -1,4 +1,4 @@
-from telegram_bot import process_message, process_query
+from telegram_bot import _clean_tg_text, _file_uri, format_fact_answer, process_message, process_query
 
 
 class _FakeSearcher:
@@ -107,3 +107,51 @@ def test_process_message_recover_success() -> None:
         allowed_chat_id="",
     )
     assert "Код восстановления подтверждён" in out
+
+
+# ── sanitization helpers ──────────────────────────────────────────────────
+
+def test_clean_tg_text_strips_control_chars() -> None:
+    assert _clean_tg_text("hello\x00world\x1f!") == "helloworld!"
+
+
+def test_clean_tg_text_normalizes_crlf() -> None:
+    assert "\r" not in _clean_tg_text("line1\r\nline2\rline3")
+
+
+def test_clean_tg_text_truncates() -> None:
+    long = "а" * 2000
+    result = _clean_tg_text(long, max_len=100)
+    assert len(result) <= 101  # 100 chars + "…"
+    assert result.endswith("…")
+
+
+def test_file_uri_windows_cyrillic() -> None:
+    uri = _file_uri(r"O:\Обмен\Договоры\файл.pdf")
+    assert uri.startswith("file:///O:/")
+    assert "%D0" in uri  # кириллица закодирована
+
+
+def test_file_uri_windows_spaces() -> None:
+    uri = _file_uri(r"C:\My Documents\file name.pdf")
+    assert "%20" in uri or "My%20Documents" in uri
+
+
+def test_file_uri_empty_returns_empty() -> None:
+    assert _file_uri("") == ""
+    assert _file_uri(None) == ""  # type: ignore[arg-type]
+
+
+def test_format_fact_answer_no_newlines_in_path() -> None:
+    result = format_fact_answer({
+        "answer": "3400 кг",
+        "source": {
+            "filename": "file\nwith\nnewlines.pdf",
+            "full_path": r"O:\Обмен\file.pdf",
+            "text_excerpt": "Масса:\n3400 кг",
+        },
+    })
+    # Перевод строки допустим между полями, но не внутри имени файла
+    lines = result.split("\n")
+    file_line = next(l for l in lines if l.startswith("Файл:"))
+    assert "\n" not in file_line

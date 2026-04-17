@@ -6,8 +6,11 @@ telegram_bot.py — Telegram бот для RAG-поиска по докумен�
 """
 
 import logging
+import re
 import time
+from pathlib import PureWindowsPath
 from typing import Any, Dict, List
+from urllib.parse import quote
 
 import requests
 
@@ -59,20 +62,47 @@ def get_updates(token: str, offset: int) -> List[Dict[str, Any]]:
     return data.get("result", [])
 
 
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _clean_tg_text(text: str, max_len: int = 1000) -> str:
+    """Remove control characters and truncate for safe Telegram output."""
+    text = _CTRL_RE.sub("", str(text or ""))
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if len(text) > max_len:
+        text = text[:max_len] + "…"
+    return text.strip()
+
+
+def _file_uri(path: str) -> str:
+    """Convert a Windows path to a percent-encoded file:// URI."""
+    if not path:
+        return ""
+    try:
+        p = PureWindowsPath(path)
+        if not p.drive or not p.parts:
+            return ""
+        rest = list(p.parts[1:])
+        encoded = "/".join(quote(part, safe="") for part in rest)
+        return f"file:///{p.drive}/{encoded}"
+    except Exception:
+        return ""
+
+
 def format_fact_answer(result: Dict[str, Any]) -> str:
     src = result.get("source", {}) or {}
-    filename = src.get("filename", "неизвестный файл")
-    full_path = src.get("full_path", "")
-    excerpt = src.get("text_excerpt", "")
-    lines = [
-        result.get("answer", "Ответ не найден"),
-        f"Файл: {filename}",
-    ]
+    filename = _clean_tg_text(src.get("filename", "неизвестный файл"), 200)
+    full_path = str(src.get("full_path", "") or "")
+    excerpt = _clean_tg_text(src.get("text_excerpt", ""), 300)
+    answer = _clean_tg_text(result.get("answer", "Ответ не найден"), 800)
+    lines = [answer, f"Файл: {filename}"]
     if excerpt:
         lines.append(f"Фрагмент: {excerpt}")
     if full_path:
-        lines.append(f"Путь: {full_path}")
-        lines.append(f"Ссылка: file:///{full_path.replace(chr(92), '/')}")
+        lines.append(f"Путь: {_clean_tg_text(full_path, 500)}")
+        uri = _file_uri(full_path)
+        if uri:
+            lines.append(f"Ссылка: {uri}")
     return "\n".join(lines)
 
 

@@ -105,6 +105,18 @@ def test_password_reset_requires_telegram_confirmation(tmp_path) -> None:
     assert db.login(username="user2", password="new") is not None
 
 
+def test_expired_session_is_rejected(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    token = db.create_session(username="admin", ttl_days=1)
+    # Принудительно просрочиваем сессию.
+    with db._connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "UPDATE user_sessions SET expires_at=? WHERE token=?",
+            ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), token),
+        )
+    assert db.get_user_by_session(token) is None
+
+
 def test_registration_cannot_overwrite_active_user_password(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     with pytest.raises(ValueError):

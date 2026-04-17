@@ -295,23 +295,16 @@ class UserAuthDB:
         return {"ok": True, "username": usr, "code": code, "expires_at": expires}
 
     def confirm_password_reset(self, *, telegram_chat_id: str, code: str) -> Dict[str, Any]:
-        return self._confirm_token(
-            table="password_reset_tokens",
-            telegram_chat_id=telegram_chat_id,
-            code=code,
-        )
-
-    def _confirm_token(self, *, table: str, telegram_chat_id: str, code: str) -> Dict[str, Any]:
         chat = str(telegram_chat_id or "").strip()
         token = (code or "").strip()
-        if table not in {"password_reset_tokens"}:
-            raise ValueError("unsupported token table")
+        if not chat or not token:
+            raise ValueError("telegram_chat_id и code обязательны")
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
-                    f"""
+                    """
                     SELECT id, username, expires_at
-                    FROM {table}
+                    FROM password_reset_tokens
                     WHERE telegram_chat_id=? AND code=? AND status='pending'
                     ORDER BY id DESC
                     LIMIT 1
@@ -322,11 +315,14 @@ class UserAuthDB:
                     return {"ok": False, "reason": "not_found"}
                 expires_at = datetime.fromisoformat(row["expires_at"])
                 if datetime.now(timezone.utc) > expires_at:
-                    conn.execute(f"UPDATE {table} SET status='expired' WHERE id=?", (int(row["id"]),))
+                    conn.execute(
+                        "UPDATE password_reset_tokens SET status='expired' WHERE id=?",
+                        (int(row["id"]),),
+                    )
                     return {"ok": False, "reason": "expired"}
                 now = _utc_now()
                 conn.execute(
-                    f"UPDATE {table} SET status='confirmed', confirmed_at=? WHERE id=?",
+                    "UPDATE password_reset_tokens SET status='confirmed', confirmed_at=? WHERE id=?",
                     (now, int(row["id"])),
                 )
                 return {"ok": True, "username": str(row["username"])}
