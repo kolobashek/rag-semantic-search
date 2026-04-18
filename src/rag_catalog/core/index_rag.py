@@ -1,5 +1,5 @@
 """
-index_rag.py — Индексатор файлов DOCX / XLSX / XLS / PDF для RAG-системы.
+index_rag.py — Индексатор файлов DOCX / XLSX / XLS / PDF / изображений для RAG-системы.
 
 Запуск:
     python index_rag.py                  # использует config.json
@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -18,7 +19,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ._platform_compat import apply_windows_platform_workarounds
 apply_windows_platform_workarounds()
@@ -59,7 +60,76 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Поддерживаемые расширения
-SUPPORTED_EXTENSIONS = {".docx", ".xlsx", ".xls", ".pdf"}
+SUPPORTED_EXTENSIONS = {
+    ".docx", ".xlsx", ".xls", ".pdf",
+    # Изображения — OCR если есть текст
+    ".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp",
+}
+
+# Расширения изображений (подмножество SUPPORTED_EXTENSIONS)
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
+
+# ─────────────────────────── таблица синонимов ────────────────────────────────
+# Сокращение → список синонимов/расшифровок.
+# Встроенная база для строительной/горной техники; дополняется через config.json
+# ("synonym_map": {"ключ": ["синоним1", "синоним2"]}).
+DEFAULT_SYNONYM_MAP: Dict[str, List[str]] = {
+    # Документы на технику
+    "псм":  ["паспорт самоходной машины", "техпаспорт самоходной машины"],
+    "птс":  ["паспорт транспортного средства", "техпаспорт"],
+    "сос":  ["свидетельство о собственности"],
+    "сти":  ["свидетельство о технической исправности"],
+    "осаго": ["обязательное страхование автогражданской ответственности", "страховой полис"],
+    "ки":   ["карточка инвентаризации", "инвентарная карточка"],
+    # Типы документов
+    "акт":  ["акт приёма", "акт сдачи", "акт передачи", "акт выполненных работ"],
+    "ттн":  ["товарно-транспортная накладная", "накладная"],
+    "тн":   ["товарная накладная"],
+    "тзт":  ["технико-эксплуатационный паспорт"],
+    "сп":   ["спецификация"],
+    "кп":   ["коммерческое предложение"],
+    "до":   ["дополнительное соглашение"],
+    # Марки техники
+    "cat":        ["caterpillar", "кэт", "кэтерпиллар"],
+    "komatsu":    ["комацу"],
+    "hitachi":    ["хитачи"],
+    "liebherr":   ["либхер"],
+    "volvo":      ["вольво"],
+    "hyundai":    ["хёндэ", "хундай"],
+    "doosan":     ["дусан"],
+    "jcb":        ["джэйсиби"],
+    "tadano":     ["тадано"],
+    "xcmg":       ["иксцмг"],
+    "sany":       ["сани"],
+    "zoomlion":   ["зумлион"],
+    "liebherr":   ["либхерр"],
+    # Виды техники
+    "экскаватор": ["экскаватор гусеничный", "гусеничный экскаватор", "экскаватор-погрузчик"],
+    "пк":         ["погрузчик колёсный", "фронтальный погрузчик"],
+    "пг":         ["погрузчик гусеничный"],
+    "мтп":        ["машина технологического транспорта"],
+    "атз":        ["автотопливозаправщик"],
+    "кму":        ["краноманипуляторная установка", "манипулятор"],
+    "ав":         ["автовышка", "вышка автомобильная", "подъёмник"],
+    "аутп":       ["автомобильный утилизатор твёрдых отходов"],
+    # Операции / процессы
+    "ремонт":     ["техническое обслуживание", "то", "тр", "капитальный ремонт"],
+    "то":         ["техническое обслуживание"],
+    "тр":         ["текущий ремонт"],
+    "зч":         ["запасные части", "запчасти"],
+    # Контрагенты / документы
+    "инн":        ["идентификационный номер налогоплательщика"],
+    "огрн":       ["основной государственный регистрационный номер"],
+    "кпп":        ["код причины постановки на учёт"],
+}
+
+# Стоп-слова для тегов (не добавляем в список тегов)
+_TAG_STOPWORDS: Set[str] = {
+    "и", "в", "на", "по", "с", "для", "из", "от", "до", "при",
+    "или", "но", "а", "не", "что", "как", "так", "к", "о", "за",
+    "the", "and", "or", "for", "of", "to", "in", "is", "a",
+    "файл", "папка", "документ", "doc", "file",
+}
 
 # ─────────────────────────── этапы индексирования ─────────────────────────────
 # Индексирование разбито на этапы: сначала быстрое наполнение индекса, затем
@@ -87,6 +157,8 @@ def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) 
     """
     Возвращает «small» или «large» для данного файла.
     Используется для разделения файлов между этапами small и large.
+
+    Изображения всегда в категории «large» — OCR CPU-intensive.
     """
     try:
         size_mb = filepath.stat().st_size / 1_048_576
@@ -97,7 +169,133 @@ def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) 
         return "small"
     if ext == ".pdf" and size_mb < small_pdf_mb:
         return "small"
+    if ext in IMAGE_EXTENSIONS:
+        return "large"  # OCR изображений CPU-intensive — всегда в large
     return "large"
+
+
+def _generate_tags(
+    filepath: Path,
+    relative_path: Path,
+    full_text: str,
+    synonym_map: Optional[Dict[str, List[str]]] = None,
+) -> List[str]:
+    """
+    Генерирует список тегов для файла на основе:
+      1. Компонентов пути (папки + имя файла без расширения)
+      2. Синонимов для найденных аббревиатур/терминов
+      3. Ключевых слов из текста содержимого (первые 2000 символов)
+      4. Метатегов: тип документа, год, расширение
+
+    Возвращает дедуплицированный отсортированный список тегов.
+    """
+    tags: Set[str] = set()
+    smap = {**DEFAULT_SYNONYM_MAP, **(synonym_map or {})}
+
+    def _add_token(tok: str) -> None:
+        """Добавить токен и его синонимы в tags."""
+        tok = tok.strip().lower()
+        if len(tok) < 2 or tok in _TAG_STOPWORDS:
+            return
+        tags.add(tok)
+        # Проверяем синонимы по точному совпадению
+        if tok in smap:
+            for syn in smap[tok]:
+                if syn:
+                    tags.add(syn.lower())
+
+    # ── 1. Токены из пути (папки + имя файла) ─────────────────────────
+    parts = list(relative_path.parts)
+    # Имя файла без расширения тоже включаем
+    stem = filepath.stem
+    for part in [*parts, stem]:
+        # Разбиваем на токены по пробелам, подчёркиваниям, дефисам, точкам
+        tokens = re.split(r"[\s_\-\.\(\)\[\]]+", part)
+        for tok in tokens:
+            _add_token(tok)
+        # Добавляем всё слово целиком (папка или имя), если оно значимое
+        clean = re.sub(r"[\s_\-\.\(\)\[\]]+", " ", part).strip().lower()
+        if len(clean) >= 2 and clean not in _TAG_STOPWORDS:
+            tags.add(clean)
+
+    # ── 2. Метатег: расширение файла ──────────────────────────────────
+    ext_clean = filepath.suffix.lower().lstrip(".")
+    if ext_clean:
+        tags.add(ext_clean)
+        # Карта расширений → понятные метатеги
+        EXT_LABELS = {
+            "pdf": "PDF документ",
+            "docx": "Word документ",
+            "xlsx": "Excel таблица",
+            "xls": "Excel таблица",
+            "jpg": "фотография",
+            "jpeg": "фотография",
+            "png": "изображение",
+            "gif": "изображение",
+            "tif": "скан",
+            "tiff": "скан",
+            "bmp": "изображение",
+            "webp": "изображение",
+        }
+        if ext_clean in EXT_LABELS:
+            tags.add(EXT_LABELS[ext_clean])
+
+    # ── 3. Год из пути или имени файла ────────────────────────────────
+    years = re.findall(r"\b(20\d{2}|19\d{2})\b", str(relative_path))
+    for y in years:
+        tags.add(y)
+
+    # ── 4. Ключевые слова из текста содержимого ───────────────────────
+    if full_text:
+        # Берём первые 2000 символов — для скорости и памяти
+        sample = full_text[:2000]
+        # Кириллические и латинские слова длиной 3+
+        content_words = re.findall(r"[а-яёa-z][а-яёa-z0-9\-]{2,}", sample.lower())
+        # Считаем частоту, берём топ-20
+        freq: Dict[str, int] = {}
+        for w in content_words:
+            if w not in _TAG_STOPWORDS and len(w) >= 3:
+                freq[w] = freq.get(w, 0) + 1
+        top_words = sorted(freq, key=lambda x: -freq[x])[:20]
+        for w in top_words:
+            _add_token(w)
+
+    # ── 5. Детектируем тип документа по имени ────────────────────────
+    name_lower = filepath.name.lower()
+    DOC_TYPE_MAP = {
+        "акт":        "акт",
+        "договор":    "договор",
+        "счёт":       "счёт",
+        "счет":       "счёт",
+        "накладная":  "накладная",
+        "паспорт":    "паспорт",
+        "псм":        "паспорт самоходной машины",
+        "птс":        "паспорт транспортного средства",
+        "техпаспорт": "технический паспорт",
+        "спецификация": "спецификация",
+        "инструкция": "инструкция",
+        "отчёт":      "отчёт",
+        "отчет":      "отчёт",
+        "протокол":   "протокол",
+        "приказ":     "приказ",
+        "заявка":     "заявка",
+        "сертификат": "сертификат",
+        "лицензия":   "лицензия",
+        "страховой":  "страховой полис",
+        "полис":      "страховой полис",
+        "фото":       "фотография",
+        "photo":      "фотография",
+        "скан":       "скан документа",
+        "scan":       "скан документа",
+    }
+    for key, label in DOC_TYPE_MAP.items():
+        if key in name_lower:
+            tags.add(label)
+            break
+
+    # Убираем слишком длинные теги (>50 символов) и пустые
+    result = sorted(t for t in tags if 1 < len(t) <= 50 and t.strip())
+    return result
 
 
 # ═══════════════════════════ RAGIndexer ════════════════════════════════
@@ -136,6 +334,7 @@ class RAGIndexer:
         telemetry_db_path: str = "",
         small_office_mb: Optional[float] = None,
         small_pdf_mb: Optional[float] = None,
+        synonym_map: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         # current_stage выставляется при каждом запуске index_directory(stage=...)
         # и определяет поведение skip-логики и экстракции содержимого.
@@ -160,6 +359,8 @@ class RAGIndexer:
         self.small_pdf_mb = float(
             DEFAULT_SMALL_PDF_MB if small_pdf_mb is None else small_pdf_mb
         )
+        # Таблица синонимов для генерации тегов (дополняет DEFAULT_SYNONYM_MAP)
+        self.synonym_map: Dict[str, List[str]] = synonym_map or {}
         # Расширения, для которых индексируется только метадата (без чтения содержимого).
         # Полезно для быстрого первого прохода по скан-PDF: имя/путь/размер — за секунды.
         self.metadata_only_extensions = {
@@ -501,6 +702,41 @@ class RAGIndexer:
             logger.warning("OCR не удался для %s: %s", filepath, exc)
             return ""
 
+    def _extract_image(self, filepath: Path) -> str:
+        """
+        Извлечь текст из изображения через pytesseract (OCR).
+        Поддерживает JPEG, PNG, GIF, BMP, TIFF, WEBP.
+        Возвращает пустую строку если pytesseract не установлен или текст не найден.
+        """
+        try:
+            import pytesseract  # type: ignore
+        except ImportError:
+            logger.debug(
+                "pytesseract не установлен — OCR изображений недоступен. "
+                "Установите: pip install pytesseract"
+            )
+            return ""
+        try:
+            from PIL import Image  # type: ignore
+            img = Image.open(filepath)
+            # Конвертируем в RGB если нужно (например TIFF с несколькими слоями)
+            if img.mode not in ("RGB", "L", "RGBA"):
+                img = img.convert("RGB")
+            text = pytesseract.image_to_string(img, lang="rus+eng")
+            result = text.strip()
+            if result:
+                logger.debug("OCR изображение %s: %d симв.", filepath.name, len(result))
+            return result
+        except ImportError:
+            logger.debug(
+                "Pillow не установлен — OCR изображений недоступен. "
+                "Установите: pip install Pillow"
+            )
+            return ""
+        except Exception as exc:
+            logger.warning("OCR изображения не удался для %s: %s", filepath, exc)
+            return ""
+
     # ── chunking ───────────────────────────────────────────────────────
 
     def _chunk_text(self, text: str) -> List[str]:
@@ -626,6 +862,10 @@ class RAGIndexer:
         elif ext == ".pdf":
             full_text = self._extract_pdf(filepath)
             file_type = "pdf"
+        elif ext in IMAGE_EXTENSIONS:
+            if not self.skip_ocr:
+                full_text = self._extract_image(filepath)
+            file_type = "image"
         else:
             logger.debug("Неподдерживаемый формат (только метаданные): %s", ext)
 
@@ -817,6 +1057,13 @@ class RAGIndexer:
             elif ext == ".pdf":
                 file_type = "pdf"
                 _fn = self._extract_pdf
+            elif ext in IMAGE_EXTENSIONS:
+                if self.skip_ocr:
+                    file_type = "image"
+                    _fn = None  # OCR отключён — только метаданные
+                else:
+                    file_type = "image"
+                    _fn = self._extract_image
             else:
                 _fn = None
 
@@ -880,11 +1127,16 @@ class RAGIndexer:
                 )
                 chunks = chunks[: self.max_chunks_per_file]
 
+            # Генерируем теги для файла (по пути, содержимому, синонимам)
+            tags = _generate_tags(filepath, relative_path, full_text, self.synonym_map)
+
             stat = filepath.stat()
             meta_text = (
                 f"Файл: {filepath.name} | Путь: {relative_path}"
                 f" | Расширение: {filepath.suffix}"
             )
+            if tags:
+                meta_text += f" | Теги: {', '.join(tags[:30])}"
             meta_payload: Dict[str, Any] = {
                 "type": "file_metadata",
                 "text": meta_text,
@@ -894,6 +1146,7 @@ class RAGIndexer:
                 "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 "path": str(relative_path),
                 "full_path": str(filepath),
+                "tags": tags,
             }
             content_payloads = [
                 {
@@ -904,6 +1157,7 @@ class RAGIndexer:
                     "path": str(relative_path),
                     "full_path": str(filepath),
                     "chunk_index": idx,
+                    "tags": tags,
                 }
                 for idx, chunk in enumerate(chunks)
             ]
@@ -1195,6 +1449,7 @@ def main() -> None:
         telemetry_db_path=telemetry_path,
         small_office_mb=float(cfg.get("small_office_mb", DEFAULT_SMALL_OFFICE_MB)),
         small_pdf_mb=float(cfg.get("small_pdf_mb", DEFAULT_SMALL_PDF_MB)),
+        synonym_map=cfg.get("synonym_map") or {},
     )
     run_id = indexer.telemetry.start_index_run(
         catalog_path=args.catalog,
