@@ -77,12 +77,17 @@ class PageState:
     screen: str = "search"
     query: str = ""
     file_type: Optional[str] = None
-    limit: int = 10
+    limit: int = 50
     content_only: bool = False
     history: List[str] = field(default_factory=list)
     results: List[Dict[str, Any]] = field(default_factory=list)
     search_error: str = ""
     searched_query: str = ""
+    expanded_query: str = ""       # расширенный запрос от LLM (пусто если не менялся)
+    rag_answer_text: str = ""      # RAG Q&A ответ (пусто если LLM отключён)
+    rag_answer_loading: bool = False
+    displayed_count: int = 10
+    active_type_filter: Optional[str] = None
     explorer_path: Optional[str] = None
     explorer_filter: str = ""
     explorer_ext: str = "Все"
@@ -952,7 +957,7 @@ def _install_css() -> None:
           --rag-accent-2: #178a6f;
           --rag-danger: #b42318;
         }
-        body { background: var(--rag-bg); color: var(--rag-text); }
+        body { background: var(--rag-bg); color: var(--rag-text); font-size: 87.5%; }
         .q-page { background: var(--rag-bg); }
         .rag-header {
           background: rgba(255, 255, 255, 0.96);
@@ -977,13 +982,13 @@ def _install_css() -> None:
           border-top: 1px solid var(--rag-border);
         }
         .rag-page {
-          width: min(1440px, calc(100vw - 32px));
+          width: min(1440px, calc(100vw - 24px));
           margin: 0 auto;
-          padding: 14px 0 42px;
+          padding: 10px 0 32px;
         }
-        .rag-page.search { padding-top: 6px; }
-        .rag-title { font-size: clamp(26px, 4vw, 42px); font-weight: 760; line-height: 1.05; letter-spacing: 0; }
-        .rag-subtitle { color: var(--rag-muted); font-size: 15px; max-width: 820px; }
+        .rag-page.search { padding-top: 4px; }
+        .rag-title { font-size: clamp(22px, 3.5vw, 34px); font-weight: 760; line-height: 1.05; letter-spacing: 0; }
+        .rag-subtitle { color: var(--rag-muted); font-size: 13px; max-width: 820px; }
         .rag-card {
           background: var(--rag-surface);
           border: 1px solid var(--rag-border);
@@ -1012,29 +1017,40 @@ def _install_css() -> None:
         .rag-result {
           background: #ffffff;
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
-          padding: 16px;
-          box-shadow: 0 8px 24px rgba(23, 32, 44, 0.05);
+          border-radius: 7px;
+          padding: 12px;
+          box-shadow: 0 4px 14px rgba(23, 32, 44, 0.05);
           width: 100%;
           box-sizing: border-box;
         }
-        .rag-meta { color: var(--rag-muted); font-size: 13px; }
+        .rag-meta { color: var(--rag-muted); font-size: 12px; }
         .rag-chip {
           display: inline-flex;
           align-items: center;
-          min-height: 28px;
-          padding: 0 10px;
+          min-height: 24px;
+          padding: 0 9px;
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
+          border-radius: 7px;
           color: var(--rag-muted);
           background: #f8fafc;
-          font-size: 13px;
+          font-size: 12px;
+          cursor: pointer;
+          user-select: none;
+          transition: background 0.15s, color 0.15s, border-color 0.15s;
         }
+        .rag-chip:hover { background: #edf2f7; color: var(--rag-accent); border-color: var(--rag-accent); }
+        .rag-chip-active {
+          background: var(--rag-accent);
+          color: #ffffff;
+          border-color: var(--rag-accent);
+          font-weight: 600;
+        }
+        .rag-chip-active:hover { background: #0f5470; border-color: #0f5470; color: #ffffff; }
         .rag-path {
           word-break: break-word;
           overflow-wrap: anywhere;
           color: var(--rag-muted);
-          font-size: 13px;
+          font-size: 12px;
         }
         .rag-actions { display: flex; flex-wrap: wrap; gap: 8px; }
         .rag-nav-button { justify-content: flex-start; border-radius: 8px; text-align: left; }
@@ -1049,10 +1065,11 @@ def _install_css() -> None:
         }
         .rag-file-icon {
           display: inline-flex;
-          width: 42px;
-          height: 42px;
-          flex: 0 0 42px;
+          width: 34px;
+          height: 34px;
+          flex: 0 0 34px;
         }
+        .rag-file-icon svg { width: 34px; height: 34px; display: block; }
         .rag-file-icon.system {
           opacity: .42;
           filter: grayscale(1);
@@ -1474,6 +1491,11 @@ def _build_page(initial_screen: str = "search") -> None:
         state.search_error = ""
         state.results = []
         state.searched_query = query
+        state.expanded_query = ""
+        state.rag_answer_text = ""
+        state.rag_answer_loading = False
+        state.displayed_count = 10
+        state.active_type_filter = None
         _remember_query(state, query)
         render_results_loading()
         searcher = _ensure_searcher(state)
@@ -1481,6 +1503,26 @@ def _build_page(initial_screen: str = "search") -> None:
             state.search_error = state.searcher_error or "Нет подключения к Qdrant."
             render()
             return
+
+        llm_enabled = bool(state.cfg.get("llm_enabled"))
+        ollama_url = str(state.cfg.get("ollama_url") or "http://localhost:11434")
+        expand_model = str(state.cfg.get("llm_expand_model") or "phi3:mini")
+        rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
+
+        # Расширение запроса через LLM (если включено)
+        search_query = query
+        if llm_enabled:
+            try:
+                from rag_catalog.core.llm import expand_query  # noqa: PLC0415
+                expanded = await run.io_bound(
+                    expand_query, query, model=expand_model, ollama_url=ollama_url
+                )
+                if expanded and expanded.lower() != query.lower():
+                    state.expanded_query = expanded
+                    search_query = expanded
+            except Exception:
+                pass  # падаем молча — поиск всё равно идёт с оригинальным запросом
+
         try:
             state.results = await run.io_bound(
                 _run_catalog_search,
@@ -1489,13 +1531,29 @@ def _build_page(initial_screen: str = "search") -> None:
                 file_type=state.file_type,
                 content_only=state.content_only,
                 username=_username(state),
-                query=query,
+                query=search_query,
             )
             _log_app_event(state, "search", "run", details={"query": query, "results": len(state.results)})
         except Exception as exc:
             state.search_error = str(exc)
             _log_app_event(state, "search", "run", ok=False, details={"query": query, "error": str(exc)})
+
         render()
+
+        # RAG Q&A — запускаем ПОСЛЕ рендера результатов, чтобы UI не ждал LLM
+        if llm_enabled and state.results and not state.search_error:
+            state.rag_answer_loading = True
+            render()
+            try:
+                from rag_catalog.core.llm import rag_answer  # noqa: PLC0415
+                answer = await run.io_bound(
+                    rag_answer, query, state.results, model=rag_model, ollama_url=ollama_url
+                )
+                state.rag_answer_text = answer or ""
+            except Exception as exc:
+                state.rag_answer_text = f"Ошибка LLM: {exc}"
+            state.rag_answer_loading = False
+            render()
 
     async def choose_query(query: str) -> None:
         # Прямой async-обработчик: пресеты больше не зависят от ui.timer и гонок с перерисовкой.
@@ -1690,21 +1748,95 @@ def _build_page(initial_screen: str = "search") -> None:
                 for label, query in SEARCH_PRESETS:
                     ui.button(label, on_click=choose_query_handler(query)).props("outline")
             return
-        ui.label(f"Результаты по запросу: {state.searched_query}").classes("text-xl font-semibold mt-2")
+        # Заголовок с опциональной подсказкой о расширении запроса
+        with ui.row().classes("w-full items-center gap-2 mt-2"):
+            ui.label(f"Результаты по запросу: {state.searched_query}").classes("text-xl font-semibold")
+            if state.expanded_query:
+                ui.label(f"→ расширен: {state.expanded_query}").classes("rag-meta text-sm italic")
+
+        # RAG Q&A карточка
+        if state.rag_answer_loading:
+            with ui.row().classes("rag-card w-full p-3 gap-2 items-center"):
+                ui.spinner(size="sm")
+                ui.label("Анализирую документы…").classes("rag-meta")
+        elif state.rag_answer_text:
+            with ui.column().classes("rag-card w-full p-3 gap-1"):
+                with ui.row().classes("items-center gap-1"):
+                    ui.icon("smart_toy", size="18px").classes("text-indigo-500")
+                    ui.label("Ответ ИИ").classes("font-semibold text-sm text-indigo-700")
+                ui.label(state.rag_answer_text).classes("text-sm whitespace-pre-wrap")
+
         if not state.results:
             ui.label("Совпадений не найдено.").classes("rag-card p-4 rag-meta")
             return
-        grouped = _grouped_results(state.results)
-        with ui.row().classes("w-full gap-2"):
-            for group_name, items in grouped:
-                ui.label(f"{group_name}: {len(items)}").classes("rag-chip")
-        index = 1
-        for group_name, items in grouped:
-            with ui.expansion(f"{group_name} ({len(items)})", value=True).classes("rag-group-panel"):
-                with ui.column().classes("w-full gap-3 p-3"):
-                    for result in items:
-                        render_result(result, index)
-                        index += 1
+
+        # Все результаты — плоский список, отсортированный по релевантности
+        sorted_results = sorted(
+            state.results,
+            key=lambda r: float(r.get("score") or 0),
+            reverse=True,
+        )
+
+        # Считаем кол-во по группам для чипов
+        group_counts: Dict[str, int] = {}
+        for r in sorted_results:
+            group_counts.setdefault(_result_group(r), 0)
+            group_counts[_result_group(r)] += 1
+
+        # Порядок групп как был в _grouped_results
+        group_order = [
+            "Каталоги", "Техпаспорта ТС", "Паспорта и удостоверения",
+            "Договоры", "Счета и платежи", "Таблицы", "PDF", "Другие файлы",
+        ]
+
+        def set_filter(gname: Optional[str]) -> None:
+            state.active_type_filter = gname
+            state.displayed_count = 10
+            render()
+
+        # Чипы-фильтры
+        with ui.row().classes("w-full gap-2 flex-wrap"):
+            # «Все»
+            all_active = state.active_type_filter is None
+            all_chip = ui.label(f"Все: {len(sorted_results)}").classes(
+                "rag-chip" + (" rag-chip-active" if all_active else "")
+            )
+            all_chip.on("click", lambda: set_filter(None))
+            # По типам
+            for gname in group_order:
+                cnt = group_counts.get(gname, 0)
+                if cnt == 0:
+                    continue
+                is_active = state.active_type_filter == gname
+                chip = ui.label(f"{gname}: {cnt}").classes(
+                    "rag-chip" + (" rag-chip-active" if is_active else "")
+                )
+                chip.on("click", lambda g=gname: set_filter(g))
+
+        # Применяем фильтр
+        if state.active_type_filter:
+            visible = [r for r in sorted_results if _result_group(r) == state.active_type_filter]
+        else:
+            visible = sorted_results
+
+        # Показываем первые displayed_count штук
+        to_show = visible[: state.displayed_count]
+        with ui.column().classes("w-full gap-3"):
+            for idx, result in enumerate(to_show, 1):
+                render_result(result, idx)
+
+        # Кнопка «Загрузить ещё»
+        remaining = len(visible) - state.displayed_count
+        if remaining > 0:
+            def load_more() -> None:
+                state.displayed_count += 10
+                render()
+
+            ui.button(
+                f"Загрузить ещё  ({remaining})",
+                on_click=load_more,
+                icon="expand_more",
+            ).props("outline no-caps").classes("w-full mt-1")
 
     def render_explorer_screen() -> None:
         root = Path(str(state.cfg.get("catalog_path") or ""))
@@ -2478,6 +2610,50 @@ def _build_page(initial_screen: str = "search") -> None:
 
             ui.button("Сохранить пути", icon="save", on_click=save_paths).props("outline")
 
+    def render_admin_llm_settings() -> None:
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Нейросеть (LLM)").classes("text-xl font-semibold")
+            ui.label(
+                "Используется Ollama, запущенный локально. "
+                "Включите, чтобы получать ответ ИИ по документам и автоматически расширять запросы."
+            ).classes("rag-meta")
+
+            llm_toggle = ui.switch(
+                "Включить ИИ-ответ и расширение запроса",
+                value=bool(state.cfg.get("llm_enabled")),
+            )
+            ollama_url_input = ui.input(
+                "Ollama URL",
+                value=str(state.cfg.get("ollama_url") or "http://localhost:11434"),
+            ).props("dense outlined").classes("w-full")
+            expand_model_input = ui.input(
+                "Модель расширения запроса",
+                value=str(state.cfg.get("llm_expand_model") or "phi3:mini"),
+            ).props("dense outlined").classes("w-full")
+            rag_model_input = ui.input(
+                "Модель RAG Q&A",
+                value=str(state.cfg.get("llm_rag_model") or "qwen3:8b"),
+            ).props("dense outlined").classes("w-full")
+
+            def save_llm_settings() -> None:
+                try:
+                    cfg = load_config()
+                    cfg["llm_enabled"] = bool(llm_toggle.value)
+                    cfg["ollama_url"] = str(ollama_url_input.value or "http://localhost:11434").strip()
+                    cfg["llm_expand_model"] = str(expand_model_input.value or "phi3:mini").strip()
+                    cfg["llm_rag_model"] = str(rag_model_input.value or "qwen3:8b").strip()
+                    save_config(cfg)
+                    state.cfg = cfg
+                    _log_app_event(state, "settings", "save_llm", details={
+                        "llm_enabled": cfg["llm_enabled"],
+                        "ollama_url": cfg["ollama_url"],
+                    })
+                    ui.notify("Настройки нейросети сохранены.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось сохранить: {exc}", type="negative")
+
+            ui.button("Сохранить настройки нейросети", icon="save", on_click=save_llm_settings).props("outline")
+
     def render_admin_search_aliases() -> None:
         telemetry = _get_telemetry(state)
         with ui.column().classes("rag-card w-full p-4 gap-3"):
@@ -2702,6 +2878,7 @@ def _build_page(initial_screen: str = "search") -> None:
         if is_admin:
             render_admin_security_settings(auth_db)
             render_admin_path_settings()
+            render_admin_llm_settings()
             render_admin_search_aliases()
             render_admin_registration_requests(auth_db)
             render_admin_telegram_chats(auth_db)

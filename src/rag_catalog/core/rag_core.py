@@ -51,6 +51,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "telegram_bot_link": "",
     "users_db_path": "",
     "telemetry_db_path": "",
+    # ── LLM / Ollama ──────────────────────────────────────────────────────
+    "ollama_url": "http://localhost:11434",
+    "llm_enabled": False,            # включить RAG Q&A и расширение запроса
+    "llm_expand_model": "phi3:mini", # модель для расширения запроса
+    "llm_rag_model": "qwen3:8b",     # модель для RAG Q&A
 }
 
 logger = logging.getLogger(__name__)
@@ -140,12 +145,23 @@ class RAGSearcher:
 
     @property
     def embedder(self) -> Any:
-        """Ленивая загрузка модели эмбеддинга (импорт sentence_transformers при первом запросе)."""
+        """Ленивая загрузка модели эмбеддинга.
+
+        Если embedding_model начинается с ``"ollama:"`` — использует OllamaEmbedder
+        (nomic-embed-text и аналоги через Ollama API). Иначе — SentenceTransformer.
+        """
         if self._embedder is None:
-            from sentence_transformers import SentenceTransformer  # noqa: PLC0415
             model_name = self.config["embedding_model"]
-            logger.info("Загрузка модели эмбеддинга: %s", model_name)
-            self._embedder = SentenceTransformer(model_name)
+            if model_name.startswith("ollama:"):
+                from .llm import OllamaEmbedder  # noqa: PLC0415
+                ollama_model = model_name[len("ollama:"):]
+                ollama_url = self.config.get("ollama_url", "http://localhost:11434")
+                logger.info("Загрузка OllamaEmbedder: %s (%s)", ollama_model, ollama_url)
+                self._embedder = OllamaEmbedder(model=ollama_model, ollama_url=ollama_url)
+            else:
+                from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+                logger.info("Загрузка модели эмбеддинга: %s", model_name)
+                self._embedder = SentenceTransformer(model_name)
         return self._embedder
 
     # ── search ────────────────────────────────────────────────────────

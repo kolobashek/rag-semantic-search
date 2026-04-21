@@ -333,6 +333,7 @@ class RAGIndexer:
         read_workers: int = 4,
         use_onnx: bool = False,
         qdrant_url: str = "",
+        ollama_url: str = "http://localhost:11434",
         metadata_only_extensions: Optional[set] = None,
         telemetry_db_path: str = "",
         small_office_mb: Optional[float] = None,
@@ -377,7 +378,12 @@ class RAGIndexer:
         self.run_id: str = ""
         self._run_deleted_files = 0
 
-        if use_onnx:
+        if embedding_model.startswith("ollama:"):
+            from .llm import OllamaEmbedder  # noqa: PLC0415
+            ollama_model_name = embedding_model[len("ollama:"):]
+            logger.info("Загрузка OllamaEmbedder: %s (%s)", ollama_model_name, ollama_url)
+            self.embedder = OllamaEmbedder(model=ollama_model_name, ollama_url=ollama_url)
+        elif use_onnx:
             logger.info("Загрузка модели эмбеддинга: %s (backend=onnx)", embedding_model)
             try:
                 self.embedder = SentenceTransformer(embedding_model, backend="onnx")
@@ -1478,6 +1484,7 @@ def main() -> None:
         small_office_mb=float(cfg.get("small_office_mb", DEFAULT_SMALL_OFFICE_MB)),
         small_pdf_mb=float(cfg.get("small_pdf_mb", DEFAULT_SMALL_PDF_MB)),
         synonym_map=cfg.get("synonym_map") or {},
+        ollama_url=str(cfg.get("ollama_url") or "http://localhost:11434"),
     )
     run_id = indexer.telemetry.start_index_run(
         catalog_path=args.catalog,
