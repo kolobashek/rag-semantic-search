@@ -1,0 +1,61 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  web:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.docker.json:/app/config.json:ro
+      - app_state:/data/state
+      - app_logs:/data/logs
+      - model_cache:/data/cache
+      - "${RAG_CATALOG_PATH:-O:/Обмен}:/data/catalog:ro"
+    command: ["rag-web", "--host", "0.0.0.0", "--port", "8080", "--no-show"]
+
+  bot:
+    build:
+      context: .
+    restart: unless-stopped
+    profiles:
+      - bot
+    depends_on:
+      - qdrant
+    volumes:
+      - ./config.docker.json:/app/config.json:ro
+      - app_state:/data/state
+      - app_logs:/data/logs
+      - model_cache:/data/cache
+      - "${RAG_CATALOG_PATH:-O:/Обмен}:/data/catalog:ro"
+    command: ["rag-telegram-bot"]
+
+  indexer:
+    build:
+      context: .
+    profiles:
+      - tools
+    depends_on:
+      - qdrant
+    volumes:
+      - ./config.docker.json:/app/config.json:ro
+      - app_state:/data/state
+      - app_logs:/data/logs
+      - model_cache:/data/cache
+      - "${RAG_CATALOG_PATH:-O:/Обмен}:/data/catalog:ro"
+    command: ["rag-index", "--url", "http://qdrant:6333"]
+
+volumes:
+  qdrant_data:
+  app_state:
+  app_logs:
+  model_cache:
