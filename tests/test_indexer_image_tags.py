@@ -303,48 +303,53 @@ class TestExtractImage:
             result = indexer._extract_image(f)
         assert result == ""
 
+    def _make_mock_image(self, mode: str = "RGB", n_frames: int = 1) -> MagicMock:
+        """Вспомогательный метод: PIL.Image mock с поддержкой контекстного менеджера."""
+        img = MagicMock()
+        img.mode = mode
+        img.n_frames = n_frames
+        # Контекстный менеджер должен возвращать сам объект
+        img.__enter__ = lambda s: s
+        img.__exit__ = MagicMock(return_value=False)
+        img.copy.return_value = img  # seek/copy возвращают тот же объект
+        return img
+
     def test_calls_pytesseract_with_rus_eng(self, tmp_path):
         """pytesseract.image_to_string вызывается с lang='rus+eng'."""
         indexer = self._make_indexer(tmp_path)
         f = tmp_path / "doc.png"
         f.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        mock_tesseract = MagicMock()
-        mock_tesseract.image_to_string.return_value = "Текст на изображении"
-
-        mock_pil_image = MagicMock()
-        mock_pil_image.mode = "RGB"
-        mock_pil_module = MagicMock()
-        mock_pil_module.Image.open.return_value = mock_pil_image
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.return_value = "Текст на изображении"
+        mock_img = self._make_mock_image("RGB", n_frames=1)
+        mock_pil = MagicMock()
+        mock_pil.Image.open.return_value = mock_img
 
         with patch.dict("sys.modules", {
-            "pytesseract": mock_tesseract,
-            "PIL": mock_pil_module,
-            "PIL.Image": mock_pil_module.Image,
+            "pytesseract": mock_tess,
+            "PIL": mock_pil,
+            "PIL.Image": mock_pil.Image,
         }):
             result = indexer._extract_image(f)
 
-        mock_tesseract.image_to_string.assert_called_once_with(
-            mock_pil_image, lang="rus+eng"
-        )
+        mock_tess.image_to_string.assert_called_once_with(mock_img, lang="rus+eng")
         assert result == "Текст на изображении"
 
     def test_strips_whitespace_from_ocr_result(self, tmp_path):
         """OCR результат обрезается по пробелам."""
         indexer = self._make_indexer(tmp_path)
         f = tmp_path / "scan.tiff"
-        f.write_bytes(b"II\x2a\x00")  # TIFF header LE
+        f.write_bytes(b"II\x2a\x00")
 
-        mock_tesseract = MagicMock()
-        mock_tesseract.image_to_string.return_value = "  \n  ТЕКСТ  \n  "
-
-        mock_image = MagicMock()
-        mock_image.mode = "RGB"
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.return_value = "  \n  ТЕКСТ  \n  "
+        mock_img = self._make_mock_image("RGB", n_frames=1)
         mock_pil = MagicMock()
-        mock_pil.Image.open.return_value = mock_image
+        mock_pil.Image.open.return_value = mock_img
 
         with patch.dict("sys.modules", {
-            "pytesseract": mock_tesseract,
+            "pytesseract": mock_tess,
             "PIL": mock_pil,
             "PIL.Image": mock_pil.Image,
         }):
@@ -358,12 +363,12 @@ class TestExtractImage:
         f = tmp_path / "broken.jpg"
         f.write_bytes(b"not an image")
 
-        mock_tesseract = MagicMock()
+        mock_tess = MagicMock()
         mock_pil = MagicMock()
         mock_pil.Image.open.side_effect = Exception("cannot identify image file")
 
         with patch.dict("sys.modules", {
-            "pytesseract": mock_tesseract,
+            "pytesseract": mock_tess,
             "PIL": mock_pil,
             "PIL.Image": mock_pil.Image,
         }):
@@ -377,29 +382,26 @@ class TestExtractImage:
         f = tmp_path / "cmyk.tiff"
         f.write_bytes(b"II\x2a\x00")
 
-        mock_tesseract = MagicMock()
-        mock_tesseract.image_to_string.return_value = "результат"
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.return_value = "результат"
 
-        mock_image = MagicMock()
-        mock_image.mode = "CMYK"  # не RGB — нужно конвертировать
         converted_image = MagicMock()
         converted_image.mode = "RGB"
-        mock_image.convert.return_value = converted_image
+        mock_img = self._make_mock_image("CMYK", n_frames=1)
+        mock_img.convert.return_value = converted_image
 
         mock_pil = MagicMock()
-        mock_pil.Image.open.return_value = mock_image
+        mock_pil.Image.open.return_value = mock_img
 
         with patch.dict("sys.modules", {
-            "pytesseract": mock_tesseract,
+            "pytesseract": mock_tess,
             "PIL": mock_pil,
             "PIL.Image": mock_pil.Image,
         }):
             result = indexer._extract_image(f)
 
-        mock_image.convert.assert_called_once_with("RGB")
-        mock_tesseract.image_to_string.assert_called_once_with(
-            converted_image, lang="rus+eng"
-        )
+        mock_img.convert.assert_called_once_with("RGB")
+        mock_tess.image_to_string.assert_called_once_with(converted_image, lang="rus+eng")
         assert result == "результат"
 
 
@@ -467,3 +469,199 @@ class TestTagsInPayload:
         # Главное — не падает и meta_text всегда строка
         assert isinstance(meta_text, str)
         assert "Файл:" in meta_text
+
+
+# ═══════════════════════════ _chunk_text (fix: бесконечный цикл) ══════════════
+
+class TestChunkText:
+    """Тесты для RAGIndexer._chunk_text — в том числе edge cases из code review."""
+
+    def _make_indexer(self, chunk_size: int, chunk_overlap: int):
+        from rag_catalog.core.index_rag import RAGIndexer
+        idx = object.__new__(RAGIndexer)
+        idx.chunk_size = chunk_size
+        idx.chunk_overlap = chunk_overlap
+        idx.max_chunks_per_file = 0
+        return idx
+
+    def test_normal_chunking(self):
+        """Стандартное разбиение: chunk_size=10, overlap=3."""
+        idx = self._make_indexer(10, 3)
+        text = "A" * 25
+        chunks = idx._chunk_text(text)
+        assert len(chunks) > 1
+        # Первый чанк ровно chunk_size
+        assert len(chunks[0]) == 10
+
+    def test_text_shorter_than_chunk(self):
+        """Текст короче chunk_size — один чанк."""
+        idx = self._make_indexer(500, 100)
+        text = "короткий текст"
+        chunks = idx._chunk_text(text)
+        assert len(chunks) == 1
+        assert chunks[0] == text
+
+    def test_empty_text(self):
+        """Пустой текст — пустой список."""
+        idx = self._make_indexer(500, 100)
+        assert idx._chunk_text("") == []
+
+    def test_overlap_equals_chunk_size_no_infinite_loop(self):
+        """chunk_overlap == chunk_size не вызывает бесконечный цикл (bug fix)."""
+        idx = self._make_indexer(100, 100)  # overlap == size — опасный edge case
+        text = "x" * 500
+        chunks = idx._chunk_text(text)
+        # Должен завершиться и вернуть разумное число чанков
+        assert 1 <= len(chunks) <= 500
+
+    def test_overlap_greater_than_chunk_size_no_infinite_loop(self):
+        """chunk_overlap > chunk_size тоже не вызывает бесконечный цикл."""
+        idx = self._make_indexer(50, 200)  # overlap > size — очень опасный case
+        text = "y" * 300
+        chunks = idx._chunk_text(text)
+        assert len(chunks) >= 1
+
+    def test_chunks_cover_all_text(self):
+        """Все символы текста присутствуют в чанках."""
+        idx = self._make_indexer(100, 20)
+        text = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя" * 10
+        chunks = idx._chunk_text(text)
+        # Первый чанк — начало текста
+        assert chunks[0] == text[:100]
+        # Последний чанк — конец текста
+        assert chunks[-1].endswith(text[-len(chunks[-1]):])
+
+    def test_zero_overlap(self):
+        """chunk_overlap=0 — чанки без перекрытия."""
+        idx = self._make_indexer(10, 0)
+        text = "0123456789abcdefghij"  # ровно 20 символов
+        chunks = idx._chunk_text(text)
+        assert len(chunks) == 2
+        assert chunks[0] == "0123456789"
+        assert chunks[1] == "abcdefghij"
+
+
+# ═══════════════════════════ Многостраничный TIFF ═════════════════════════════
+
+class TestExtractImageMultipage:
+    """Тесты OCR многостраничных изображений (TIFF-сканы)."""
+
+    def _make_indexer(self, tmp_path):
+        from rag_catalog.core.index_rag import RAGIndexer
+        idx = object.__new__(RAGIndexer)
+        idx.catalog_path = tmp_path
+        idx.skip_ocr = False
+        return idx
+
+    def test_single_page_image(self, tmp_path):
+        """Однокадровое изображение: pytesseract вызывается один раз."""
+        indexer = self._make_indexer(tmp_path)
+        f = tmp_path / "single.png"
+        f.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.return_value = "страница один"
+
+        mock_img = MagicMock()
+        mock_img.mode = "RGB"
+        mock_img.n_frames = 1  # один кадр
+        mock_img.__enter__ = lambda s: s
+        mock_img.__exit__ = MagicMock(return_value=False)
+
+        mock_pil = MagicMock()
+        mock_pil.Image.open.return_value = mock_img
+
+        with patch.dict("sys.modules", {"pytesseract": mock_tess, "PIL": mock_pil, "PIL.Image": mock_pil.Image}):
+            result = indexer._extract_image(f)
+
+        assert mock_tess.image_to_string.call_count == 1
+        assert result == "страница один"
+
+    def test_multipage_tiff_all_pages_ocrd(self, tmp_path):
+        """Многостраничный TIFF: pytesseract вызывается для каждой страницы."""
+        indexer = self._make_indexer(tmp_path)
+        f = tmp_path / "scan.tiff"
+        f.write_bytes(b"II\x2a\x00")
+
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.side_effect = [
+            "текст страницы 1",
+            "текст страницы 2",
+            "текст страницы 3",
+        ]
+
+        mock_img = MagicMock()
+        mock_img.mode = "RGB"
+        mock_img.n_frames = 3
+        mock_img.__enter__ = lambda s: s
+        mock_img.__exit__ = MagicMock(return_value=False)
+        mock_img.copy.return_value = mock_img  # copy() возвращает тот же объект
+
+        mock_pil = MagicMock()
+        mock_pil.Image.open.return_value = mock_img
+
+        with patch.dict("sys.modules", {"pytesseract": mock_tess, "PIL": mock_pil, "PIL.Image": mock_pil.Image}):
+            result = indexer._extract_image(f)
+
+        assert mock_tess.image_to_string.call_count == 3
+        assert "текст страницы 1" in result
+        assert "текст страницы 2" in result
+        assert "текст страницы 3" in result
+
+    def test_multipage_tiff_empty_pages_skipped(self, tmp_path):
+        """Пустые страницы не добавляются в результат."""
+        indexer = self._make_indexer(tmp_path)
+        f = tmp_path / "scan2.tiff"
+        f.write_bytes(b"II\x2a\x00")
+
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.side_effect = ["", "содержимое", ""]
+
+        mock_img = MagicMock()
+        mock_img.mode = "RGB"
+        mock_img.n_frames = 3
+        mock_img.__enter__ = lambda s: s
+        mock_img.__exit__ = MagicMock(return_value=False)
+        mock_img.copy.return_value = mock_img
+
+        mock_pil = MagicMock()
+        mock_pil.Image.open.return_value = mock_img
+
+        with patch.dict("sys.modules", {"pytesseract": mock_tess, "PIL": mock_pil, "PIL.Image": mock_pil.Image}):
+            result = indexer._extract_image(f)
+
+        assert result == "содержимое"
+
+
+# ═══════════════════════════ DEFAULT_SYNONYM_MAP (fix: liebherr) ══════════════
+
+class TestSynonymMapIntegrity:
+    """Проверка корректности DEFAULT_SYNONYM_MAP после исправления дубля liebherr."""
+
+    def test_no_duplicate_keys(self):
+        """В DEFAULT_SYNONYM_MAP нет дублирующихся ключей."""
+        from rag_catalog.core.index_rag import DEFAULT_SYNONYM_MAP
+        # Python dict не хранит дубли, но мы проверяем через исходник
+        import ast
+        from pathlib import Path
+        src = Path(__file__).parent.parent / "src/rag_catalog/core/index_rag.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id == "DEFAULT_SYNONYM_MAP":
+                        if isinstance(node.value, ast.Dict):
+                            keys = [
+                                k.s if isinstance(k, ast.Constant) else None
+                                for k in node.value.keys
+                            ]
+                            assert len(keys) == len(set(k for k in keys if k)), \
+                                f"Дублирующиеся ключи: {[k for k in keys if keys.count(k) > 1]}"
+
+    def test_liebherr_has_both_variants(self):
+        """liebherr содержит оба варианта транслитерации."""
+        from rag_catalog.core.index_rag import DEFAULT_SYNONYM_MAP
+        assert "liebherr" in DEFAULT_SYNONYM_MAP
+        syns = DEFAULT_SYNONYM_MAP["liebherr"]
+        assert "либхер" in syns
+        assert "либхерр" in syns

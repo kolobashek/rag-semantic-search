@@ -93,7 +93,7 @@ DEFAULT_SYNONYM_MAP: Dict[str, List[str]] = {
     "cat":        ["caterpillar", "кэт", "кэтерпиллар"],
     "komatsu":    ["комацу"],
     "hitachi":    ["хитачи"],
-    "liebherr":   ["либхер"],
+    "liebherr":   ["либхер", "либхерр"],
     "volvo":      ["вольво"],
     "hyundai":    ["хёндэ", "хундай"],
     "doosan":     ["дусан"],
@@ -102,7 +102,6 @@ DEFAULT_SYNONYM_MAP: Dict[str, List[str]] = {
     "xcmg":       ["иксцмг"],
     "sany":       ["сани"],
     "zoomlion":   ["зумлион"],
-    "liebherr":   ["либхерр"],
     # Виды техники
     "экскаватор": ["экскаватор гусеничный", "гусеничный экскаватор", "экскаватор-погрузчик"],
     "пк":         ["погрузчик колёсный", "фронтальный погрузчик"],
@@ -718,21 +717,37 @@ class RAGIndexer:
             return ""
         try:
             from PIL import Image  # type: ignore
-            img = Image.open(filepath)
-            # Конвертируем в RGB если нужно (например TIFF с несколькими слоями)
-            if img.mode not in ("RGB", "L", "RGBA"):
-                img = img.convert("RGB")
-            text = pytesseract.image_to_string(img, lang="rus+eng")
-            result = text.strip()
-            if result:
-                logger.debug("OCR изображение %s: %d симв.", filepath.name, len(result))
-            return result
         except ImportError:
             logger.debug(
                 "Pillow не установлен — OCR изображений недоступен. "
                 "Установите: pip install Pillow"
             )
             return ""
+        try:
+            parts: List[str] = []
+            with Image.open(filepath) as img:
+                # Определяем число кадров/страниц (TIFF-сканы бывают многостраничными)
+                n_frames: int = getattr(img, "n_frames", 1)
+                for frame_idx in range(n_frames):
+                    if n_frames > 1:
+                        img.seek(frame_idx)
+                        frame = img.copy()
+                    else:
+                        frame = img
+                    # Конвертируем в RGB если нужно (CMYK, P, LA и прочие)
+                    if frame.mode not in ("RGB", "L", "RGBA"):
+                        frame = frame.convert("RGB")
+                    page_text = pytesseract.image_to_string(frame, lang="rus+eng").strip()
+                    if page_text:
+                        parts.append(page_text)
+                    logger.debug(
+                        "OCR %s стр.%d/%d: %d симв.",
+                        filepath.name, frame_idx + 1, n_frames, len(page_text),
+                    )
+            result = "\n".join(parts).strip()
+            if result:
+                logger.debug("OCR итого %s: %d симв., %d стр.", filepath.name, len(result), n_frames)
+            return result
         except Exception as exc:
             logger.warning("OCR изображения не удался для %s: %s", filepath, exc)
             return ""
@@ -740,17 +755,19 @@ class RAGIndexer:
     # ── chunking ───────────────────────────────────────────────────────
 
     def _chunk_text(self, text: str) -> List[str]:
-        """Разбить текст на перекрывающиеся чанки."""
+        """Разбить текст на перекрывающиеся чанки.
+
+        Гарантирует прогресс: step = max(1, chunk_size - chunk_overlap).
+        Защищает от бесконечного цикла если chunk_overlap >= chunk_size.
+        """
         if not text:
             return []
+        step = max(1, self.chunk_size - self.chunk_overlap)
         chunks: List[str] = []
         start = 0
         while start < len(text):
-            end = start + self.chunk_size
-            chunks.append(text[start:end])
-            if end >= len(text):
-                break
-            start = end - self.chunk_overlap
+            chunks.append(text[start : start + self.chunk_size])
+            start += step
         return chunks
 
     # ── indexing helpers ───────────────────────────────────────────────

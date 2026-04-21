@@ -959,7 +959,7 @@ def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
         limit = st.slider("Количество результатов", 5, 50, 10, step=5)
         file_type = st.selectbox(
             "Тип файла",
-            options=["Все", ".docx", ".xlsx", ".xls", ".pdf"],
+            options=["Все", ".docx", ".xlsx", ".xls", ".pdf", ".jpg", ".png", ".tiff"],
         )
         file_type_val: Optional[str] = None if file_type == "Все" else file_type
         content_only = st.checkbox("Только содержимое")
@@ -1491,7 +1491,7 @@ def render_explorer_tab(cfg: Dict[str, Any]) -> None:
     with fc2:
         ext_filter = st.selectbox(
             "Расширение",
-            options=["Все", ".docx", ".xlsx", ".xls", ".pdf"],
+            options=["Все", ".docx", ".xlsx", ".xls", ".pdf", ".jpg", ".png", ".tiff"],
             label_visibility="collapsed",
             key="explorer_ext_filter",
         )
@@ -2066,4 +2066,57 @@ def main() -> None:
                 with st.popover("История", use_container_width=True):
                     st.caption("История и подсказки")
                     if not suggestions:
-                   
+                        st.caption("Пока пусто")
+                    else:
+                        for suggestion in suggestions:
+                            if st.button(suggestion, key=f"suggest_{hash(suggestion)}", use_container_width=True):
+                                _choose_search_query(suggestion)
+                                st.rerun()
+            with b_col:
+                if st.button("Найти", type="primary", use_container_width=True):
+                    _submit_current_query()
+
+        if st.session_state.pop("trigger_search", False):
+            active_query = str(st.session_state.get("query_input") or "").strip()
+            searcher = _get_searcher()
+            if not active_query:
+                st.warning("Введите запрос.")
+            elif searcher is None or not st.session_state.get("qdrant_connected"):
+                st.error("Нет подключения к Qdrant.")
+            else:
+                with st.spinner("Ищу..."):
+                    try:
+                        results = searcher.search(
+                            active_query,
+                            limit=int(limit or 10),
+                            file_type=file_type_val,
+                            content_only=bool(content_only),
+                            source="streamlit_ui",
+                        )
+                    except Exception as exc:
+                        st.error(str(exc))
+                        results = []
+                st.session_state.last_query = active_query
+                st.session_state.last_results = results
+                st.session_state.last_limit = limit
+                st.session_state.last_file_type = file_type_val
+                st.session_state.last_content_only = content_only
+                _remember_search_query(active_query)
+
+        if st.session_state.get("last_query"):
+            st.subheader(f"Результаты по запросу: {st.session_state.last_query}")
+            results = list(st.session_state.get("last_results") or [])
+            if results:
+                render_grouped_results(results)
+            else:
+                st.info("Совпадений не найдено.")
+    elif screen == "Проводник":
+        render_explorer_tab(cfg)
+    elif screen == "Индексирование":
+        render_indexing_tab(cfg)
+    elif screen == "Telegram":
+        render_telegram_tab(cfg)
+
+
+if __name__ == "__main__":
+    main()
