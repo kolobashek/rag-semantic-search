@@ -69,6 +69,10 @@ SUPPORTED_EXTENSIONS = {
 # Расширения изображений (подмножество SUPPORTED_EXTENSIONS)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
 
+# Максимум страниц/кадров при OCR многостраничного изображения (TIFF, GIF).
+# Защита от случайных файлов с тысячами кадров, которые зависнут индексатор.
+MAX_IMAGE_PAGES: int = 50
+
 # ─────────────────────────── таблица синонимов ────────────────────────────────
 # Сокращение → список синонимов/расшифровок.
 # Встроенная база для строительной/горной техники; дополняется через config.json
@@ -728,6 +732,13 @@ class RAGIndexer:
             with Image.open(filepath) as img:
                 # Определяем число кадров/страниц (TIFF-сканы бывают многостраничными)
                 n_frames: int = getattr(img, "n_frames", 1)
+                if n_frames > MAX_IMAGE_PAGES:
+                    logger.warning(
+                        "Изображение %s содержит %d кадров — обрабатываем только первые %d "
+                        "(MAX_IMAGE_PAGES). Остальные пропущены.",
+                        filepath.name, n_frames, MAX_IMAGE_PAGES,
+                    )
+                    n_frames = MAX_IMAGE_PAGES
                 for frame_idx in range(n_frames):
                     if n_frames > 1:
                         img.seek(frame_idx)

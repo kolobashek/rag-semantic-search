@@ -633,6 +633,149 @@ class TestExtractImageMultipage:
         assert result == "содержимое"
 
 
+    def test_gif_multiframe_all_frames_ocrd(self, tmp_path):
+        """GIF с несколькими кадрами: pytesseract вызывается для каждого кадра."""
+        indexer = self._make_indexer(tmp_path)
+        f = tmp_path / "animation.gif"
+        f.write_bytes(b"GIF89a")
+
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.side_effect = [
+            "кадр один",
+            "кадр два",
+            "кадр три",
+        ]
+
+        mock_img = MagicMock()
+        mock_img.mode = "RGB"
+        mock_img.n_frames = 3
+        mock_img.__enter__ = lambda s: s
+        mock_img.__exit__ = MagicMock(return_value=False)
+        mock_img.copy.return_value = mock_img
+
+        mock_pil = MagicMock()
+        mock_pil.Image.open.return_value = mock_img
+
+        with patch.dict("sys.modules", {"pytesseract": mock_tess, "PIL": mock_pil, "PIL.Image": mock_pil.Image}):
+            result = indexer._extract_image(f)
+
+        assert mock_tess.image_to_string.call_count == 3
+        assert "кадр один" in result
+        assert "кадр два" in result
+        assert "кадр три" in result
+
+    def test_max_image_pages_limits_frames(self, tmp_path):
+        """Изображение с кадрами > MAX_IMAGE_PAGES обрабатывается только до лимита."""
+        from rag_catalog.core.index_rag import MAX_IMAGE_PAGES
+
+        indexer = self._make_indexer(tmp_path)
+        f = tmp_path / "huge.tiff"
+        f.write_bytes(b"II\x2a\x00")
+
+        total_frames = MAX_IMAGE_PAGES + 10  # явно превышаем лимит
+
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.return_value = "текст"
+
+        mock_img = MagicMock()
+        mock_img.mode = "RGB"
+        mock_img.n_frames = total_frames
+        mock_img.__enter__ = lambda s: s
+        mock_img.__exit__ = MagicMock(return_value=False)
+        mock_img.copy.return_value = mock_img
+
+        mock_pil = MagicMock()
+        mock_pil.Image.open.return_value = mock_img
+
+        with patch.dict("sys.modules", {"pytesseract": mock_tess, "PIL": mock_pil, "PIL.Image": mock_pil.Image}):
+            result = indexer._extract_image(f)
+
+        # Не больше MAX_IMAGE_PAGES вызовов
+        assert mock_tess.image_to_string.call_count == MAX_IMAGE_PAGES
+        assert "текст" in result
+
+
+# ═══════════════════════════ skip_ocr для изображений ═════════════════════════
+
+class TestSkipOcrFlag:
+    """Проверяем что skip_ocr=True блокирует OCR для изображений."""
+
+    def _make_indexer(self, tmp_path, skip_ocr: bool):
+        """Создать RAGIndexer с минимальными заглушками."""
+        from rag_catalog.core.index_rag import RAGIndexer
+        idx = object.__new__(RAGIndexer)
+        idx.catalog_path = tmp_path
+        idx.skip_ocr = skip_ocr
+        idx.synonym_map = {}
+        idx.chunk_size = 512
+        idx.chunk_overlap = 64
+        idx.state = {"files": {}}
+        # Заглушки для тяжёлых зависимостей
+        idx.embedder = MagicMock()
+        idx.client = MagicMock()
+        idx.collection_name = "test_col"
+        idx.telemetry = MagicMock()
+        return idx
+
+    def test_skip_ocr_true_does_not_call_extract_image(self, tmp_path):
+        """При skip_ocr=True _extract_image не вызывается для изображений."""
+        indexer = self._make_indexer(tmp_path, skip_ocr=True)
+        f = tmp_path / "photo.jpg"
+        f.write_bytes(b"\xff\xd8\xff")  # JPEG magic bytes
+
+        # Мокаем методы которые вызывает process_file
+        with patch.object(indexer, "_get_file_fingerprint", return_value=("abc123", 12345.0)), \
+             patch.object(indexer, "_index_metadata"), \
+             patch.object(indexer, "_index_content"), \
+             patch.object(indexer, "_save_state"), \
+             patch.object(indexer, "_extract_image") as mock_extract:
+
+            indexer.process_file(f)
+
+        # _extract_image не должен быть вызван
+        mock_extract.assert_not_called()
+
+    def test_skip_ocr_false_calls_extract_image(self, tmp_path):
+        """При skip_ocr=False _extract_image вызывается для изображений."""
+        indexer = self._make_indexer(tmp_path, skip_ocr=False)
+        f = tmp_path / "photo.jpg"
+        f.write_bytes(b"\xff\xd8\xff")
+
+        with patch.object(indexer, "_get_file_fingerprint", return_value=("abc123", 12345.0)), \
+             patch.object(indexer, "_index_metadata"), \
+             patch.object(indexer, "_index_content"), \
+             patch.object(indexer, "_save_state"), \
+             patch.object(indexer, "_extract_image", return_value="ocr текст") as mock_extract:
+
+            indexer.process_file(f)
+
+        mock_extract.assert_called_once_with(f)
+
+    def test_skip_ocr_true_still_sets_image_file_type(self, tmp_path):
+        """При skip_ocr=True file_type всё равно = 'image', но full_text = ''."""
+        indexer = self._make_indexer(tmp_path, skip_ocr=True)
+        f = tmp_path / "scan.png"
+        f.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        index_content_calls = []
+
+        def capture_index_content(filepath, relative_path, file_type, full_text):
+            index_content_calls.append((file_type, full_text))
+
+        with patch.object(indexer, "_get_file_fingerprint", return_value=("abc123", 12345.0)), \
+             patch.object(indexer, "_index_metadata"), \
+             patch.object(indexer, "_index_content", side_effect=capture_index_content), \
+             patch.object(indexer, "_save_state"):
+
+            indexer.process_file(f)
+
+        # _index_content не вызывается — текста нет
+        assert index_content_calls == []
+        # Файл всё равно сохраняется в state
+        assert str(f) in indexer.state["files"]
+        assert indexer.state["files"][str(f)]["stage"] == "metadata"
+
+
 # ═══════════════════════════ DEFAULT_SYNONYM_MAP (fix: liebherr) ══════════════
 
 class TestSynonymMapIntegrity:
