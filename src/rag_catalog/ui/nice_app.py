@@ -75,12 +75,16 @@ def _launch_indexer(
         args.append("--recreate")
     if skip_inline_ocr:
         args.append("--no-ocr")
+    log_dir = PROJECT_ROOT / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_path = log_dir / "indexer_stderr.log"
+    stderr_file = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
     proc = subprocess.Popen(
         args,
         cwd=str(PROJECT_ROOT),
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stderr_file,
+        stderr=stderr_file,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return proc.pid
@@ -92,12 +96,16 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50) -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     args = [sys.executable, str(ocr_script), "--min-text-len", str(int(min_text_len))]
+    log_dir = PROJECT_ROOT / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_path = log_dir / "ocr_stderr.log"
+    stderr_file = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
     proc = subprocess.Popen(
         args,
         cwd=str(PROJECT_ROOT),
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stderr_file,
+        stderr=stderr_file,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return proc.pid
@@ -2317,30 +2325,47 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.button("Запустить OCR", icon="document_scanner", on_click=run_ocr_now).props("outline color=orange")
 
         # ── Прогресс этапов ──────────────────────────────────────────────
-        active_stages = telemetry.get("active_stages") or []
-        latest_stages = telemetry.get("latest_stages") or []
-        progress_rows = active_stages or latest_stages
         with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Прогресс этапов").classes("text-xl font-semibold")
-            if not progress_rows:
-                ui.label("Данных по этапам пока нет.").classes("rag-meta")
-            for row in progress_rows:
-                processed = int(row.get("processed_files") or 0)
-                total = int(row.get("total_files") or 0)
-                pct = min(1.0, processed / total) if total > 0 else (1.0 if str(row.get("status") or "") != "running" else 0.0)
-                with ui.column().classes("w-full gap-1"):
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(str(row.get("stage") or "-")).classes("font-semibold min-w-24")
-                        ui.label(str(row.get("status") or "-")).classes("rag-chip")
-                        ui.label(f"{processed:,} / {total:,} файлов".replace(",", " ")).classes("rag-meta")
-                        ui.space()
-                        ui.label(_format_duration_seconds(row.get("duration_sec"))).classes("rag-meta")
-                    ui.linear_progress(value=pct).classes("w-full")
-                    ui.label(
-                        f"добавлено {int(row.get('added_files') or 0):,} · обновлено {int(row.get('updated_files') or 0):,} · "
-                        f"пропущено {int(row.get('skipped_files') or 0):,} · ошибок {int(row.get('error_files') or 0):,} · "
-                        f"точек {int(row.get('points_added') or 0):,}".replace(",", " ")
-                    ).classes("rag-meta")
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("Прогресс этапов").classes("text-xl font-semibold")
+                ui.space()
+                refresh_btn = ui.button(icon="refresh", on_click=lambda: _refresh_progress()).props("flat dense round").tooltip("Обновить")
+            progress_area = ui.column().classes("w-full gap-3")
+
+            def _refresh_progress() -> None:
+                fresh = _read_index_telemetry(state.cfg)
+                active = fresh.get("active_stages") or []
+                latest = fresh.get("latest_stages") or []
+                progress_rows = active or latest
+                progress_area.clear()
+                with progress_area:
+                    if not progress_rows:
+                        ui.label("Данных по этапам пока нет.").classes("rag-meta")
+                    for row in progress_rows:
+                        processed = int(row.get("processed_files") or 0)
+                        total_f = int(row.get("total_files") or 0)
+                        pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if str(row.get("status") or "") != "running" else 0.0)
+                        status_str = str(row.get("status") or "-")
+                        is_running = status_str == "running"
+                        with ui.column().classes("w-full gap-1"):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.label(str(row.get("stage") or "-")).classes("font-semibold min-w-24")
+                                chip_color = "text-green-600" if is_running else ""
+                                ui.label(status_str).classes(f"rag-chip {chip_color}")
+                                ui.label(f"{processed:,} / {total_f:,} файлов".replace(",", " ")).classes("rag-meta")
+                                ui.space()
+                                ui.label(_format_duration_seconds(row.get("duration_sec"))).classes("rag-meta")
+                            ui.linear_progress(value=pct).props("color=indigo-5" if is_running else "").classes("w-full")
+                            ui.label(
+                                f"добавлено {int(row.get('added_files') or 0):,} · обновлено {int(row.get('updated_files') or 0):,} · "
+                                f"пропущено {int(row.get('skipped_files') or 0):,} · ошибок {int(row.get('error_files') or 0):,} · "
+                                f"точек {int(row.get('points_added') or 0):,}".replace(",", " ")
+                            ).classes("rag-meta")
+
+            # Initial render
+            _refresh_progress()
+            # Auto-refresh every 5 seconds while indexing may be running
+            ui.timer(5.0, _refresh_progress)
 
         # ── Расписание (список) ──────────────────────────────────────────
         with ui.column().classes("rag-card w-full p-4 gap-3"):
