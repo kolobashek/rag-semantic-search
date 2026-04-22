@@ -1091,25 +1091,35 @@ def _apply_explorer_filter_input(state: PageState, event: Any, fallback: Any = "
 
 
 def _install_css() -> None:
+    ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">')
     ui.add_css(
         """
         :root {
-          --rag-bg: #f6f8fb;
-          --rag-surface: #ffffff;
-          --rag-border: #d9e0ea;
-          --rag-text: #17202c;
-          --rag-muted: #657385;
-          --rag-accent: #146c94;
-          --rag-accent-2: #178a6f;
-          --rag-danger: #b42318;
+          --rag-bg: #f3f6f9;
+          --rag-surface: rgba(255, 255, 255, 0.85);
+          --rag-border: rgba(200, 210, 224, 0.5);
+          --rag-text: #1e293b;
+          --rag-muted: #64748b;
+          --rag-accent: #3b82f6;
+          --rag-accent-2: #10b981;
+          --rag-danger: #ef4444;
+          --rag-shadow: 0 10px 40px -10px rgba(0,0,0,0.08);
         }
-        body { background: var(--rag-bg); color: var(--rag-text); font-size: 87.5%; }
-        .q-page { background: var(--rag-bg); }
+        body { 
+          background: var(--rag-bg); 
+          color: var(--rag-text); 
+          font-family: 'Inter', sans-serif;
+          font-size: 87.5%; 
+          letter-spacing: -0.01em;
+          background-image: radial-gradient(at 0% 0%, hsla(253,16%,7%,0.03) 0, transparent 50%), radial-gradient(at 50% 0%, hsla(225,39%,30%,0.03) 0, transparent 50%), radial-gradient(at 100% 0%, hsla(339,49%,30%,0.03) 0, transparent 50%);
+        }
+        .q-page { background: transparent; }
         .rag-header {
-          background: rgba(255, 255, 255, 0.96);
+          background: rgba(255, 255, 255, 0.65);
           color: var(--rag-text);
           border-bottom: 1px solid var(--rag-border);
-          backdrop-filter: blur(16px);
+          backdrop-filter: blur(24px) saturate(180%);
+          -webkit-backdrop-filter: blur(24px) saturate(180%);
         }
         .rag-header-breadcrumbs .q-btn { min-height: 32px; padding: 0 6px; }
         .rag-header-actions .q-btn { min-width: 34px; min-height: 34px; }
@@ -1138,60 +1148,92 @@ def _install_css() -> None:
         .rag-card {
           background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
-          box-shadow: 0 10px 30px rgba(23, 32, 44, 0.06);
+          border-radius: 16px;
+          box-shadow: var(--rag-shadow);
+          backdrop-filter: blur(12px);
+          transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .rag-card:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 20px 40px -10px rgba(0,0,0,0.12);
         }
         .rag-search-shell { position: relative; z-index: 5; }
         .rag-search-box {
-          background: var(--rag-surface);
+          background: rgba(255, 255, 255, 0.9);
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
-          box-shadow: 0 6px 16px rgba(23, 32, 44, 0.06);
+          border-radius: 16px;
+          box-shadow: var(--rag-shadow);
+          backdrop-filter: blur(12px);
+          transition: box-shadow 0.2s ease;
+        }
+        .rag-search-box:focus-within {
+          box-shadow: 0 0 0 2px var(--rag-accent), var(--rag-shadow);
         }
         .rag-suggest {
           position: absolute;
           left: 0;
           right: 0;
           top: calc(100% + 8px);
-          background: #ffffff;
+          background: rgba(255, 255, 255, 0.95);
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
-          box-shadow: 0 18px 48px rgba(23, 32, 44, 0.16);
+          border-radius: 16px;
+          box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.18);
+          backdrop-filter: blur(16px);
           overflow: hidden;
           z-index: 30;
         }
         .rag-result {
-          background: #ffffff;
+          background: rgba(255, 255, 255, 0.7);
           border: 1px solid var(--rag-border);
-          border-radius: 7px;
-          padding: 12px;
-          box-shadow: 0 4px 14px rgba(23, 32, 44, 0.05);
+          border-radius: 12px;
+          padding: 16px;
+          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.02);
           width: 100%;
           box-sizing: border-box;
+          backdrop-filter: blur(8px);
+          transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .rag-result:hover {
+          background: rgba(255, 255, 255, 0.95);
+          transform: translateY(-2px) scale(1.005);
+          box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.1);
+          border-color: rgba(59, 130, 246, 0.3);
         }
         .rag-meta { color: var(--rag-muted); font-size: 12px; }
         .rag-chip {
           display: inline-flex;
           align-items: center;
-          min-height: 24px;
-          padding: 0 9px;
+          min-height: 28px;
+          padding: 0 12px;
           border: 1px solid var(--rag-border);
-          border-radius: 7px;
+          border-radius: 14px;
           color: var(--rag-muted);
-          background: #f8fafc;
+          background: rgba(255, 255, 255, 0.5);
+          backdrop-filter: blur(4px);
           font-size: 12px;
+          font-weight: 500;
           cursor: pointer;
           user-select: none;
-          transition: background 0.15s, color 0.15s, border-color 0.15s;
+          transition: all 0.2s ease;
         }
-        .rag-chip:hover { background: #edf2f7; color: var(--rag-accent); border-color: var(--rag-accent); }
+        .rag-chip:hover { 
+          background: #ffffff; 
+          color: var(--rag-accent); 
+          border-color: var(--rag-accent); 
+          transform: translateY(-1px);
+          box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.1);
+        }
         .rag-chip-active {
-          background: var(--rag-accent);
+          background: linear-gradient(135deg, var(--rag-accent), #2563eb);
           color: #ffffff;
-          border-color: var(--rag-accent);
+          border-color: transparent;
           font-weight: 600;
+          box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
         }
-        .rag-chip-active:hover { background: #0f5470; border-color: #0f5470; color: #ffffff; }
+        .rag-chip-active:hover { 
+          transform: translateY(-1px);
+          box-shadow: 0 6px 14px rgba(59, 130, 246, 0.4);
+        }
         .rag-path {
           word-break: break-word;
           overflow-wrap: anywhere;
@@ -1234,14 +1276,18 @@ def _install_css() -> None:
         .rag-explorer-item {
           width: 100%;
           min-width: 0;
-          background: #ffffff;
-          border: 1px solid transparent;
-          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.7);
+          border: 1px solid var(--rag-border);
+          border-radius: 12px;
           color: var(--rag-text);
+          backdrop-filter: blur(8px);
+          transition: all 0.2s ease;
         }
         .rag-explorer-item:hover {
-          background: #eef6fb;
-          border-color: #bdd7e9;
+          background: rgba(255, 255, 255, 0.95);
+          border-color: rgba(59, 130, 246, 0.3);
+          transform: translateY(-2px);
+          box-shadow: 0 10px 20px -10px rgba(59, 130, 246, 0.15);
         }
         .rag-explorer-item.system {
           opacity: .55;
