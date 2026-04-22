@@ -86,6 +86,7 @@ class PageState:
     expanded_query: str = ""       # расширенный запрос от LLM (пусто если не менялся)
     rag_answer_text: str = ""      # RAG Q&A ответ (пусто если LLM отключён)
     rag_answer_loading: bool = False
+    settings_section: str = "profile"  # активная секция в настройках (IDE-навигация)
     displayed_count: int = 10
     active_type_filter: Optional[str] = None
     explorer_path: Optional[str] = None
@@ -220,6 +221,9 @@ def _load_user_state(state: PageState) -> None:
         state.explorer_desc = bool(explorer.get("desc", state.explorer_desc))
         state.explorer_ext = str(explorer.get("ext") or state.explorer_ext)
     state.favorites = auth_db.list_favorites(username=username)
+    # Восстановить личную историю поиска из БД (персистентна между сессиями)
+    if not state.history:
+        state.history = _my_recent_queries(state.cfg, username, limit=24)
 
 
 def _save_explorer_settings(state: PageState) -> None:
@@ -303,28 +307,47 @@ def _dedupe_queries(values: List[str], limit: int = 12) -> List[str]:
     return out
 
 
-def _recent_search_queries(cfg: Dict[str, Any], limit: int = 10) -> List[str]:
+def _my_recent_queries(cfg: Dict[str, Any], username: str = "", limit: int = 12) -> List[str]:
+    """Последние запросы текущего пользователя из БД."""
     rows = _db_query_dicts(
         _telemetry_db_path(cfg),
         """
         SELECT query
         FROM search_logs
-        WHERE query <> ''
+        WHERE query <> '' AND lower(username) = ?
         ORDER BY id DESC
         LIMIT 80
         """,
+        (username.strip().lower(),),
+    )
+    return _dedupe_queries([str(row.get("query") or "") for row in rows], limit=limit)
+
+
+def _popular_queries(cfg: Dict[str, Any], exclude_username: str = "", limit: int = 10) -> List[str]:
+    """Топ запросов по частоте среди всех пользователей (кроме текущего)."""
+    rows = _db_query_dicts(
+        _telemetry_db_path(cfg),
+        """
+        SELECT query, COUNT(*) AS cnt
+        FROM search_logs
+        WHERE query <> '' AND lower(username) != ?
+        GROUP BY lower(query)
+        ORDER BY cnt DESC
+        LIMIT 40
+        """,
+        (exclude_username.strip().lower(),),
     )
     return _dedupe_queries([str(row.get("query") or "") for row in rows], limit=limit)
 
 
 def _search_suggestions(state: PageState, typed: str = "") -> List[str]:
-    base = [*state.history, *_recent_search_queries(state.cfg, limit=12), *[query for _, query in SEARCH_PRESETS]]
-    suggestions = _dedupe_queries(base, limit=24)
+    username = _username(state)
+    personal = _dedupe_queries([*state.history, *_my_recent_queries(state.cfg, username, limit=12)], limit=24)
     needle = typed.strip().lower()
     if not needle:
-        return suggestions[:12]
-    starts = [item for item in suggestions if item.lower().startswith(needle)]
-    contains = [item for item in suggestions if needle in item.lower() and item not in starts]
+        return personal[:12]
+    starts = [item for item in personal if item.lower().startswith(needle)]
+    contains = [item for item in personal if needle in item.lower() and item not in starts]
     return [*starts, *contains][:12]
 
 
@@ -1567,15 +1590,37 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_suggestions(area: ui.column, typed: str) -> None:
         area.clear()
-        suggestions = _search_suggestions(state, typed)
-        if not suggestions:
+        username = _username(state)
+        personal = _dedupe_queries([*state.history, *_my_recent_queries(state.cfg, username, limit=12)], limit=12)
+        popular = _popular_queries(state.cfg, exclude_username=username, limit=10)
+
+        needle = typed.strip().lower()
+        if needle:
+            personal = [q for q in personal if needle in q.lower()]
+            popular = [q for q in popular if needle in q.lower()]
+        else:
+            personal = personal[:8]
+            popular = popular[:8]
+
+        if not personal and not popular:
             return
+
         with area:
-            with ui.column().classes("rag-suggest p-2 gap-1"):
-                ui.label("История и подсказки").classes("rag-meta px-3 py-1")
-                for item in suggestions:
-                    icon = "history" if item in state.history else "north_east"
-                    ui.button(item, icon=icon, on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
+            with ui.row().classes("rag-suggest p-3 gap-0 w-full"):
+                # Левая колонка — личная история
+                if personal:
+                    col_cls = "flex-1 gap-1 min-w-0" + (" pr-3 border-r border-gray-200" if popular else "")
+                    with ui.column().classes(col_cls):
+                        ui.label("Моя история").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
+                        for item in personal:
+                            ui.button(item, icon="history", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                # Правая колонка — часто ищут
+                if popular:
+                    col_cls = "flex-1 gap-1 min-w-0" + (" pl-3" if personal else "")
+                    with ui.column().classes(col_cls):
+                        ui.label("Часто ищут").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
+                        for item in popular:
+                            ui.button(item, icon="trending_up", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
     def render_search_box() -> None:
         with ui.column().classes("rag-search-shell w-full max-w-5xl"):
@@ -2611,6 +2656,31 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.button("Сохранить пути", icon="save", on_click=save_paths).props("outline")
 
     def render_admin_llm_settings() -> None:
+        def _fetch_ollama_models(ollama_url: str) -> List[str]:
+            """Запросить список моделей из Ollama /api/tags. Возвращает [] при ошибке."""
+            try:
+                import urllib.request as _ur  # noqa: PLC0415
+                import json as _json  # noqa: PLC0415
+                req = _ur.Request(f"{ollama_url.rstrip('/')}/api/tags", method="GET")
+                with _ur.urlopen(req, timeout=4) as resp:
+                    data = _json.loads(resp.read().decode())
+                return sorted(m["name"] for m in (data.get("models") or []) if m.get("name"))
+            except Exception:
+                return []
+
+        current_url = str(state.cfg.get("ollama_url") or "http://localhost:11434")
+        current_expand = str(state.cfg.get("llm_expand_model") or "phi3:mini")
+        current_rag = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
+
+        # Подтягиваем модели сразу при рендере
+        available_models = _fetch_ollama_models(current_url)
+        # Гарантируем, что текущие значения есть в списке даже если Ollama недоступен
+        for m in [current_expand, current_rag]:
+            if m and m not in available_models:
+                available_models.insert(0, m)
+        if not available_models:
+            available_models = [current_expand, current_rag]
+
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             ui.label("Нейросеть (LLM)").classes("text-xl font-semibold")
             ui.label(
@@ -2624,24 +2694,53 @@ def _build_page(initial_screen: str = "search") -> None:
             )
             ollama_url_input = ui.input(
                 "Ollama URL",
-                value=str(state.cfg.get("ollama_url") or "http://localhost:11434"),
+                value=current_url,
             ).props("dense outlined").classes("w-full")
-            expand_model_input = ui.input(
-                "Модель расширения запроса",
-                value=str(state.cfg.get("llm_expand_model") or "phi3:mini"),
+
+            status_label = ui.label(
+                f"Найдено моделей: {len(available_models)}" if available_models else "Ollama недоступен — список пуст"
+            ).classes("rag-meta text-sm")
+
+            expand_select = ui.select(
+                label="Модель расширения запроса (быстрая, лёгкая)",
+                options=available_models,
+                value=current_expand,
+                with_input=True,
             ).props("dense outlined").classes("w-full")
-            rag_model_input = ui.input(
-                "Модель RAG Q&A",
-                value=str(state.cfg.get("llm_rag_model") or "qwen3:8b"),
+
+            rag_select = ui.select(
+                label="Модель RAG Q&A (умная, для анализа документов)",
+                options=available_models,
+                value=current_rag,
+                with_input=True,
             ).props("dense outlined").classes("w-full")
+
+            async def refresh_models() -> None:
+                url = str(ollama_url_input.value or "http://localhost:11434").strip()
+                models = await run.io_bound(_fetch_ollama_models, url)
+                for m in [str(expand_select.value or ""), str(rag_select.value or "")]:
+                    if m and m not in models:
+                        models.insert(0, m)
+                if not models:
+                    status_label.set_text("Ollama недоступен или нет установленных моделей")
+                    ui.notify("Ollama не отвечает по адресу: " + url, type="warning")
+                    return
+                expand_select.options = models
+                rag_select.options = models
+                expand_select.update()
+                rag_select.update()
+                status_label.set_text(f"Найдено моделей: {len(models)}")
+                ui.notify(f"Обновлено: {len(models)} моделей", type="positive")
+
+            ui.button("Обновить список моделей", icon="refresh", on_click=refresh_models).props("flat dense")
 
             def save_llm_settings() -> None:
                 try:
                     cfg = load_config()
                     cfg["llm_enabled"] = bool(llm_toggle.value)
                     cfg["ollama_url"] = str(ollama_url_input.value or "http://localhost:11434").strip()
-                    cfg["llm_expand_model"] = str(expand_model_input.value or "phi3:mini").strip()
-                    cfg["llm_rag_model"] = str(rag_model_input.value or "qwen3:8b").strip()
+                    cfg["llm_expand_model"] = str(expand_select.value or "phi3:mini").strip()
+                    cfg["llm_rag_model"] = str(rag_select.value or "qwen3:8b").strip()
                     save_config(cfg)
                     state.cfg = cfg
                     _log_app_event(state, "settings", "save_llm", details={
@@ -2734,8 +2833,10 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_settings_screen() -> None:
         auth_db = _get_auth_db(state)
-        ui.label("Настройки").classes("text-2xl font-semibold")
+
+        # ── Форма входа (без боковой панели) ────────────────────────────
         if state.current_user is None:
+            ui.label("Настройки").classes("text-2xl font-semibold")
             with ui.column().classes("rag-card w-full max-w-xl p-4 gap-3"):
                 ui.label("Вход пользователя").classes("text-xl font-semibold")
                 ui.label("Для первого входа администратора используйте admin / admin, затем смените пароль.").classes("rag-meta")
@@ -2762,128 +2863,235 @@ def _build_page(initial_screen: str = "search") -> None:
 
         user = state.current_user
         is_admin = str(user.get("role") or "user") == "admin"
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Настройки пользователя").classes("text-xl font-semibold")
-            ui.label(f"Логин: {user.get('username')} · роль: {user.get('role')} · статус: {user.get('status')}").classes("rag-meta")
-            display_input = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
-            telegram_input = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
-            telegram_username_input = ui.input("Telegram username", value=str(user.get("telegram_username") or "")).props("dense outlined prefix=@").classes("w-full")
-            telegram_link_input = ui.input("Ссылка привязки Telegram", value="").props("dense outlined readonly").classes("w-full")
 
-            def save_profile() -> None:
-                ok = auth_db.update_profile(
-                    username=str(user.get("username") or ""),
-                    display_name=str(display_input.value or ""),
-                    telegram_chat_id=str(telegram_input.value or ""),
-                    telegram_username=str(telegram_username_input.value or ""),
-                )
-                _refresh_current_user(state)
-                ui.notify("Профиль сохранен." if ok else "Не удалось сохранить профиль.", type="positive" if ok else "negative")
-                render()
+        # ── Реестр секций: (key, icon, label, keywords) ─────────────────
+        user_sections: List[tuple] = [
+            ("profile",   "person",          "Профиль",              ["telegram", "имя", "аккаунт", "профиль"]),
+            ("explorer",  "folder_open",      "Проводник",            ["файлы", "вид", "сортировка"]),
+            ("favorites", "star_border",      "Избранное",            ["закладки"]),
+            ("password",  "key",              "Пароль и выход",       ["смена", "выход", "logout"]),
+        ]
+        admin_sections: List[tuple] = [
+            ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
+            ("llm",           "smart_toy",      "Нейросеть",              ["ollama", "модель", "ai", "llm", "rag"]),
+            ("aliases",       "travel_explore", "Синонимы поиска",        ["группы", "расширение", "запросы"]),
+            ("indexing",      "build",          "Индексация",             ["индекс", "статус", "прогресс"]),
+            ("security",      "security",       "Сессии и безопасность",  ["сессии", "системные файлы"]),
+            ("users",         "group",          "Пользователи",           ["роль", "статус", "логин"]),
+            ("registrations", "person_add",     "Регистрации",            ["заявки", "одобрить"]),
+            ("tg_chats",      "chat",           "Telegram чаты",          ["бот", "chat id"]),
+        ]
 
-            ui.button("Сохранить профиль", icon="save", on_click=save_profile).props("outline")
+        active = [state.settings_section]  # сохраняем между ре-рендерами
+        q_ref  = [""]
 
-            def make_current_link() -> None:
-                bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-                if not bot_link:
-                    ui.notify("В config.json не задан telegram_bot_link.", type="warning")
-                    return
-                out = auth_db.create_telegram_link_token(username=str(user.get("username") or ""))
-                if not out.get("ok"):
-                    ui.notify(f"Не удалось создать ссылку: {out.get('reason')}", type="negative")
-                    return
-                telegram_link_input.value = _telegram_deeplink(bot_link, "link", str(out.get("token") or ""))
-                telegram_link_input.update()
-                ui.notify("Ссылка привязки создана.", type="positive")
+        # ── IDE-лейаут ───────────────────────────────────────────────────
+        with ui.row().classes("w-full gap-0 items-start"):
 
-            with ui.row().classes("gap-2"):
-                ui.button("Привязать Telegram", icon="link", on_click=make_current_link).props("outline")
-                ui.button(
-                    "Открыть Telegram",
-                    icon="open_in_new",
-                    on_click=lambda: ui.run_javascript(
-                        f"window.open({json.dumps(str(telegram_link_input.value or ''))}, '_blank')"
-                    ),
-                ).props("outline")
+            # Левая боковая панель
+            with ui.column().classes("flex-none gap-1").style(
+                "width:220px; min-width:220px; border-right:1px solid #e5e7eb; padding-right:12px; margin-right:16px"
+            ):
+                ui.label("Настройки").classes("text-xl font-semibold mb-2")
+                search_box = ui.input(
+                    placeholder="Поиск настроек…",
+                    on_change=lambda e: (q_ref.__setitem__(0, str(e.value or "").lower()), render_nav()),
+                ).props("dense outlined clearable").classes("w-full")
 
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Настройки проводника").classes("text-xl font-semibold")
-            ui.label(f"Вид: {state.explorer_view} · сортировка: {state.explorer_sort} · {'убывание' if state.explorer_desc else 'возрастание'} · тип: {state.explorer_ext}").classes("rag-meta")
+                nav_col = ui.column().classes("w-full gap-0")
 
-            def reset_explorer_settings() -> None:
-                auth_db.reset_user_settings(username=str(user.get("username") or ""))
-                state.explorer_view = "Таблица"
-                state.explorer_sort = "По имени"
-                state.explorer_desc = False
-                state.explorer_ext = "Все"
-                _log_app_event(state, "settings", "reset_explorer")
-                ui.notify("Настройки проводника сброшены.", type="positive")
-                render()
+            # Правая область контента
+            content_col = ui.column().classes("flex-1 gap-3 min-w-0")
 
-            ui.button("Сбросить настройки проводника", icon="restart_alt", on_click=reset_explorer_settings).props("outline")
+        # ── Навигация ────────────────────────────────────────────────────
+        def _visible(entry: tuple) -> bool:
+            q = q_ref[0]
+            if not q:
+                return True
+            key, icon, label, kws = entry
+            return q in label.lower() or any(q in kw.lower() for kw in kws)
 
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Избранное").classes("text-xl font-semibold")
-            if not state.favorites:
-                ui.label("Закладок пока нет. Добавьте файл или папку звездочкой в проводнике.").classes("rag-meta")
-            for fav in state.favorites:
-                fav_path = Path(str(fav.get("path") or ""))
-                item_type = str(fav.get("item_type") or "")
-                with ui.row().classes("w-full items-center gap-2"):
-                    ui.icon("folder" if item_type == "folder" else "description")
-                    ui.label(str(fav.get("title") or fav_path.name or fav_path)).classes("font-medium")
-                    ui.label(str(fav_path)).classes("rag-path flex-1")
-                    if item_type == "folder":
-                        ui.button("Открыть", on_click=lambda p=fav_path: go_explorer(str(p))).props("outline dense")
-                    else:
-                        ui.button("Открыть", on_click=lambda p=fav_path: ui.run_javascript(f"window.open({json.dumps(_file_url(str(p)))}, '_blank')")).props("outline dense")
-                    ui.button(icon="delete", on_click=lambda p=fav_path: (_toggle_favorite(state, p), render())).props("flat round dense")
+        def render_nav() -> None:
+            nav_col.clear()
+            with nav_col:
+                groups: List[tuple] = [("", user_sections)]
+                if is_admin:
+                    groups.append(("Администратор", admin_sections))
+                for group_label, sections in groups:
+                    filtered = [s for s in sections if _visible(s)]
+                    if not filtered:
+                        continue
+                    if group_label:
+                        ui.label(group_label.upper()).classes(
+                            "text-xs text-gray-400 font-semibold mt-3 mb-1 px-2"
+                        )
+                    for key, icon, label, _ in filtered:
+                        is_active = active[0] == key
+                        bg = "background:#eef2ff;" if is_active else ""
+                        with ui.row().classes("w-full items-center gap-2 px-2 py-1 rounded cursor-pointer").style(
+                            bg + "user-select:none"
+                        ).on("click", lambda k=key: navigate(k)):
+                            ui.icon(icon, size="16px").classes(
+                                "text-indigo-600" if is_active else "text-gray-400"
+                            )
+                            ui.label(label).classes(
+                                "text-sm font-medium text-indigo-700" if is_active else "text-sm text-gray-700"
+                            )
 
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Смена пароля").classes("text-xl font-semibold")
-            old_password = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-            new_password = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-            new_password2 = ui.input("Повторите пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+        # ── Контент секции ───────────────────────────────────────────────
+        def render_section() -> None:
+            content_col.clear()
+            with content_col:
+                sec = active[0]
 
-            def change_password() -> None:
-                if str(new_password.value or "") != str(new_password2.value or ""):
-                    ui.notify("Новые пароли не совпадают.", type="warning")
-                    return
-                ok = auth_db.change_password(
-                    username=str(user.get("username") or ""),
-                    old_password=str(old_password.value or ""),
-                    new_password=str(new_password.value or ""),
-                )
-                if ok:
-                    _refresh_current_user(state)
-                ui.notify("Пароль изменен." if ok else "Не удалось изменить пароль.", type="positive" if ok else "negative")
-                render()
+                if sec == "profile":
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Профиль").classes("text-xl font-semibold")
+                        ui.label(
+                            f"Логин: {user.get('username')} · роль: {user.get('role')} · статус: {user.get('status')}"
+                        ).classes("rag-meta")
+                        disp_in = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
+                        tg_id_in = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
+                        tg_un_in = ui.input("Telegram username", value=str(user.get("telegram_username") or "")).props("dense outlined prefix=@").classes("w-full")
+                        tg_link_in = ui.input("Ссылка привязки Telegram", value="").props("dense outlined readonly").classes("w-full")
 
-            with ui.row().classes("gap-2"):
-                ui.button("Сменить пароль", icon="key", on_click=change_password).props("outline")
-                def logout() -> None:
-                    if state.auth_token:
-                        auth_db.revoke_session(state.auth_token)
-                    auth_db.log_auth_event(username=_username(state), event_type="logout", ok=True)
-                    state.current_user = None
-                    state.auth_token = ""
-                    try:
-                        app.storage.user.pop("auth_token", None)
-                    except Exception:
-                        pass
-                    render()
+                        def save_profile() -> None:
+                            auth_db.update_profile(
+                                username=str(user.get("username") or ""),
+                                display_name=str(disp_in.value or ""),
+                                telegram_chat_id=str(tg_id_in.value or ""),
+                                telegram_username=str(tg_un_in.value or ""),
+                            )
+                            _refresh_current_user(state)
+                            ui.notify("Профиль сохранён.", type="positive")
 
-                ui.button("Выйти", icon="logout", on_click=logout).props("flat")
+                        def make_tg_link() -> None:
+                            bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+                            if not bot_link:
+                                ui.notify("В config.json не задан telegram_bot_link.", type="warning")
+                                return
+                            out = auth_db.create_telegram_link_token(username=str(user.get("username") or ""))
+                            if not out.get("ok"):
+                                ui.notify(f"Ошибка: {out.get('reason')}", type="negative")
+                                return
+                            tg_link_in.value = _telegram_deeplink(bot_link, "link", str(out.get("token") or ""))
+                            tg_link_in.update()
+                            ui.notify("Ссылка создана.", type="positive")
 
-        if is_admin:
-            render_admin_security_settings(auth_db)
-            render_admin_path_settings()
-            render_admin_llm_settings()
-            render_admin_search_aliases()
-            render_admin_registration_requests(auth_db)
-            render_admin_telegram_chats(auth_db)
-            render_index_dashboard()
-            render_admin_users(auth_db)
+                        ui.button("Сохранить профиль", icon="save", on_click=save_profile).props("outline")
+                        with ui.row().classes("gap-2"):
+                            ui.button("Привязать Telegram", icon="link", on_click=make_tg_link).props("outline")
+                            ui.button(
+                                "Открыть Telegram", icon="open_in_new",
+                                on_click=lambda: ui.run_javascript(
+                                    f"window.open({json.dumps(str(tg_link_in.value or ''))}, '_blank')"
+                                ),
+                            ).props("outline")
+
+                elif sec == "explorer":
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Проводник").classes("text-xl font-semibold")
+                        ui.label(
+                            f"Вид: {state.explorer_view} · сортировка: {state.explorer_sort} · "
+                            f"{'убывание' if state.explorer_desc else 'возрастание'} · тип: {state.explorer_ext}"
+                        ).classes("rag-meta")
+
+                        def reset_explorer() -> None:
+                            auth_db.reset_user_settings(username=str(user.get("username") or ""))
+                            state.explorer_view = "Таблица"
+                            state.explorer_sort = "По имени"
+                            state.explorer_desc = False
+                            state.explorer_ext = "Все"
+                            _log_app_event(state, "settings", "reset_explorer")
+                            ui.notify("Настройки проводника сброшены.", type="positive")
+                            render_section()
+
+                        ui.button("Сбросить настройки проводника", icon="restart_alt", on_click=reset_explorer).props("outline")
+
+                elif sec == "favorites":
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Избранное").classes("text-xl font-semibold")
+                        if not state.favorites:
+                            ui.label("Закладок пока нет. Добавьте файл или папку звёздочкой в проводнике.").classes("rag-meta")
+                        for fav in state.favorites:
+                            fav_path = Path(str(fav.get("path") or ""))
+                            item_type = str(fav.get("item_type") or "")
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.icon("folder" if item_type == "folder" else "description")
+                                ui.label(str(fav.get("title") or fav_path.name or fav_path)).classes("font-medium")
+                                ui.label(str(fav_path)).classes("rag-path flex-1")
+                                if item_type == "folder":
+                                    ui.button("Открыть", on_click=lambda p=fav_path: go_explorer(str(p))).props("outline dense")
+                                else:
+                                    ui.button("Открыть", on_click=lambda p=fav_path: ui.run_javascript(
+                                        f"window.open({json.dumps(_file_url(str(p)))}, '_blank')"
+                                    )).props("outline dense")
+                                ui.button(icon="delete", on_click=lambda p=fav_path: (
+                                    _toggle_favorite(state, p), render_section()
+                                )).props("flat round dense")
+
+                elif sec == "password":
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Смена пароля").classes("text-xl font-semibold")
+                        old_pw = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                        new_pw = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                        new_pw2 = ui.input("Повторите пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+                        def change_pw() -> None:
+                            if str(new_pw.value or "") != str(new_pw2.value or ""):
+                                ui.notify("Пароли не совпадают.", type="warning")
+                                return
+                            ok = auth_db.change_password(
+                                username=str(user.get("username") or ""),
+                                old_password=str(old_pw.value or ""),
+                                new_password=str(new_pw.value or ""),
+                            )
+                            if ok:
+                                _refresh_current_user(state)
+                            ui.notify("Пароль изменён." if ok else "Не удалось изменить пароль.",
+                                      type="positive" if ok else "negative")
+
+                        def do_logout() -> None:
+                            if state.auth_token:
+                                auth_db.revoke_session(state.auth_token)
+                            auth_db.log_auth_event(username=_username(state), event_type="logout", ok=True)
+                            state.current_user = None
+                            state.auth_token = ""
+                            try:
+                                app.storage.user.pop("auth_token", None)
+                            except Exception:
+                                pass
+                            render()
+
+                        with ui.row().classes("gap-2"):
+                            ui.button("Сменить пароль", icon="key", on_click=change_pw).props("outline")
+                            ui.button("Выйти", icon="logout", on_click=do_logout).props("flat")
+
+                elif sec == "paths":
+                    render_admin_path_settings()
+                elif sec == "llm":
+                    render_admin_llm_settings()
+                elif sec == "aliases":
+                    render_admin_search_aliases()
+                elif sec == "indexing":
+                    render_index_dashboard()
+                elif sec == "security":
+                    render_admin_security_settings(auth_db)
+                elif sec == "users":
+                    render_admin_users(auth_db)
+                elif sec == "registrations":
+                    render_admin_registration_requests(auth_db)
+                elif sec == "tg_chats":
+                    render_admin_telegram_chats(auth_db)
+
+        def navigate(key: str) -> None:
+            active[0] = key
+            state.settings_section = key
+            render_nav()
+            render_section()
+
+        render_nav()
+        render_section()
 
     def render_telegram_screen() -> None:
         enabled = bool(state.cfg.get("telegram_enabled"))
@@ -2952,15 +3160,6 @@ def _build_page(initial_screen: str = "search") -> None:
             LIMIT 20
             """,
         )
-        recent_searches = _db_query_dicts(
-            telemetry_path,
-            """
-            SELECT ts, source, username, query, results_count, duration_ms, ok, error
-            FROM search_logs
-            ORDER BY id DESC
-            LIMIT 50
-            """,
-        )
         auth_events = auth_db.list_auth_events(limit=50)
 
         with ui.row().classes("w-full gap-3 items-start"):
@@ -3008,7 +3207,16 @@ def _build_page(initial_screen: str = "search") -> None:
                 ).classes("w-full")
 
                 def refresh_search_table() -> None:
-                    rows = recent_searches
+                    # Каждый вызов делает свежий запрос к БД — данные не устаревают
+                    rows = _db_query_dicts(
+                        telemetry_path,
+                        """
+                        SELECT ts, source, username, query, results_count, duration_ms, ok, error
+                        FROM search_logs
+                        ORDER BY id DESC
+                        LIMIT 500
+                        """,
+                    )
                     source_mode = str(search_source_filter.value or "Все")
                     if source_mode == "Telegram":
                         rows = [row for row in rows if str(row.get("source") or "").startswith("telegram_bot:")]

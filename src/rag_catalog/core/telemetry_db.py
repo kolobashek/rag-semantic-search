@@ -382,8 +382,6 @@ class TelemetryDB:
     ) -> None:
         raw_value = int(feedback)
         value = max(-3, min(3, raw_value))
-        if value == 0:
-            value = 1
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
