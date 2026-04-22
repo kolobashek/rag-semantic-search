@@ -254,6 +254,19 @@ class TelemetryDB:
                         index_run_id TEXT,
                         note TEXT NOT NULL DEFAULT ''
                     );
+
+                    CREATE TABLE IF NOT EXISTS index_schedules (
+                        id TEXT PRIMARY KEY,
+                        label TEXT NOT NULL DEFAULT '',
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        cadence TEXT NOT NULL DEFAULT 'daily',
+                        time TEXT NOT NULL DEFAULT '03:00',
+                        days_json TEXT NOT NULL DEFAULT '["Mon","Tue","Wed","Thu","Fri"]',
+                        stage TEXT NOT NULL DEFAULT 'all',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        last_run_at TEXT
+                    );
                     """
                 )
                 self._migrate_schema(conn)
@@ -288,6 +301,8 @@ class TelemetryDB:
                       ON ocr_runs(ts_started);
                     CREATE INDEX IF NOT EXISTS idx_ocr_runs_status
                       ON ocr_runs(status);
+                    CREATE INDEX IF NOT EXISTS idx_index_schedules_enabled
+                      ON index_schedules(enabled);
                     """
                 )
 
@@ -1036,6 +1051,109 @@ class TelemetryDB:
         return self.fetch_dicts(
             "SELECT * FROM ocr_runs ORDER BY ts_started DESC LIMIT ?",
             [int(limit)],
+        )
+
+    # ── index schedules ───────────────────────────────────────────────
+
+    def list_index_schedules(self) -> List[Dict[str, Any]]:
+        """Вернуть все расписания индексации, отсортированные по времени создания."""
+        rows = self.fetch_dicts(
+            "SELECT * FROM index_schedules ORDER BY created_at"
+        )
+        for row in rows:
+            try:
+                row["days"] = json.loads(str(row.get("days_json") or "[]"))
+            except json.JSONDecodeError:
+                row["days"] = []
+        return rows
+
+    def save_index_schedule(
+        self,
+        *,
+        id: Optional[str] = None,
+        label: str = "",
+        enabled: bool = True,
+        cadence: str = "daily",
+        time: str = "03:00",
+        days: Optional[List[str]] = None,
+        stage: str = "all",
+    ) -> Dict[str, Any]:
+        """Создать или обновить расписание. Возвращает сохранённую запись."""
+        sched_id = str(id or uuid.uuid4())
+        clean_cadence = cadence if cadence in {"hourly", "daily", "weekly"} else "daily"
+        clean_stage = stage if stage in {"all", "metadata", "small", "large", "content"} else "all"
+        clean_days = [str(d) for d in (days or []) if str(d).strip()]
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO index_schedules (id, label, enabled, cadence, time, days_json, stage, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        label=excluded.label,
+                        enabled=excluded.enabled,
+                        cadence=excluded.cadence,
+                        time=excluded.time,
+                        days_json=excluded.days_json,
+                        stage=excluded.stage,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        sched_id,
+                        str(label or "").strip(),
+                        1 if enabled else 0,
+                        clean_cadence,
+                        str(time or "03:00").strip(),
+                        json.dumps(clean_days, ensure_ascii=False),
+                        clean_stage,
+                        now,
+                        now,
+                    ),
+                )
+        return {
+            "id": sched_id, "label": label, "enabled": enabled,
+            "cadence": clean_cadence, "time": time, "days": clean_days,
+            "stage": clean_stage,
+        }
+
+    def delete_index_schedule(self, *, id: str) -> bool:
+        """Удалить расписание по id. Возвращает True если запись была найдена."""
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute("DELETE FROM index_schedules WHERE id=?", (str(id),))
+                return cur.rowcount > 0
+
+    def touch_index_schedule(self, *, id: str) -> None:
+        """Обновить last_run_at расписания на текущее UTC-время."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE index_schedules SET last_run_at=? WHERE id=?",
+                    (_utc_now(), str(id)),
+                )
+
+    def get_daily_index_stats(self, *, days: int = 30) -> List[Dict[str, Any]]:
+        """Статистика индексации по дням за последние N дней."""
+        return self.fetch_dicts(
+            """
+            SELECT
+                date(ts_started) AS day,
+                stage,
+                SUM(processed_files) AS files,
+                SUM(added_files) AS added,
+                SUM(points_added) AS points,
+                COUNT(*) AS runs,
+                CAST(SUM(
+                    CAST((julianday(COALESCE(ts_finished, ts_updated)) - julianday(ts_started)) * 86400 AS INTEGER)
+                ) AS INTEGER) AS total_sec
+            FROM index_stage_progress
+            WHERE ts_started >= date('now', ?)
+              AND ts_finished IS NOT NULL
+            GROUP BY date(ts_started), stage
+            ORDER BY day, stage
+            """,
+            [f"-{int(days)} days"],
         )
 
     # ── generic ───────────────────────────────────────────────────────

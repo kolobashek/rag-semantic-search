@@ -6,12 +6,14 @@ import argparse
 import html
 import json
 import mimetypes
+import os
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -26,6 +28,114 @@ from rag_catalog.core.user_auth_db import UserAuthDB
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 APP_ICON_PATH = PROJECT_ROOT / "assets" / "brand" / "ico" / "favicon.ico"
 LOGO_PATH = PROJECT_ROOT / "assets" / "brand" / "png" / "app-badge-128.png"
+
+_STAGE_LABELS: Dict[str, str] = {
+    "all": "Все этапы",
+    "metadata": "metadata",
+    "small": "small chunks",
+    "large": "large chunks",
+    "content": "content",
+}
+_CADENCE_LABELS: Dict[str, str] = {
+    "hourly": "Каждый час",
+    "daily": "Ежедневно",
+    "weekly": "Еженедельно",
+}
+_DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+_DAY_RU = {"Mon": "Пн", "Tue": "Вт", "Wed": "Ср", "Thu": "Чт", "Fri": "Пт", "Sat": "Сб", "Sun": "Вс"}
+
+
+def _launch_indexer(
+    cfg: Dict[str, Any],
+    *,
+    stage: str = "all",
+    recreate: bool = False,
+    workers: Optional[int] = None,
+    max_chunks: Optional[int] = None,
+    skip_inline_ocr: bool = False,
+) -> int:
+    """Запустить index_rag.py как фоновый процесс. Возвращает PID."""
+    index_script = PROJECT_ROOT / "src" / "rag_catalog" / "core" / "index_rag.py"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    args = [
+        sys.executable, str(index_script),
+        "--catalog", str(cfg.get("catalog_path") or ""),
+        "--collection", str(cfg.get("collection_name") or ""),
+        "--stage", stage,
+        "--workers", str(int(workers or cfg.get("index_read_workers") or 4)),
+        "--max-chunks", str(int(max_chunks or cfg.get("index_max_chunks") or 2000)),
+    ]
+    qdrant_url = str(cfg.get("qdrant_url") or "")
+    if qdrant_url:
+        args += ["--url", qdrant_url]
+    else:
+        args += ["--db", str(cfg.get("qdrant_db_path") or "")]
+    if recreate:
+        args.append("--recreate")
+    if skip_inline_ocr:
+        args.append("--no-ocr")
+    proc = subprocess.Popen(
+        args,
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return proc.pid
+
+
+def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50) -> int:
+    """Запустить ocr_pdfs.py как фоновый процесс. Возвращает PID."""
+    ocr_script = PROJECT_ROOT / "src" / "rag_catalog" / "core" / "ocr_pdfs.py"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    args = [sys.executable, str(ocr_script), "--min-text-len", str(int(min_text_len))]
+    proc = subprocess.Popen(
+        args,
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return proc.pid
+
+
+def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Вернуть расписания, которые должны запуститься прямо сейчас (±1 мин)."""
+    now = datetime.now(timezone.utc)
+    due = []
+    for sched in schedules:
+        if not int(sched.get("enabled") or 0):
+            continue
+        sched_time = str(sched.get("time") or "03:00")
+        try:
+            hh, mm = int(sched_time[:2]), int(sched_time[3:5])
+        except (ValueError, IndexError):
+            continue
+        cadence = str(sched.get("cadence") or "daily")
+        days = sched.get("days") or []
+        day_name = now.strftime("%a")  # "Mon", "Tue", ...
+        if cadence == "weekly" and day_name not in days:
+            continue
+        if cadence == "daily" and days and day_name not in days:
+            continue
+        # Проверяем совпадение часа и минуты (±1 мин)
+        if now.hour != hh or abs(now.minute - mm) > 1:
+            continue
+        # Не запускать дважды в одну минуту
+        last_run = str(sched.get("last_run_at") or "")
+        if last_run:
+            try:
+                lr = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+                if (now - lr).total_seconds() < 90:
+                    continue
+            except ValueError:
+                pass
+        due.append(sched)
+    return due
 
 SEARCH_PRESETS = [
     ("Договоры", "договор поставки"),
@@ -1450,6 +1560,34 @@ def _build_page(initial_screen: str = "search") -> None:
 
     ui.timer(3600.0, touch_activity)
 
+    # ── Встроенный планировщик ────────────────────────────────────────
+    def _tick_scheduler() -> None:
+        """Каждую минуту проверяет расписание и запускает индексатор при совпадении."""
+        if not _is_admin(state):
+            return
+        tdb = _get_telemetry(state)
+        if not hasattr(tdb, "list_index_schedules"):
+            return
+        try:
+            schedules = tdb.list_index_schedules()
+            due = _schedules_due(schedules)
+            cfg_settings = tdb.get_index_settings() if hasattr(tdb, "get_index_settings") else {}
+            for sched in due:
+                pid = _launch_indexer(
+                    state.cfg,
+                    stage=str(sched.get("stage") or "all"),
+                    workers=int(cfg_settings.get("workers") or state.cfg.get("index_read_workers") or 4),
+                    max_chunks=int(cfg_settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000),
+                    skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
+                )
+                tdb.touch_index_schedule(id=str(sched["id"]))
+                _log_app_event(state, "index", "schedule_run",
+                               details={"sched_id": sched["id"], "stage": sched.get("stage"), "pid": pid})
+        except Exception:
+            pass
+
+    ui.timer(60.0, _tick_scheduler)
+
     def set_screen(screen: str) -> None:
         touch_activity()
         state.screen = screen
@@ -2115,17 +2253,19 @@ def _build_page(initial_screen: str = "search") -> None:
 
         render_entries()
 
-    def render_index_screen() -> None:
+    def render_index_screen() -> None:  # noqa: C901
         if not _is_admin(state):
             ui.label("Раздел индексирования доступен только администратору.").classes("rag-card p-4 text-red-700")
             return
         stats = _read_index_stats(state.cfg)
         telemetry = _read_index_telemetry(state.cfg)
         settings_db = _get_telemetry(state)
+        settings = settings_db.get_index_settings() if hasattr(settings_db, "get_index_settings") else {}
 
         ui.label("Индекс").classes("text-2xl font-semibold")
-        ui.label("Расписание, прогресс, статистика этапов и OCR.").classes("rag-meta")
+        ui.label("Запуск, расписание, прогресс, статистика этапов и OCR.").classes("rag-meta")
 
+        # ── Метрики ──────────────────────────────────────────────────────
         def render_metric(label: str, value: str, icon: str = "analytics") -> None:
             with ui.column().classes("rag-card p-4 gap-1 min-w-52 flex-1"):
                 with ui.row().classes("items-center gap-2"):
@@ -2140,13 +2280,50 @@ def _build_page(initial_screen: str = "search") -> None:
             overall = telemetry.get("overall") or {}
             render_metric("Средняя длительность", _format_duration_seconds(overall.get("avg_duration_sec")), "timer")
 
+        # ── Запустить сейчас ─────────────────────────────────────────────
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("play_circle").classes("text-2xl text-indigo-500")
+                ui.label("Запустить сейчас").classes("text-xl font-semibold")
+            ui.label("Запускается фоновый процесс; прогресс появится в разделе «Прогресс этапов» через несколько секунд.").classes("rag-meta")
+            workers_now = int(settings.get("workers") or state.cfg.get("index_read_workers") or 4)
+            chunks_now = int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000)
+            skip_ocr_now = bool(settings.get("skip_inline_ocr"))
+            ocr_min_len_now = int(settings.get("ocr_min_text_len") or 50)
+
+            def make_run_handler(stage_key: str) -> Any:
+                def handler() -> None:
+                    pid = _launch_indexer(state.cfg, stage=stage_key, workers=workers_now,
+                                         max_chunks=chunks_now, skip_inline_ocr=skip_ocr_now)
+                    _log_app_event(state, "index", "run_now", details={"stage": stage_key, "pid": pid})
+                    ui.notify(f"Индексация «{_STAGE_LABELS.get(stage_key, stage_key)}» запущена (PID {pid}).", type="positive")
+                return handler
+
+            with ui.row().classes("w-full gap-2 flex-wrap"):
+                for stage_key, stage_label in _STAGE_LABELS.items():
+                    color = "primary" if stage_key == "all" else None
+                    ui.button(stage_label, icon="play_arrow", on_click=make_run_handler(stage_key), color=color).props("unelevated" if stage_key == "all" else "outline")
+
+            ui.separator()
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.icon("scanner").classes("text-xl text-orange-500")
+                ui.label("OCR распознавание").classes("font-semibold")
+
+            def run_ocr_now() -> None:
+                pid = _launch_ocr(state.cfg, min_text_len=ocr_min_len_now)
+                _log_app_event(state, "index", "run_ocr_now", details={"pid": pid})
+                ui.notify(f"OCR-проход запущен (PID {pid}).", type="positive")
+
+            ui.button("Запустить OCR", icon="document_scanner", on_click=run_ocr_now).props("outline color=orange")
+
+        # ── Прогресс этапов ──────────────────────────────────────────────
         active_stages = telemetry.get("active_stages") or []
         latest_stages = telemetry.get("latest_stages") or []
         progress_rows = active_stages or latest_stages
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             ui.label("Прогресс этапов").classes("text-xl font-semibold")
             if not progress_rows:
-                ui.label("Данных по этапам пока нет. Запустите индексирование, чтобы появились прогрессбары.").classes("rag-meta")
+                ui.label("Данных по этапам пока нет.").classes("rag-meta")
             for row in progress_rows:
                 processed = int(row.get("processed_files") or 0)
                 total = int(row.get("total_files") or 0)
@@ -2165,35 +2342,117 @@ def _build_page(initial_screen: str = "search") -> None:
                         f"точек {int(row.get('points_added') or 0):,}".replace(",", " ")
                     ).classes("rag-meta")
 
+        # ── Расписание (список) ──────────────────────────────────────────
         with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Настройки индекса и расписания").classes("text-xl font-semibold")
-            settings = settings_db.get_index_settings() if hasattr(settings_db, "get_index_settings") else {}
-            schedule_enabled = ui.checkbox("Включить расписание индексирования", value=bool(settings.get("schedule_enabled")))
-            with ui.row().classes("w-full gap-3"):
-                cadence_input = ui.select(
-                    {"manual": "Вручную", "hourly": "Каждый час", "daily": "Ежедневно", "weekly": "Еженедельно"},
-                    value=str(settings.get("cadence") or "daily"),
-                    label="Период",
-                ).props("dense outlined").classes("w-48")
-                time_input = ui.input("Время запуска", value=str(settings.get("time") or "03:00")).props("dense outlined mask='##:##'").classes("w-36")
-                stage_input = ui.select(
-                    {"all": "Все этапы", "metadata": "metadata", "small": "small", "large": "large", "content": "content"},
-                    value=str(settings.get("stage") or "all"),
-                    label="Этап",
-                ).props("dense outlined").classes("w-44")
-            with ui.row().classes("w-full gap-3"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("event_repeat").classes("text-2xl text-indigo-500")
+                ui.label("Расписание индексации").classes("text-xl font-semibold")
+            ui.label(
+                "Встроенный планировщик проверяет расписание каждую минуту и запускает индексатор в фоне. "
+                "Можно создать несколько записей — разные этапы в разное время."
+            ).classes("rag-meta")
+
+            schedules_list = settings_db.list_index_schedules() if hasattr(settings_db, "list_index_schedules") else []
+            sched_area = ui.column().classes("w-full gap-2")
+
+            def render_schedules() -> None:
+                sched_area.clear()
+                current = settings_db.list_index_schedules() if hasattr(settings_db, "list_index_schedules") else []
+                with sched_area:
+                    if not current:
+                        ui.label("Расписаний пока нет. Нажмите «+ Добавить» чтобы создать.").classes("rag-meta")
+                    for sched in current:
+                        days_str = " ".join(_DAY_RU.get(d, d) for d in (sched.get("days") or []))
+                        cadence_str = _CADENCE_LABELS.get(str(sched.get("cadence") or "daily"), "")
+                        stage_str = _STAGE_LABELS.get(str(sched.get("stage") or "all"), str(sched.get("stage") or ""))
+                        last_run = str(sched.get("last_run_at") or "—")
+                        enabled_val = bool(int(sched.get("enabled") or 0))
+                        color_cls = "" if enabled_val else "opacity-50"
+                        with ui.row().classes(f"w-full items-center gap-2 p-2 border border-gray-200 rounded {color_cls}"):
+                            ui.icon("check_circle" if enabled_val else "radio_button_unchecked").classes(
+                                "text-xl " + ("text-green-500" if enabled_val else "text-gray-400"))
+                            ui.label(str(sched.get("label") or "Без названия")).classes("font-semibold min-w-32")
+                            ui.label(stage_str).classes("rag-chip")
+                            ui.label(f"{cadence_str} в {sched.get('time') or '?'}").classes("rag-meta")
+                            ui.label(days_str).classes("rag-meta min-w-28")
+                            ui.space()
+                            ui.label(f"Последний: {last_run[:16] if last_run != '—' else '—'}").classes("rag-meta text-xs")
+                            ui.button(icon="edit", on_click=lambda s=sched: open_sched_dialog(s), color=None).props("flat dense round")
+                            ui.button(icon="delete", on_click=lambda s=sched: delete_sched(str(s.get("id") or "")), color=None).props("flat dense round color=red-5")
+
+            def delete_sched(sched_id: str) -> None:
+                settings_db.delete_index_schedule(id=sched_id)
+                render_schedules()
+                ui.notify("Расписание удалено.", type="warning")
+
+            def open_sched_dialog(existing: Optional[Dict[str, Any]] = None) -> None:
+                with ui.dialog() as dlg, ui.card().classes("w-full max-w-lg p-4 gap-3"):
+                    ui.label("Изменить расписание" if existing else "Новое расписание").classes("text-lg font-semibold")
+                    dlg_label = ui.input("Название", value=str((existing or {}).get("label") or "")).props("dense outlined").classes("w-full")
+                    with ui.row().classes("w-full gap-3"):
+                        dlg_enabled = ui.checkbox("Включено", value=bool(int((existing or {}).get("enabled", 1))))
+                        dlg_stage = ui.select(
+                            _STAGE_LABELS, value=str((existing or {}).get("stage") or "all"), label="Этап"
+                        ).props("dense outlined").classes("flex-1")
+                    with ui.row().classes("w-full gap-3"):
+                        dlg_cadence = ui.select(
+                            _CADENCE_LABELS, value=str((existing or {}).get("cadence") or "daily"), label="Период"
+                        ).props("dense outlined").classes("flex-1")
+                        dlg_time = ui.input(
+                            "Время (ЧЧ:ММ)", value=str((existing or {}).get("time") or "03:00")
+                        ).props("dense outlined mask='##:##'").classes("w-32")
+                    ui.label("Дни недели (для ежедневного/еженедельного):").classes("rag-meta")
+                    existing_days = (existing or {}).get("days") or _DAY_LABELS[:5]
+                    day_checks = {d: ui.checkbox(_DAY_RU.get(d, d), value=(d in existing_days)) for d in _DAY_LABELS}
+                    with ui.row().classes("w-full gap-2 justify-end"):
+                        ui.button("Отмена", on_click=dlg.close).props("flat")
+                        def save_sched() -> None:
+                            days_sel = [d for d, cb in day_checks.items() if cb.value]
+                            settings_db.save_index_schedule(
+                                id=(existing or {}).get("id"),
+                                label=str(dlg_label.value or ""),
+                                enabled=bool(dlg_enabled.value),
+                                cadence=str(dlg_cadence.value or "daily"),
+                                time=str(dlg_time.value or "03:00"),
+                                days=days_sel,
+                                stage=str(dlg_stage.value or "all"),
+                            )
+                            dlg.close()
+                            render_schedules()
+                            ui.notify("Расписание сохранено.", type="positive")
+                        ui.button("Сохранить", icon="save", on_click=save_sched).props("unelevated")
+                dlg.open()
+
+            render_schedules()
+            ui.button("+ Добавить расписание", icon="add", on_click=lambda: open_sched_dialog()).props("outline")
+
+        # ── Настройки индекса ────────────────────────────────────────────
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("tune").classes("text-2xl text-indigo-500")
+                ui.label("Параметры индексации").classes("text-xl font-semibold")
+            with ui.row().classes("w-full gap-3 flex-wrap"):
                 workers_input = ui.number("Потоки чтения", value=int(settings.get("workers") or state.cfg.get("index_read_workers") or 4), min=1, max=32, step=1).props("dense outlined").classes("w-40")
                 max_chunks_input = ui.number("Макс. чанков на файл", value=int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000), min=0, max=100000, step=100).props("dense outlined").classes("w-52")
                 recreate_input = ui.checkbox("Пересоздавать коллекцию", value=bool(settings.get("recreate")))
                 skip_inline_ocr_input = ui.checkbox("Пропускать OCR внутри индекса", value=bool(settings.get("skip_inline_ocr")))
-            ui.label("Настройки сохраняются в БД. Их может использовать внешний планировщик или отдельный runner автоматизации.").classes("rag-meta")
+
+            ui.separator()
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("scanner").classes("text-xl text-orange-500")
+                ui.label("Настройки OCR").classes("font-semibold")
+            with ui.row().classes("w-full gap-3 items-end flex-wrap"):
+                ocr_enabled_input = ui.checkbox("Запускать OCR после индексации", value=bool(settings.get("ocr_enabled")))
+                with ui.column().classes("gap-0"):
+                    ocr_min_text_input = ui.number(
+                        "Порог текста для скана (символов)",
+                        value=int(settings.get("ocr_min_text_len") or 50),
+                        min=1, max=100000, step=10,
+                    ).props("dense outlined").classes("w-64")
+                    ui.label("Если в PDF меньше указанного числа символов — файл считается сканом.").classes("rag-meta text-xs")
 
             def save_index_settings() -> None:
                 saved = settings_db.save_index_settings({
-                    "schedule_enabled": bool(schedule_enabled.value),
-                    "cadence": str(cadence_input.value or "daily"),
-                    "time": str(time_input.value or "03:00"),
-                    "stage": str(stage_input.value or "all"),
                     "workers": int(workers_input.value or 4),
                     "max_chunks": int(max_chunks_input.value or 0),
                     "recreate": bool(recreate_input.value),
@@ -2205,16 +2464,15 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.notify("Настройки индексирования сохранены.", type="positive")
                 render()
 
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Сохранить настройки", icon="save", on_click=save_index_settings).props("unelevated")
+
+        # ── OCR статус ───────────────────────────────────────────────────
         active_ocr = telemetry.get("active_ocr")
         last_ocr = telemetry.get("last_ocr")
         ocr_summary = telemetry.get("ocr_summary") or {}
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("OCR распознавание").classes("text-xl font-semibold")
-            settings = settings_db.get_index_settings() if hasattr(settings_db, "get_index_settings") else {}
-            with ui.row().classes("w-full gap-3 items-center"):
-                ocr_enabled_input = ui.checkbox("Запускать OCR после индексации", value=bool(settings.get("ocr_enabled")))
-                ocr_min_text_input = ui.number("Порог текста для скана", value=int(settings.get("ocr_min_text_len") or 50), min=1, max=100000, step=10).props("dense outlined").classes("w-52")
-                ui.button("Сохранить настройки индекса и OCR", icon="save", on_click=save_index_settings).props("outline")
+        with ui.column().classes("rag-card w-full p-4 gap-2"):
+            ui.label("Статус OCR").classes("text-xl font-semibold")
             if active_ocr:
                 found = int(active_ocr.get("found_scanned") or 0)
                 processed = int(active_ocr.get("processed_pdfs") or 0)
@@ -2235,8 +2493,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 f"средне обработано: {float(ocr_summary.get('avg_processed_pdfs') or 0):.0f}"
             ).classes("rag-meta")
 
+        # ── Статистика по этапам + график ────────────────────────────────
         with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Статистика по этапам").classes("text-xl font-semibold")
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("Статистика по этапам").classes("text-xl font-semibold")
             rows = telemetry.get("stage_summary") or []
             if rows:
                 ui.table(
@@ -2249,7 +2509,7 @@ def _build_page(initial_screen: str = "search") -> None:
                         {"name": "updated_files", "label": "Обновлено", "field": "updated_files"},
                         {"name": "error_files", "label": "Ошибок", "field": "error_files"},
                         {"name": "points_added", "label": "Точек", "field": "points_added"},
-                        {"name": "last_duration_sec", "label": "Последний запуск, сек", "field": "last_duration_sec"},
+                        {"name": "last_duration_sec", "label": "Последний, сек", "field": "last_duration_sec"},
                         {"name": "avg_duration_sec", "label": "Среднее, сек", "field": "avg_duration_sec"},
                     ],
                     pagination=10,
@@ -2257,6 +2517,53 @@ def _build_page(initial_screen: str = "search") -> None:
             else:
                 ui.label("История этапов пока пустая.").classes("rag-meta")
 
+            # ── График по дням ──────────────────────────────────────────
+            ui.separator()
+            ui.label("График индексации по дням").classes("font-semibold")
+            with ui.row().classes("w-full gap-3 items-center"):
+                chart_metric = ui.select(
+                    {"files": "Файлов обработано", "added": "Файлов добавлено", "points": "Точек (чанков)"},
+                    value="files", label="Метрика"
+                ).props("dense outlined").classes("w-56")
+                chart_period = ui.select(
+                    {"7": "7 дней", "30": "30 дней", "90": "90 дней"},
+                    value="30", label="Период"
+                ).props("dense outlined").classes("w-36")
+                chart_area = ui.column().classes("w-full")
+
+            def rebuild_chart() -> None:
+                chart_area.clear()
+                period_days = int(chart_period.value or 30)
+                metric_key = str(chart_metric.value or "files")
+                daily = settings_db.get_daily_index_stats(days=period_days) if hasattr(settings_db, "get_daily_index_stats") else []
+                if not daily:
+                    with chart_area:
+                        ui.label("Нет данных за выбранный период.").classes("rag-meta")
+                    return
+                # Группируем по дням, суммируем метрику по всем этапам
+                from collections import defaultdict
+                by_day: Dict[str, int] = defaultdict(int)
+                for d in daily:
+                    by_day[str(d.get("day") or "")] += int(d.get(metric_key) or 0)
+                days_sorted = sorted(by_day.keys())
+                values = [by_day[d] for d in days_sorted]
+                metric_label = {"files": "Файлов", "added": "Добавлено", "points": "Точек"}[metric_key]
+                chart_option = {
+                    "tooltip": {"trigger": "axis"},
+                    "xAxis": {"type": "category", "data": days_sorted, "axisLabel": {"rotate": 30}},
+                    "yAxis": {"type": "value", "name": metric_label},
+                    "series": [{"name": metric_label, "type": "bar", "data": values,
+                                "itemStyle": {"color": "#6366f1"}}],
+                    "grid": {"left": "60px", "right": "20px", "bottom": "60px"},
+                }
+                with chart_area:
+                    ui.echart(chart_option).classes("w-full h-64")
+
+            chart_metric.on_value_change(lambda _: rebuild_chart())
+            chart_period.on_value_change(lambda _: rebuild_chart())
+            rebuild_chart()
+
+        # ── Форматы файлов ───────────────────────────────────────────────
         with ui.column().classes("rag-card w-full p-4 gap-2"):
             ui.label("Форматы файлов в индексе").classes("text-xl font-semibold")
             if not stats["found"]:
