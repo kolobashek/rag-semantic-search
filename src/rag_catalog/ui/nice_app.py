@@ -45,6 +45,16 @@ _DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _DAY_RU = {"Mon": "Пн", "Tue": "Вт", "Wed": "Ср", "Thu": "Чт", "Fri": "Пт", "Sat": "Сб", "Sun": "Вс"}
 
 
+def _open_log(log_path: "Path", label: str) -> "Any":
+    """Открыть лог-файл на дозапись, записать заголовок с временем."""
+    log_path.parent.mkdir(exist_ok=True)
+    fh = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fh.write(f"\n{'='*60}\n{label}  {ts}\n{'='*60}\n")
+    fh.flush()
+    return fh
+
+
 def _launch_indexer(
     cfg: Dict[str, Any],
     *,
@@ -54,12 +64,12 @@ def _launch_indexer(
     max_chunks: Optional[int] = None,
     skip_inline_ocr: bool = False,
 ) -> int:
-    """Запустить index_rag.py как фоновый процесс. Возвращает PID."""
-    index_script = PROJECT_ROOT / "src" / "rag_catalog" / "core" / "index_rag.py"
+    """Запустить index_rag как фоновый процесс. Возвращает PID."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    env["PYTHONIOENCODING"] = "utf-8"
     args = [
-        sys.executable, str(index_script),
+        sys.executable, "-m", "rag_catalog.core.index_rag",
         "--catalog", str(cfg.get("catalog_path") or ""),
         "--collection", str(cfg.get("collection_name") or ""),
         "--stage", stage,
@@ -75,37 +85,32 @@ def _launch_indexer(
         args.append("--recreate")
     if skip_inline_ocr:
         args.append("--no-ocr")
-    log_dir = PROJECT_ROOT / "logs"
-    log_dir.mkdir(exist_ok=True)
-    log_path = log_dir / "indexer_stderr.log"
-    stderr_file = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
+    log_fh = _open_log(PROJECT_ROOT / "logs" / "indexer.log", f"INDEXER  stage={stage}")
     proc = subprocess.Popen(
         args,
-        cwd=str(PROJECT_ROOT),
+        cwd=str(PROJECT_ROOT / "src"),
         env=env,
-        stdout=stderr_file,
-        stderr=stderr_file,
+        stdout=log_fh,
+        stderr=log_fh,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return proc.pid
 
 
 def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50) -> int:
-    """Запустить ocr_pdfs.py как фоновый процесс. Возвращает PID."""
-    ocr_script = PROJECT_ROOT / "src" / "rag_catalog" / "core" / "ocr_pdfs.py"
+    """Запустить ocr_pdfs как фоновый процесс. Возвращает PID."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
-    args = [sys.executable, str(ocr_script), "--min-text-len", str(int(min_text_len))]
-    log_dir = PROJECT_ROOT / "logs"
-    log_dir.mkdir(exist_ok=True)
-    log_path = log_dir / "ocr_stderr.log"
-    stderr_file = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
+    env["PYTHONIOENCODING"] = "utf-8"
+    args = [sys.executable, "-m", "rag_catalog.core.ocr_pdfs",
+            "--min-text-len", str(int(min_text_len))]
+    log_fh = _open_log(PROJECT_ROOT / "logs" / "ocr.log", "OCR")
     proc = subprocess.Popen(
         args,
-        cwd=str(PROJECT_ROOT),
+        cwd=str(PROJECT_ROOT / "src"),
         env=env,
-        stdout=stderr_file,
-        stderr=stderr_file,
+        stdout=log_fh,
+        stderr=log_fh,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return proc.pid
