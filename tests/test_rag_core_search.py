@@ -82,7 +82,8 @@ def test_search_no_results_is_valid_empty_list_and_truncates_query() -> None:
     out = s.search(long_query, source="test")
     assert out == []
     call = s.telemetry.search_calls[-1]
-    assert len(call["query"]) == MAX_QUERY_LEN
+    assert call["query"] == long_query
+    assert len(call["query_used"]) == MAX_QUERY_LEN
     assert "truncated_from=" in call["error"]
 
 
@@ -94,6 +95,49 @@ def test_search_sets_content_only_must_not_filter() -> None:
     assert qf.must_not and len(qf.must_not) == 1
     assert qf.must_not[0].key == "type"
     assert qf.must_not[0].match.value == "file_metadata"
+
+
+def test_search_title_only_disables_content_only_filter_and_logs_original_query() -> None:
+    s = _make_searcher(connected=True)
+    s.search("expanded query", title_only=True, content_only=True, query_original="typed query", source="test")
+    qf = s.qdrant.last_kwargs["query_filter"]
+    assert qf is None or not qf.must_not
+    call = s.telemetry.search_calls[-1]
+    assert call["query"] == "typed query"
+    assert call["query_original"] == "typed query"
+    assert call["query_used"] == "expanded query"
+
+
+def test_search_title_only_returns_only_metadata_points() -> None:
+    s = _make_searcher(connected=True)
+
+    s.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[  # type: ignore[method-assign]
+        SimpleNamespace(
+            score=0.91,
+            payload={
+                "type": "docx_content",
+                "filename": "chunk.docx",
+                "path": "p/chunk.docx",
+                "full_path": r"O:\p\chunk.docx",
+                "extension": ".docx",
+            },
+        ),
+        SimpleNamespace(
+            score=0.88,
+            payload={
+                "type": "file_metadata",
+                "filename": "meta.docx",
+                "path": "p/meta.docx",
+                "full_path": r"O:\p\meta.docx",
+                "extension": ".docx",
+            },
+        ),
+    ])
+    s._lexical_catalog_search = lambda **kwargs: []  # type: ignore[method-assign]
+
+    out = s.search("abc", title_only=True, source="test")
+
+    assert [item["type"] for item in out] == ["file_metadata"]
 
 
 def test_merge_ranked_results_applies_feedback_signal() -> None:

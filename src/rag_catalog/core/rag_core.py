@@ -172,6 +172,8 @@ class RAGSearcher:
         limit: int = 10,
         file_type: Optional[str] = None,
         content_only: bool = False,
+        title_only: bool = False,
+        query_original: str = "",
         source: str = "unknown",
         username: str = "",
     ) -> List[Dict[str, Any]]:
@@ -187,6 +189,7 @@ class RAGSearcher:
             limit:        Максимальное количество результатов.
             file_type:    Фильтр по расширению файла, например '.docx', '.pdf'.
             content_only: Если True — исключить точки типа file_metadata.
+            title_only:   Если True — вернуть только metadata-результаты по имени/пути.
 
         Returns:
             Список словарей с ключами:
@@ -194,7 +197,11 @@ class RAGSearcher:
         """
         started = time.perf_counter()
         raw_query = query or ""
+        raw_original = query_original if query_original else raw_query
+        if title_only and content_only:
+            content_only = False
         query_used = raw_query[:MAX_QUERY_LEN]
+        query_original_used = raw_original
         truncated_note = ""
         if len(raw_query) > MAX_QUERY_LEN:
             truncated_note = f"truncated_from={len(raw_query)}"
@@ -202,7 +209,7 @@ class RAGSearcher:
         if not self.connected:
             self.telemetry.log_search(
                 source=source,
-                query=query_used,
+                query=query_original_used,
                 limit_value=limit,
                 file_type=file_type,
                 content_only=content_only,
@@ -211,6 +218,8 @@ class RAGSearcher:
                 ok=False,
                 error="not_connected",
                 username=username,
+                query_original=query_original_used,
+                query_used=query_used,
             )
             raise ConnectionError("Нет подключения к Qdrant")
 
@@ -222,7 +231,7 @@ class RAGSearcher:
             logger.error("Не удалось построить эмбеддинг запроса: %s", exc)
             self.telemetry.log_search(
                 source=source,
-                query=query_used,
+                query=query_original_used,
                 limit_value=limit,
                 file_type=file_type,
                 content_only=content_only,
@@ -231,6 +240,8 @@ class RAGSearcher:
                 ok=False,
                 error=f"embed_error: {exc}",
                 username=username,
+                query_original=query_original_used,
+                query_used=query_used,
             )
             raise RuntimeError(f"Не удалось построить эмбеддинг запроса: {exc}") from exc
 
@@ -276,7 +287,7 @@ class RAGSearcher:
             logger.error("Ошибка поиска в Qdrant: %s", exc)
             self.telemetry.log_search(
                 source=source,
-                query=query_used,
+                query=query_original_used,
                 limit_value=limit,
                 file_type=file_type,
                 content_only=content_only,
@@ -285,10 +296,13 @@ class RAGSearcher:
                 ok=False,
                 error=f"qdrant_error: {exc}",
                 username=username,
+                query_original=query_original_used,
+                query_used=query_used,
             )
             raise RuntimeError(f"Ошибка поиска в Qdrant: {exc}") from exc
 
         results: List[Dict[str, Any]] = []
+        metadata_types = {"file_metadata", "folder_metadata"}
         for hit in raw:
             payload = hit.payload or {}
             results.append(
@@ -305,18 +319,21 @@ class RAGSearcher:
                     "chunk_index": payload.get("chunk_index"),
                 }
             )
+        if title_only:
+            results = [item for item in results if str(item.get("type") or "") in metadata_types]
 
         lexical_results = self._lexical_catalog_search(
             query=query_used,
             limit=max(limit * 4, 40),
             file_type=file_type,
             content_only=content_only,
+            title_only=title_only,
         )
         results = self._merge_ranked_results(lexical_results, results, limit=limit, query=query_used)
 
         self.telemetry.log_search(
             source=source,
-            query=query_used,
+            query=query_original_used,
             limit_value=limit,
             file_type=file_type,
             content_only=content_only,
@@ -325,6 +342,8 @@ class RAGSearcher:
             ok=True,
             error=truncated_note,
             username=username,
+            query_original=query_original_used,
+            query_used=query_used,
         )
         return results
 
@@ -429,7 +448,9 @@ class RAGSearcher:
         limit: int,
         file_type: Optional[str],
         content_only: bool,
+        title_only: bool = False,
     ) -> List[Dict[str, Any]]:
+        _ = title_only  # lexical path already returns only metadata entries
         if content_only:
             return []
         terms = self._query_terms(query)

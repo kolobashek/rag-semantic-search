@@ -11,6 +11,8 @@ def test_search_logs_include_username_and_migrate(tmp_path) -> None:
     db.log_search(
         source="nicegui",
         query="passport",
+        query_original="passport",
+        query_used="passport",
         limit_value=10,
         file_type=None,
         content_only=False,
@@ -20,8 +22,16 @@ def test_search_logs_include_username_and_migrate(tmp_path) -> None:
         username="admin",
     )
 
-    rows = db.fetch_dicts("SELECT username, query, results_count FROM search_logs")
-    assert rows == [{"username": "admin", "query": "passport", "results_count": 3}]
+    rows = db.fetch_dicts("SELECT username, query, query_original, query_used, results_count FROM search_logs")
+    assert rows == [
+        {
+            "username": "admin",
+            "query": "passport",
+            "query_original": "passport",
+            "query_used": "passport",
+            "results_count": 3,
+        }
+    ]
 
 
 def test_existing_search_logs_without_username_are_migrated_before_indexes(tmp_path) -> None:
@@ -58,6 +68,8 @@ def test_existing_search_logs_without_username_are_migrated_before_indexes(tmp_p
     db.log_search(
         source="nicegui",
         query="new",
+        query_original="new original",
+        query_used="new expanded",
         limit_value=10,
         file_type=None,
         content_only=False,
@@ -67,8 +79,28 @@ def test_existing_search_logs_without_username_are_migrated_before_indexes(tmp_p
         username="admin",
     )
 
-    rows = db.fetch_dicts("SELECT query, username FROM search_logs ORDER BY id")
-    assert rows == [{"query": "old", "username": ""}, {"query": "new", "username": "admin"}]
+    rows = db.fetch_dicts("SELECT query, query_original, query_used, username FROM search_logs ORDER BY id")
+    assert rows == [
+        {"query": "old", "query_original": "old", "query_used": "old", "username": ""},
+        {"query": "new", "query_original": "new original", "query_used": "new expanded", "username": "admin"},
+    ]
+
+
+def test_log_search_defaults_query_original_and_query_used_to_query(tmp_path) -> None:
+    db = TelemetryDB(str(tmp_path / "telemetry.db"))
+    db.log_search(
+        source="nicegui",
+        query="исходный",
+        limit_value=5,
+        file_type=None,
+        content_only=False,
+        results_count=1,
+        duration_ms=10,
+        ok=True,
+        username="u",
+    )
+    rows = db.fetch_dicts("SELECT query, query_original, query_used FROM search_logs")
+    assert rows == [{"query": "исходный", "query_original": "исходный", "query_used": "исходный"}]
 
 
 def test_app_events_are_logged(tmp_path) -> None:
@@ -193,3 +225,97 @@ def test_index_settings_are_persisted_and_normalized(tmp_path) -> None:
     assert loaded["schedule_enabled"] is True
     assert loaded["time"] == "02:30"
     assert loaded["recreate"] is True
+
+
+def test_worker_pid_columns_are_added_for_legacy_index_and_ocr_tables(tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE index_runs (
+                run_id TEXT PRIMARY KEY,
+                ts_started TEXT NOT NULL,
+                ts_finished TEXT,
+                status TEXT NOT NULL,
+                catalog_path TEXT,
+                collection_name TEXT,
+                recreate INTEGER NOT NULL DEFAULT 0,
+                total_files INTEGER NOT NULL DEFAULT 0,
+                added_files INTEGER NOT NULL DEFAULT 0,
+                updated_files INTEGER NOT NULL DEFAULT 0,
+                skipped_files INTEGER NOT NULL DEFAULT 0,
+                deleted_files INTEGER NOT NULL DEFAULT 0,
+                error_files INTEGER NOT NULL DEFAULT 0,
+                points_added INTEGER NOT NULL DEFAULT 0,
+                note TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE ocr_runs (
+                ocr_run_id TEXT PRIMARY KEY,
+                ts_started TEXT NOT NULL,
+                ts_updated TEXT NOT NULL,
+                ts_finished TEXT,
+                status TEXT NOT NULL,
+                collection_name TEXT NOT NULL DEFAULT '',
+                found_scanned INTEGER NOT NULL DEFAULT 0,
+                processed_pdfs INTEGER NOT NULL DEFAULT 0,
+                index_run_id TEXT,
+                note TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    TelemetryDB(str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        index_cols = {row[1] for row in conn.execute("PRAGMA table_info(index_runs)").fetchall()}
+        ocr_cols = {row[1] for row in conn.execute("PRAGMA table_info(ocr_runs)").fetchall()}
+    assert "worker_pid" in index_cols
+    assert "worker_pid" in ocr_cols
+
+
+def test_start_runs_save_worker_pid_and_active_index_lookup(tmp_path) -> None:
+    db = TelemetryDB(str(tmp_path / "telemetry.db"))
+    run_id = db.start_index_run(
+        catalog_path="O:\\Обмен",
+        collection_name="catalog",
+        recreate=False,
+        worker_pid=11111,
+    )
+    ocr_run_id = db.start_ocr_run(
+        collection_name="catalog",
+        found_scanned=2,
+        worker_pid=22222,
+    )
+
+    index_rows = db.fetch_dicts("SELECT run_id, worker_pid FROM index_runs WHERE run_id=?", [run_id])
+    ocr_rows = db.fetch_dicts("SELECT ocr_run_id, worker_pid FROM ocr_runs WHERE ocr_run_id=?", [ocr_run_id])
+    active = db.get_active_index_run()
+
+    assert index_rows == [{"run_id": run_id, "worker_pid": 11111}]
+    assert ocr_rows == [{"ocr_run_id": ocr_run_id, "worker_pid": 22222}]
+    assert active is not None
+    assert active["run_id"] == run_id
+    assert active["worker_pid"] == 11111
+
+
+def test_finalize_running_ocr_runs_updates_only_running_rows(tmp_path) -> None:
+    db = TelemetryDB(str(tmp_path / "telemetry.db"))
+    running_id = db.start_ocr_run(collection_name="catalog", found_scanned=3)
+    completed_id = db.start_ocr_run(collection_name="catalog", found_scanned=4)
+    db.finish_ocr_run(ocr_run_id=completed_id, status="completed", processed_pdfs=4, note="done")
+
+    closed = db.finalize_running_ocr_runs(status="cancelled", note="server_restart_recovery")
+    rows = db.fetch_dicts(
+        "SELECT ocr_run_id, status, note FROM ocr_runs WHERE ocr_run_id IN (?, ?) ORDER BY ocr_run_id",
+        [running_id, completed_id],
+    )
+    row_by_id = {row["ocr_run_id"]: row for row in rows}
+
+    assert closed == 1
+    assert row_by_id[running_id]["status"] == "cancelled"
+    assert "server_restart_recovery" in str(row_by_id[running_id]["note"] or "")
+    assert row_by_id[completed_id]["status"] == "completed"

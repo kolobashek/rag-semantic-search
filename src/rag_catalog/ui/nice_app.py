@@ -18,6 +18,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
 from nicegui import app, events, run, ui
 
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
@@ -55,6 +57,49 @@ def _open_log(log_path: "Path", label: str) -> "Any":
     return fh
 
 
+def _windows_detached_creationflags() -> int:
+    flags = 0
+    for name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB"):
+        flags |= int(getattr(subprocess, name, 0) or 0)
+    return flags
+
+
+def _is_process_alive(pid: int) -> bool:
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _find_live_running_index_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any]]:
+    rows = telemetry.fetch_dicts(
+        "SELECT * FROM index_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 20"
+    )
+    for row in rows:
+        pid = _safe_int(row.get("worker_pid"), 0)
+        if _is_process_alive(pid):
+            return row
+    return None
+
+
+def _find_live_running_ocr_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any]]:
+    rows = telemetry.fetch_dicts(
+        "SELECT * FROM ocr_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 20"
+    )
+    for row in rows:
+        pid = _safe_int(row.get("worker_pid"), 0)
+        if _is_process_alive(pid):
+            return row
+    return None
+
+
 def _launch_indexer(
     cfg: Dict[str, Any],
     *,
@@ -66,10 +111,12 @@ def _launch_indexer(
 ) -> int:
     """Запустить index_rag как фоновый процесс. Возвращает PID."""
     telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
-    telemetry.finalize_running_index_runs(
-        status="cancelled",
-        note="interrupted by new launch",
-    )
+    active_run = _find_live_running_index_run(telemetry)
+    if active_run:
+        active_pid = _safe_int(active_run.get("worker_pid"), 0)
+        raise RuntimeError(
+            f"Индексация уже запущена (PID {active_pid}). Дождитесь завершения текущего процесса."
+        )
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"
@@ -98,7 +145,7 @@ def _launch_indexer(
             env=env,
             stdout=log_fh,
             stderr=log_fh,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=_windows_detached_creationflags(),
         )
     finally:
         log_fh.close()
@@ -107,6 +154,13 @@ def _launch_indexer(
 
 def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50) -> int:
     """Запустить ocr_pdfs как фоновый процесс. Возвращает PID."""
+    telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
+    active_run = _find_live_running_ocr_run(telemetry)
+    if active_run:
+        active_pid = _safe_int(active_run.get("worker_pid"), 0)
+        raise RuntimeError(
+            f"OCR уже запущен (PID {active_pid}). Дождитесь завершения текущего процесса."
+        )
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"
@@ -120,7 +174,7 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50) -> int:
             env=env,
             stdout=log_fh,
             stderr=log_fh,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=_windows_detached_creationflags(),
         )
     finally:
         log_fh.close()
@@ -170,6 +224,8 @@ SEARCH_PRESETS = [
 ]
 
 FILE_PREVIEW_EXTENSIONS = {".txt", ".log", ".csv", ".json", ".md", ".py", ".ps1", ".xml", ".html", ".css"}
+INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
+OFFICE_PREVIEW_EXTENSIONS = {".docx", ".xlsx", ".xls", ".rtf"}
 PAGE_SIZE = 80
 SYSTEM_FILE_EXTENSIONS = {
     ".dll",
@@ -213,6 +269,7 @@ class PageState:
     file_type: Optional[str] = None
     limit: int = 50
     content_only: bool = False
+    title_only: bool = False
     history: List[str] = field(default_factory=list)
     results: List[Dict[str, Any]] = field(default_factory=list)
     search_error: str = ""
@@ -233,6 +290,7 @@ class PageState:
     auth_db: Optional[UserAuthDB] = None
     current_user: Optional[Dict[str, Any]] = None
     auth_token: str = ""
+    theme: str = "light"
     favorites: List[Dict[str, Any]] = field(default_factory=list)
     header_explorer_actions: Optional[ui.row] = None
     header_breadcrumbs: Optional[ui.row] = None
@@ -263,11 +321,175 @@ def _folder_url(full_path: str) -> str:
         return ""
 
 
+def _resolve_catalog_file(cfg: Dict[str, Any], raw_path: str) -> Optional[Path]:
+    try:
+        catalog = Path(str(cfg.get("catalog_path") or "")).resolve()
+        if not catalog.exists() or not catalog.is_dir():
+            return None
+        candidate = Path(str(raw_path or "")).resolve()
+        candidate.relative_to(catalog)
+    except Exception:
+        return None
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    return candidate
+
+
+def _viewer_file_url(full_path: str) -> str:
+    value = str(full_path or "").strip()
+    if not value:
+        return ""
+    return f"/api/view-file?path={quote(value, safe='')}"
+
+
+def _preview_office_file(path: Path, limit: int = 12000) -> str:
+    ext = path.suffix.lower()
+    if ext == ".docx":
+        try:
+            from docx import Document  # noqa: PLC0415
+
+            doc = Document(path)
+            parts: List[str] = [p.text for p in doc.paragraphs if p.text]
+            for table in doc.tables:
+                for row in table.rows:
+                    row_cells = [str(cell.text or "").strip() for cell in row.cells]
+                    line = " | ".join(item for item in row_cells if item)
+                    if line:
+                        parts.append(line)
+            return "\n".join(parts)[:limit] or "Документ пуст."
+        except Exception as exc:
+            return f"Не удалось прочитать DOCX: {exc}"
+    if ext == ".xlsx":
+        try:
+            from openpyxl import load_workbook  # noqa: PLC0415
+
+            wb = load_workbook(path, read_only=True, data_only=True)
+            parts: List[str] = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                parts.append(f"Лист: {sheet_name}")
+                for row in ws.iter_rows(values_only=True):
+                    row_text = " | ".join(str(c) if c is not None else "" for c in row)
+                    if row_text.strip():
+                        parts.append(row_text)
+                    if len("\n".join(parts)) >= limit:
+                        return "\n".join(parts)[:limit]
+            return "\n".join(parts)[:limit] or "Таблица пуста."
+        except Exception as exc:
+            return f"Не удалось прочитать XLSX: {exc}"
+    if ext == ".xls":
+        try:
+            import xlrd  # type: ignore  # noqa: PLC0415
+
+            book = xlrd.open_workbook(str(path))
+            parts = []
+            for sheet in book.sheets():
+                parts.append(f"Лист: {sheet.name}")
+                for row_idx in range(sheet.nrows):
+                    row = sheet.row_values(row_idx)
+                    row_text = " | ".join(str(v) if v not in ("", None) else "" for v in row)
+                    if row_text.strip():
+                        parts.append(row_text)
+                    if len("\n".join(parts)) >= limit:
+                        return "\n".join(parts)[:limit]
+            return "\n".join(parts)[:limit] or "Таблица пуста."
+        except Exception as exc:
+            return f"Не удалось прочитать XLS: {exc}"
+    if ext == ".rtf":
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+            no_ctrl = re.sub(r"\\[a-z]+\d* ?", " ", raw)
+            no_braces = re.sub(r"[{}]", "", no_ctrl)
+            clean = re.sub(r"\s+", " ", no_braces).strip()
+            return clean[:limit] or "Документ пуст."
+        except Exception as exc:
+            return f"Не удалось прочитать RTF: {exc}"
+    return "Для этого типа файла доступно открытие или скачивание."
+
+
+@app.get("/api/view-file")
+def api_view_file(path: str) -> FileResponse:
+    resolved = _resolve_catalog_file(load_config(), path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Файл не найден или недоступен")
+    media_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+    return FileResponse(str(resolved), media_type=media_type, filename=resolved.name)
+
+
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     explicit = str(cfg.get("telemetry_db_path") or "").strip()
     if explicit:
         return Path(explicit)
     return Path(str(cfg.get("qdrant_db_path") or "")) / "rag_telemetry.db"
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _resolve_index_recovery_stage(telemetry: TelemetryDB, active_run: Dict[str, Any]) -> str:
+    run_id = str(active_run.get("run_id") or "")
+    if run_id:
+        stage_rows = telemetry.fetch_dicts(
+            """
+            SELECT stage
+            FROM index_stage_progress
+            WHERE run_id=? AND status='running'
+            ORDER BY ts_updated DESC, ts_started DESC
+            LIMIT 1
+            """,
+            [run_id],
+        )
+        if stage_rows:
+            candidate = str(stage_rows[0].get("stage") or "").strip().lower()
+            if candidate in _STAGE_LABELS:
+                return candidate
+    note = str(active_run.get("note") or "")
+    match = re.search(r"stage=(all|metadata|small|large|content)", note.lower())
+    if match:
+        return match.group(1)
+    return "all"
+
+
+def _recover_background_tasks(cfg: Dict[str, Any]) -> None:
+    telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
+    settings = telemetry.get_index_settings() if hasattr(telemetry, "get_index_settings") else {}
+    workers = _safe_int(settings.get("workers") or cfg.get("index_read_workers") or 4, 4)
+    max_chunks = _safe_int(settings.get("max_chunks") or cfg.get("index_max_chunks") or 2000, 2000)
+    skip_inline_ocr = bool(settings.get("skip_inline_ocr"))
+    ocr_min_text_len = _safe_int(settings.get("ocr_min_text_len") or 50, 50)
+
+    live_index = _find_live_running_index_run(telemetry)
+    active_index = telemetry.get_active_index_run() if hasattr(telemetry, "get_active_index_run") else None
+    if not live_index and active_index:
+        recovery_stage = _resolve_index_recovery_stage(telemetry, active_index)
+        telemetry.finalize_running_index_runs(
+            status="cancelled",
+            note="server_restart_recovery",
+        )
+        _launch_indexer(
+            cfg,
+            stage=recovery_stage,
+            workers=workers,
+            max_chunks=max_chunks,
+            skip_inline_ocr=skip_inline_ocr,
+        )
+
+    live_ocr = _find_live_running_ocr_run(telemetry)
+    active_ocr = telemetry.get_active_ocr_run() if hasattr(telemetry, "get_active_ocr_run") else None
+    if not live_ocr and active_ocr:
+        if hasattr(telemetry, "finalize_running_ocr_runs"):
+            telemetry.finalize_running_ocr_runs(
+                status="cancelled",
+                note="server_restart_recovery",
+            )
+        _launch_ocr(
+            cfg,
+            min_text_len=ocr_min_text_len,
+        )
 
 
 CONFIG_PATH_KEYS = {
@@ -354,10 +576,31 @@ def _load_user_state(state: PageState) -> None:
         state.explorer_sort = str(explorer.get("sort") or state.explorer_sort)
         state.explorer_desc = bool(explorer.get("desc", state.explorer_desc))
         state.explorer_ext = str(explorer.get("ext") or state.explorer_ext)
+    ui_settings = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
+    if ui_settings:
+        theme = str(ui_settings.get("theme") or "").strip().lower()
+        if theme in {"light", "dark"}:
+            state.theme = theme
     state.favorites = auth_db.list_favorites(username=username)
     # Восстановить личную историю поиска из БД (персистентна между сессиями)
     if not state.history:
+        try:
+            _get_telemetry(state)
+        except Exception:
+            pass
         state.history = _my_recent_queries(state.cfg, username, limit=24)
+
+
+def _save_ui_settings(state: PageState) -> None:
+    username = _username(state)
+    if not username:
+        return
+    auth_db = _get_auth_db(state)
+    settings = auth_db.get_user_settings(username=username)
+    ui_settings = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
+    ui_settings["theme"] = state.theme if state.theme in {"light", "dark"} else "light"
+    settings["ui"] = ui_settings
+    auth_db.save_user_settings(username=username, settings=settings)
 
 
 def _save_explorer_settings(state: PageState) -> None:
@@ -446,7 +689,7 @@ def _my_recent_queries(cfg: Dict[str, Any], username: str = "", limit: int = 12)
     rows = _db_query_dicts(
         _telemetry_db_path(cfg),
         """
-        SELECT query
+        SELECT COALESCE(NULLIF(query_original, ''), query) AS query
         FROM search_logs
         WHERE query <> '' AND lower(username) = ?
         ORDER BY id DESC
@@ -462,10 +705,10 @@ def _popular_queries(cfg: Dict[str, Any], exclude_username: str = "", limit: int
     rows = _db_query_dicts(
         _telemetry_db_path(cfg),
         """
-        SELECT query, COUNT(*) AS cnt
+        SELECT COALESCE(NULLIF(query_original, ''), query) AS query, COUNT(*) AS cnt
         FROM search_logs
         WHERE query <> '' AND lower(username) != ?
-        GROUP BY lower(query)
+        GROUP BY lower(COALESCE(NULLIF(query_original, ''), query))
         ORDER BY cnt DESC
         LIMIT 40
         """,
@@ -512,9 +755,12 @@ def _run_catalog_search(
     searcher: RAGSearcher,
     *,
     query: str,
+    query_original: str,
+    query_used: str,
     limit: int,
     file_type: Optional[str],
     content_only: bool,
+    title_only: bool,
     username: str = "",
 ) -> List[Dict[str, Any]]:
     results = _normalize_search_results(
@@ -523,20 +769,23 @@ def _run_catalog_search(
             limit=limit,
             file_type=file_type,
             content_only=content_only,
+            title_only=title_only,
             source="nicegui",
             username=username,
+            query_original=query_original,
         )
     )
-    if results or content_only:
+    if results or content_only or title_only:
         return results
 
     # If the vector path returns an empty/invalid value, keep name/path search usable.
     try:
         fallback = searcher._lexical_catalog_search(  # noqa: SLF001 - UI fallback for catalog metadata search
-            query=query,
+            query=query_used,
             limit=max(limit, 10),
             file_type=file_type,
             content_only=False,
+            title_only=title_only,
         )
     except Exception:
         return results
@@ -1196,8 +1445,8 @@ def _install_css() -> None:
         .rag-result {
           background: rgba(255, 255, 255, 0.7);
           border: 1px solid var(--rag-border);
-          border-radius: 12px;
-          padding: 16px;
+          border-radius: 10px;
+          padding: 12px;
           box-shadow: 0 4px 14px rgba(0, 0, 0, 0.02);
           width: 100%;
           box-sizing: border-box;
@@ -1251,10 +1500,21 @@ def _install_css() -> None:
           color: var(--rag-muted);
           font-size: 12px;
         }
-        .rag-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+        .rag-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+        .rag-feedback-btn {
+          width: 30px;
+          height: 30px;
+          min-width: 30px;
+        }
         .rag-nav-button { justify-content: flex-start; border-radius: 8px; text-align: left; }
         .rag-nav-button .q-btn__content { justify-content: flex-start; width: 100%; text-align: left; }
         .rag-nav-button .q-icon { margin-right: 10px; }
+        .rag-suggest-item .block {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
         .rag-group-panel {
           width: 100%;
           border: 1px solid var(--rag-border);
@@ -1510,7 +1770,7 @@ def _install_css() -> None:
         @media (max-width: 760px) {
           .rag-page { width: calc(100vw - 20px); padding-top: 18px; }
           .rag-title { font-size: 28px; }
-          .rag-actions .q-btn { width: 100%; }
+          .rag-actions .q-btn { width: auto; }
           .rag-search-box { box-shadow: 0 4px 12px rgba(23, 32, 44, 0.06); }
         }
         """
@@ -1543,8 +1803,7 @@ def _install_css() -> None:
               const itemPath = decodeURIComponent(item.dataset.ragPath || '');
               const itemUrl = item.dataset.ragUrl || '';
               addButton(m, 'Открыть', () => {
-                if (itemUrl) window.open(itemUrl, '_blank');
-                else item.querySelector('[data-rag-open]')?.click();
+                item.querySelector('[data-rag-open]')?.click();
               });
               if (itemType === 'file' && itemUrl) {
                 addButton(m, 'Скачать', () => {
@@ -1594,8 +1853,10 @@ def _build_page(initial_screen: str = "search") -> None:
     except Exception:
         pass
 
-    with ui.header(fixed=True, elevated=False).classes("rag-header h-12 px-3 md:px-4"):
-        ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("text-slate-700")
+    dark_mode = ui.dark_mode(state.theme == "dark")
+
+    with ui.header(fixed=True, elevated=False).classes("rag-header h-12 px-3 md:px-4 items-center"):
+        menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("text-slate-700 self-center min-h-[34px]")
         ui.image("/rag-logo.png").classes("w-6 h-6 rounded") if LOGO_PATH.exists() else ui.icon("manage_search").classes("text-2xl")
         ui.label("RAG Каталог").classes("font-semibold text-base")
         # header_title убран — активный экран видно по подсветке в сайдбаре.
@@ -1606,10 +1867,15 @@ def _build_page(initial_screen: str = "search") -> None:
         state.header_breadcrumbs = header_breadcrumbs
         state.header_explorer_actions = header_actions
         ui.space()
+        theme_button = ui.button(
+            icon="light_mode" if state.theme == "dark" else "dark_mode",
+            on_click=lambda: toggle_theme(),
+            color=None,
+        ).props("flat round dense").classes("text-slate-700")
         status_text = "Qdrant готов" if _ensure_searcher(state) and state.searcher and state.searcher.connected else "Qdrant недоступен"
         ui.label(status_text).classes("hidden sm:block rag-chip")
 
-    with ui.left_drawer(value=True, fixed=True, bordered=True).classes("rag-drawer w-80 p-4") as drawer:
+    with ui.left_drawer(value=False, fixed=True, bordered=True).classes("rag-drawer w-80 p-4") as drawer:
         with ui.column().classes("rag-drawer-body w-full"):
             ui.label("Меню").classes("text-xl font-semibold mb-2")
             nav_area = ui.column().classes("w-full gap-2")
@@ -1643,13 +1909,23 @@ def _build_page(initial_screen: str = "search") -> None:
             due = _schedules_due(schedules)
             cfg_settings = tdb.get_index_settings() if hasattr(tdb, "get_index_settings") else {}
             for sched in due:
-                pid = _launch_indexer(
-                    state.cfg,
-                    stage=str(sched.get("stage") or "all"),
-                    workers=int(cfg_settings.get("workers") or state.cfg.get("index_read_workers") or 4),
-                    max_chunks=int(cfg_settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000),
-                    skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
-                )
+                try:
+                    pid = _launch_indexer(
+                        state.cfg,
+                        stage=str(sched.get("stage") or "all"),
+                        workers=int(cfg_settings.get("workers") or state.cfg.get("index_read_workers") or 4),
+                        max_chunks=int(cfg_settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000),
+                        skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
+                    )
+                except RuntimeError as exc:
+                    _log_app_event(
+                        state,
+                        "index",
+                        "schedule_skip",
+                        ok=False,
+                        details={"sched_id": sched.get("id"), "reason": str(exc)},
+                    )
+                    continue
                 tdb.touch_index_schedule(id=str(sched["id"]))
                 _log_app_event(state, "index", "schedule_run",
                                details={"sched_id": sched["id"], "stage": sched.get("stage"), "pid": pid})
@@ -1658,8 +1934,37 @@ def _build_page(initial_screen: str = "search") -> None:
 
     ui.timer(60.0, _tick_scheduler)
 
-    def set_screen(screen: str) -> None:
+    def do_logout() -> None:
+        auth_db = _get_auth_db(state)
+        if state.auth_token:
+            auth_db.revoke_session(state.auth_token)
+        auth_db.log_auth_event(username=_username(state), event_type="logout", ok=True)
+        state.current_user = None
+        state.auth_token = ""
+        state.theme = "light"
+        dark_mode.set_value(False)
+        try:
+            app.storage.user.pop("auth_token", None)
+        except Exception:
+            pass
+        render()
+
+    def toggle_theme() -> None:
+        if state.current_user is None:
+            return
+        state.theme = "dark" if state.theme == "light" else "light"
+        dark_mode.set_value(state.theme == "dark")
+        theme_button.set_icon("light_mode" if state.theme == "dark" else "dark_mode")
+        _save_ui_settings(state)
+        _log_app_event(state, "ui", "theme_toggle", details={"theme": state.theme})
+
+    def set_screen(screen: str, *, close_drawer: bool = False) -> None:
         touch_activity()
+        if close_drawer:
+            try:
+                drawer.set_value(False)
+            except Exception:
+                pass
         state.screen = screen
         ui.run_javascript(f"history.pushState(null, '', '/{screen}')")
         _log_app_event(state, "navigation", "open_screen", details={"screen": screen})
@@ -1682,17 +1987,30 @@ def _build_page(initial_screen: str = "search") -> None:
                 ("telegram", "Telegram", "send"),
             ]:
                 color = "primary" if state.screen == screen else None
-                ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s, close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
             if str((state.current_user or {}).get("role") or "") == "admin":
                 color = "primary" if state.screen == "index" else None
-                ui.button("Индекс", icon="analytics", on_click=lambda: set_screen("index"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button("Индекс", icon="analytics", on_click=lambda: set_screen("index", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
                 color = "primary" if state.screen == "stats" else None
-                ui.button("Статистика", icon="query_stats", on_click=lambda: set_screen("stats"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button("Статистика", icon="query_stats", on_click=lambda: set_screen("stats", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
         settings_area.clear()
         with settings_area:
             if state.screen == "search":
                 ui.separator()
+
+                def set_content_only(enabled: bool) -> None:
+                    state.content_only = bool(enabled)
+                    if state.content_only:
+                        state.title_only = False
+                    render()
+
+                def set_title_only(enabled: bool) -> None:
+                    state.title_only = bool(enabled)
+                    if state.title_only:
+                        state.content_only = False
+                    render()
+
                 with ui.expansion("Параметры поиска", icon="tune", value=True).classes("w-full"):
                     ui.select(
                         ["Все", ".docx", ".xlsx", ".xls", ".pdf"],
@@ -1701,7 +2019,16 @@ def _build_page(initial_screen: str = "search") -> None:
                         on_change=lambda e: setattr(state, "file_type", None if e.value == "Все" else e.value),
                     ).classes("w-full")
                     ui.number("Лимит", value=state.limit, min=1, max=50, step=1, on_change=lambda e: setattr(state, "limit", int(e.value or 10))).classes("w-full")
-                    ui.checkbox("Искать только в содержимом", value=state.content_only, on_change=lambda e: setattr(state, "content_only", bool(e.value)))
+                    ui.checkbox(
+                        "Искать только в содержимом",
+                        value=state.content_only,
+                        on_change=lambda e: set_content_only(bool(e.value)),
+                    )
+                    ui.checkbox(
+                        "Искать только в названиях",
+                        value=state.title_only,
+                        on_change=lambda e: set_title_only(bool(e.value)),
+                    )
 
         bottom_nav_area.clear()
         with bottom_nav_area:
@@ -1709,7 +2036,9 @@ def _build_page(initial_screen: str = "search") -> None:
             user_label = "Настройки"
             if state.current_user:
                 user_label = f"Настройки · {state.current_user.get('username')}"
-            ui.button(user_label, icon="settings", on_click=lambda: set_screen("settings"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+            ui.button(user_label, icon="settings", on_click=lambda: set_screen("settings", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+            if state.current_user:
+                ui.button("Выйти", icon="logout", on_click=do_logout, color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
     async def run_search(explicit_query: Optional[str] = None) -> None:
         touch_activity()
@@ -1761,13 +2090,39 @@ def _build_page(initial_screen: str = "search") -> None:
                 limit=state.limit,
                 file_type=state.file_type,
                 content_only=state.content_only,
+                title_only=state.title_only,
                 username=_username(state),
                 query=search_query,
+                query_original=query,
+                query_used=search_query,
             )
-            _log_app_event(state, "search", "run", details={"query": query, "results": len(state.results)})
+            _log_app_event(
+                state,
+                "search",
+                "run",
+                details={
+                    "query": query,
+                    "query_used": search_query,
+                    "results": len(state.results),
+                    "content_only": bool(state.content_only),
+                    "title_only": bool(state.title_only),
+                },
+            )
         except Exception as exc:
             state.search_error = str(exc)
-            _log_app_event(state, "search", "run", ok=False, details={"query": query, "error": str(exc)})
+            _log_app_event(
+                state,
+                "search",
+                "run",
+                ok=False,
+                details={
+                    "query": query,
+                    "query_used": search_query,
+                    "error": str(exc),
+                    "content_only": bool(state.content_only),
+                    "title_only": bool(state.title_only),
+                },
+            )
 
         render()
 
@@ -1821,14 +2176,16 @@ def _build_page(initial_screen: str = "search") -> None:
                     with ui.column().classes(col_cls):
                         ui.label("Моя история").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
                         for item in personal:
-                            ui.button(item, icon="history", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                            btn = ui.button(item, icon="history", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button rag-suggest-item w-full")
+                            btn.tooltip(item)
                 # Правая колонка — часто ищут
                 if popular:
                     col_cls = "flex-1 gap-1 min-w-0" + (" pl-3" if personal else "")
                     with ui.column().classes(col_cls):
                         ui.label("Часто ищут").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
                         for item in popular:
-                            ui.button(item, icon="trending_up", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                            btn = ui.button(item, icon="trending_up", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button rag-suggest-item w-full")
+                            btn.tooltip(item)
 
     def render_search_box() -> None:
         with ui.column().classes("rag-search-shell w-full max-w-5xl"):
@@ -1869,6 +2226,40 @@ def _build_page(initial_screen: str = "search") -> None:
         with ui.column().classes("w-full gap-2"):
             render_search_box()
 
+    def open_file_viewer(path_value: Path | str) -> None:
+        candidate = _resolve_catalog_file(state.cfg, str(path_value or ""))
+        if candidate is None:
+            ui.notify("Файл недоступен для просмотра.", type="warning")
+            return
+        viewer_url = _viewer_file_url(str(candidate))
+        ext = candidate.suffix.lower()
+
+        with ui.dialog() as dialog, ui.card().classes("w-[min(1100px,96vw)] max-h-[90vh] overflow-auto gap-3"):
+            with ui.row().classes("w-full items-center gap-2"):
+                with ui.column().classes("min-w-0 flex-1 gap-0"):
+                    ui.label(candidate.name).classes("text-lg font-semibold truncate")
+                    ui.label(str(candidate)).classes("rag-path")
+                ui.button("Скачать", icon="download", on_click=lambda p=candidate: ui.download(p, filename=p.name)).props("outline dense")
+                ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda p=candidate: _open_os_path(str(p.parent))).props("outline dense")
+                ui.button(icon="close", on_click=dialog.close, color=None).props("flat round dense")
+
+            if ext == ".pdf":
+                ui.html(
+                    f'<iframe src="{html.escape(viewer_url, quote=True)}" '
+                    'style="width:100%; height:72vh; border:1px solid rgba(148,163,184,.45); border-radius:10px;"></iframe>',
+                    sanitize=False,
+                )
+            elif ext in INLINE_IMAGE_EXTENSIONS:
+                ui.image(viewer_url).classes("max-w-full max-h-[72vh] object-contain mx-auto")
+            elif ext in FILE_PREVIEW_EXTENSIONS:
+                ui.label(_preview_file(candidate, limit=32000)).classes("rag-code")
+            elif ext in OFFICE_PREVIEW_EXTENSIONS:
+                ui.label(_preview_office_file(candidate, limit=32000)).classes("rag-code")
+                ui.label("Для офисных форматов показывается текстовый извлеченный фрагмент.").classes("rag-meta")
+            else:
+                ui.label("Встроенный просмотр для этого формата не поддерживается. Используйте скачивание или открытие в ОС.").classes("rag-meta")
+        dialog.open()
+
     def render_result(result: Dict[str, Any], index: int) -> None:
         name = str(result.get("filename") or "Без имени")
         path = str(result.get("path") or "")
@@ -1876,7 +2267,7 @@ def _build_page(initial_screen: str = "search") -> None:
         score = float(result.get("score") or 0)
         kind = _result_kind(result)
         text = _clean_text(result.get("text") or "")
-        preview = text[:650] + ("..." if len(text) > 650 else "")
+        preview = text[:280] + ("..." if len(text) > 280 else "")
         p = Path(full_path) if full_path else None
 
         def rate_result(value: int, result: Dict[str, Any] = result, index: int = index) -> None:
@@ -1898,7 +2289,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 "feedback",
                 details={"value": value, "path": result_path, "query": state.searched_query},
             )
-            ui.notify("Оценка сохранена. Следующие поиски будут учитывать этот сигнал.", type="positive")
+            ui.notify("Оценка сохранена.", type="positive")
 
         def track_result_use(reason: str, result: Dict[str, Any] = result, index: int = index) -> None:
             result_path = str(result.get("full_path") or result.get("path") or "")
@@ -1917,50 +2308,48 @@ def _build_page(initial_screen: str = "search") -> None:
             except Exception:
                 pass
 
-        with ui.column().classes("rag-result gap-3"):
-            with ui.row().classes("w-full items-start gap-3"):
-                ui.html(_file_icon_svg(full_path or path, kind), sanitize=False)
-                with ui.column().classes("flex-1 gap-1"):
-                    ui.label(f"{index}. {name}").classes("text-lg font-semibold")
-                    ui.label(path or full_path).classes("rag-path")
+        def open_primary() -> None:
+            if kind == "Каталог":
+                track_result_use("open_folder")
+                go_explorer(full_path)
+                return
+            if p and p.exists() and p.is_file():
+                track_result_use("open_viewer")
+                open_file_viewer(p)
+
+        with ui.column().classes("rag-result gap-2"):
+            with ui.row().classes("w-full items-start gap-2"):
+                opener = ui.row().classes("flex-1 min-w-0 items-start gap-2 cursor-pointer").on("click", open_primary)
+                with opener:
+                    ui.html(_file_icon_svg(full_path or path, kind), sanitize=False)
+                    with ui.column().classes("flex-1 min-w-0 gap-0"):
+                        title = ui.label(f"{index}. {name}").classes("text-base font-semibold truncate")
+                        title.tooltip(name)
+                        path_label = ui.label(path or full_path).classes("rag-path truncate")
+                        path_label.tooltip(path or full_path)
                 ui.label(f"{kind} · {score:.3f}").classes("rag-chip")
 
-            with ui.row().classes("rag-actions"):
-                ui.button("Полезно", icon="thumb_up", on_click=lambda: rate_result(3)).props("outline dense")
-                ui.button("Не то", icon="thumb_down", on_click=lambda: rate_result(-3)).props("outline dense")
-                if full_path:
-                    if kind == "Каталог":
-                        def open_folder(p: str = full_path) -> None:
-                            track_result_use("open_folder")
-                            go_explorer(p)
+            with ui.row().classes("w-full items-center justify-between gap-2"):
+                with ui.row().classes("rag-actions items-center"):
+                    if full_path:
+                        if kind == "Каталог":
+                            ui.button("В проводник приложения", icon="folder_open", on_click=lambda p=full_path: go_explorer(p)).props("outline dense")
+                        else:
+                            def open_in_app_explorer(pth: str = full_path) -> None:
+                                track_result_use("open_in_app_explorer")
+                                go_explorer(pth)
 
-                        ui.button("Открыть в приложении", icon="folder_open", on_click=open_folder).props("outline")
-                        url = _file_url(full_path)
-                        if url:
-                            ui.link("Папка ОС", url, new_tab=True).classes("q-btn q-btn--outline q-btn--rectangle q-btn--no-uppercase")
-                    else:
-                        url = _file_url(full_path)
-                        if url:
-                            ui.link("Открыть", url, new_tab=True).classes("q-btn q-btn--outline q-btn--rectangle q-btn--no-uppercase")
-                        folder_url = _folder_url(full_path)
-                        if folder_url:
-                            ui.link("Папка ОС", folder_url, new_tab=True).classes("q-btn q-btn--outline q-btn--rectangle q-btn--no-uppercase")
-                        def open_in_app_explorer(p: str = full_path) -> None:
-                            track_result_use("open_in_app_explorer")
-                            go_explorer(p)
-
-                        ui.button("В проводник приложения", icon="folder", on_click=open_in_app_explorer).props("outline")
-                        if p and p.exists() and p.is_file():
-                            def download_result(p: Path = p) -> None:
-                                track_result_use("download")
-                                ui.download(p, filename=p.name)
-
-                            ui.button("Скачать", icon="download", on_click=download_result).props("outline")
-                    def open_in_os(p: str = full_path) -> None:
-                        track_result_use("open_os")
-                        _open_os_path(p)
-
-                    ui.button("Проводник ОС", icon="open_in_new", on_click=open_in_os).props("flat")
+                            ui.button("В проводник приложения", icon="folder", on_click=open_in_app_explorer).props("outline dense")
+                            if p and p.exists() and p.is_file():
+                                ui.button("Скачать", icon="download", on_click=lambda pth=p: ui.download(pth, filename=pth.name)).props("outline dense")
+                        ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda pth=full_path: _open_os_path(str(Path(pth).parent if kind != "Каталог" else pth))).props("outline dense")
+                with ui.row().classes("items-center justify-end gap-1"):
+                    bad = ui.button(icon="thumb_down", on_click=lambda: rate_result(-3), color=None).props("flat round dense")
+                    bad.classes("rag-feedback-btn")
+                    bad.tooltip("Не то")
+                    good = ui.button(icon="thumb_up", on_click=lambda: rate_result(3), color=None).props("flat round dense")
+                    good.classes("rag-feedback-btn")
+                    good.tooltip("Полезно")
 
             if kind == "Каталог":
                 with ui.expansion("Раскрыть каталог", icon="account_tree").classes("w-full"):
@@ -1974,23 +2363,25 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.label("Папки").classes("font-semibold")
                             with ui.column().classes("w-full gap-1"):
                                 for item in children["dirs"]:
-                                    ui.button(item["name"], icon="folder", on_click=lambda p=item["path"]: go_explorer(p), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                                    btn = ui.button(item["name"], icon="folder", on_click=lambda pth=item["path"]: go_explorer(pth), color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                                    btn.tooltip(str(item["path"]))
                         if children["files"]:
                             ui.label("Файлы").classes("font-semibold mt-2")
-                            for item in children["files"]:
-                                ui.label(f"{item['name']} · {item.get('size', '')}").classes("rag-meta")
+                            with ui.column().classes("w-full gap-1"):
+                                for item in children["files"]:
+                                    item_path = Path(str(item["path"]))
+                                    with ui.row().classes("w-full items-center gap-2"):
+                                        ui.html(_file_icon_svg(str(item_path), "Файл"), sanitize=False)
+                                        file_btn = ui.button(
+                                            f"{item['name']} · {item.get('size', '')}",
+                                            on_click=lambda pth=item_path: open_file_viewer(pth),
+                                            color=None,
+                                        ).props("flat align=left no-caps dense").classes("rag-nav-button flex-1")
+                                        file_btn.tooltip(str(item_path))
                         if children.get("truncated"):
                             ui.label("Показаны первые элементы. Полный список доступен в проводнике приложения.").classes("rag-meta")
-            else:
-                if preview:
-                    ui.label(preview).classes("rag-meta")
-                with ui.expansion("Просмотреть в приложении", icon="visibility").classes("w-full"):
-                    if p:
-                        ui.label(_preview_file(p)).classes("rag-code")
-                    elif text:
-                        ui.label(text[:6000]).classes("rag-code")
-                    else:
-                        ui.label("Нет доступного фрагмента.").classes("rag-meta")
+            elif preview:
+                ui.label(preview).classes("rag-meta")
 
     def render_search_screen() -> None:
         render_search_header()
@@ -2108,11 +2499,10 @@ def _build_page(initial_screen: str = "search") -> None:
             render()
 
         def open_file(path: Path) -> None:
-            url = _file_url(str(path))
-            if url:
+            if path.exists() and path.is_file():
                 _get_auth_db(state).touch_favorite(username=_username(state), path=str(path))
                 _log_app_event(state, "explorer", "open_file", details={"path": str(path)})
-                ui.run_javascript(f"window.open({json.dumps(url)}, '_blank')")
+                open_file_viewer(path)
 
         def copy_path(path: Path) -> None:
             ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(str(path))})")
@@ -2120,7 +2510,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
         def explorer_context_props(path: Path, *, is_dir: bool) -> str:
             item_type = "folder" if is_dir else "file"
-            item_url = "" if is_dir else _file_url(str(path))
+            item_url = "" if is_dir else _viewer_file_url(str(path))
             favorite = "true" if _is_favorite(state, str(path)) else "false"
             attrs = {
                 "data-rag-context": "explorer-item",
@@ -2177,7 +2567,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 opener.props("data-rag-open")
                 with opener:
                     ui.html(icon, sanitize=False)
-                    ui.label(path.name).classes("rag-explorer-name text-center text-sm")
+                    name_label = ui.label(path.name).classes("rag-explorer-name text-center text-sm")
+                    name_label.tooltip(str(path.name))
                 os_button = ui.button(on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("data-rag-os")
                 os_button.classes("hidden")
 
@@ -2195,7 +2586,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.html(_file_icon_svg(str(path), "Каталог" if is_dir else "Файл"), sanitize=False)
                 action = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
                 with ui.column().classes("flex-1 gap-0"):
-                    ui.button(path.name, on_click=action, color=None).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
+                    open_btn = ui.button(path.name, on_click=action, color=None).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
+                    open_btn.tooltip(str(path.name))
                     if not compact:
                         ui.label(f"{'Папка' if is_dir else path.suffix or 'без расширения'} · {size} · {modified}").classes("rag-meta")
                 if not compact:
@@ -2363,8 +2755,17 @@ def _build_page(initial_screen: str = "search") -> None:
 
             def make_run_handler(stage_key: str) -> Any:
                 def handler() -> None:
-                    pid = _launch_indexer(state.cfg, stage=stage_key, workers=workers_now,
-                                         max_chunks=chunks_now, skip_inline_ocr=skip_ocr_now)
+                    try:
+                        pid = _launch_indexer(
+                            state.cfg,
+                            stage=stage_key,
+                            workers=workers_now,
+                            max_chunks=chunks_now,
+                            skip_inline_ocr=skip_ocr_now,
+                        )
+                    except RuntimeError as exc:
+                        ui.notify(str(exc), type="warning")
+                        return
                     _log_app_event(state, "index", "run_now", details={"stage": stage_key, "pid": pid})
                     ui.notify(f"Индексация «{_STAGE_LABELS.get(stage_key, stage_key)}» запущена (PID {pid}).", type="positive")
                 return handler
@@ -2380,7 +2781,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.label("OCR распознавание").classes("font-semibold")
 
             def run_ocr_now() -> None:
-                pid = _launch_ocr(state.cfg, min_text_len=ocr_min_len_now)
+                try:
+                    pid = _launch_ocr(state.cfg, min_text_len=ocr_min_len_now)
+                except RuntimeError as exc:
+                    ui.notify(str(exc), type="warning")
+                    return
                 _log_app_event(state, "index", "run_ocr_now", details={"pid": pid})
                 ui.notify(f"OCR-проход запущен (PID {pid}).", type="positive")
 
@@ -2686,20 +3091,14 @@ def _build_page(initial_screen: str = "search") -> None:
         with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
             with ui.column().classes("rag-card w-full max-w-xl p-5 gap-3"):
                 ui.label("Вход в RAG Каталог").classes("text-2xl font-semibold")
-                ui.label("Введите учетные данные, чтобы открыть приложение.").classes("rag-meta")
-                username_input = ui.input("Логин").props("dense outlined").classes("w-full")
-                password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                ui.label("Войдите в аккаунт или отправьте заявку на доступ.").classes("rag-meta")
 
-                def login() -> None:
-                    username = str(username_input.value or "")
-                    user = auth_db.login(username=username, password=str(password_input.value or ""))
-                    if not user:
-                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
-                        ui.notify("Неверный логин или пароль.", type="negative")
-                        return
+                tg_login_token = {"value": ""}
+
+                def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
                     state.current_user = user
                     state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
-                    auth_db.log_auth_event(username=_username(state), event_type="login", ok=True)
+                    auth_db.log_auth_event(username=_username(state), event_type=event_type, ok=True)
                     _load_user_state(state)
                     try:
                         app.storage.user["auth_token"] = state.auth_token
@@ -2708,101 +3107,100 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.notify("Вход выполнен.", type="positive")
                     render()
 
-                password_input.on("keyup.enter", lambda _: login())
-                ui.button("Войти", icon="login", on_click=login).props("unelevated")
+                def login() -> None:
+                    username = str(username_input.value or "")
+                    user = auth_db.login(username=username, password=str(password_input.value or ""))
+                    if not user:
+                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
+                        ui.notify("Неверный логин или пароль.", type="negative")
+                        return
+                    _complete_login(user, event_type="login")
 
-                with ui.expansion("Вход через Telegram", icon="send").classes("w-full"):
-                    ui.label("Откройте ссылку, подтвердите вход в боте, затем приложение войдет автоматически.").classes("rag-meta")
-                    tg_login_link = ui.input("Ссылка входа", value="").props("dense outlined readonly").classes("w-full")
-                    tg_login_token = {"value": ""}
+                def request_tg_login() -> None:
+                    bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+                    if not bot_link:
+                        ui.notify("Telegram-вход не настроен: задайте telegram_bot_link в config.json.", type="warning")
+                        return
+                    out = auth_db.create_telegram_login_challenge(target="web")
+                    token = str(out.get("token") or "")
+                    link = _telegram_deeplink(bot_link, "login", token)
+                    if not token or not link:
+                        ui.notify("Не удалось создать Telegram-ссылку входа.", type="negative")
+                        return
+                    tg_login_token["value"] = token
+                    ui.run_javascript(
+                        "(() => {"
+                        f"const url = {json.dumps(link)};"
+                        "const w = window.open(url, '_blank', 'noopener,noreferrer');"
+                        "if (!w) { window.location.href = url; }"
+                        "})();"
+                    )
+                    ui.notify("Подтвердите вход в Telegram, затем вернитесь в браузер.", type="positive")
 
-                    def request_tg_login() -> None:
-                        bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-                        if not bot_link:
-                            ui.notify("В config.json не задан telegram_bot_link.", type="warning")
-                            return
-                        out = auth_db.create_telegram_login_challenge(target="web")
-                        tg_login_token["value"] = str(out.get("token") or "")
-                        tg_login_link.value = _telegram_deeplink(bot_link, "login", tg_login_token["value"])
-                        tg_login_link.update()
-                        ui.notify("Ссылка входа создана.", type="positive")
+                def poll_tg_login() -> None:
+                    token = tg_login_token["value"]
+                    if not token or state.current_user is not None:
+                        return
+                    out = auth_db.consume_confirmed_telegram_login(token=token)
+                    if not out.get("ok"):
+                        return
+                    tg_login_token["value"] = ""
+                    user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
+                    if not user:
+                        return
+                    _complete_login(user, event_type="telegram_web_login")
 
-                    def poll_tg_login() -> None:
-                        token = tg_login_token["value"]
-                        if not token or state.current_user is not None:
-                            return
-                        out = auth_db.consume_confirmed_telegram_login(token=token)
-                        if not out.get("ok"):
-                            return
-                        user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
-                        if not user:
-                            return
-                        state.current_user = user
-                        state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
-                        auth_db.log_auth_event(username=_username(state), event_type="telegram_web_login", ok=True)
-                        _load_user_state(state)
-                        try:
-                            app.storage.user["auth_token"] = state.auth_token
-                        except Exception:
-                            pass
-                        ui.notify("Вход через Telegram выполнен.", type="positive")
-                        render()
+                def register_request() -> None:
+                    username = str(reg_username_input.value or "").strip().lower()
+                    display_name = str(reg_display_input.value or "").strip()
+                    tg_username = str(reg_tg_user_input.value or "").strip().lstrip("@")
+                    if len(username) < 3:
+                        ui.notify("Укажите логин (минимум 3 символа).", type="warning")
+                        return
+                    if auth_db.get_user(username=username):
+                        ui.notify("Пользователь с таким логином уже существует. Используйте вход.", type="warning")
+                        return
+                    out = auth_db.create_registration_request(
+                        username=username,
+                        display_name=display_name or username,
+                        telegram_username=tg_username,
+                        source="web",
+                        note="requested from web login form",
+                    )
+                    if not out.get("ok"):
+                        ui.notify("Не удалось отправить заявку. Попробуйте позже.", type="negative")
+                        return
+                    ui.notify("Заявка отправлена администратору.", type="positive")
+                    reg_username_input.value = ""
+                    reg_display_input.value = ""
+                    reg_tg_user_input.value = ""
+                    reg_username_input.update()
+                    reg_display_input.update()
+                    reg_tg_user_input.update()
 
-                    ui.timer(2.0, poll_tg_login)
-                    with ui.row().classes("w-full gap-2"):
-                        ui.button("Создать ссылку входа", icon="link", on_click=request_tg_login).props("outline")
-                        ui.button(
-                            "Открыть Telegram",
-                            icon="open_in_new",
-                            on_click=lambda: ui.run_javascript(
-                                f"window.open({json.dumps(str(tg_login_link.value or ''))}, '_blank')"
-                            ),
-                        ).props("outline")
+                tabs = ui.tabs().classes("w-full")
+                with tabs:
+                    tab_login = ui.tab("Войти", icon="login")
+                    tab_register = ui.tab("Зарегистрироваться", icon="person_add")
 
-                with ui.expansion("Привязка Telegram", icon="verified_user").classes("w-full"):
-                    ui.label(
-                        "Введите логин и пароль, создайте ссылку и откройте ее в Telegram."
-                    ).classes("rag-meta")
-                    tg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")
-                    tg_password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-                    tg_link_output = ui.input("Ссылка активации Telegram", value="").props("dense outlined readonly").classes("w-full")
+                with ui.tab_panels(tabs, value=tab_login).classes("w-full"):
+                    with ui.tab_panel(tab_login).classes("w-full gap-3"):
+                        username_input = ui.input("Логин").props("dense outlined").classes("w-full")
+                        password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                        password_input.on("keyup.enter", lambda _: login())
+                        ui.button("Войти", icon="login", on_click=login).props("unelevated")
+                        ui.separator()
+                        ui.button("Войти через Telegram", icon="send", on_click=request_tg_login).props("outline").classes("w-full")
+                        ui.label("Стандартный сценарий: как у OAuth-входа — нажали кнопку, подтвердили в Telegram, вернулись в приложение.").classes("rag-meta")
 
-                    def request_tg_link() -> None:
-                        bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-                        if not bot_link:
-                            ui.notify("В config.json не задан telegram_bot_link.", type="warning")
-                            return
-                        try:
-                            out = auth_db.request_telegram_link(
-                                username=str(tg_username_input.value or ""),
-                                password=str(tg_password_input.value or ""),
-                            )
-                        except Exception as exc:
-                            ui.notify(f"Не удалось создать ссылку: {exc}", type="negative")
-                            return
-                        if not out.get("ok"):
-                            reason = str(out.get("reason") or "")
-                            if reason == "bad_credentials":
-                                ui.notify("Неверный логин или пароль.", type="negative")
-                            elif reason == "user_not_found":
-                                ui.notify("Активный пользователь не найден.", type="negative")
-                            else:
-                                ui.notify("Не удалось создать ссылку.", type="negative")
-                            return
-                        link = _telegram_deeplink(bot_link, "link", str(out.get("token") or ""))
-                        tg_link_output.value = link
-                        tg_link_output.update()
-                        ui.notify("Ссылка создана. Откройте ее или отправьте себе.", type="positive")
+                    with ui.tab_panel(tab_register).classes("w-full gap-3"):
+                        reg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")
+                        reg_display_input = ui.input("Имя").props("dense outlined").classes("w-full")
+                        reg_tg_user_input = ui.input("Telegram username (необязательно)").props("dense outlined").classes("w-full")
+                        ui.button("Отправить заявку", icon="how_to_reg", on_click=register_request).props("unelevated")
+                        ui.label("После одобрения администратором вы получите доступ к аккаунту.").classes("rag-meta")
 
-                    with ui.row().classes("w-full gap-2"):
-                        ui.button("Создать ссылку активации", icon="link", on_click=request_tg_link).props("outline")
-                        ui.button(
-                            "Открыть ссылку",
-                            icon="open_in_new",
-                            on_click=lambda: ui.run_javascript(
-                                f"window.open({json.dumps(str(tg_link_output.value or ''))}, '_blank')"
-                            ),
-                        ).props("outline")
+                ui.timer(2.0, poll_tg_login)
 
     def render_admin_users(auth_db: UserAuthDB) -> None:
         with ui.column().classes("rag-card w-full p-4 gap-4"):
@@ -3345,21 +3743,20 @@ def _build_page(initial_screen: str = "search") -> None:
                             f"Логин: {user.get('username')} · роль: {user.get('role')} · статус: {user.get('status')}"
                         ).classes("rag-meta")
                         disp_in = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
-                        tg_id_in = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
-                        tg_un_in = ui.input("Telegram username", value=str(user.get("telegram_username") or "")).props("dense outlined prefix=@").classes("w-full")
-                        tg_link_in = ui.input("Ссылка привязки Telegram", value="").props("dense outlined readonly").classes("w-full")
+                        linked_tg_id = str(user.get("telegram_chat_id") or "").strip()
+                        linked_tg_un = str(user.get("telegram_username") or "").strip()
 
                         def save_profile() -> None:
                             auth_db.update_profile(
                                 username=str(user.get("username") or ""),
                                 display_name=str(disp_in.value or ""),
-                                telegram_chat_id=str(tg_id_in.value or ""),
-                                telegram_username=str(tg_un_in.value or ""),
+                                telegram_chat_id=linked_tg_id,
+                                telegram_username=linked_tg_un,
                             )
                             _refresh_current_user(state)
                             ui.notify("Профиль сохранён.", type="positive")
 
-                        def make_tg_link() -> None:
+                        def bind_tg() -> None:
                             bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
                             if not bot_link:
                                 ui.notify("В config.json не задан telegram_bot_link.", type="warning")
@@ -3368,19 +3765,26 @@ def _build_page(initial_screen: str = "search") -> None:
                             if not out.get("ok"):
                                 ui.notify(f"Ошибка: {out.get('reason')}", type="negative")
                                 return
-                            tg_link_in.value = _telegram_deeplink(bot_link, "link", str(out.get("token") or ""))
-                            tg_link_in.update()
-                            ui.notify("Ссылка создана.", type="positive")
+                            link = _telegram_deeplink(bot_link, "link", str(out.get("token") or ""))
+                            if not link:
+                                ui.notify("Не удалось создать ссылку привязки.", type="negative")
+                                return
+                            ui.run_javascript(
+                                "(() => {"
+                                f"const url = {json.dumps(link)};"
+                                "const w = window.open(url, '_blank', 'noopener,noreferrer');"
+                                "if (!w) { window.location.href = url; }"
+                                "})();"
+                            )
+                            ui.notify("Откройте Telegram и подтвердите привязку.", type="positive")
 
                         ui.button("Сохранить профиль", icon="save", on_click=save_profile).props("outline")
-                        with ui.row().classes("gap-2"):
-                            ui.button("Привязать Telegram", icon="link", on_click=make_tg_link).props("outline")
-                            ui.button(
-                                "Открыть Telegram", icon="open_in_new",
-                                on_click=lambda: ui.run_javascript(
-                                    f"window.open({json.dumps(str(tg_link_in.value or ''))}, '_blank')"
-                                ),
-                            ).props("outline")
+                        if linked_tg_id:
+                            linked_label = f"@{linked_tg_un}" if linked_tg_un else linked_tg_id
+                            ui.label(f"Telegram уже привязан: {linked_label}").classes("rag-meta")
+                        else:
+                            ui.label("Telegram не привязан. Можно привязать в один клик.").classes("rag-meta")
+                            ui.button("Привязать Telegram", icon="link", on_click=bind_tg).props("outline")
 
                 elif sec == "explorer":
                     with ui.column().classes("rag-card w-full p-4 gap-3"):
@@ -3417,9 +3821,7 @@ def _build_page(initial_screen: str = "search") -> None:
                                 if item_type == "folder":
                                     ui.button("Открыть", on_click=lambda p=fav_path: go_explorer(str(p))).props("outline dense")
                                 else:
-                                    ui.button("Открыть", on_click=lambda p=fav_path: ui.run_javascript(
-                                        f"window.open({json.dumps(_file_url(str(p)))}, '_blank')"
-                                    )).props("outline dense")
+                                    ui.button("Открыть", on_click=lambda p=fav_path: open_file_viewer(p)).props("outline dense")
                                 ui.button(icon="delete", on_click=lambda p=fav_path: (
                                     _toggle_favorite(state, p), render_section()
                                 )).props("flat round dense")
@@ -3444,18 +3846,6 @@ def _build_page(initial_screen: str = "search") -> None:
                                 _refresh_current_user(state)
                             ui.notify("Пароль изменён." if ok else "Не удалось изменить пароль.",
                                       type="positive" if ok else "negative")
-
-                        def do_logout() -> None:
-                            if state.auth_token:
-                                auth_db.revoke_session(state.auth_token)
-                            auth_db.log_auth_event(username=_username(state), event_type="logout", ok=True)
-                            state.current_user = None
-                            state.auth_token = ""
-                            try:
-                                app.storage.user.pop("auth_token", None)
-                            except Exception:
-                                pass
-                            render()
 
                         with ui.row().classes("gap-2"):
                             ui.button("Сменить пароль", icon="key", on_click=change_pw).props("outline")
@@ -3720,7 +4110,19 @@ def _build_page(initial_screen: str = "search") -> None:
         with content:
             if state.current_user is None:
                 try:
+                    drawer.set_value(False)
+                except Exception:
+                    pass
+                try:
                     drawer.set_visibility(False)
+                except Exception:
+                    pass
+                try:
+                    menu_button.set_visibility(False)
+                except Exception:
+                    pass
+                try:
+                    theme_button.set_visibility(False)
                 except Exception:
                     pass
                 render_login_screen()
@@ -3729,6 +4131,16 @@ def _build_page(initial_screen: str = "search") -> None:
                 drawer.set_visibility(True)
             except Exception:
                 pass
+            try:
+                menu_button.set_visibility(True)
+            except Exception:
+                pass
+            try:
+                theme_button.set_visibility(True)
+                theme_button.set_icon("light_mode" if state.theme == "dark" else "dark_mode")
+            except Exception:
+                pass
+            dark_mode.set_value(state.theme == "dark")
             touch_activity()
             if state.screen == "explorer":
                 try:
@@ -3791,6 +4203,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-show", action="store_true", help="Не открывать браузер автоматически.")
     args = parser.parse_args(argv)
+    try:
+        _recover_background_tasks(load_config())
+    except Exception as exc:
+        print(f"[nice_app] background recovery skipped: {exc}", file=sys.stderr)
     ui.run(
         title="RAG Каталог",
         host=args.host,

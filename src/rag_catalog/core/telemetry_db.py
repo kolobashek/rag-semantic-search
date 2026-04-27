@@ -130,6 +130,8 @@ class TelemetryDB:
                         ts TEXT NOT NULL,
                         source TEXT NOT NULL,
                         query TEXT NOT NULL,
+                        query_original TEXT NOT NULL DEFAULT '',
+                        query_used TEXT NOT NULL DEFAULT '',
                         limit_value INTEGER,
                         file_type TEXT,
                         content_only INTEGER NOT NULL DEFAULT 0,
@@ -158,6 +160,7 @@ class TelemetryDB:
                         ts_started TEXT NOT NULL,
                         ts_finished TEXT,
                         status TEXT NOT NULL,
+                        worker_pid INTEGER NOT NULL DEFAULT 0,
                         catalog_path TEXT,
                         collection_name TEXT,
                         recreate INTEGER NOT NULL DEFAULT 0,
@@ -248,6 +251,7 @@ class TelemetryDB:
                         ts_updated TEXT NOT NULL,
                         ts_finished TEXT,
                         status TEXT NOT NULL,
+                        worker_pid INTEGER NOT NULL DEFAULT 0,
                         collection_name TEXT NOT NULL DEFAULT '',
                         found_scanned INTEGER NOT NULL DEFAULT 0,
                         processed_pdfs INTEGER NOT NULL DEFAULT 0,
@@ -311,6 +315,35 @@ class TelemetryDB:
         search_cols = {row["name"] for row in conn.execute("PRAGMA table_info(search_logs)").fetchall()}
         if "username" not in search_cols:
             conn.execute("ALTER TABLE search_logs ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+            search_cols.add("username")
+        if "query_original" not in search_cols:
+            conn.execute("ALTER TABLE search_logs ADD COLUMN query_original TEXT NOT NULL DEFAULT ''")
+            search_cols.add("query_original")
+        if "query_used" not in search_cols:
+            conn.execute("ALTER TABLE search_logs ADD COLUMN query_used TEXT NOT NULL DEFAULT ''")
+            search_cols.add("query_used")
+        conn.execute(
+            """
+            UPDATE search_logs
+            SET query_original = query
+            WHERE COALESCE(query_original, '') = ''
+              AND COALESCE(query, '') <> ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE search_logs
+            SET query_used = query
+            WHERE COALESCE(query_used, '') = ''
+              AND COALESCE(query, '') <> ''
+            """
+        )
+        index_cols = {row["name"] for row in conn.execute("PRAGMA table_info(index_runs)").fetchall()}
+        if "worker_pid" not in index_cols:
+            conn.execute("ALTER TABLE index_runs ADD COLUMN worker_pid INTEGER NOT NULL DEFAULT 0")
+        ocr_cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocr_runs)").fetchall()}
+        if "worker_pid" not in ocr_cols:
+            conn.execute("ALTER TABLE ocr_runs ADD COLUMN worker_pid INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_default_search_aliases(self, conn: sqlite3.Connection) -> None:
         now = _utc_now()
@@ -356,21 +389,25 @@ class TelemetryDB:
         ok: bool,
         error: str = "",
         username: str = "",
+        query_original: str = "",
+        query_used: str = "",
     ) -> None:
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
                     """
                     INSERT INTO search_logs (
-                        ts, source, query, limit_value, file_type, content_only,
+                        ts, source, query, query_original, query_used, limit_value, file_type, content_only,
                         results_count, duration_ms, ok, error, username
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         _utc_now(),
                         source or "unknown",
                         query or "",
+                        query_original or query or "",
+                        query_used or query or "",
                         int(limit_value),
                         file_type or "",
                         1 if content_only else 0,
@@ -775,6 +812,7 @@ class TelemetryDB:
         collection_name: str,
         recreate: bool,
         note: str = "",
+        worker_pid: int = 0,
     ) -> str:
         run_id = str(uuid.uuid4())
         with self._lock:
@@ -782,14 +820,15 @@ class TelemetryDB:
                 conn.execute(
                     """
                     INSERT INTO index_runs (
-                        run_id, ts_started, status, catalog_path, collection_name, recreate, note
+                        run_id, ts_started, status, worker_pid, catalog_path, collection_name, recreate, note
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
                         _utc_now(),
                         "running",
+                        int(worker_pid),
                         catalog_path,
                         collection_name,
                         1 if recreate else 0,
@@ -797,6 +836,13 @@ class TelemetryDB:
                     ),
                 )
         return run_id
+
+    def get_active_index_run(self) -> Optional[Dict[str, Any]]:
+        """Вернуть активный индексный запуск (status='running') или None."""
+        rows = self.fetch_dicts(
+            "SELECT * FROM index_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 1"
+        )
+        return rows[0] if rows else None
 
     def finalize_running_index_runs(
         self,
@@ -1016,6 +1062,7 @@ class TelemetryDB:
         collection_name: str = "",
         found_scanned: int = 0,
         note: str = "",
+        worker_pid: int = 0,
     ) -> str:
         """Создать запись о начале OCR-прохода. Возвращает ocr_run_id."""
         ocr_run_id = str(uuid.uuid4())
@@ -1026,12 +1073,13 @@ class TelemetryDB:
                     """
                     INSERT INTO ocr_runs (
                         ocr_run_id, ts_started, ts_updated, status,
-                        collection_name, found_scanned, processed_pdfs, note
+                        worker_pid, collection_name, found_scanned, processed_pdfs, note
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ocr_run_id, now, now, "running",
+                        int(worker_pid),
                         collection_name or "",
                         int(found_scanned),
                         0,
@@ -1096,6 +1144,41 @@ class TelemetryDB:
                     """,
                     (now, now, status, int(processed_pdfs), note or "", note or "", ocr_run_id),
                 )
+
+    def finalize_running_ocr_runs(
+        self,
+        *,
+        status: str = "cancelled",
+        note: str = "",
+    ) -> int:
+        """Завершить все зависшие ocr_runs со status='running'."""
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                run_rows = conn.execute(
+                    "SELECT ocr_run_id FROM ocr_runs WHERE status='running'"
+                ).fetchall()
+                run_ids = [str(row["ocr_run_id"]) for row in run_rows if row["ocr_run_id"]]
+                if not run_ids:
+                    return 0
+                placeholders = ",".join("?" for _ in run_ids)
+                conn.execute(
+                    f"""
+                    UPDATE ocr_runs
+                    SET
+                        ts_updated=?,
+                        ts_finished=COALESCE(ts_finished, ?),
+                        status=?,
+                        note=CASE
+                            WHEN ? = '' THEN note
+                            WHEN note IS NULL OR note = '' THEN ?
+                            ELSE note || ' | ' || ?
+                        END
+                    WHERE ocr_run_id IN ({placeholders}) AND status='running'
+                    """,
+                    (now, now, status, note or "", note or "", note or "", *run_ids),
+                )
+                return len(run_ids)
 
     def get_active_ocr_run(self) -> Optional[Dict[str, Any]]:
         """Вернуть активный OCR-проход (status='running') или None."""

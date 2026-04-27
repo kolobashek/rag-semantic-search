@@ -1486,15 +1486,12 @@ def main() -> None:
         synonym_map=cfg.get("synonym_map") or {},
         ollama_url=str(cfg.get("ollama_url") or "http://localhost:11434"),
     )
-    indexer.telemetry.finalize_running_index_runs(
-        status="cancelled",
-        note="interrupted by new launch",
-    )
     run_id = indexer.telemetry.start_index_run(
         catalog_path=args.catalog,
         collection_name=args.collection,
         recreate=bool(args.recreate),
         note=f"stage={stage}",
+        worker_pid=os.getpid(),
     )
     indexer.set_run_id(run_id)
     run_totals: Dict[str, int] = {

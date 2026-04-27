@@ -23,6 +23,7 @@ ocr_pdfs.py — OCR-проход по сканированным PDF в RAG-ка
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -286,6 +287,7 @@ def main() -> int:
         collection_name=args.collection,
         found_scanned=len(scanned),
         note=f"min_text_len={args.min_text_len}",
+        worker_pid=os.getpid(),
     )
     logger.info("OCR run_id: %s", ocr_run_id)
 
