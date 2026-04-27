@@ -798,6 +798,51 @@ class TelemetryDB:
                 )
         return run_id
 
+    def finalize_running_index_runs(
+        self,
+        *,
+        status: str = "cancelled",
+        note: str = "",
+    ) -> int:
+        """Завершить все зависшие index_runs со status='running'."""
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                run_rows = conn.execute(
+                    "SELECT run_id FROM index_runs WHERE status='running'"
+                ).fetchall()
+                run_ids = [str(row["run_id"]) for row in run_rows if row["run_id"]]
+                if not run_ids:
+                    return 0
+                placeholders = ",".join("?" for _ in run_ids)
+                conn.execute(
+                    f"""
+                    UPDATE index_stage_progress
+                    SET
+                        ts_updated=?,
+                        ts_finished=COALESCE(ts_finished, ?),
+                        status=?
+                    WHERE run_id IN ({placeholders}) AND status='running'
+                    """,
+                    (now, now, status, *run_ids),
+                )
+                conn.execute(
+                    f"""
+                    UPDATE index_runs
+                    SET
+                        ts_finished=COALESCE(ts_finished, ?),
+                        status=?,
+                        note=CASE
+                            WHEN ? = '' THEN note
+                            WHEN note IS NULL OR note = '' THEN ?
+                            ELSE note || ' | ' || ?
+                        END
+                    WHERE run_id IN ({placeholders}) AND status='running'
+                    """,
+                    (now, status, note or "", note or "", note or "", *run_ids),
+                )
+                return len(run_ids)
+
     def start_stage(self, *, run_id: str, stage: str, total_files: int) -> None:
         now = _utc_now()
         with self._lock:
@@ -916,6 +961,7 @@ class TelemetryDB:
         points_added: int,
         note: str = "",
     ) -> None:
+        now = _utc_now()
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -935,7 +981,7 @@ class TelemetryDB:
                     WHERE run_id=?
                     """,
                     (
-                        _utc_now(),
+                        now,
                         status,
                         int(total_files),
                         int(added_files),
@@ -949,6 +995,18 @@ class TelemetryDB:
                         run_id,
                     ),
                 )
+                if status != "completed":
+                    conn.execute(
+                        """
+                        UPDATE index_stage_progress
+                        SET
+                            ts_updated=?,
+                            ts_finished=COALESCE(ts_finished, ?),
+                            status=?
+                        WHERE run_id=? AND status='running'
+                        """,
+                        (now, now, status, run_id),
+                    )
 
     # ── OCR runs ──────────────────────────────────────────────────────
 

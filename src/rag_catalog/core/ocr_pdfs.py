@@ -300,18 +300,8 @@ def main() -> int:
         note=f"state_entries_removed={removed}",
     )
 
-    # ── 3. Запустить index_rag.py без --no-ocr ───────────────────────────────
-    index_script = Path(__file__).parent / "index_rag.py"
-    if not index_script.exists():
-        logger.error("index_rag.py не найден в %s", index_script.parent)
-        telemetry.finish_ocr_run(
-            ocr_run_id=ocr_run_id,
-            status="failed",
-            note="index_rag.py not found",
-        )
-        return 1
-
-    cmd = [sys.executable, "-u", str(index_script)]
+    # ── 3. Запустить index_rag как модуль (устойчиво к относительным импортам) ──
+    cmd = [sys.executable, "-u", "-m", "rag_catalog.core.index_rag"]
 
     if cfg.get("catalog_path"):
         cmd += ["--catalog", cfg["catalog_path"]]

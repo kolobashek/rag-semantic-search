@@ -65,6 +65,11 @@ def _launch_indexer(
     skip_inline_ocr: bool = False,
 ) -> int:
     """Запустить index_rag как фоновый процесс. Возвращает PID."""
+    telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
+    telemetry.finalize_running_index_runs(
+        status="cancelled",
+        note="interrupted by new launch",
+    )
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"

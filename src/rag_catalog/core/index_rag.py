@@ -1486,6 +1486,10 @@ def main() -> None:
         synonym_map=cfg.get("synonym_map") or {},
         ollama_url=str(cfg.get("ollama_url") or "http://localhost:11434"),
     )
+    indexer.telemetry.finalize_running_index_runs(
+        status="cancelled",
+        note="interrupted by new launch",
+    )
     run_id = indexer.telemetry.start_index_run(
         catalog_path=args.catalog,
         collection_name=args.collection,
@@ -1557,6 +1561,21 @@ def main() -> None:
             points_added=run_totals["points_added"],
             note="ok",
         )
+    except KeyboardInterrupt:
+        indexer.telemetry.finish_index_run(
+            run_id=run_id,
+            status="cancelled",
+            total_files=run_totals["total_files"],
+            added_files=run_totals["added_files"],
+            updated_files=run_totals["updated_files"],
+            skipped_files=run_totals["skipped_files"],
+            deleted_files=indexer._run_deleted_files,
+            error_files=run_totals["error_files"],
+            points_added=run_totals["points_added"],
+            note="interrupted by user",
+        )
+        logger.warning("Индексация прервана пользователем.")
+        raise
     except Exception as exc:
         indexer.telemetry.finish_index_run(
             run_id=run_id,
