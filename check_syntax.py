@@ -1,17 +1,16 @@
-import ast, sys
+import ast
+from pathlib import Path
 
-files = [
-    r"src\rag_catalog\ui\nice_app.py",
-    r"src\rag_catalog\core\telemetry_db.py",
+ROOT = Path(__file__).resolve().parent
+FILES = [
+    ROOT / "src" / "rag_catalog" / "ui" / "nice_app.py",
+    ROOT / "src" / "rag_catalog" / "core" / "telemetry_db.py",
 ]
 
-import os
-os.chdir(r"D:\Docs\Claude\Projects\Semantic search")
-
-for path in files:
+for path in FILES:
     try:
-        src = open(path, encoding="utf-8").read()
-        ast.parse(src)
+        src = path.read_text(encoding="utf-8")
+        ast.parse(src, filename=str(path))
         print(f"OK: {path}")
     except SyntaxError as e:
         print(f"SYNTAX ERROR in {path}")

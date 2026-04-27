@@ -86,14 +86,17 @@ def _launch_indexer(
     if skip_inline_ocr:
         args.append("--no-ocr")
     log_fh = _open_log(PROJECT_ROOT / "logs" / "indexer.log", f"INDEXER  stage={stage}")
-    proc = subprocess.Popen(
-        args,
-        cwd=str(PROJECT_ROOT / "src"),
-        env=env,
-        stdout=log_fh,
-        stderr=log_fh,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    try:
+        proc = subprocess.Popen(
+            args,
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            stdout=log_fh,
+            stderr=log_fh,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    finally:
+        log_fh.close()
     return proc.pid
 
 
@@ -105,14 +108,17 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50) -> int:
     args = [sys.executable, "-m", "rag_catalog.core.ocr_pdfs",
             "--min-text-len", str(int(min_text_len))]
     log_fh = _open_log(PROJECT_ROOT / "logs" / "ocr.log", "OCR")
-    proc = subprocess.Popen(
-        args,
-        cwd=str(PROJECT_ROOT / "src"),
-        env=env,
-        stdout=log_fh,
-        stderr=log_fh,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    try:
+        proc = subprocess.Popen(
+            args,
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            stdout=log_fh,
+            stderr=log_fh,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    finally:
+        log_fh.close()
     return proc.pid
 
 
