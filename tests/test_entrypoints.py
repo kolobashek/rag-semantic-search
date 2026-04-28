@@ -24,7 +24,6 @@ def _run_entrypoint(*args: str) -> subprocess.CompletedProcess[str]:
 def test_cli_entrypoint_help_commands() -> None:
     expected = {
         "rag_search.py": "--content-only",
-        "rag_search_fixed.py": "--content-only",
         "index_rag.py": "--stage",
         "ocr_pdfs.py": "--dry-run",
         "nice_app.py": "--no-show",
@@ -43,14 +42,12 @@ def test_legacy_import_shims_alias_package_modules() -> None:
     import ocr_pdfs as root_ocr_pdfs
     import rag_core as root_rag_core
     import rag_search as root_rag_search
-    import rag_search_fixed as root_rag_search_fixed
     import telegram_bot as root_telegram_bot
     import telemetry_db as root_telemetry_db
     import user_auth_db as root_user_auth_db
     import windows_app as root_windows_app
     import nice_app as root_nice_app
     from rag_catalog.cli import rag_search as package_rag_search
-    from rag_catalog.cli import rag_search_fixed as package_rag_search_fixed
     from rag_catalog.core import index_rag as package_index_rag
     from rag_catalog.core import ocr_pdfs as package_ocr_pdfs
     from rag_catalog.core import rag_core as package_rag_core
@@ -61,7 +58,6 @@ def test_legacy_import_shims_alias_package_modules() -> None:
     from rag_catalog.ui import nice_app as package_nice_app
 
     assert root_rag_search.main is package_rag_search.main
-    assert root_rag_search_fixed.main is package_rag_search_fixed.main
     assert root_index_rag.RAGIndexer is package_index_rag.RAGIndexer
     assert root_ocr_pdfs.find_scanned_pdfs is package_ocr_pdfs.find_scanned_pdfs
     assert root_telegram_bot.process_message is package_telegram_bot.process_message

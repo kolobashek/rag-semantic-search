@@ -1366,12 +1366,12 @@ def _install_css() -> None:
           --rag-shadow: 0 10px 40px -10px rgba(0,0,0,0.08);
         }
         body { 
-          background: var(--rag-bg); 
-          color: var(--rag-text); 
-          font-family: 'Inter', sans-serif;
-          font-size: 87.5%; 
-          letter-spacing: -0.01em;
-          background-image: radial-gradient(at 0% 0%, hsla(253,16%,7%,0.03) 0, transparent 50%), radial-gradient(at 50% 0%, hsla(225,39%,30%,0.03) 0, transparent 50%), radial-gradient(at 100% 0%, hsla(339,49%,30%,0.03) 0, transparent 50%);
+          background: var(--rag-bg) !important; 
+          color: var(--rag-text) !important; 
+          font-family: 'Inter', sans-serif !important;
+          font-size: 87.5% !important; 
+          letter-spacing: -0.01em !important;
+          background-image: radial-gradient(at 0% 0%, hsla(253,16%,7%,0.03) 0, transparent 50%), radial-gradient(at 50% 0%, hsla(225,39%,30%,0.03) 0, transparent 50%), radial-gradient(at 100% 0%, hsla(339,49%,30%,0.03) 0, transparent 50%) !important;
         }
         .q-page { background: transparent; }
         .rag-header {

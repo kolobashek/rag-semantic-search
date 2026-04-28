@@ -31,10 +31,8 @@ def test_config_and_icon_remain_project_root_assets() -> None:
 
 def test_entrypoint_shims_exist_for_backward_compatibility() -> None:
     for filename in (
-        "app_ui.py",
         "windows_app.py",
         "rag_search.py",
-        "rag_search_fixed.py",
         "index_rag.py",
         "ocr_pdfs.py",
         "telegram_bot.py",

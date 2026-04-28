@@ -48,6 +48,8 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx._run_deleted_files = 0
     idx.small_office_mb = 20.0
     idx.small_pdf_mb = 2.0
+    idx.skip_ocr = False
+    idx.synonym_map = {}
     idx.embedder = _FakeEmbedder()
     idx.qdrant = _FakeQdrant()
     idx._save_state = lambda: None

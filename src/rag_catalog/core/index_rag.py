@@ -784,6 +784,8 @@ class RAGIndexer:
         start = 0
         while start < len(text):
             chunks.append(text[start : start + self.chunk_size])
+            if start + self.chunk_size >= len(text):
+                break
             start += step
         return chunks
 
