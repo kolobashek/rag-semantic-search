@@ -1367,31 +1367,73 @@ def _apply_explorer_filter_input(state: PageState, event: Any, fallback: Any = "
 
 
 def _install_css() -> None:
-    ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">')
+    ui.add_head_html(
+        '<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">'
+    )
     ui.add_css(
         """
         :root {
-          --rag-bg: #f3f6f9;
-          --rag-surface: rgba(255, 255, 255, 0.85);
-          --rag-border: rgba(200, 210, 224, 0.5);
-          --rag-text: #1e293b;
-          --rag-muted: #64748b;
-          --rag-accent: #3b82f6;
+          /* Brandbook palette */
+          --rag-accent: #3d63ff;
           --rag-accent-2: #10b981;
-          --rag-danger: #ef4444;
-          --rag-shadow: 0 10px 40px -10px rgba(0,0,0,0.08);
+          --rag-amber: #f59e0b;
+          --rag-danger: #dc2626;
+          --rag-ok: #16a34a;
+          --rag-warn: #f59e0b;
+
+          /* Backgrounds */
+          --rag-bg: #fafaf7;
+          --rag-surface: #ffffff;
+          --rag-bg-sunken: #f4f3ee;
+
+          /* Lines / borders */
+          --rag-border: #e6e3da;
+          --rag-border-strong: #d8d3c4;
+
+          /* Ink / text */
+          --rag-text: #14141a;
+          --rag-ink-2: #3a3a44;
+          --rag-muted: #6c6c78;
+          --rag-ink-4: #9a9aa2;
+
+          /* Fonts */
+          --rag-display-font: 'Manrope', system-ui, sans-serif;
+          --rag-text-font: 'Inter', system-ui, sans-serif;
+          --rag-mono-font: 'JetBrains Mono', ui-monospace, monospace;
+
+          /* Radii */
+          --rag-radius-sm: 6px;
+          --rag-radius-md: 10px;
+          --rag-radius-lg: 14px;
+          --rag-radius-xl: 22px;
+
+          /* Shadows */
+          --rag-shadow: 0 1px 0 rgba(20,20,26,.04), 0 1px 2px rgba(20,20,26,.05);
+          --rag-shadow-2: 0 6px 16px -8px rgba(20,20,26,.12), 0 2px 4px rgba(20,20,26,.04);
+          --rag-shadow-3: 0 24px 48px -16px rgba(20,20,26,.18), 0 8px 16px -8px rgba(20,20,26,.08);
         }
-        body { 
-          background: var(--rag-bg) !important; 
-          color: var(--rag-text) !important; 
-          font-family: 'Inter', sans-serif !important;
-          font-size: 87.5% !important; 
+        [data-theme=dark] {
+          --rag-bg: #0c0c0f;
+          --rag-surface: #15151a;
+          --rag-bg-sunken: #08080a;
+          --rag-border: #23232b;
+          --rag-border-strong: #2e2e38;
+          --rag-text: #f4f4f7;
+          --rag-ink-2: #c8c8d0;
+          --rag-muted: #8a8a96;
+          --rag-ink-4: #5a5a64;
+          --rag-accent: #6385ff;
+        }
+        body {
+          background: var(--rag-bg) !important;
+          color: var(--rag-text) !important;
+          font-family: var(--rag-text-font) !important;
+          font-size: 87.5% !important;
           letter-spacing: -0.01em !important;
-          background-image: radial-gradient(at 0% 0%, hsla(253,16%,7%,0.03) 0, transparent 50%), radial-gradient(at 50% 0%, hsla(225,39%,30%,0.03) 0, transparent 50%), radial-gradient(at 100% 0%, hsla(339,49%,30%,0.03) 0, transparent 50%) !important;
         }
         .q-page { background: transparent; }
         .rag-header {
-          background: rgba(255, 255, 255, 0.65);
+          background: rgba(250, 250, 247, 0.82);
           color: var(--rag-text);
           border-bottom: 1px solid var(--rag-border);
           backdrop-filter: blur(24px) saturate(180%);
@@ -1400,7 +1442,7 @@ def _install_css() -> None:
         .rag-header-breadcrumbs .q-btn { min-height: 32px; padding: 0 6px; }
         .rag-header-actions .q-btn { min-width: 34px; min-height: 34px; }
         .rag-drawer {
-          background: #ffffff;
+          background: var(--rag-surface);
           border-right: 1px solid var(--rag-border);
         }
         .rag-drawer-body {
@@ -1419,61 +1461,57 @@ def _install_css() -> None:
           padding: 10px 0 32px;
         }
         .rag-page.search { padding-top: 4px; }
-        .rag-title { font-size: clamp(22px, 3.5vw, 34px); font-weight: 760; line-height: 1.05; letter-spacing: 0; }
+        .rag-title { font-size: clamp(22px, 3.5vw, 34px); font-weight: 760; line-height: 1.05; letter-spacing: 0; font-family: var(--rag-display-font); }
         .rag-subtitle { color: var(--rag-muted); font-size: 13px; max-width: 820px; }
         .rag-card {
           background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 16px;
-          box-shadow: var(--rag-shadow);
-          backdrop-filter: blur(12px);
+          border-radius: var(--rag-radius-lg);
+          box-shadow: var(--rag-shadow-2);
           transition: transform 0.2s ease, box-shadow 0.2s ease;
         }
         .rag-card:hover {
           transform: translateY(-2px);
-          box-shadow: 0 20px 40px -10px rgba(0,0,0,0.12);
+          box-shadow: var(--rag-shadow-3);
         }
         .rag-search-shell { position: relative; z-index: 5; }
         .rag-search-box {
-          background: rgba(255, 255, 255, 0.9);
+          background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 16px;
-          box-shadow: var(--rag-shadow);
-          backdrop-filter: blur(12px);
+          border-radius: var(--rag-radius-lg);
+          box-shadow: var(--rag-shadow-2);
           transition: box-shadow 0.2s ease;
         }
         .rag-search-box:focus-within {
-          box-shadow: 0 0 0 2px var(--rag-accent), var(--rag-shadow);
+          box-shadow: 0 0 0 2px var(--rag-accent), var(--rag-shadow-2);
         }
         .rag-suggest {
           position: absolute;
           left: 0;
           right: 0;
           top: calc(100% + 8px);
-          background: rgba(255, 255, 255, 0.95);
+          background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 16px;
-          box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.18);
-          backdrop-filter: blur(16px);
+          border-radius: var(--rag-radius-lg);
+          box-shadow: var(--rag-shadow-3);
           overflow: hidden;
           z-index: 30;
         }
         .rag-result {
-          background: rgba(255, 255, 255, 0.7);
+          background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 10px;
+          border-radius: var(--rag-radius-md);
           padding: 12px;
-          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.02);
+          box-shadow: var(--rag-shadow);
           width: 100%;
           box-sizing: border-box;
-          backdrop-filter: blur(8px);
-          transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+          transition: all 0.2s ease;
         }
         .rag-result:hover {
-          background: rgba(255, 255, 255, 0.95);
-          transform: translateY(-2px) scale(1.005);
-          box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.1);
-          border-color: rgba(59, 130, 246, 0.3);
+          background: var(--rag-surface);
+          transform: translateY(-2px);
+          box-shadow: var(--rag-shadow-2);
+          border-color: rgba(61, 99, 255, 0.3);
         }
         .rag-meta { color: var(--rag-muted); font-size: 12px; }
         .rag-chip {
@@ -1484,31 +1522,30 @@ def _install_css() -> None:
           border: 1px solid var(--rag-border);
           border-radius: 14px;
           color: var(--rag-muted);
-          background: rgba(255, 255, 255, 0.5);
-          backdrop-filter: blur(4px);
+          background: var(--rag-bg-sunken);
           font-size: 12px;
           font-weight: 500;
           cursor: pointer;
           user-select: none;
           transition: all 0.2s ease;
         }
-        .rag-chip:hover { 
-          background: #ffffff; 
-          color: var(--rag-accent); 
-          border-color: var(--rag-accent); 
+        .rag-chip:hover {
+          background: var(--rag-surface);
+          color: var(--rag-accent);
+          border-color: var(--rag-accent);
           transform: translateY(-1px);
-          box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.1);
+          box-shadow: 0 4px 6px -1px rgba(61, 99, 255, 0.1);
         }
         .rag-chip-active {
-          background: linear-gradient(135deg, var(--rag-accent), #2563eb);
+          background: var(--rag-accent);
           color: #ffffff;
           border-color: transparent;
           font-weight: 600;
-          box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+          box-shadow: 0 4px 12px rgba(61, 99, 255, 0.3);
         }
-        .rag-chip-active:hover { 
+        .rag-chip-active:hover {
           transform: translateY(-1px);
-          box-shadow: 0 6px 14px rgba(59, 130, 246, 0.4);
+          box-shadow: 0 6px 14px rgba(61, 99, 255, 0.4);
         }
         .rag-path {
           word-break: break-word;
@@ -1534,8 +1571,8 @@ def _install_css() -> None:
         .rag-group-panel {
           width: 100%;
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
-          background: #ffffff;
+          border-radius: var(--rag-radius-md);
+          background: var(--rag-surface);
           overflow: hidden;
         }
         .rag-file-icon {
@@ -1563,27 +1600,26 @@ def _install_css() -> None:
         .rag-explorer-item {
           width: 100%;
           min-width: 0;
-          background: rgba(255, 255, 255, 0.7);
+          background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 12px;
+          border-radius: var(--rag-radius-md);
           color: var(--rag-text);
-          backdrop-filter: blur(8px);
           transition: all 0.2s ease;
         }
         .rag-explorer-item:hover {
-          background: rgba(255, 255, 255, 0.95);
-          border-color: rgba(59, 130, 246, 0.3);
+          background: var(--rag-surface);
+          border-color: rgba(61, 99, 255, 0.3);
           transform: translateY(-2px);
-          box-shadow: 0 10px 20px -10px rgba(59, 130, 246, 0.15);
+          box-shadow: 0 10px 20px -10px rgba(61, 99, 255, 0.15);
         }
         .rag-explorer-item.system {
           opacity: .55;
-          color: #64748b;
+          color: var(--rag-muted);
         }
         .rag-explorer-item.system:hover {
           opacity: .78;
-          background: #f1f5f9;
-          border-color: #cbd5e1;
+          background: var(--rag-bg-sunken);
+          border-color: var(--rag-border-strong);
         }
         .rag-explorer-item { position: relative; }
         .rag-explorer-grid.small .rag-explorer-item {
@@ -1655,14 +1691,14 @@ def _install_css() -> None:
           min-width: 160px;
           height: 42px;
           border: 1px solid var(--rag-border);
-          background: #ffffff;
-          border-radius: 8px;
+          background: var(--rag-surface);
+          border-radius: var(--rag-radius-md);
           overflow: hidden;
           transition: background .12s ease, border-color .12s ease, box-shadow .12s ease;
         }
         .rag-bookmark:hover {
-          background: #eef6fb;
-          border-color: #bdd7e9;
+          background: var(--rag-bg-sunken);
+          border-color: var(--rag-border-strong);
         }
         .rag-bookmark-main {
           position: absolute;
@@ -1684,9 +1720,9 @@ def _install_css() -> None:
           align-items: center;
           justify-content: center;
           opacity: 0;
-          background: #ffffff;
+          background: var(--rag-surface);
           border-left: 1px solid var(--rag-border);
-          color: #7b8794;
+          color: var(--rag-muted);
           transition: opacity .12s ease, color .12s ease, background .12s ease;
         }
         .rag-bookmark:hover .rag-bookmark-remove {
@@ -1694,7 +1730,7 @@ def _install_css() -> None:
         }
         .rag-bookmark-remove:hover {
           background: #fff1f1;
-          color: #b42318;
+          color: var(--rag-danger);
         }
         .rag-bookmark .q-btn {
           min-width: 0;
@@ -1722,10 +1758,10 @@ def _install_css() -> None:
           position: fixed;
           z-index: 10000;
           min-width: 220px;
-          background: #ffffff;
+          background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
-          box-shadow: 0 18px 48px rgba(23, 32, 44, 0.18);
+          border-radius: var(--rag-radius-md);
+          box-shadow: var(--rag-shadow-3);
           padding: 6px;
           display: none;
         }
@@ -1736,11 +1772,11 @@ def _install_css() -> None:
           border: 0;
           background: transparent;
           text-align: left;
-          border-radius: 8px;
+          border-radius: var(--rag-radius-sm);
           color: var(--rag-text);
           cursor: pointer;
         }
-        .rag-context-menu button:hover { background: #eef6fb; }
+        .rag-context-menu button:hover { background: var(--rag-bg-sunken); }
         .rag-favorites-dialog-row {
           display: grid;
           grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1776,18 +1812,283 @@ def _install_css() -> None:
         .rag-code {
           white-space: pre-wrap;
           word-break: break-word;
-          font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+          font-family: var(--rag-mono-font);
           font-size: 12px;
-          background: #f8fafc;
+          background: var(--rag-bg-sunken);
           border: 1px solid var(--rag-border);
-          border-radius: 8px;
+          border-radius: var(--rag-radius-sm);
           padding: 12px;
         }
         @media (max-width: 760px) {
           .rag-page { width: calc(100vw - 20px); padding-top: 18px; }
           .rag-title { font-size: 28px; }
           .rag-actions .q-btn { width: auto; }
-          .rag-search-box { box-shadow: 0 4px 12px rgba(23, 32, 44, 0.06); }
+          .rag-search-box { box-shadow: var(--rag-shadow); }
+        }
+
+        /* ═══════════════════════════════════════
+           LOGIN — split layout
+        ═══════════════════════════════════════ */
+        .rag-login-root {
+          position: fixed;
+          inset: 0;
+          z-index: 9000;
+          display: flex;
+          background: var(--rag-bg);
+        }
+        .rag-login-brand {
+          flex: 0 0 400px;
+          background: #0c0c0f;
+          display: flex;
+          flex-direction: column;
+          padding: 48px 40px 32px;
+          position: relative;
+          overflow: hidden;
+        }
+        .rag-login-brand::before {
+          content: '';
+          position: absolute;
+          inset: 0;
+          background:
+            radial-gradient(ellipse at 25% 15%, rgba(61,99,255,.28) 0, transparent 55%),
+            radial-gradient(ellipse at 75% 85%, rgba(99,133,255,.14) 0, transparent 55%);
+          pointer-events: none;
+        }
+        .rag-login-brand-inner {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          flex-direction: column;
+          flex: 1;
+        }
+        .rag-login-mark-wrap {
+          width: 56px;
+          height: 56px;
+          margin-bottom: 28px;
+          flex-shrink: 0;
+        }
+        .rag-login-mark-wrap svg { width: 56px; height: 56px; }
+        .rag-login-brand-name {
+          font-family: var(--rag-display-font);
+          font-size: 26px;
+          font-weight: 800;
+          color: #ffffff;
+          letter-spacing: -0.02em;
+          line-height: 1.1;
+        }
+        .rag-login-brand-sub {
+          font-size: 13px;
+          color: rgba(255,255,255,.45);
+          margin-top: 6px;
+          letter-spacing: 0.02em;
+        }
+        .rag-login-stats {
+          margin-top: auto;
+          padding-top: 48px;
+        }
+        .rag-login-stat-val {
+          font-family: var(--rag-display-font);
+          font-size: 44px;
+          font-weight: 800;
+          color: #ffffff;
+          letter-spacing: -0.03em;
+          line-height: 1;
+        }
+        .rag-login-stat-lbl {
+          font-size: 13px;
+          color: rgba(255,255,255,.45);
+          margin-top: 6px;
+        }
+        .rag-login-brand-footer {
+          position: relative;
+          z-index: 1;
+          margin-top: 32px;
+          padding-top: 20px;
+          border-top: 1px solid rgba(255,255,255,.1);
+        }
+        .rag-login-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12px;
+          color: rgba(255,255,255,.4);
+        }
+        .rag-login-badge-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: #10b981;
+          flex-shrink: 0;
+        }
+        .rag-login-form-side {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 48px 40px;
+          overflow-y: auto;
+          background: var(--rag-surface);
+        }
+        .rag-login-form-inner {
+          width: 100%;
+          max-width: 380px;
+          display: flex;
+          flex-direction: column;
+          gap: 0;
+        }
+        .rag-login-greeting {
+          font-family: var(--rag-display-font);
+          font-size: 28px;
+          font-weight: 700;
+          color: var(--rag-text);
+          letter-spacing: -0.02em;
+          line-height: 1.15;
+          margin-bottom: 6px;
+        }
+        .rag-login-greeting-sub {
+          font-size: 14px;
+          color: var(--rag-muted);
+          margin-bottom: 28px;
+        }
+        .rag-login-divider {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          margin: 16px 0;
+        }
+        .rag-login-divider-line {
+          flex: 1;
+          height: 1px;
+          background: var(--rag-border);
+        }
+        .rag-login-divider-text {
+          font-size: 12px;
+          color: var(--rag-ink-4);
+          white-space: nowrap;
+        }
+        .rag-login-reg-wrap {
+          margin-top: 20px;
+          padding-top: 20px;
+          border-top: 1px solid var(--rag-border);
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        .rag-login-reg-wrap .rag-login-reg-title {
+          font-family: var(--rag-display-font);
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--rag-text);
+        }
+        .rag-login-input-gap { margin-bottom: 12px; }
+        .rag-login-btn-primary {
+          background: var(--rag-accent) !important;
+          color: #ffffff !important;
+          border-radius: var(--rag-radius-md) !important;
+          font-weight: 600 !important;
+          font-size: 14px !important;
+          min-height: 44px !important;
+          margin-top: 20px;
+          margin-bottom: 12px;
+        }
+        @media (max-width: 800px) {
+          .rag-login-brand { display: none; }
+          .rag-login-form-side { padding: 32px 24px; }
+        }
+
+        /* ═══════════════════════════════════════
+           SEARCH — stats bar, score badge, toolbar
+        ═══════════════════════════════════════ */
+        .rag-search-stats-bar {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+          padding: 8px 12px;
+          background: var(--rag-bg-sunken);
+          border: 1px solid var(--rag-border);
+          border-radius: var(--rag-radius-md);
+          font-size: 12px;
+          color: var(--rag-muted);
+        }
+        .rag-search-stats-total {
+          font-weight: 600;
+          color: var(--rag-text);
+          font-size: 13px;
+        }
+        .rag-search-stats-sep {
+          width: 1px;
+          height: 12px;
+          background: var(--rag-border-strong);
+          flex-shrink: 0;
+        }
+        .rag-sort-toolbar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .rag-sort-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 4px 10px;
+          border-radius: var(--rag-radius-sm);
+          font-size: 12px;
+          font-weight: 500;
+          color: var(--rag-muted);
+          background: transparent;
+          border: 1px solid var(--rag-border);
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+        .rag-sort-btn:hover {
+          color: var(--rag-text);
+          border-color: var(--rag-border-strong);
+        }
+        .rag-sort-btn.active {
+          color: var(--rag-accent);
+          border-color: var(--rag-accent);
+          background: rgba(61,99,255,.06);
+        }
+        .rag-score-badge {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 7px;
+          border-radius: 10px;
+          font-size: 11px;
+          font-weight: 600;
+          font-family: var(--rag-mono-font);
+          background: rgba(61,99,255,.08);
+          color: rgba(61,99,255,.7);
+          border: 1px solid rgba(61,99,255,.15);
+          flex-shrink: 0;
+        }
+        .rag-result-date {
+          font-size: 11px;
+          color: var(--rag-ink-4);
+          white-space: nowrap;
+        }
+        .rag-result-kind {
+          font-size: 11px;
+          color: var(--rag-muted);
+          background: var(--rag-bg-sunken);
+          border: 1px solid var(--rag-border);
+          border-radius: 6px;
+          padding: 1px 6px;
+        }
+        .rag-refine-bar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          padding: 8px 0 2px;
+        }
+        .rag-refine-label {
+          font-size: 12px;
+          color: var(--rag-muted);
+          white-space: nowrap;
         }
         """
     )
@@ -2333,6 +2634,15 @@ def _build_page(initial_screen: str = "search") -> None:
                 track_result_use("open_viewer")
                 open_file_viewer(p)
 
+        modified_raw = result.get("modified") or ""
+        modified_str = ""
+        if modified_raw:
+            try:
+                _dt = modified_raw[:10]  # "YYYY-MM-DD"
+                modified_str = _dt
+            except Exception:
+                pass
+
         with ui.column().classes("rag-result gap-2"):
             with ui.row().classes("w-full items-start gap-2"):
                 opener = ui.row().classes("flex-1 min-w-0 items-start gap-2 cursor-pointer").on("click", open_primary)
@@ -2343,7 +2653,11 @@ def _build_page(initial_screen: str = "search") -> None:
                         title.tooltip(name)
                         path_label = ui.label(path or full_path).classes("rag-path truncate")
                         path_label.tooltip(path or full_path)
-                ui.label(f"{kind} · {score:.3f}").classes("rag-chip")
+                with ui.column().classes("items-end gap-1 flex-shrink-0"):
+                    ui.html(f'<span class="rag-score-badge">{score:.3f}</span>', sanitize=False)
+                    if modified_str:
+                        ui.html(f'<span class="rag-result-date">{modified_str}</span>', sanitize=False)
+                    ui.html(f'<span class="rag-result-kind">{kind}</span>', sanitize=False)
 
             with ui.row().classes("w-full items-center justify-between gap-2"):
                 with ui.row().classes("rag-actions items-center"):
@@ -2404,15 +2718,96 @@ def _build_page(initial_screen: str = "search") -> None:
         if state.search_error:
             ui.label(state.search_error).classes("text-red-700 rag-card p-4")
         if not state.searched_query:
-            with ui.row().classes("w-full gap-3"):
-                for label, query in SEARCH_PRESETS:
-                    ui.button(label, on_click=choose_query_handler(query)).props("outline")
+            # ── Главный экран (нет активного запроса) ───────────────────────
+            display_name = str(
+                (state.current_user or {}).get("display_name")
+                or (state.current_user or {}).get("username")
+                or ""
+            )
+            greeting = f"Добрый день, {display_name}!" if display_name else "Добрый день!"
+
+            _idx_stats = _read_index_stats(state.cfg)
+            _doc_total = _idx_stats.get("total", 0)
+            _doc_total_str = f"{_doc_total:,}".replace(",", " ")
+            _last_mod = _idx_stats.get("last_modified") or "—"
+            _by_ext = _idx_stats.get("by_ext") or {}
+            _top_ext = sorted(_by_ext.items(), key=lambda x: x[1], reverse=True)[:6]
+
+            # Приветствие
+            with ui.column().classes("w-full gap-0 mb-2"):
+                ui.html(
+                    f'<div style="font-family: var(--rag-display-font); font-size: 24px;'
+                    f' font-weight: 700; color: var(--rag-text); letter-spacing: -0.02em;">'
+                    f'{greeting}</div>'
+                    f'<div style="font-size: 13px; color: var(--rag-muted); margin-top: 4px;">'
+                    f'Что ищем сегодня?</div>',
+                    sanitize=False,
+                )
+
+            # Блок статистики (раскрыт по умолчанию)
+            with ui.expansion("Статистика индекса", icon="query_stats", value=True).classes(
+                "rag-card w-full"
+            ):
+                with ui.row().classes("w-full gap-3 flex-wrap p-1"):
+                    with ui.column().classes("gap-0"):
+                        ui.html(
+                            f'<div style="font-family: var(--rag-display-font); font-size: 28px;'
+                            f' font-weight: 800; color: var(--rag-text); letter-spacing: -0.03em;'
+                            f' line-height: 1;">{_doc_total_str}</div>'
+                            f'<div style="font-size: 12px; color: var(--rag-muted); margin-top: 2px;">документов</div>',
+                            sanitize=False,
+                        )
+                    if _top_ext:
+                        ui.element("div").style(
+                            "width: 1px; background: var(--rag-border); align-self: stretch;"
+                        )
+                        with ui.column().classes("gap-1"):
+                            for ext, cnt in _top_ext:
+                                ui.html(
+                                    f'<div style="font-size: 12px; color: var(--rag-muted);">'
+                                    f'<span style="font-weight: 600; color: var(--rag-text);">'
+                                    f'{ext.upper()}</span> — {cnt:,}'.replace(",", " ") + "</div>",
+                                    sanitize=False,
+                                )
+                    ui.element("div").style("flex: 1;")
+                    with ui.column().classes("gap-0 items-end"):
+                        ui.html(
+                            f'<div style="font-size: 12px; color: var(--rag-muted);">Обновлён</div>'
+                            f'<div style="font-size: 13px; color: var(--rag-ink-2); font-weight: 500;">'
+                            f'{_last_mod}</div>',
+                            sanitize=False,
+                        )
+
+            # Быстрые запросы (коллапс)
+            with ui.expansion("Быстрые запросы", icon="bolt", value=True).classes(
+                "rag-card w-full"
+            ):
+                with ui.row().classes("w-full gap-2 flex-wrap p-1"):
+                    for label, query in SEARCH_PRESETS:
+                        ui.button(label, on_click=choose_query_handler(query)).props(
+                            "outline no-caps"
+                        ).style("font-size: 13px;")
+
+            # История запросов (коллапс)
+            _recent = list(state.history[:12])
+            if _recent:
+                with ui.expansion(
+                    f"История запросов ({len(_recent)})", icon="history", value=True
+                ).classes("rag-card w-full"):
+                    with ui.column().classes("w-full gap-1 p-1"):
+                        for q in _recent:
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.icon("history", size="16px").style(
+                                    "color: var(--rag-ink-4); flex-shrink: 0;"
+                                )
+                                btn = ui.button(q, on_click=choose_query_handler(q)).props(
+                                    "flat dense no-caps align=left"
+                                ).classes("flex-1 text-left")
+                                btn.style(
+                                    "font-size: 13px; color: var(--rag-ink-2);"
+                                    " justify-content: flex-start;"
+                                )
             return
-        # Заголовок с опциональной подсказкой о расширении запроса
-        with ui.row().classes("w-full items-center gap-2 mt-2"):
-            ui.label(f"Результаты по запросу: {state.searched_query}").classes("text-xl font-semibold")
-            if state.expanded_query:
-                ui.label(f"→ расширен: {state.expanded_query}").classes("rag-meta text-sm italic")
 
         # RAG Q&A карточка
         if state.rag_answer_loading:
@@ -2422,20 +2817,25 @@ def _build_page(initial_screen: str = "search") -> None:
         elif state.rag_answer_text:
             with ui.column().classes("rag-card w-full p-3 gap-1"):
                 with ui.row().classes("items-center gap-1"):
-                    ui.icon("smart_toy", size="18px").classes("text-indigo-500")
-                    ui.label("Ответ ИИ").classes("font-semibold text-sm text-indigo-700")
+                    ui.icon("smart_toy", size="18px").style("color: var(--rag-accent);")
+                    ui.label("Ответ ИИ").classes("font-semibold text-sm").style("color: var(--rag-accent);")
                 ui.label(state.rag_answer_text).classes("text-sm whitespace-pre-wrap")
 
         if not state.results:
             ui.label("Совпадений не найдено.").classes("rag-card p-4 rag-meta")
             return
 
-        # Все результаты — плоский список, отсортированный по релевантности
-        sorted_results = sorted(
-            state.results,
-            key=lambda r: float(r.get("score") or 0),
-            reverse=True,
-        )
+        # Сортировка
+        _sort_key = getattr(state, "search_sort", "score")
+
+        def _sorted(results: list, key: str) -> list:
+            if key == "name":
+                return sorted(results, key=lambda r: (r.get("filename") or "").lower())
+            if key == "date":
+                return sorted(results, key=lambda r: r.get("modified") or "", reverse=True)
+            return sorted(results, key=lambda r: float(r.get("score") or 0), reverse=True)
+
+        sorted_results = _sorted(list(state.results), _sort_key)
 
         # Считаем кол-во по группам для чипов
         group_counts: Dict[str, int] = {}
@@ -2443,35 +2843,74 @@ def _build_page(initial_screen: str = "search") -> None:
             group_counts.setdefault(_result_group(r), 0)
             group_counts[_result_group(r)] += 1
 
-        # Порядок групп как был в _grouped_results
         group_order = [
             "Каталоги", "Техпаспорта ТС", "Паспорта и удостоверения",
             "Договоры", "Счета и платежи", "Таблицы", "PDF", "Другие файлы",
         ]
+
+        # ── Stats bar ────────────────────────────────────────────────────────
+        with ui.element("div").classes("rag-search-stats-bar w-full"):
+            ui.html(
+                f'<span class="rag-search-stats-total">{len(sorted_results)}</span>'
+                f'<span>&nbsp;результатов</span>',
+                sanitize=False,
+            )
+            if state.expanded_query:
+                ui.html('<div class="rag-search-stats-sep"></div>', sanitize=False)
+                ui.html(
+                    f'<span>расширен: <i>{state.expanded_query}</i></span>',
+                    sanitize=False,
+                )
+            # Топ расширений
+            ext_counts: Dict[str, int] = {}
+            for r in sorted_results:
+                ext = (r.get("extension") or "").upper().lstrip(".") or "—"
+                ext_counts.setdefault(ext, 0)
+                ext_counts[ext] += 1
+            top_exts = sorted(ext_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            if top_exts:
+                ui.html('<div class="rag-search-stats-sep"></div>', sanitize=False)
+                parts = " · ".join(f"{e}: {c}" for e, c in top_exts)
+                ui.html(f'<span>{parts}</span>', sanitize=False)
+
+        # ── Sort + filter toolbar ────────────────────────────────────────────
+        def set_sort(key: str) -> None:
+            state.search_sort = key  # type: ignore[attr-defined]
+            render()
 
         def set_filter(gname: Optional[str]) -> None:
             state.active_type_filter = gname
             state.displayed_count = 10
             render()
 
-        # Чипы-фильтры
-        with ui.row().classes("w-full gap-2 flex-wrap"):
-            # «Все»
+        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+            # Чипы-фильтры по группам
             all_active = state.active_type_filter is None
-            all_chip = ui.label(f"Все: {len(sorted_results)}").classes(
+            all_chip = ui.label(f"Все ({len(sorted_results)})").classes(
                 "rag-chip" + (" rag-chip-active" if all_active else "")
             )
             all_chip.on("click", lambda: set_filter(None))
-            # По типам
             for gname in group_order:
                 cnt = group_counts.get(gname, 0)
                 if cnt == 0:
                     continue
                 is_active = state.active_type_filter == gname
-                chip = ui.label(f"{gname}: {cnt}").classes(
+                chip = ui.label(f"{gname} ({cnt})").classes(
                     "rag-chip" + (" rag-chip-active" if is_active else "")
                 )
                 chip.on("click", lambda g=gname: set_filter(g))
+
+            # Разделитель
+            ui.element("div").style("flex: 1;")
+
+            # Сортировка
+            for sk, slabel in [("score", "По релевантности"), ("name", "По имени"), ("date", "По дате")]:
+                is_cur = _sort_key == sk
+                btn = ui.html(
+                    f'<button class="rag-sort-btn{"  active" if is_cur else ""}">{slabel}</button>',
+                    sanitize=False,
+                )
+                btn.on("click", lambda s=sk: set_sort(s))
 
         # Применяем фильтр
         if state.active_type_filter:
@@ -2493,7 +2932,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 render()
 
             ui.button(
-                f"Загрузить ещё  ({remaining})",
+                f"Загрузить ещё ({remaining})",
                 on_click=load_more,
                 icon="expand_more",
             ).props("outline no-caps").classes("w-full mt-1")
@@ -2740,8 +3179,13 @@ def _build_page(initial_screen: str = "search") -> None:
         settings_db = _get_telemetry(state)
         settings = settings_db.get_index_settings() if hasattr(settings_db, "get_index_settings") else {}
 
-        ui.label("Индекс").classes("text-2xl font-semibold")
-        ui.label("Запуск, расписание, прогресс, статистика этапов и OCR.").classes("rag-meta")
+        ui.html(
+            '<div style="font-family: var(--rag-display-font); font-size: 26px;'
+            ' font-weight: 700; color: var(--rag-text); letter-spacing: -0.02em;">Индексация</div>'
+            '<div style="font-size: 13px; color: var(--rag-muted); margin-top: 2px;">'
+            "Запуск, расписание, прогресс этапов и OCR.</div>",
+            sanitize=False,
+        )
 
         # ── Метрики ──────────────────────────────────────────────────────
         def render_metric(label: str, value: str, icon: str = "analytics") -> None:
@@ -2830,20 +3274,68 @@ def _build_page(initial_screen: str = "search") -> None:
                         pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if str(row.get("status") or "") != "running" else 0.0)
                         status_str = str(row.get("status") or "-")
                         is_running = status_str == "running"
-                        with ui.column().classes("w-full gap-1"):
-                            with ui.row().classes("w-full items-center gap-2"):
-                                ui.label(str(row.get("stage") or "-")).classes("font-semibold min-w-24")
-                                chip_color = "text-green-600" if is_running else ""
-                                ui.label(status_str).classes(f"rag-chip {chip_color}")
-                                ui.label(f"{processed:,} / {total_f:,} файлов".replace(",", " ")).classes("rag-meta")
-                                ui.space()
-                                ui.label(_format_duration_seconds(row.get("duration_sec"))).classes("rag-meta")
-                            ui.linear_progress(value=pct).props("color=indigo-5" if is_running else "").classes("w-full")
-                            ui.label(
-                                f"добавлено {int(row.get('added_files') or 0):,} · обновлено {int(row.get('updated_files') or 0):,} · "
-                                f"пропущено {int(row.get('skipped_files') or 0):,} · ошибок {int(row.get('error_files') or 0):,} · "
-                                f"точек {int(row.get('points_added') or 0):,}".replace(",", " ")
-                            ).classes("rag-meta")
+                        is_done = status_str in ("done", "completed", "finished")
+                        is_error = status_str in ("error", "failed")
+
+                        stage_label = _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or "-"))
+                        started_at = str(row.get("started_at") or "")[:16].replace("T", " ")
+                        finished_at = str(row.get("finished_at") or "")[:16].replace("T", " ")
+
+                        status_color = (
+                            "var(--rag-accent)" if is_running
+                            else "var(--rag-ok)" if is_done
+                            else "var(--rag-danger)" if is_error
+                            else "var(--rag-muted)"
+                        )
+                        bar_color = "primary" if is_running else ("positive" if is_done else ("negative" if is_error else ""))
+
+                        with ui.column().classes("w-full gap-1").style(
+                            "border-left: 3px solid " + status_color + "; padding-left: 10px;"
+                        ):
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                ui.label(stage_label).classes("font-semibold")
+                                ui.label(status_str).classes("rag-chip").style(
+                                    f"color: {status_color}; border-color: {status_color};"
+                                    f" background: {status_color}18;"
+                                )
+                                if started_at:
+                                    ui.html(
+                                        f'<span class="rag-meta">▶ {started_at}</span>',
+                                        sanitize=False,
+                                    )
+                                if finished_at and not is_running:
+                                    ui.html(
+                                        f'<span class="rag-meta">■ {finished_at}</span>',
+                                        sanitize=False,
+                                    )
+                                ui.element("div").style("flex: 1;")
+                                duration_str = _format_duration_seconds(row.get("duration_sec"))
+                                if duration_str:
+                                    ui.label(duration_str).classes("rag-meta font-mono")
+                            if total_f > 0 or is_running:
+                                ui.linear_progress(value=pct).props(
+                                    f"color={bar_color}" if bar_color else ""
+                                ).classes("w-full")
+                                ui.html(
+                                    f'<span class="rag-meta">{processed:,} / {total_f:,} файлов</span>'.replace(",", " "),
+                                    sanitize=False,
+                                )
+                            with ui.row().classes("w-full gap-3 flex-wrap"):
+                                for lbl, key in [
+                                    ("добавлено", "added_files"),
+                                    ("обновлено", "updated_files"),
+                                    ("пропущено", "skipped_files"),
+                                    ("ошибок", "error_files"),
+                                    ("точек", "points_added"),
+                                ]:
+                                    val = int(row.get(key) or 0)
+                                    if val:
+                                        color_s = "var(--rag-danger)" if key == "error_files" and val else "var(--rag-muted)"
+                                        ui.html(
+                                            f'<span style="font-size:12px; color:{color_s};">'
+                                            f'{lbl} <b style="color:var(--rag-ink-2);">{val:,}</b></span>'.replace(",", " "),
+                                            sanitize=False,
+                                        )
 
             # Initial render
             _refresh_progress()
@@ -3104,119 +3596,219 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
-        with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
-            with ui.column().classes("rag-card w-full max-w-xl p-5 gap-3"):
-                ui.label("Вход в RAG Каталог").classes("text-2xl font-semibold")
-                ui.label("Войдите в аккаунт или отправьте заявку на доступ.").classes("rag-meta")
 
-                tg_login_token = {"value": ""}
+        tg_login_token: Dict[str, str] = {"value": ""}
+        reg_visible: Dict[str, bool] = {"v": False}
 
-                def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
-                    state.current_user = user
-                    state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
-                    auth_db.log_auth_event(username=_username(state), event_type=event_type, ok=True)
-                    _load_user_state(state)
-                    try:
-                        app.storage.user["auth_token"] = state.auth_token
-                    except Exception:
-                        pass
-                    ui.notify("Вход выполнен.", type="positive")
-                    render()
+        # ── логика аутентификации ────────────────────────────────────────────
+        def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
+            state.current_user = user
+            state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
+            auth_db.log_auth_event(username=_username(state), event_type=event_type, ok=True)
+            _load_user_state(state)
+            try:
+                app.storage.user["auth_token"] = state.auth_token
+            except Exception:
+                pass
+            ui.notify("Вход выполнен.", type="positive")
+            render()
 
-                def login() -> None:
-                    username = str(username_input.value or "")
-                    user = auth_db.login(username=username, password=str(password_input.value or ""))
-                    if not user:
-                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
-                        ui.notify("Неверный логин или пароль.", type="negative")
-                        return
-                    _complete_login(user, event_type="login")
+        def login() -> None:
+            username = str(username_input.value or "")
+            user = auth_db.login(username=username, password=str(password_input.value or ""))
+            if not user:
+                auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
+                ui.notify("Неверный логин или пароль.", type="negative")
+                return
+            _complete_login(user, event_type="login")
 
-                def request_tg_login() -> None:
-                    bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-                    if not bot_link:
-                        ui.notify("Telegram-вход не настроен: задайте telegram_bot_link в config.json.", type="warning")
-                        return
-                    out = auth_db.create_telegram_login_challenge(target="web")
-                    token = str(out.get("token") or "")
-                    link = _telegram_deeplink(bot_link, "login", token)
-                    if not token or not link:
-                        ui.notify("Не удалось создать Telegram-ссылку входа.", type="negative")
-                        return
-                    tg_login_token["value"] = token
-                    ui.run_javascript(
-                        "(() => {"
-                        f"const url = {json.dumps(link)};"
-                        "const w = window.open(url, '_blank', 'noopener,noreferrer');"
-                        "if (!w) { window.location.href = url; }"
-                        "})();"
+        def request_tg_login() -> None:
+            bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+            if not bot_link:
+                ui.notify("Telegram-вход не настроен: задайте telegram_bot_link в config.json.", type="warning")
+                return
+            out = auth_db.create_telegram_login_challenge(target="web")
+            token = str(out.get("token") or "")
+            link = _telegram_deeplink(bot_link, "login", token)
+            if not token or not link:
+                ui.notify("Не удалось создать Telegram-ссылку входа.", type="negative")
+                return
+            tg_login_token["value"] = token
+            ui.run_javascript(
+                "(() => {"
+                f"const url = {json.dumps(link)};"
+                "const w = window.open(url, '_blank', 'noopener,noreferrer');"
+                "if (!w) { window.location.href = url; }"
+                "})();"
+            )
+            ui.notify("Подтвердите вход в Telegram, затем вернитесь в браузер.", type="positive")
+
+        def poll_tg_login() -> None:
+            token = tg_login_token["value"]
+            if not token or state.current_user is not None:
+                return
+            out = auth_db.consume_confirmed_telegram_login(token=token)
+            if not out.get("ok"):
+                return
+            tg_login_token["value"] = ""
+            user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
+            if not user:
+                return
+            _complete_login(user, event_type="telegram_web_login")
+
+        def register_request() -> None:
+            username = str(reg_username_input.value or "").strip().lower()
+            display_name = str(reg_display_input.value or "").strip()
+            tg_username = str(reg_tg_user_input.value or "").strip().lstrip("@")
+            if len(username) < 3:
+                ui.notify("Укажите логин (минимум 3 символа).", type="warning")
+                return
+            if auth_db.get_user(username=username):
+                ui.notify("Пользователь с таким логином уже существует. Используйте вход.", type="warning")
+                return
+            out = auth_db.create_registration_request(
+                username=username,
+                display_name=display_name or username,
+                telegram_username=tg_username,
+                source="web",
+                note="requested from web login form",
+            )
+            if not out.get("ok"):
+                ui.notify("Не удалось отправить заявку. Попробуйте позже.", type="negative")
+                return
+            ui.notify("Заявка отправлена администратору.", type="positive")
+            reg_username_input.value = ""
+            reg_display_input.value = ""
+            reg_tg_user_input.value = ""
+            reg_username_input.update()
+            reg_display_input.update()
+            reg_tg_user_input.update()
+
+        # ── данные для брендовой панели ──────────────────────────────────────
+        _stats = _read_index_stats(state.cfg)
+        _doc_count = _stats.get("total", 0)
+        _doc_count_str = f"{_doc_count:,}".replace(",", " ") if _doc_count else "—"
+
+        _MARK_SVG = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">'
+            '<path d="M210 332h575a28 28 0 0 1 28 28v270H210z" fill="#F2B625"/>'
+            '<path d="M210 268h185a28 28 0 0 1 24 14l34 58H210z" fill="#F2B625"/>'
+            '<path d="M250 356h522v228H250z" fill="none" stroke="#FFFFFF" stroke-width="28" stroke-linejoin="round"/>'
+            '<path d="M360 145h242l53 53v367H360z" fill="#F7FAFC" stroke="#5F6B78" stroke-width="10"/>'
+            '<path d="M602 145v53h53" fill="none" stroke="#5F6B78" stroke-width="10"/>'
+            '<path d="M410 245h170M410 300h194M410 355h194M410 410h194M410 465h194" stroke="#81909E" stroke-width="14"/>'
+            '<circle cx="436" cy="236" r="35" fill="#D98B00"/>'
+            '<circle cx="436" cy="236" r="14" fill="#FFFFFF"/>'
+            '<path d="M390 470l64-66 72 31M390 470l-34 70M450 548h190M505 372h55v60h-55z"'
+            ' fill="none" stroke="#25313D" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>'
+            '<circle cx="696" cy="562" r="137" fill="#FFFFFF" stroke="#157FC4" stroke-width="30"/>'
+            '<path d="M790 660l112 112" stroke="#157FC4" stroke-width="54" stroke-linecap="round"/>'
+            '<path d="M636 532a62 62 0 0 1 66-55" fill="none" stroke="#5F6B78"'
+            ' stroke-width="18" stroke-linecap="round"/>'
+            '</svg>'
+        )
+
+        # ── split layout ─────────────────────────────────────────────────────
+        with ui.element("div").classes("rag-login-root"):
+
+            # Левая тёмная панель
+            with ui.element("aside").classes("rag-login-brand"):
+                ui.html(
+                    f'<div class="rag-login-brand-inner">'
+                    f'  <div class="rag-login-mark-wrap">{_MARK_SVG}</div>'
+                    f'  <div class="rag-login-brand-name">ТЕХНОПОИСК</div>'
+                    f'  <div class="rag-login-brand-sub">Поиск документов и данных</div>'
+                    f'  <div class="rag-login-stats">'
+                    f'    <div class="rag-login-stat-val">{_doc_count_str}</div>'
+                    f'    <div class="rag-login-stat-lbl">документов в индексе</div>'
+                    f'  </div>'
+                    f'</div>'
+                    f'<div class="rag-login-brand-footer">'
+                    f'  <div class="rag-login-badge">'
+                    f'    <div class="rag-login-badge-dot"></div>'
+                    f'    Индекс активен'
+                    f'  </div>'
+                    f'</div>'
+                )
+
+            # Правая форма
+            with ui.element("main").classes("rag-login-form-side"):
+                with ui.element("div").classes("rag-login-form-inner"):
+                    ui.html(
+                        '<div class="rag-login-greeting">Добро пожаловать</div>'
+                        '<div class="rag-login-greeting-sub">Войдите в аккаунт для доступа к системе</div>'
                     )
-                    ui.notify("Подтвердите вход в Telegram, затем вернитесь в браузер.", type="positive")
 
-                def poll_tg_login() -> None:
-                    token = tg_login_token["value"]
-                    if not token or state.current_user is not None:
-                        return
-                    out = auth_db.consume_confirmed_telegram_login(token=token)
-                    if not out.get("ok"):
-                        return
-                    tg_login_token["value"] = ""
-                    user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
-                    if not user:
-                        return
-                    _complete_login(user, event_type="telegram_web_login")
-
-                def register_request() -> None:
-                    username = str(reg_username_input.value or "").strip().lower()
-                    display_name = str(reg_display_input.value or "").strip()
-                    tg_username = str(reg_tg_user_input.value or "").strip().lstrip("@")
-                    if len(username) < 3:
-                        ui.notify("Укажите логин (минимум 3 символа).", type="warning")
-                        return
-                    if auth_db.get_user(username=username):
-                        ui.notify("Пользователь с таким логином уже существует. Используйте вход.", type="warning")
-                        return
-                    out = auth_db.create_registration_request(
-                        username=username,
-                        display_name=display_name or username,
-                        telegram_username=tg_username,
-                        source="web",
-                        note="requested from web login form",
+                    username_input = (
+                        ui.input("Логин")
+                        .props("dense outlined")
+                        .classes("w-full rag-login-input-gap")
                     )
-                    if not out.get("ok"):
-                        ui.notify("Не удалось отправить заявку. Попробуйте позже.", type="negative")
-                        return
-                    ui.notify("Заявка отправлена администратору.", type="positive")
-                    reg_username_input.value = ""
-                    reg_display_input.value = ""
-                    reg_tg_user_input.value = ""
-                    reg_username_input.update()
-                    reg_display_input.update()
-                    reg_tg_user_input.update()
+                    password_input = (
+                        ui.input("Пароль", password=True, password_toggle_button=True)
+                        .props("dense outlined")
+                        .classes("w-full")
+                    )
+                    password_input.on("keyup.enter", lambda _: login())
 
-                tabs = ui.tabs().classes("w-full")
-                with tabs:
-                    tab_login = ui.tab("Войти", icon="login")
-                    tab_register = ui.tab("Зарегистрироваться", icon="person_add")
+                    ui.button("Войти", on_click=login).props("unelevated").classes(
+                        "w-full rag-login-btn-primary"
+                    )
 
-                with ui.tab_panels(tabs, value=tab_login).classes("w-full"):
-                    with ui.tab_panel(tab_login).classes("w-full gap-3"):
-                        username_input = ui.input("Логин").props("dense outlined").classes("w-full")
-                        password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-                        password_input.on("keyup.enter", lambda _: login())
-                        ui.button("Войти", icon="login", on_click=login).props("unelevated")
-                        ui.separator()
-                        ui.button("Войти через Telegram", icon="send", on_click=request_tg_login).props("outline").classes("w-full")
-                        ui.label("Стандартный сценарий: как у OAuth-входа — нажали кнопку, подтвердили в Telegram, вернулись в приложение.").classes("rag-meta")
+                    ui.html(
+                        '<div class="rag-login-divider">'
+                        '  <div class="rag-login-divider-line"></div>'
+                        '  <span class="rag-login-divider-text">или</span>'
+                        '  <div class="rag-login-divider-line"></div>'
+                        '</div>'
+                    )
 
-                    with ui.tab_panel(tab_register).classes("w-full gap-3"):
-                        reg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")
-                        reg_display_input = ui.input("Имя").props("dense outlined").classes("w-full")
-                        reg_tg_user_input = ui.input("Telegram username (необязательно)").props("dense outlined").classes("w-full")
-                        ui.button("Отправить заявку", icon="how_to_reg", on_click=register_request).props("unelevated")
-                        ui.label("После одобрения администратором вы получите доступ к аккаунту.").classes("rag-meta")
+                    ui.button("Войти через Telegram", icon="send", on_click=request_tg_login).props(
+                        "outline"
+                    ).classes("w-full")
 
-                ui.timer(2.0, poll_tg_login)
+                    # Заявка на доступ
+                    reg_section = ui.element("div").classes("rag-login-reg-wrap")
+                    reg_section.set_visibility(False)
+
+                    with ui.row().classes("w-full justify-center items-center gap-1 q-mt-sm"):
+                        ui.label("Нет аккаунта?").style(
+                            "color: var(--rag-muted); font-size: 13px;"
+                        )
+
+                        def _toggle_reg() -> None:
+                            reg_visible["v"] = not reg_visible["v"]
+                            reg_section.set_visibility(reg_visible["v"])
+
+                        ui.button("Запросить доступ", on_click=_toggle_reg).props("flat dense").style(
+                            "color: var(--rag-accent); font-size: 13px; text-transform: none;"
+                        )
+
+                    with reg_section:
+                        ui.html('<div class="rag-login-reg-title">Заявка на доступ</div>')
+                        reg_username_input = (
+                            ui.input("Логин")
+                            .props("dense outlined")
+                            .classes("w-full rag-login-input-gap")
+                        )
+                        reg_display_input = (
+                            ui.input("Имя")
+                            .props("dense outlined")
+                            .classes("w-full rag-login-input-gap")
+                        )
+                        reg_tg_user_input = (
+                            ui.input("Telegram (необязательно)")
+                            .props("dense outlined prefix=@")
+                            .classes("w-full")
+                        )
+                        ui.button(
+                            "Отправить заявку", icon="how_to_reg", on_click=register_request
+                        ).props("unelevated").classes("w-full q-mt-sm")
+                        ui.label(
+                            "После одобрения администратором вы получите доступ."
+                        ).classes("rag-meta q-mt-xs")
+
+        ui.timer(2.0, poll_tg_login)
 
     def render_admin_users(auth_db: UserAuthDB) -> None:
         with ui.column().classes("rag-card w-full p-4 gap-4"):
