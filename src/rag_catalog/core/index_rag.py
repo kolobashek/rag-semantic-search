@@ -686,6 +686,35 @@ class RAGIndexer:
             logger.warning("pdfplumber: ошибка чтения %s: %s", filepath.name, exc)
             return ""
 
+    @staticmethod
+    def _setup_tesseract(pytesseract_module: Any) -> None:
+        """Явно указать путь к tesseract.exe если он не найден в PATH.
+
+        Windows-машины часто имеют tesseract установленным, но не добавленным в PATH
+        текущего процесса (PATH обновился после старта приложения). Проверяем стандартные
+        расположения и прописываем путь в pytesseract.tesseract_cmd напрямую.
+        """
+        import shutil  # noqa: PLC0415
+        if shutil.which("tesseract"):
+            return  # уже в PATH — ничего делать не нужно
+        import os  # noqa: PLC0415
+        candidates = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            r"C:\tools\tesseract\tesseract.exe",
+            r"C:\tesseract\tesseract.exe",
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                # pytesseract читает команду из pytesseract.pytesseract.tesseract_cmd
+                pytesseract_module.pytesseract.tesseract_cmd = path
+                logger.debug("tesseract найден по явному пути: %s", path)
+                return
+        logger.warning(
+            "tesseract не найден ни в PATH, ни в стандартных директориях Windows. "
+            "Установите с https://github.com/UB-Mannheim/tesseract/wiki и добавьте в PATH."
+        )
+
     def _ocr_pdf(self, filepath: Path) -> str:
         """OCR сканированного PDF через pytesseract + pdf2image."""
         try:
@@ -698,6 +727,7 @@ class RAGIndexer:
             )
             return ""
 
+        self._setup_tesseract(pytesseract)
         try:
             pages = convert_from_path(str(filepath), dpi=200)
             parts: List[str] = []
@@ -725,6 +755,7 @@ class RAGIndexer:
                 "Установите: pip install pytesseract"
             )
             return ""
+        self._setup_tesseract(pytesseract)
         try:
             from PIL import Image  # type: ignore
         except ImportError:
