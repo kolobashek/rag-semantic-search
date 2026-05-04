@@ -258,6 +258,10 @@ SYSTEM_FILE_EXTENSIONS = {
 if LOGO_PATH.exists():
     app.add_static_file(local_file=LOGO_PATH, url_path="/rag-logo.png")
 
+_MARK_SVG_PATH = PROJECT_ROOT / "assets" / "brand" / "svg" / "mark.svg"
+if _MARK_SVG_PATH.exists():
+    app.add_static_file(local_file=_MARK_SVG_PATH, url_path="/rag-mark.svg")
+
 
 @dataclass
 class PageState:
@@ -1412,7 +1416,7 @@ def _install_css() -> None:
           --rag-shadow-2: 0 6px 16px -8px rgba(20,20,26,.12), 0 2px 4px rgba(20,20,26,.04);
           --rag-shadow-3: 0 24px 48px -16px rgba(20,20,26,.18), 0 8px 16px -8px rgba(20,20,26,.08);
         }
-        [data-theme=dark] {
+        .body--dark {
           --rag-bg: #0c0c0f;
           --rag-surface: #15151a;
           --rag-bg-sunken: #08080a;
@@ -1433,28 +1437,94 @@ def _install_css() -> None:
         }
         .q-page { background: transparent; }
         .rag-header {
-          background: rgba(250, 250, 247, 0.82);
+          background: rgba(250, 250, 247, 0.88) !important;
+          color: var(--rag-text) !important;
+          border-bottom: 1px solid var(--rag-border) !important;
+          backdrop-filter: blur(20px) saturate(160%);
+          -webkit-backdrop-filter: blur(20px) saturate(160%);
+          padding-left: 16px !important;
+          padding-right: 16px !important;
+        }
+        .body--dark .rag-header {
+          background: rgba(21, 21, 26, 0.92) !important;
+          border-bottom-color: #23232b !important;
+        }
+        .rag-header-brand {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          text-decoration: none;
+          cursor: default;
+        }
+        .rag-header-brand-name {
+          font-family: var(--rag-display-font);
+          font-size: 15px;
+          font-weight: 700;
           color: var(--rag-text);
-          border-bottom: 1px solid var(--rag-border);
-          backdrop-filter: blur(24px) saturate(180%);
-          -webkit-backdrop-filter: blur(24px) saturate(180%);
+          letter-spacing: -0.02em;
         }
         .rag-header-breadcrumbs .q-btn { min-height: 32px; padding: 0 6px; }
         .rag-header-actions .q-btn { min-width: 34px; min-height: 34px; }
+
+        /* ── Drawer — всегда тёмная боковая панель ── */
         .rag-drawer {
-          background: var(--rag-surface);
-          border-right: 1px solid var(--rag-border);
+          background: #0d0d11 !important;
+          border-right: none !important;
+          width: 224px !important;
+          padding: 0 !important;
+        }
+        .rag-drawer-brand {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 18px 16px 12px;
+          border-bottom: 1px solid rgba(255,255,255,.07);
+          margin-bottom: 8px;
+        }
+        .rag-drawer-brand-mark {
+          width: 28px;
+          height: 28px;
+          flex-shrink: 0;
+        }
+        .rag-drawer-brand-name {
+          font-family: var(--rag-display-font);
+          font-size: 14px;
+          font-weight: 700;
+          color: #ffffff;
+          letter-spacing: -0.02em;
         }
         .rag-drawer-body {
-          min-height: calc(100vh - 92px);
           display: flex;
           flex-direction: column;
+          height: 100%;
+          padding: 0 8px;
         }
+        .rag-drawer-nav { flex: 1; }
         .rag-drawer-bottom {
-          margin-top: auto;
-          padding-top: 12px;
-          border-top: 1px solid var(--rag-border);
+          padding: 8px 0 12px;
+          border-top: 1px solid rgba(255,255,255,.07);
+          margin-top: 8px;
         }
+        .rag-nav-button {
+          color: rgba(255,255,255,.6) !important;
+          border-radius: var(--rag-radius-md) !important;
+          transition: background .12s ease, color .12s ease !important;
+        }
+        .rag-nav-button:hover {
+          background: rgba(255,255,255,.07) !important;
+          color: rgba(255,255,255,.9) !important;
+        }
+        .rag-nav-button.text-primary,
+        .rag-nav-button[color=primary] {
+          background: rgba(99,133,255,.18) !important;
+          color: #a0b4ff !important;
+        }
+        .rag-nav-button .q-btn__content {
+          justify-content: flex-start;
+          width: 100%;
+          text-align: left;
+        }
+        .rag-nav-button .q-icon { margin-right: 10px; }
         .rag-page {
           width: min(1440px, calc(100vw - 24px));
           margin: 0 auto;
@@ -2172,32 +2242,47 @@ def _build_page(initial_screen: str = "search") -> None:
 
     dark_mode = ui.dark_mode(state.theme == "dark")
 
-    with ui.header(fixed=True, elevated=False).classes("rag-header h-12 px-3 md:px-4 items-center"):
-        menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("text-slate-700 self-center min-h-[34px]")
-        ui.image("/rag-logo.png").classes("w-6 h-6 rounded") if LOGO_PATH.exists() else ui.icon("manage_search").classes("text-2xl")
-        ui.label("RAG Каталог").classes("font-semibold text-base")
-        # header_title убран — активный экран видно по подсветке в сайдбаре.
-        # Оставляем ссылочное поле на None для совместимости с render().
+    with ui.header(fixed=True, elevated=False).classes("rag-header h-12 items-center"):
+        # Гамбургер — только на узких экранах
+        menu_button = (
+            ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None)
+            .props("flat round dense")
+            .classes("lg:hidden")
+            .style("color: var(--rag-muted);")
+        )
         header_title = ui.label("").classes("hidden")
-        header_breadcrumbs = ui.row().classes("rag-header-breadcrumbs items-center gap-1 hidden md:flex")
+        header_breadcrumbs = ui.row().classes("rag-header-breadcrumbs items-center gap-1")
         header_actions = ui.row().classes("rag-header-actions items-center gap-1")
         state.header_breadcrumbs = header_breadcrumbs
         state.header_explorer_actions = header_actions
         ui.space()
+        status_connected = _ensure_searcher(state) and state.searcher and state.searcher.connected
+        status_text = "Qdrant" if status_connected else "Qdrant ✕"
+        ui.label(status_text).classes("hidden sm:block rag-chip").style(
+            f"color: {'var(--rag-ok)' if status_connected else 'var(--rag-danger)'};"
+        )
         theme_button = ui.button(
             icon="light_mode" if state.theme == "dark" else "dark_mode",
             on_click=lambda: toggle_theme(),
             color=None,
-        ).props("flat round dense").classes("text-slate-700")
-        status_text = "Qdrant готов" if _ensure_searcher(state) and state.searcher and state.searcher.connected else "Qdrant недоступен"
-        ui.label(status_text).classes("hidden sm:block rag-chip")
+        ).props("flat round dense").style("color: var(--rag-muted);")
 
-    with ui.left_drawer(value=False, fixed=True, bordered=True).classes("rag-drawer w-80 p-4") as drawer:
-        with ui.column().classes("rag-drawer-body w-full"):
-            ui.label("Меню").classes("text-xl font-semibold mb-2")
-            nav_area = ui.column().classes("w-full gap-2")
-            settings_area = ui.column().classes("w-full gap-3 mt-4")
-            bottom_nav_area = ui.column().classes("rag-drawer-bottom w-full gap-2")
+    with (
+        ui.left_drawer(value=True, fixed=True, bordered=False)
+        .props("behavior=desktop breakpoint=1024")
+        .classes("rag-drawer")
+    ) as drawer:
+        # Бренд-шапка
+        ui.html(
+            '<div class="rag-drawer-brand">'
+            '  <img src="/rag-mark.svg" class="rag-drawer-brand-mark" alt="">'
+            '  <span class="rag-drawer-brand-name">ТЕХНОПОИСК</span>'
+            '</div>'
+        )
+        with ui.column().classes("rag-drawer-body"):
+            nav_area = ui.column().classes("rag-drawer-nav w-full gap-1")
+            settings_area = ui.column().classes("w-full mt-2")
+            bottom_nav_area = ui.column().classes("rag-drawer-bottom w-full gap-1")
 
     page_root = ui.column().classes("rag-page gap-5")
     with page_root:
@@ -2304,12 +2389,12 @@ def _build_page(initial_screen: str = "search") -> None:
                 ("telegram", "Telegram", "send"),
             ]:
                 color = "primary" if state.screen == screen else None
-                ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s, close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
             if str((state.current_user or {}).get("role") or "") == "admin":
                 color = "primary" if state.screen == "index" else None
-                ui.button("Индекс", icon="analytics", on_click=lambda: set_screen("index", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button("Индекс", icon="analytics", on_click=lambda: set_screen("index"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
                 color = "primary" if state.screen == "stats" else None
-                ui.button("Статистика", icon="query_stats", on_click=lambda: set_screen("stats", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button("Статистика", icon="query_stats", on_click=lambda: set_screen("stats"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
         settings_area.clear()
         with settings_area:
@@ -2353,7 +2438,7 @@ def _build_page(initial_screen: str = "search") -> None:
             user_label = "Настройки"
             if state.current_user:
                 user_label = f"Настройки · {state.current_user.get('username')}"
-            ui.button(user_label, icon="settings", on_click=lambda: set_screen("settings", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+            ui.button(user_label, icon="settings", on_click=lambda: set_screen("settings"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
             if state.current_user:
                 ui.button("Выйти", icon="logout", on_click=do_logout, color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
@@ -4815,11 +4900,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         _recover_background_tasks(load_config())
     except Exception as exc:
         print(f"[nice_app] background recovery skipped: {exc}", file=sys.stderr)
+    _favicon = (
+        str(_MARK_SVG_PATH) if _MARK_SVG_PATH.exists()
+        else (APP_ICON_PATH if APP_ICON_PATH.exists() else None)
+    )
     ui.run(
-        title="RAG Каталог",
+        title="ТЕХНОПОИСК",
         host=args.host,
         port=args.port,
-        favicon=APP_ICON_PATH if APP_ICON_PATH.exists() else None,
+        favicon=_favicon,
         language="ru",
         reload=False,
         show=not args.no_show,
