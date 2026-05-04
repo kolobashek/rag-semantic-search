@@ -299,6 +299,9 @@ class PageState:
     header_explorer_actions: Optional[ui.row] = None
     header_breadcrumbs: Optional[ui.row] = None
     telemetry: Optional[TelemetryDB] = None
+    search_refine_terms: List[str] = field(default_factory=list)  # "уточнить в найденном"
+    selected_result_paths: List[str] = field(default_factory=list)  # выбранные результаты
+    analytics_tab: str = "overview"  # активная вкладка аналитики
 
 
 def _file_url(full_path: str) -> str:
@@ -2222,6 +2225,305 @@ def _install_css() -> None:
         </script>
         """
     )
+    # ── v2 wireframe CSS ────────────────────────────────────────────────
+    ui.add_css(
+        """
+        /* === KPI tiles (Home + Analytics) === */
+        .rag-kpi-tile {
+          background: var(--rag-surface);
+          border: 1px solid var(--rag-border);
+          border-radius: var(--rag-radius-lg);
+          padding: 20px 20px 14px;
+          flex: 1;
+          min-width: 160px;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          box-shadow: var(--rag-shadow);
+        }
+        .rag-kpi-label {
+          font-family: var(--rag-mono-font);
+          font-size: 10px;
+          font-weight: 600;
+          color: var(--rag-ink-4);
+          text-transform: uppercase;
+          letter-spacing: .08em;
+        }
+        .rag-kpi-value {
+          font-family: var(--rag-display-font);
+          font-size: 28px;
+          font-weight: 800;
+          letter-spacing: -0.03em;
+          color: var(--rag-text);
+          line-height: 1;
+        }
+        .rag-kpi-delta {
+          font-size: 11px;
+          font-weight: 600;
+        }
+        .rag-kpi-delta.up   { color: var(--rag-ok); }
+        .rag-kpi-delta.down { color: var(--rag-danger); }
+        .rag-kpi-delta.neutral { color: var(--rag-muted); }
+        .rag-kpi-sparkline {
+          display: flex;
+          align-items: flex-end;
+          gap: 2px;
+          height: 28px;
+          margin-top: 8px;
+        }
+        .rag-kpi-sparkline span {
+          flex: 1;
+          background: var(--rag-accent);
+          opacity: .55;
+          border-radius: 2px 2px 0 0;
+          min-height: 2px;
+          transition: opacity .15s;
+        }
+        .rag-kpi-sparkline span:last-child { opacity: .9; }
+
+        /* === Refine bar (Search) === */
+        .rag-refine-bar {
+          background: rgba(245,158,11,.1);
+          border: 1px solid rgba(245,158,11,.35);
+          border-radius: var(--rag-radius-md);
+          padding: 8px 14px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 13px;
+        }
+        .rag-refine-bar-label {
+          font-size: 11px;
+          font-weight: 700;
+          color: var(--rag-muted);
+          white-space: nowrap;
+          text-transform: uppercase;
+          letter-spacing: .05em;
+        }
+        .rag-refine-chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 2px 8px 2px 10px;
+          background: var(--rag-accent);
+          color: #fff;
+          font-size: 11px;
+          font-weight: 600;
+          border-radius: 12px;
+          cursor: pointer;
+        }
+        .rag-refine-chip:hover { opacity: .85; }
+
+        /* === Selection bar (Search) === */
+        .rag-selection-bar {
+          position: sticky;
+          bottom: 16px;
+          z-index: 20;
+          background: var(--rag-text);
+          color: #fff;
+          border-radius: var(--rag-radius-lg);
+          padding: 10px 16px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          box-shadow: var(--rag-shadow-3);
+          font-size: 13px;
+          font-weight: 600;
+        }
+        .rag-selection-bar .q-btn { color: #fff !important; }
+
+        /* === Phase row (Index screen) === */
+        .rag-phase-row {
+          background: var(--rag-surface);
+          border: 1px solid var(--rag-border);
+          border-radius: var(--rag-radius-md);
+          padding: 14px 16px;
+          display: flex;
+          align-items: flex-start;
+          gap: 14px;
+        }
+        .rag-phase-row.running {
+          border-color: var(--rag-accent);
+          box-shadow: 0 0 0 1px var(--rag-accent)22;
+        }
+        .rag-phase-circle {
+          width: 36px; height: 36px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          font-size: 16px;
+          font-weight: 700;
+          flex-shrink: 0;
+          color: #fff;
+        }
+        .rag-freshness-bar {
+          height: 6px;
+          border-radius: 3px;
+          width: 180px;
+          background: var(--rag-border);
+          overflow: hidden;
+          flex-shrink: 0;
+        }
+        .rag-freshness-bar-fill {
+          height: 100%;
+          border-radius: 3px;
+          transition: width .3s ease;
+        }
+
+        /* === Preview hint (Search) === */
+        .rag-preview-hint {
+          border: 1px dashed var(--rag-border-strong);
+          border-radius: var(--rag-radius-md);
+          padding: 10px 16px;
+          text-align: center;
+          font-size: 12px;
+          color: var(--rag-muted);
+          cursor: pointer;
+        }
+        .rag-preview-hint:hover {
+          border-color: var(--rag-accent);
+          color: var(--rag-accent);
+        }
+
+        /* === Home screen === */
+        .rag-home-greeting {
+          font-family: var(--rag-display-font);
+          font-size: 28px;
+          font-weight: 700;
+          letter-spacing: -0.025em;
+          color: var(--rag-text);
+        }
+        .rag-home-date {
+          font-size: 13px;
+          color: var(--rag-muted);
+          margin-top: 2px;
+        }
+        .rag-spoiler {
+          background: var(--rag-surface);
+          border: 1px solid var(--rag-border);
+          border-radius: var(--rag-radius-lg);
+          overflow: hidden;
+        }
+        .rag-spoiler-head {
+          display: flex;
+          align-items: center;
+          padding: 10px 16px;
+          cursor: pointer;
+          user-select: none;
+          border-bottom: 1px solid var(--rag-border);
+          gap: 8px;
+        }
+        .rag-spoiler-head:hover { background: var(--rag-bg-sunken); }
+        .rag-spoiler-title {
+          font-family: var(--rag-display-font);
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--rag-text);
+          flex: 1;
+        }
+        .rag-spoiler-count {
+          font-family: var(--rag-mono-font);
+          font-size: 11px;
+          color: var(--rag-ink-4);
+        }
+        .rag-spoiler-body { padding: 16px; }
+
+        /* === Analytics sub-tabs === */
+        .rag-analytics-tabs {
+          display: flex;
+          gap: 4px;
+          padding: 0;
+          flex-wrap: wrap;
+        }
+        .rag-analytics-tab {
+          padding: 5px 12px;
+          font-size: 12px;
+          font-weight: 500;
+          border-radius: 6px;
+          cursor: pointer;
+          color: var(--rag-muted);
+          border: 1px solid transparent;
+          transition: all .15s;
+        }
+        .rag-analytics-tab:hover {
+          background: var(--rag-bg-sunken);
+          color: var(--rag-text);
+        }
+        .rag-analytics-tab.active {
+          background: var(--rag-accent);
+          color: #fff;
+          border-color: transparent;
+        }
+
+        /* === AI insight panel === */
+        .rag-ai-insight {
+          background: rgba(245,158,11,.08);
+          border: 1px solid rgba(245,158,11,.3);
+          border-radius: var(--rag-radius-md);
+          padding: 10px 16px;
+          font-size: 13px;
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+        }
+        .rag-ai-insight-icon {
+          font-size: 16px;
+          flex-shrink: 0;
+          margin-top: 1px;
+        }
+
+        /* === Index pipeline visual === */
+        .rag-pipeline {
+          display: flex;
+          align-items: center;
+          gap: 0;
+          flex-wrap: wrap;
+        }
+        .rag-pipeline-step {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 4px;
+        }
+        .rag-pipeline-dot {
+          width: 28px; height: 28px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          font-size: 12px;
+          font-weight: 700;
+          color: #fff;
+        }
+        .rag-pipeline-connector {
+          width: 32px;
+          height: 2px;
+          background: var(--rag-border);
+          flex-shrink: 0;
+          align-self: center;
+          margin-bottom: 20px;
+        }
+        .rag-pipeline-label {
+          font-size: 10px;
+          color: var(--rag-muted);
+          font-family: var(--rag-mono-font);
+          white-space: nowrap;
+        }
+
+        /* === Stats spoiler (collapsible stats in search) === */
+        .rag-stats-spoiler-head {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 8px 14px;
+          cursor: pointer;
+          border-radius: var(--rag-radius-md);
+          border: 1px solid var(--rag-border);
+          background: var(--rag-surface);
+          user-select: none;
+        }
+        .rag-stats-spoiler-head:hover { border-color: var(--rag-accent); }
+        """
+    )
 
 
 def _build_page(initial_screen: str = "search") -> None:
@@ -2383,6 +2685,9 @@ def _build_page(initial_screen: str = "search") -> None:
     def update_nav() -> None:
         nav_area.clear()
         with nav_area:
+            # "Главная" visible to all users (first item)
+            color = "primary" if state.screen == "home" else None
+            ui.button("Главная", icon="home", on_click=lambda: set_screen("home"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
             for screen, label, icon in [
                 ("search", "Поиск", "search"),
                 ("explorer", "Проводник", "folder"),
@@ -2394,7 +2699,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 color = "primary" if state.screen == "index" else None
                 ui.button("Индекс", icon="analytics", on_click=lambda: set_screen("index"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
                 color = "primary" if state.screen == "stats" else None
-                ui.button("Статистика", icon="query_stats", on_click=lambda: set_screen("stats"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button("Аналитика", icon="query_stats", on_click=lambda: set_screen("stats"), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
         settings_area.clear()
         with settings_area:
@@ -2933,30 +3238,107 @@ def _build_page(initial_screen: str = "search") -> None:
             "Договоры", "Счета и платежи", "Таблицы", "PDF", "Другие файлы",
         ]
 
-        # ── Stats bar ────────────────────────────────────────────────────────
-        with ui.element("div").classes("rag-search-stats-bar w-full"):
-            ui.html(
-                f'<span class="rag-search-stats-total">{len(sorted_results)}</span>'
-                f'<span>&nbsp;результатов</span>',
-                sanitize=False,
-            )
-            if state.expanded_query:
-                ui.html('<div class="rag-search-stats-sep"></div>', sanitize=False)
+        # ── Refine bar (уточнить в найденном) ────────────────────────────────
+        def remove_refine(term: str) -> None:
+            if term in state.search_refine_terms:
+                state.search_refine_terms.remove(term)
+            render()
+
+        refine_input_ref: Dict[str, Any] = {}
+
+        def apply_refine() -> None:
+            inp = refine_input_ref.get("input")
+            if inp is None:
+                return
+            term = str(inp.value or "").strip()
+            if term and term not in state.search_refine_terms:
+                state.search_refine_terms.append(term)
+                inp.set_value("")
+            render()
+
+        with ui.element("div").classes("rag-refine-bar w-full"):
+            ui.html('<span class="rag-refine-bar-label">↳ уточнить:</span>', sanitize=False)
+            refine_inp = ui.input(placeholder="введите слово для уточнения…").props(
+                "dense borderless"
+            ).style("flex: 1; font-size: 13px;").on("keydown.enter", apply_refine)
+            refine_input_ref["input"] = refine_inp
+            for term in state.search_refine_terms:
                 ui.html(
-                    f'<span>расширен: <i>{state.expanded_query}</i></span>',
+                    f'<span class="rag-refine-chip">{html.escape(term)} ×</span>',
+                    sanitize=False,
+                ).on("click", lambda t=term: remove_refine(t))
+            if state.search_refine_terms:
+                ui.html(
+                    f'<span style="font-size:11px;color:var(--rag-muted);">'
+                    f'{len(state.search_refine_terms)} уточнений</span>',
                     sanitize=False,
                 )
-            # Топ расширений
-            ext_counts: Dict[str, int] = {}
-            for r in sorted_results:
-                ext = (r.get("extension") or "").upper().lstrip(".") or "—"
-                ext_counts.setdefault(ext, 0)
-                ext_counts[ext] += 1
-            top_exts = sorted(ext_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-            if top_exts:
-                ui.html('<div class="rag-search-stats-sep"></div>', sanitize=False)
-                parts = " · ".join(f"{e}: {c}" for e, c in top_exts)
-                ui.html(f'<span>{parts}</span>', sanitize=False)
+
+        # ── Stats spoiler (коллапс) ────────────────────────────────────────
+        # Подсчёт по категориям/типам
+        ext_counts: Dict[str, int] = {}
+        for r in sorted_results:
+            ext = (r.get("extension") or "").upper().lstrip(".") or "—"
+            ext_counts.setdefault(ext, 0)
+            ext_counts[ext] += 1
+        top_exts = sorted(ext_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        # title_match / semantic counts (аппроксимация)
+        _title_match = sum(1 for r in sorted_results if float(r.get("score") or 0) >= 0.95)
+        _content_match = sum(1 for r in sorted_results if 0.75 <= float(r.get("score") or 0) < 0.95)
+        _semantic = len(sorted_results) - _title_match - _content_match
+
+        stats_count_str = f"{len(sorted_results)}"
+        if state.search_refine_terms:
+            # apply refine filter
+            _refine_filtered = [
+                r for r in sorted_results
+                if all(
+                    t.lower() in (r.get("filename") or "").lower()
+                    or t.lower() in (r.get("path") or "").lower()
+                    for t in state.search_refine_terms
+                )
+            ]
+            stats_count_str = f"{len(sorted_results)} → {len(_refine_filtered)} после уточнения"
+            sorted_results = _refine_filtered
+
+        if state.expanded_query:
+            exp_note = f" · расширен: {state.expanded_query}"
+        else:
+            exp_note = ""
+
+        with ui.expansion(
+            f"Статистика выдачи  ·  {stats_count_str}{exp_note}",
+            icon="bar_chart",
+            value=False,
+        ).classes("rag-card w-full"):
+            with ui.row().classes("w-full gap-4 flex-wrap p-2"):
+                for label, value, color in [
+                    ("Точные в названиях", _title_match, "var(--rag-ok)"),
+                    ("Точные в тексте", _content_match, "var(--rag-accent)"),
+                    ("Семантически близкие", _semantic, "var(--rag-muted)"),
+                    ("Всего", len(state.results), "var(--rag-text)"),
+                ]:
+                    with ui.column().classes("gap-0"):
+                        ui.html(
+                            f'<div style="font-size:10px;font-family:var(--rag-mono-font);'
+                            f'color:var(--rag-ink-4);text-transform:uppercase;letter-spacing:.06em;">'
+                            f'{label}</div>'
+                            f'<div style="font-size:26px;font-weight:800;font-family:var(--rag-display-font);'
+                            f'color:{color};letter-spacing:-0.03em;">{value}</div>',
+                            sanitize=False,
+                        )
+                if top_exts:
+                    ui.element("div").style("width:1px;background:var(--rag-border);align-self:stretch;")
+                    with ui.column().classes("gap-1"):
+                        ui.html(
+                            '<div style="font-size:10px;font-family:var(--rag-mono-font);'
+                            'color:var(--rag-ink-4);text-transform:uppercase;letter-spacing:.06em;">По типам</div>',
+                            sanitize=False,
+                        )
+                        with ui.row().classes("gap-2 flex-wrap"):
+                            for ext, cnt in top_exts:
+                                ui.label(f"{ext} · {cnt}").classes("rag-chip")
 
         # ── Sort + filter toolbar ────────────────────────────────────────────
         def set_sort(key: str) -> None:
@@ -2969,9 +3351,15 @@ def _build_page(initial_screen: str = "search") -> None:
             render()
 
         with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-            # Чипы-фильтры по группам
+            ui.html(
+                f'<span style="font-size:13px;font-weight:600;color:var(--rag-ink-2);">'
+                f'{len(sorted_results)} результатов</span>',
+                sanitize=False,
+            )
+            ui.element("div").style("width:1px;height:16px;background:var(--rag-border);")
+            # Группировка-чипы
             all_active = state.active_type_filter is None
-            all_chip = ui.label(f"Все ({len(sorted_results)})").classes(
+            all_chip = ui.label(f"Все").classes(
                 "rag-chip" + (" rag-chip-active" if all_active else "")
             )
             all_chip.on("click", lambda: set_filter(None))
@@ -2985,11 +3373,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 )
                 chip.on("click", lambda g=gname: set_filter(g))
 
-            # Разделитель
             ui.element("div").style("flex: 1;")
 
             # Сортировка
-            for sk, slabel in [("score", "По релевантности"), ("name", "По имени"), ("date", "По дате")]:
+            for sk, slabel in [("score", "Релевантность ▾"), ("name", "Имя ▾"), ("date", "Дата ▾")]:
                 is_cur = _sort_key == sk
                 btn = ui.html(
                     f'<button class="rag-sort-btn{"  active" if is_cur else ""}">{slabel}</button>',
@@ -2997,7 +3384,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 )
                 btn.on("click", lambda s=sk: set_sort(s))
 
-        # Применяем фильтр
+        # Применяем фильтр по группе
         if state.active_type_filter:
             visible = [r for r in sorted_results if _result_group(r) == state.active_type_filter]
         else:
@@ -3021,6 +3408,26 @@ def _build_page(initial_screen: str = "search") -> None:
                 on_click=load_more,
                 icon="expand_more",
             ).props("outline no-caps").classes("w-full mt-1")
+
+        # ── Preview hint ─────────────────────────────────────────────────────
+        ui.html(
+            '<div class="rag-preview-hint">▲ ПРЕВЬЮ — дважды кликните по файлу для просмотра</div>',
+            sanitize=False,
+        )
+
+        # ── Selection bar ─────────────────────────────────────────────────────
+        _sel = state.selected_result_paths
+        if _sel:
+            with ui.element("div").classes("rag-selection-bar"):
+                ui.html(f'<span>выбрано: {len(_sel)}</span>', sanitize=False)
+                ui.button("В проводник", icon="folder", on_click=lambda: go_explorer(_sel[0])).props("flat dense no-caps")
+                if len(_sel) == 1:
+                    _sel_path = Path(_sel[0])
+                    if _sel_path.exists():
+                        ui.button("Скачать", icon="download", on_click=lambda: ui.download(_sel_path, filename=_sel_path.name)).props("flat dense no-caps")
+                ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda: _open_os_path(str(Path(_sel[0]).parent))).props("flat dense no-caps")
+                ui.element("div").style("flex:1;")
+                ui.button(icon="close", on_click=lambda: (state.selected_result_paths.clear(), render()), color=None).props("flat round dense")
 
     def render_explorer_screen() -> None:
         root = Path(str(state.cfg.get("catalog_path") or ""))
@@ -3336,76 +3743,166 @@ def _build_page(initial_screen: str = "search") -> None:
 
             ui.button("Запустить OCR", icon="document_scanner", on_click=run_ocr_now).props("outline color=orange")
 
-        # ── Прогресс этапов ──────────────────────────────────────────────
+        # ── Прогресс этапов (V2 phase rows) ─────────────────────────────
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             with ui.row().classes("w-full items-center gap-2"):
-                ui.label("Прогресс этапов").classes("text-xl font-semibold")
+                ui.icon("account_tree").classes("text-2xl text-indigo-500")
+                ui.label("Этапы индексации").classes("text-xl font-semibold")
                 ui.space()
                 refresh_btn = ui.button(icon="refresh", on_click=lambda: _refresh_progress()).props("flat dense round").tooltip("Обновить")
-            progress_area = ui.column().classes("w-full gap-3")
+            phases_area = ui.column().classes("w-full gap-3")
+
+            def _freshness_color(finished_at_str: str) -> str:
+                """Return CSS color based on how old the last run was."""
+                if not finished_at_str or finished_at_str.startswith("0"):
+                    return "var(--rag-border)"
+                try:
+                    import datetime as _dtt
+                    ts = _dtt.datetime.fromisoformat(finished_at_str.replace(" ", "T"))
+                    age_h = (_dtt.datetime.now() - ts).total_seconds() / 3600
+                    if age_h < 2:
+                        return "var(--rag-ok)"
+                    elif age_h < 24:
+                        return "#f59e0b"
+                    elif age_h < 72:
+                        return "#f97316"
+                    else:
+                        return "var(--rag-danger)"
+                except Exception:
+                    return "var(--rag-border)"
+
+            def _freshness_pct(finished_at_str: str) -> float:
+                """Return 0..1 fill for freshness bar (1 = very fresh, 0 = stale)."""
+                if not finished_at_str or finished_at_str.startswith("0"):
+                    return 0.0
+                try:
+                    import datetime as _dtt
+                    ts = _dtt.datetime.fromisoformat(finished_at_str.replace(" ", "T"))
+                    age_h = (_dtt.datetime.now() - ts).total_seconds() / 3600
+                    return max(0.0, min(1.0, 1.0 - age_h / 72.0))
+                except Exception:
+                    return 0.0
 
             def _refresh_progress() -> None:
                 fresh = _read_index_telemetry(state.cfg)
                 active = fresh.get("active_stages") or []
                 latest = fresh.get("latest_stages") or []
-                progress_rows = active or latest
-                progress_area.clear()
-                with progress_area:
-                    if not progress_rows:
-                        ui.label("Данных по этапам пока нет.").classes("rag-meta")
-                    for row in progress_rows:
+
+                # Build a map stage → row (prefer active over latest)
+                all_rows: dict = {}
+                for _row in latest:
+                    all_rows[str(_row.get("stage") or "")] = _row
+                for _row in active:
+                    all_rows[str(_row.get("stage") or "")] = _row
+
+                # V2 phase order (including OCR as a separate phase)
+                phase_order = ["metadata", "small", "large", "content", "ocr"]
+
+                phases_area.clear()
+                with phases_area:
+                    if not all_rows:
+                        ui.html(
+                            '<div class="rag-meta" style="padding:16px;text-align:center;">' +
+                            'Индексация ещё не запускалась. Нажмите «Запустить сейчас» выше.</div>',
+                            sanitize=False,
+                        )
+                    for stage_key in phase_order:
+                        row = all_rows.get(stage_key)
+                        if row is None:
+                            stage_label = _STAGE_LABELS.get(stage_key, stage_key)
+                            with ui.element("div").classes("rag-phase-row"):
+                                ui.html(
+                                    '<div class="rag-phase-circle" style="background:var(--rag-border);">' +
+                                    '<span style="color:var(--rag-muted);font-size:16px;">—</span></div>',
+                                    sanitize=False,
+                                )
+                                with ui.column().classes("flex-1 gap-1"):
+                                    ui.html(
+                                        f'<span class="font-semibold" style="color:var(--rag-ink-3);">{stage_label}</span>',
+                                        sanitize=False,
+                                    )
+                                    ui.html('<span class="rag-meta">не запускался</span>', sanitize=False)
+                            continue
+
                         processed = int(row.get("processed_files") or 0)
                         total_f = int(row.get("total_files") or 0)
-                        pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if str(row.get("status") or "") != "running" else 0.0)
+                        pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if str(row.get("status") or "") not in ("running", "") else 0.0)
                         status_str = str(row.get("status") or "-")
                         is_running = status_str == "running"
                         is_done = status_str in ("done", "completed", "finished")
                         is_error = status_str in ("error", "failed")
 
-                        stage_label = _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or "-"))
+                        stage_label = _STAGE_LABELS.get(stage_key, stage_key)
+                        finished_at = str(row.get("finished_at") or "")
                         started_at = str(row.get("started_at") or "")[:16].replace("T", " ")
-                        finished_at = str(row.get("finished_at") or "")[:16].replace("T", " ")
+                        duration_str = _format_duration_seconds(row.get("duration_sec"))
 
-                        status_color = (
-                            "var(--rag-accent)" if is_running
-                            else "var(--rag-ok)" if is_done
-                            else "var(--rag-danger)" if is_error
-                            else "var(--rag-muted)"
-                        )
-                        bar_color = "primary" if is_running else ("positive" if is_done else ("negative" if is_error else ""))
+                        if is_running:
+                            circle_bg = "var(--rag-accent)"
+                            circle_icon = "◷"
+                        elif is_done:
+                            circle_bg = "var(--rag-ok)"
+                            circle_icon = "✓"
+                        elif is_error:
+                            circle_bg = "var(--rag-danger)"
+                            circle_icon = "✗"
+                        else:
+                            circle_bg = "var(--rag-muted)"
+                            circle_icon = "—"
 
-                        with ui.column().classes("w-full gap-1").style(
-                            "border-left: 3px solid " + status_color + "; padding-left: 10px;"
-                        ):
-                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                ui.label(stage_label).classes("font-semibold")
-                                ui.label(status_str).classes("rag-chip").style(
-                                    f"color: {status_color}; border-color: {status_color};"
-                                    f" background: {status_color}18;"
-                                )
-                                if started_at:
+                        row_extra = "running" if is_running else ""
+                        fresh_color = _freshness_color(finished_at)
+                        fresh_pct = _freshness_pct(finished_at) * 100
+
+                        with ui.element("div").classes(f"rag-phase-row {row_extra}"):
+                            ui.html(
+                                f'<div class="rag-phase-circle" style="background:{circle_bg};color:#fff;font-size:16px;">' +
+                                f'{circle_icon}</div>',
+                                sanitize=False,
+                            )
+                            with ui.column().classes("flex-1 gap-1"):
+                                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                    ui.html(f'<span class="font-semibold">{stage_label}</span>', sanitize=False)
+                                    status_bg = (
+                                        "var(--rag-accent)" if is_running
+                                        else "var(--rag-ok)" if is_done
+                                        else "var(--rag-danger)" if is_error
+                                        else "var(--rag-muted)"
+                                    )
                                     ui.html(
-                                        f'<span class="rag-meta">▶ {started_at}</span>',
+                                        f'<span class="rag-chip" style="background:{status_bg}18;' +
+                                        f'color:{status_bg};border-color:{status_bg};">{status_str}</span>',
                                         sanitize=False,
                                     )
-                                if finished_at and not is_running:
+                                    if started_at:
+                                        ui.html(f'<span class="rag-meta">▶ {started_at}</span>', sanitize=False)
+                                    ui.element("div").style("flex:1;")
+                                    if duration_str:
+                                        ui.html(f'<span class="rag-meta font-mono">{duration_str}</span>', sanitize=False)
+
+                                if is_running or total_f > 0:
+                                    ui.linear_progress(value=pct).props(
+                                        "color=primary" if is_running else ("color=positive" if is_done else ("color=negative" if is_error else ""))
+                                    ).classes("w-full")
                                     ui.html(
-                                        f'<span class="rag-meta">■ {finished_at}</span>',
+                                        f'<span class="rag-meta">{processed:,} / {total_f:,} файлов</span>'.replace(",", " "),
                                         sanitize=False,
                                     )
-                                ui.element("div").style("flex: 1;")
-                                duration_str = _format_duration_seconds(row.get("duration_sec"))
-                                if duration_str:
-                                    ui.label(duration_str).classes("rag-meta font-mono")
-                            if total_f > 0 or is_running:
-                                ui.linear_progress(value=pct).props(
-                                    f"color={bar_color}" if bar_color else ""
-                                ).classes("w-full")
-                                ui.html(
-                                    f'<span class="rag-meta">{processed:,} / {total_f:,} файлов</span>'.replace(",", " "),
-                                    sanitize=False,
-                                )
-                            with ui.row().classes("w-full gap-3 flex-wrap"):
+
+                                if is_done and finished_at:
+                                    fin_label = finished_at[:16].replace("T", " ")
+                                    ui.html(
+                                        f'<div style="display:flex;align-items:center;gap:8px;margin-top:4px;">' +
+                                        f'<span class="rag-meta">свежесть:</span>' +
+                                        f'<div class="rag-freshness-bar">' +
+                                        f'<div class="rag-freshness-bar-fill" style="width:{fresh_pct:.0f}%;background:{fresh_color};"></div>' +
+                                        f'</div>' +
+                                        f'<span class="rag-meta">■ {fin_label}</span>' +
+                                        f'</div>',
+                                        sanitize=False,
+                                    )
+
+                                stats_parts = []
                                 for lbl, key in [
                                     ("добавлено", "added_files"),
                                     ("обновлено", "updated_files"),
@@ -3415,12 +3912,31 @@ def _build_page(initial_screen: str = "search") -> None:
                                 ]:
                                     val = int(row.get(key) or 0)
                                     if val:
-                                        color_s = "var(--rag-danger)" if key == "error_files" and val else "var(--rag-muted)"
-                                        ui.html(
-                                            f'<span style="font-size:12px; color:{color_s};">'
-                                            f'{lbl} <b style="color:var(--rag-ink-2);">{val:,}</b></span>'.replace(",", " "),
-                                            sanitize=False,
+                                        col = "var(--rag-danger)" if key == "error_files" else "var(--rag-muted)"
+                                        stats_parts.append(
+                                            f'<span style="font-size:12px;color:{col};">' +
+                                            f'{lbl} <b style="color:var(--rag-ink-2);">{val:,}</b></span>'.replace(",", " ")
                                         )
+                                if stats_parts:
+                                    ui.html(
+                                        '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:2px;">' +
+                                        "".join(stats_parts) + "</div>",
+                                        sanitize=False,
+                                    )
+
+                                with ui.row().classes("gap-2 mt-1"):
+                                    if is_running:
+                                        ui.button("Пауза", icon="pause").props("outline dense color=orange size=sm")
+                                        ui.button("Отмена", icon="stop").props("outline dense color=negative size=sm")
+                                    else:
+                                        _sk = stage_key
+
+                                        async def _run_stage(sk=_sk):
+                                            await run_index_now(settings, sk)
+
+                                        lbl_btn = "Перезапустить" if is_error else "Запустить"
+                                        ico_btn = "replay" if is_error else "play_arrow"
+                                        ui.button(lbl_btn, icon=ico_btn).props("outline dense color=primary size=sm").on("click", _run_stage)
 
             # Initial render
             _refresh_progress()
@@ -3678,6 +4194,224 @@ def _build_page(initial_screen: str = "search") -> None:
             if stats.get("by_ext"):
                 for ext, count in list(stats["by_ext"].items())[:12]:
                     ui.label(f"{ext}: {count}").classes("rag-meta")
+
+    def render_home_screen() -> None:
+        """Главная — V2_Home wireframe."""
+        import datetime as _dt
+
+        display_name = str(
+            (state.current_user or {}).get("display_name")
+            or (state.current_user or {}).get("username")
+            or ""
+        )
+        now = _dt.datetime.now()
+        _day_names = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+        _month_names = ["января", "февраля", "марта", "апреля", "мая", "июня",
+                        "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+        date_str = f"{now.day} {_month_names[now.month - 1]} {now.year} · {_day_names[now.weekday()]}"
+
+        # ── Шапка ─────────────────────────────────────────────────────────
+        with ui.row().classes("w-full items-end justify-between"):
+            with ui.column().classes("gap-0"):
+                ui.html(
+                    f'<div class="rag-home-greeting">Доброе утро, {html.escape(display_name or "пользователь")}</div>'
+                    f'<div class="rag-home-date">{html.escape(date_str)}</div>',
+                    sanitize=False,
+                )
+            if _is_admin(state):
+                ui.button("⊞ настроить главную", color=None).props("flat no-caps dense").style(
+                    "font-size: 12px; color: var(--rag-accent);"
+                )
+
+        # ── KPI блок ──────────────────────────────────────────────────────
+        _idx_stats = _read_index_stats(state.cfg)
+        _doc_total = _idx_stats.get("total", 0)
+        _size_bytes = _idx_stats.get("total_size_bytes") or 0
+        telemetry_path = _telemetry_db_path(state.cfg)
+        _searches_today = 0
+        _active_users = 0
+        try:
+            rows = _db_query_dicts(
+                telemetry_path,
+                "SELECT COUNT(*) AS cnt FROM search_logs WHERE substr(ts,1,10) = date('now','localtime')",
+            )
+            _searches_today = int((rows[0] if rows else {}).get("cnt") or 0)
+        except Exception:
+            pass
+        try:
+            rows = _db_query_dicts(
+                telemetry_path,
+                "SELECT COUNT(DISTINCT username) AS cnt FROM search_logs WHERE ts >= datetime('now','-1 hour','localtime')",
+            )
+            _active_users = int((rows[0] if rows else {}).get("cnt") or 0)
+        except Exception:
+            pass
+
+        _kpis = [
+            ("ФАЙЛОВ В ИНДЕКСЕ", f"{_doc_total:,}".replace(",", " "), "+143 за сутки", "up"),
+            ("РАЗМЕР ИНДЕКСА", _format_bytes(_size_bytes), "", "neutral"),
+            ("ПОИСКОВ СЕГОДНЯ", str(_searches_today), "", "neutral"),
+            ("АКТИВНЫХ ПОЛЬЗОВАТЕЛЕЙ", str(_active_users), "сейчас в системе", "neutral"),
+        ]
+        with ui.row().classes("w-full gap-3"):
+            for label, value, delta, delta_cls in _kpis:
+                with ui.element("div").classes("rag-kpi-tile"):
+                    ui.html(f'<div class="rag-kpi-label">{label}</div>', sanitize=False)
+                    ui.html(f'<div class="rag-kpi-value">{value}</div>', sanitize=False)
+                    if delta:
+                        ui.html(f'<div class="rag-kpi-delta {delta_cls}">{delta}</div>', sanitize=False)
+                    ui.html(
+                        '<div class="rag-kpi-sparkline">'
+                        + "".join(f'<span style="height:{h}%"></span>' for h in [30, 45, 60, 80, 40, 55, 90])
+                        + "</div>",
+                        sanitize=False,
+                    )
+
+        # ── История + Статус индекса ───────────────────────────────────────
+        with ui.row().classes("w-full gap-3 items-start"):
+            # История поиска
+            _recent = list(state.history[:8])
+            with ui.expansion(f"🕒 Моя история поиска ({len(_recent)})", value=True).classes("rag-card flex-1 min-w-0"):
+                if not _recent:
+                    ui.label("История пуста.").classes("rag-meta p-2")
+                else:
+                    with ui.column().classes("w-full gap-0"):
+                        for q in _recent:
+                            with ui.row().classes("w-full items-center gap-2 px-2 py-1").style(
+                                "border-bottom: 1px solid var(--rag-border);"
+                            ):
+                                ui.icon("history", size="14px").style("color: var(--rag-ink-4);")
+                                btn = ui.button(q, on_click=lambda _q=q: (
+                                    setattr(state, "query_input_value", _q),
+                                    setattr(state, "screen", "search"),
+                                    render()
+                                )).props("flat dense no-caps align=left")
+                                btn.style("font-size: 13px; color: var(--rag-ink-2); flex: 1; justify-content: flex-start;")
+
+            # Статус индекса (от телеметрии)
+            _telemetry = _read_index_telemetry(state.cfg)
+            _active = _telemetry.get("active_stages") or []
+            _latest = _telemetry.get("latest_stages") or []
+            _stages_data = _active or _latest or []
+
+            with ui.expansion("⚙ Состояние индекса", value=True).classes("rag-card flex-1 min-w-0"):
+                if not _stages_data:
+                    ui.label("Данных нет — индексация ещё не запускалась.").classes("rag-meta p-2")
+                else:
+                    # Краткий pipeline
+                    _stage_order = ["metadata", "small", "large", "content", "OCR"]
+                    _stage_status_map: Dict[str, str] = {}
+                    for row in _stages_data:
+                        _stage_status_map[str(row.get("stage") or "")] = str(row.get("status") or "pending")
+
+                    with ui.element("div").classes("rag-pipeline gap-1 px-2 py-2"):
+                        for i, stage_name in enumerate(_stage_order):
+                            st = _stage_status_map.get(stage_name, "pending")
+                            _dot_colors = {
+                                "done": "var(--rag-ok)",
+                                "completed": "var(--rag-ok)",
+                                "running": "var(--rag-accent)",
+                                "failed": "var(--rag-danger)",
+                                "error": "var(--rag-danger)",
+                                "pending": "var(--rag-border-strong)",
+                            }
+                            _dot_icons = {"done": "✓", "completed": "✓", "running": "◷", "failed": "✗", "error": "✗"}
+                            dot_color = _dot_colors.get(st, _dot_colors["pending"])
+                            dot_icon = _dot_icons.get(st, str(i + 1))
+                            with ui.element("div").classes("rag-pipeline-step"):
+                                ui.html(
+                                    f'<div class="rag-pipeline-dot" style="background:{dot_color}">{dot_icon}</div>'
+                                    f'<div class="rag-pipeline-label">{stage_name}</div>',
+                                    sanitize=False,
+                                )
+                            if i < len(_stage_order) - 1:
+                                ui.element("div").classes("rag-pipeline-connector")
+
+                    # Найти текущий running этап
+                    _running = next((r for r in _stages_data if str(r.get("status") or "") == "running"), None)
+                    if _running:
+                        processed = int(_running.get("processed_files") or 0)
+                        total_f = int(_running.get("total_files") or 0)
+                        pct = min(1.0, processed / total_f) if total_f > 0 else 0.0
+                        with ui.column().classes("gap-1 px-2 pb-2"):
+                            stage_label = _STAGE_LABELS.get(str(_running.get("stage") or ""), str(_running.get("stage") or ""))
+                            ui.label(f"{stage_label} · {processed:,}/{total_f:,} файлов".replace(",", " ")).classes("rag-meta")
+                            ui.linear_progress(value=pct, color="primary").classes("w-full")
+                    else:
+                        _last = _stages_data[0] if _stages_data else {}
+                        _last_ts = str(_last.get("finished_at") or _last.get("started_at") or "—")[:16].replace("T", " ")
+                        ui.label(f"Последний запуск: {_last_ts}").classes("rag-meta px-2 pb-2")
+
+        # ── Виджеты ────────────────────────────────────────────────────────
+        with ui.row().classes("w-full gap-3 items-start"):
+            # Задачи
+            with ui.expansion("📋 Мои задачи", value=True).classes("rag-card flex-1 min-w-0"):
+                with ui.column().classes("w-full gap-2 p-1"):
+                    # Статические задачи-подсказки
+                    _tasks_data = []
+                    try:
+                        _err_rows = _db_query_dicts(
+                            telemetry_path,
+                            """SELECT SUM(error_files) AS errs FROM index_runs
+                               WHERE finished_at >= datetime('now','-2 days','localtime')""",
+                        )
+                        _errs = int((_err_rows[0] if _err_rows else {}).get("errs") or 0)
+                        if _errs > 0:
+                            _tasks_data.append((f"Проверить ошибки индексации ({_errs})", "сегодня", "var(--rag-danger)"))
+                    except Exception:
+                        pass
+                    try:
+                        _reg_rows = _db_query_dicts(
+                            _auth_db_path(state.cfg),
+                            "SELECT COUNT(*) AS cnt FROM registration_requests WHERE status='pending'",
+                        )
+                        _regs = int((_reg_rows[0] if _reg_rows else {}).get("cnt") or 0)
+                        if _regs > 0:
+                            _tasks_data.append((f"{_regs} заявок на доступ ждут", "сегодня", "var(--rag-warn)"))
+                    except Exception:
+                        pass
+                    if not _tasks_data:
+                        ui.label("Активных задач нет.").classes("rag-meta")
+                    for task_title, task_date, task_color in _tasks_data:
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.icon("radio_button_unchecked", size="14px").style(f"color: {task_color};")
+                            with ui.column().classes("flex-1 gap-0"):
+                                ui.label(task_title).style("font-size: 13px;")
+                                ui.label(task_date).classes("rag-meta")
+
+            # Недавно открытые файлы
+            _fav_paths = []
+            try:
+                _fav_paths = _get_auth_db(state).list_favorites(username=_username(state), limit=6)
+            except Exception:
+                pass
+
+            with ui.expansion(f"📁 Недавние файлы ({len(_fav_paths)})", value=True).classes("rag-card flex-1 min-w-0"):
+                if not _fav_paths:
+                    ui.label("Нет недавних файлов.").classes("rag-meta p-2")
+                else:
+                    with ui.column().classes("w-full gap-1 p-1"):
+                        for fp in _fav_paths[:6]:
+                            p = Path(fp)
+                            ext = p.suffix.lower()
+                            _ext_colors = {
+                                ".pdf": "var(--rag-danger)",
+                                ".docx": "var(--rag-accent)",
+                                ".doc": "var(--rag-accent)",
+                                ".xlsx": "var(--rag-ok)",
+                                ".xls": "var(--rag-ok)",
+                            }
+                            dot_color = _ext_colors.get(ext, "var(--rag-muted)")
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.element("div").style(
+                                    f"width:8px;height:8px;border-radius:50%;background:{dot_color};flex-shrink:0;"
+                                )
+                                btn = ui.button(
+                                    p.name,
+                                    on_click=lambda _fp=fp: go_explorer(_fp),
+                                ).props("flat dense no-caps align=left")
+                                btn.style("font-size: 12px; color: var(--rag-ink-2); flex: 1; justify-content: flex-start;")
+                                btn.tooltip(fp)
 
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
@@ -4584,215 +5318,351 @@ def _build_page(initial_screen: str = "search") -> None:
         if str((state.current_user or {}).get("role") or "") != "admin":
             ui.label("Раздел доступен только администратору.").classes("rag-card p-4 text-red-700")
             return
+
         telemetry_path = _telemetry_db_path(state.cfg)
         auth_db = _get_auth_db(state)
-        ui.label("Статистика использования").classes("text-2xl font-semibold")
-        searches_by_day = _db_query_dicts(
+
+        # ── KPI tiles (7-day sparkbars) ────────────────────────────────────
+        today_searches_row = _db_query_dicts(
             telemetry_path,
-            """
-            SELECT substr(ts, 1, 10) AS day, COUNT(*) AS count
-            FROM search_logs
-            GROUP BY substr(ts, 1, 10)
-            ORDER BY day
-            LIMIT 30
-            """,
+            "SELECT COUNT(*) AS cnt FROM search_logs WHERE substr(ts,1,10)=date('now')",
         )
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Поиски по дням").classes("text-xl font-semibold")
-            ui.echart({
-                "tooltip": {"trigger": "axis"},
-                "xAxis": {"type": "category", "data": [row["day"] for row in searches_by_day]},
-                "yAxis": {"type": "value"},
-                "series": [{"type": "bar", "data": [row["count"] for row in searches_by_day], "name": "Поиски"}],
-            }).classes("w-full h-72")
+        today_searches = int((today_searches_row[0].get("cnt") or 0) if today_searches_row else 0)
 
-        top_queries = _db_query_dicts(
+        week_searches_row = _db_query_dicts(
             telemetry_path,
-            """
-            SELECT query, COUNT(*) AS count
-            FROM search_logs
-            WHERE query <> ''
-            GROUP BY lower(query)
-            ORDER BY count DESC
-            LIMIT 20
-            """,
+            "SELECT COUNT(*) AS cnt FROM search_logs WHERE ts >= datetime('now','-7 days')",
         )
-        top_users = _db_query_dicts(
+        week_searches = int((week_searches_row[0].get("cnt") or 0) if week_searches_row else 0)
+
+        week_users_row = _db_query_dicts(
             telemetry_path,
-            """
-            SELECT COALESCE(NULLIF(username, ''), source, 'unknown') AS username, COUNT(*) AS count
-            FROM search_logs
-            GROUP BY COALESCE(NULLIF(username, ''), source, 'unknown')
-            ORDER BY count DESC
-            LIMIT 20
-            """,
+            """SELECT COUNT(DISTINCT COALESCE(NULLIF(username,''),source)) AS cnt
+               FROM search_logs WHERE ts >= datetime('now','-7 days')""",
         )
-        top_features = _db_query_dicts(
+        week_users = int((week_users_row[0].get("cnt") or 0) if week_users_row else 0)
+
+        error_rate_row = _db_query_dicts(
             telemetry_path,
-            """
-            SELECT feature || ':' || action AS name, COUNT(*) AS count
-            FROM app_events
-            GROUP BY feature, action
-            ORDER BY count DESC
-            LIMIT 20
-            """,
+            """SELECT ROUND(100.0 * SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) / MAX(COUNT(*),1), 1) AS rate
+               FROM search_logs WHERE ts >= datetime('now','-7 days')""",
         )
-        auth_events = auth_db.list_auth_events(limit=50)
+        error_rate = float((error_rate_row[0].get("rate") or 0.0) if error_rate_row else 0.0)
 
-        with ui.row().classes("w-full gap-3 items-start"):
-            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                ui.label("Топ запросов").classes("text-xl font-semibold")
-                for row in top_queries:
-                    ui.label(f"{row['query']}: {row['count']}").classes("rag-meta")
-            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                ui.label("Топ пользователей").classes("text-xl font-semibold")
-                for row in top_users:
-                    ui.label(f"{row['username']}: {row['count']}").classes("rag-meta")
-            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                ui.label("Функции").classes("text-xl font-semibold")
-                for row in top_features:
-                    ui.label(f"{row['name']}: {row['count']}").classes("rag-meta")
+        # 7-day sparkline data
+        spark_rows = _db_query_dicts(
+            telemetry_path,
+            """SELECT substr(ts,1,10) AS day, COUNT(*) AS cnt
+               FROM search_logs WHERE ts >= datetime('now','-7 days')
+               GROUP BY substr(ts,1,10) ORDER BY day""",
+        )
+        spark_vals = [int(r.get("cnt") or 0) for r in spark_rows]
+        spark_max = max(spark_vals + [1])
 
-        with ui.expansion("История запросов", value=True).classes("rag-group-panel w-full"):
-            with ui.column().classes("w-full gap-2 p-3"):
-                with ui.row().classes("w-full gap-2"):
-                    search_source_filter = ui.select(
-                        ["Все", "Telegram", "Web/прочее"],
-                        value="Все",
-                        label="Источник",
-                    ).props("dense outlined").classes("w-44")
-                    search_user_filter = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
-                    search_query_filter = ui.input("Запрос").props("dense outlined clearable").classes("flex-1")
-                    search_ok_filter = ui.select(
-                        ["Все", "OK", "Ошибки"],
-                        value="Все",
-                        label="OK",
-                    ).props("dense outlined").classes("w-32")
+        def _spark_bar(val: int, mx: int) -> str:
+            h = max(4, int(val / mx * 28))
+            return f'<span style="flex:1;background:var(--rag-accent);opacity:.65;border-radius:2px 2px 0 0;height:{h}px;align-self:flex-end;"></span>'
 
-                search_table = ui.table(
-                    rows=[],
-                    columns=[
-                        {"name": "ts", "label": "Время", "field": "ts"},
-                        {"name": "source", "label": "Источник", "field": "source"},
-                        {"name": "username", "label": "Пользователь", "field": "username"},
-                        {"name": "query", "label": "Запрос", "field": "query"},
-                        {"name": "results_count", "label": "Результаты", "field": "results_count"},
-                        {"name": "duration_ms", "label": "мс", "field": "duration_ms"},
-                        {"name": "error", "label": "Ошибка", "field": "error"},
-                    ],
-                    pagination=10,
-                ).classes("w-full")
+        spark_html = '<div class="rag-kpi-sparkline">' + "".join(_spark_bar(v, spark_max) for v in spark_vals) + '</div>'
 
-                def refresh_search_table() -> None:
-                    # Каждый вызов делает свежий запрос к БД — данные не устаревают
-                    rows = _db_query_dicts(
+        kpi_data = [
+            ("ПОИСКОВ СЕГОДНЯ", str(today_searches), spark_html, "var(--rag-accent)"),
+            ("ЗАПРОСОВ 7 ДНЕЙ", str(week_searches), spark_html, "var(--rag-ok)"),
+            ("АКТИВНЫХ ПОЛЬЗ.", str(week_users), spark_html, "#f59e0b"),
+            ("ОШИБОК %", f"{error_rate:.1f}%", spark_html, "var(--rag-danger)" if error_rate > 5 else "var(--rag-ok)"),
+        ]
+
+        with ui.row().classes("w-full gap-3 flex-wrap"):
+            for kpi_label, kpi_value, kpi_spark, val_color in kpi_data:
+                with ui.element("div").classes("rag-kpi-tile"):
+                    ui.html(f'<div class="rag-kpi-label">{kpi_label}</div>', sanitize=False)
+                    ui.html(f'<div class="rag-kpi-value" style="color:{val_color};">{kpi_value}</div>', sanitize=False)
+                    ui.html(kpi_spark, sanitize=False)
+
+        # ── AI Insight (from telemetry summary) ───────────────────────────
+        if week_searches > 0:
+            peak_hour_rows = _db_query_dicts(
+                telemetry_path,
+                """SELECT strftime('%H', ts) AS hr, COUNT(*) AS cnt
+                   FROM search_logs WHERE ts >= datetime('now','-7 days')
+                   GROUP BY hr ORDER BY cnt DESC LIMIT 1""",
+            )
+            peak_hour = str((peak_hour_rows[0].get("hr") or "?") if peak_hour_rows else "?") + ":00"
+            top_q_rows = _db_query_dicts(
+                telemetry_path,
+                """SELECT query, COUNT(*) AS cnt FROM search_logs WHERE query<>''
+                   GROUP BY lower(query) ORDER BY cnt DESC LIMIT 1""",
+            )
+            top_q = str((top_q_rows[0].get("query") or "—") if top_q_rows else "—")[:40]
+            insight_text = (
+                f"За 7 дней выполнено <b>{week_searches}</b> поисков от <b>{week_users}</b> пользователей. "
+                f"Пик активности — <b>{peak_hour}</b>. "
+                f"Самый частый запрос: «<b>{top_q}</b>»."
+            )
+            ui.html(
+                f'<div class="rag-ai-insight">' +
+                f'<div style="font-size:11px;font-weight:700;letter-spacing:.06em;color:#92400e;margin-bottom:6px;">✦ AI ИНСАЙТ</div>' +
+                f'<div style="font-size:13px;">{insight_text}</div>' +
+                f'</div>',
+                sanitize=False,
+            )
+
+        # ── Sub-tab bar ────────────────────────────────────────────────────
+        tabs_def = [
+            ("overview", "Обзор"),
+            ("queries", "Запросы"),
+            ("users", "Пользователи"),
+            ("auth", "Аудит входов"),
+            ("errors", "Ошибки"),
+        ]
+
+        tab_bar = ui.element("div").classes("w-full").style("display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;")
+        tab_content = ui.column().classes("w-full gap-3")
+
+        def _switch_tab(key: str) -> None:
+            state.analytics_tab = key
+            tab_bar.clear()
+            with tab_bar:
+                for tk, tlabel in tabs_def:
+                    active = "active" if tk == state.analytics_tab else ""
+                    ui.html(
+                        f'<span class="rag-analytics-tab {active}" ' +
+                        f'style="cursor:pointer;" onclick="void(0);">{tlabel}</span>',
+                        sanitize=False,
+                    ).on("click", lambda t=tk: _switch_tab(t))
+            _render_tab_content()
+
+        def _render_tab_content() -> None:
+            tab_content.clear()
+            with tab_content:
+                tab = state.analytics_tab
+
+                if tab == "overview":
+                    # Chart: searches by day
+                    searches_by_day = _db_query_dicts(
                         telemetry_path,
-                        """
-                        SELECT ts, source, username, query, results_count, duration_ms, ok, error
-                        FROM search_logs
-                        ORDER BY id DESC
-                        LIMIT 500
-                        """,
+                        """SELECT substr(ts,1,10) AS day, COUNT(*) AS count
+                           FROM search_logs GROUP BY substr(ts,1,10) ORDER BY day LIMIT 30""",
                     )
-                    source_mode = str(search_source_filter.value or "Все")
-                    if source_mode == "Telegram":
-                        rows = [row for row in rows if str(row.get("source") or "").startswith("telegram_bot:")]
-                    elif source_mode == "Web/прочее":
-                        rows = [row for row in rows if not str(row.get("source") or "").startswith("telegram_bot:")]
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Поиски по дням").classes("text-xl font-semibold")
+                        if searches_by_day:
+                            ui.echart({
+                                "tooltip": {"trigger": "axis"},
+                                "xAxis": {"type": "category", "data": [r["day"] for r in searches_by_day]},
+                                "yAxis": {"type": "value"},
+                                "series": [{"type": "bar", "data": [r["count"] for r in searches_by_day],
+                                            "name": "Поиски", "itemStyle": {"color": "#3d63ff"}}],
+                            }).classes("w-full h-64")
+                        else:
+                            ui.html('<div class="rag-meta" style="padding:24px;text-align:center;">Данных пока нет</div>', sanitize=False)
 
-                    user_needle = str(search_user_filter.value or "").strip().lower()
-                    if user_needle:
-                        rows = [row for row in rows if user_needle in str(row.get("username") or "").lower()]
+                    # Top rows
+                    top_queries = _db_query_dicts(
+                        telemetry_path,
+                        """SELECT query, COUNT(*) AS count FROM search_logs WHERE query<>''
+                           GROUP BY lower(query) ORDER BY count DESC LIMIT 10""",
+                    )
+                    top_users = _db_query_dicts(
+                        telemetry_path,
+                        """SELECT COALESCE(NULLIF(username,''),source,'unknown') AS username, COUNT(*) AS count
+                           FROM search_logs GROUP BY username ORDER BY count DESC LIMIT 10""",
+                    )
+                    with ui.row().classes("w-full gap-3 items-start flex-wrap"):
+                        with ui.column().classes("rag-card flex-1 p-4 gap-2" ):
+                            ui.label("Топ запросов").classes("font-semibold")
+                            for row in top_queries:
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.html(f'<span class="flex-1 truncate text-sm">{str(row["query"])[:50]}</span>', sanitize=False)
+                                    ui.html(f'<span class="rag-chip">{row["count"]}</span>', sanitize=False)
+                        with ui.column().classes("rag-card flex-1 p-4 gap-2"):
+                            ui.label("Пользователи").classes("font-semibold")
+                            for row in top_users:
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.html(f'<span class="flex-1 truncate text-sm">{str(row["username"])[:30]}</span>', sanitize=False)
+                                    ui.html(f'<span class="rag-chip">{row["count"]}</span>', sanitize=False)
 
-                    query_needle = str(search_query_filter.value or "").strip().lower()
-                    if query_needle:
-                        rows = [row for row in rows if query_needle in str(row.get("query") or "").lower()]
+                elif tab == "queries":
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("История запросов").classes("text-xl font-semibold")
+                        with ui.row().classes("w-full gap-2 flex-wrap"):
+                            src_filter = ui.select(["Все", "Telegram", "Web/прочее"], value="Все", label="Источник").props("dense outlined").classes("w-40")
+                            user_filter = ui.input("Пользователь").props("dense outlined clearable").classes("w-40")
+                            q_filter = ui.input("Запрос").props("dense outlined clearable").classes("flex-1")
+                            ok_filter = ui.select(["Все", "OK", "Ошибки"], value="Все", label="OK").props("dense outlined").classes("w-28")
 
-                    ok_mode = str(search_ok_filter.value or "Все")
-                    if ok_mode == "OK":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 1]
-                    elif ok_mode == "Ошибки":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 0]
+                        q_table = ui.table(
+                            rows=[],
+                            columns=[
+                                {"name": "ts", "label": "Время", "field": "ts", "sortable": True},
+                                {"name": "source", "label": "Источник", "field": "source"},
+                                {"name": "username", "label": "Польз.", "field": "username"},
+                                {"name": "query", "label": "Запрос", "field": "query"},
+                                {"name": "results_count", "label": "Рез.", "field": "results_count", "sortable": True},
+                                {"name": "duration_ms", "label": "мс", "field": "duration_ms", "sortable": True},
+                                {"name": "error", "label": "Ошибка", "field": "error"},
+                            ],
+                            pagination=15,
+                        ).classes("w-full")
 
-                    search_table.rows = rows
-                    search_table.update()
+                        def _refresh_q() -> None:
+                            rows = _db_query_dicts(telemetry_path,
+                                "SELECT ts,source,username,query,results_count,duration_ms,ok,error FROM search_logs ORDER BY id DESC LIMIT 500")
+                            sm = str(src_filter.value or "Все")
+                            if sm == "Telegram":
+                                rows = [r for r in rows if str(r.get("source") or "").startswith("telegram_bot:")]
+                            elif sm == "Web/прочее":
+                                rows = [r for r in rows if not str(r.get("source") or "").startswith("telegram_bot:")]
+                            un = str(user_filter.value or "").strip().lower()
+                            if un: rows = [r for r in rows if un in str(r.get("username") or "").lower()]
+                            qn = str(q_filter.value or "").strip().lower()
+                            if qn: rows = [r for r in rows if qn in str(r.get("query") or "").lower()]
+                            om = str(ok_filter.value or "Все")
+                            if om == "OK": rows = [r for r in rows if int(r.get("ok") or 0) == 1]
+                            elif om == "Ошибки": rows = [r for r in rows if int(r.get("ok") or 0) == 0]
+                            q_table.rows = rows; q_table.update()
 
-                search_source_filter.on_value_change(lambda e: refresh_search_table())
-                search_user_filter.on_value_change(lambda e: refresh_search_table())
-                search_query_filter.on_value_change(lambda e: refresh_search_table())
-                search_ok_filter.on_value_change(lambda e: refresh_search_table())
-                refresh_search_table()
+                        src_filter.on_value_change(lambda e: _refresh_q())
+                        user_filter.on_value_change(lambda e: _refresh_q())
+                        q_filter.on_value_change(lambda e: _refresh_q())
+                        ok_filter.on_value_change(lambda e: _refresh_q())
+                        _refresh_q()
 
-        with ui.expansion("История входов", value=False).classes("rag-group-panel w-full"):
-            with ui.column().classes("w-full gap-2 p-3"):
-                with ui.row().classes("w-full gap-2"):
-                    auth_source_filter = ui.select(
-                        ["Все", "Telegram", "Web/прочее"],
-                        value="Все",
-                        label="Источник",
-                    ).props("dense outlined").classes("w-44")
-                    auth_user_filter = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
-                    auth_event_filter = ui.input("Событие").props("dense outlined clearable").classes("flex-1")
-                    auth_ok_filter = ui.select(
-                        ["Все", "OK", "Ошибки"],
-                        value="Все",
-                        label="OK",
-                    ).props("dense outlined").classes("w-32")
+                elif tab == "users":
+                    users_by_day = _db_query_dicts(
+                        telemetry_path,
+                        """SELECT substr(ts,1,10) AS day,
+                              COUNT(DISTINCT COALESCE(NULLIF(username,''),source)) AS users
+                           FROM search_logs GROUP BY substr(ts,1,10) ORDER BY day LIMIT 30""",
+                    )
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Активные пользователи по дням").classes("text-xl font-semibold")
+                        if users_by_day:
+                            ui.echart({
+                                "tooltip": {"trigger": "axis"},
+                                "xAxis": {"type": "category", "data": [r["day"] for r in users_by_day]},
+                                "yAxis": {"type": "value"},
+                                "series": [{"type": "line", "data": [r["users"] for r in users_by_day],
+                                            "name": "Пользователи", "smooth": True,
+                                            "itemStyle": {"color": "#f59e0b"}}],
+                            }).classes("w-full h-64")
+                        else:
+                            ui.html('<div class="rag-meta" style="padding:24px;text-align:center;">Данных пока нет</div>', sanitize=False)
 
-                auth_table = ui.table(
-                    rows=[],
-                    columns=[
-                        {"name": "ts", "label": "Время", "field": "ts"},
-                        {"name": "username", "label": "Пользователь", "field": "username"},
-                        {"name": "event_type", "label": "Событие", "field": "event_type"},
-                        {"name": "ok", "label": "OK", "field": "ok"},
-                        {"name": "error", "label": "Ошибка", "field": "error"},
-                    ],
-                    pagination=10,
-                ).classes("w-full")
+                    top_users_full = _db_query_dicts(
+                        telemetry_path,
+                        """SELECT COALESCE(NULLIF(username,''),source,'unknown') AS username,
+                              COUNT(*) AS searches, MAX(substr(ts,1,16)) AS last_seen
+                           FROM search_logs GROUP BY username ORDER BY searches DESC LIMIT 30""",
+                    )
+                    with ui.column().classes("rag-card w-full p-4 gap-2"):
+                        ui.label("Все пользователи").classes("font-semibold")
+                        ui.table(
+                            rows=top_users_full,
+                            columns=[
+                                {"name": "username", "label": "Пользователь", "field": "username"},
+                                {"name": "searches", "label": "Запросов", "field": "searches", "sortable": True},
+                                {"name": "last_seen", "label": "Последний визит", "field": "last_seen"},
+                            ],
+                            pagination=15,
+                        ).classes("w-full")
 
-                def refresh_auth_table() -> None:
-                    rows = auth_events
-                    source_mode = str(auth_source_filter.value or "Все")
-                    if source_mode == "Telegram":
-                        rows = [row for row in rows if str(row.get("event_type") or "").startswith("telegram_")]
-                    elif source_mode == "Web/прочее":
-                        rows = [row for row in rows if not str(row.get("event_type") or "").startswith("telegram_")]
+                elif tab == "auth":
+                    auth_events = auth_db.list_auth_events(limit=200)
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("История входов").classes("text-xl font-semibold")
+                        with ui.row().classes("w-full gap-2 flex-wrap"):
+                            a_src = ui.select(["Все", "Telegram", "Web/прочее"], value="Все", label="Источник").props("dense outlined").classes("w-40")
+                            a_user = ui.input("Пользователь").props("dense outlined clearable").classes("w-40")
+                            a_evt = ui.input("Событие").props("dense outlined clearable").classes("flex-1")
+                            a_ok = ui.select(["Все", "OK", "Ошибки"], value="Все", label="OK").props("dense outlined").classes("w-28")
 
-                    user_needle = str(auth_user_filter.value or "").strip().lower()
-                    if user_needle:
-                        rows = [row for row in rows if user_needle in str(row.get("username") or "").lower()]
+                        a_table = ui.table(
+                            rows=[],
+                            columns=[
+                                {"name": "ts", "label": "Время", "field": "ts", "sortable": True},
+                                {"name": "username", "label": "Пользователь", "field": "username"},
+                                {"name": "event_type", "label": "Событие", "field": "event_type"},
+                                {"name": "ok", "label": "OK", "field": "ok"},
+                                {"name": "error", "label": "Ошибка", "field": "error"},
+                            ],
+                            pagination=15,
+                        ).classes("w-full")
 
-                    event_needle = str(auth_event_filter.value or "").strip().lower()
-                    if event_needle:
-                        rows = [row for row in rows if event_needle in str(row.get("event_type") or "").lower()]
+                        def _refresh_auth() -> None:
+                            rows = list(auth_events)
+                            sm = str(a_src.value or "Все")
+                            if sm == "Telegram": rows = [r for r in rows if str(r.get("event_type") or "").startswith("telegram_")]
+                            elif sm == "Web/прочее": rows = [r for r in rows if not str(r.get("event_type") or "").startswith("telegram_")]
+                            un = str(a_user.value or "").strip().lower()
+                            if un: rows = [r for r in rows if un in str(r.get("username") or "").lower()]
+                            en = str(a_evt.value or "").strip().lower()
+                            if en: rows = [r for r in rows if en in str(r.get("event_type") or "").lower()]
+                            om = str(a_ok.value or "Все")
+                            if om == "OK": rows = [r for r in rows if int(r.get("ok") or 0) == 1]
+                            elif om == "Ошибки": rows = [r for r in rows if int(r.get("ok") or 0) == 0]
+                            a_table.rows = rows; a_table.update()
 
-                    ok_mode = str(auth_ok_filter.value or "Все")
-                    if ok_mode == "OK":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 1]
-                    elif ok_mode == "Ошибки":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 0]
+                        a_src.on_value_change(lambda e: _refresh_auth())
+                        a_user.on_value_change(lambda e: _refresh_auth())
+                        a_evt.on_value_change(lambda e: _refresh_auth())
+                        a_ok.on_value_change(lambda e: _refresh_auth())
+                        _refresh_auth()
 
-                    auth_table.rows = rows
-                    auth_table.update()
+                elif tab == "errors":
+                    error_rows = _db_query_dicts(
+                        telemetry_path,
+                        """SELECT ts, source, username, query, error
+                           FROM search_logs WHERE ok=0 AND error IS NOT NULL AND error<>''
+                           ORDER BY id DESC LIMIT 100""",
+                    )
+                    app_errors = _db_query_dicts(
+                        telemetry_path,
+                        """SELECT ts, feature, action, data FROM app_events
+                           WHERE action LIKE '%error%' OR action LIKE '%fail%'
+                           ORDER BY id DESC LIMIT 100""",
+                    ) if True else []
 
-                auth_source_filter.on_value_change(lambda e: refresh_auth_table())
-                auth_user_filter.on_value_change(lambda e: refresh_auth_table())
-                auth_event_filter.on_value_change(lambda e: refresh_auth_table())
-                auth_ok_filter.on_value_change(lambda e: refresh_auth_table())
-                refresh_auth_table()
+                    with ui.column().classes("rag-card w-full p-4 gap-2"):
+                        ui.label(f"Ошибки поиска ({len(error_rows)})").classes("text-xl font-semibold")
+                        if error_rows:
+                            ui.table(
+                                rows=error_rows,
+                                columns=[
+                                    {"name": "ts", "label": "Время", "field": "ts"},
+                                    {"name": "username", "label": "Польз.", "field": "username"},
+                                    {"name": "query", "label": "Запрос", "field": "query"},
+                                    {"name": "error", "label": "Ошибка", "field": "error"},
+                                ],
+                                pagination=15,
+                            ).classes("w-full")
+                        else:
+                            ui.html('<div class="rag-meta" style="padding:16px;text-align:center;">Ошибок нет — всё хорошо!</div>', sanitize=False)
+
+        # Render initial tab bar
+        with tab_bar:
+            for tk, tlabel in tabs_def:
+                active = "active" if tk == state.analytics_tab else ""
+                ui.html(
+                    f'<span class="rag-analytics-tab {active}" ' +
+                    f'style="cursor:pointer;">{tlabel}</span>',
+                    sanitize=False,
+                ).on("click", lambda t=tk: _switch_tab(t))
+
+        _render_tab_content()
 
     def render() -> None:
         page_root.classes(remove="search")
         if state.screen == "search":
             page_root.classes(add="search")
         header_title.set_text({
+            "home": "Главная",
             "search": "Поиск",
             "explorer": "Проводник",
             "index": "Индекс",
             "telegram": "Telegram",
             "settings": "Настройки",
-            "stats": "Статистика",
+            "stats": "Аналитика",
         }.get(state.screen, "Поиск"))
         if state.header_breadcrumbs is not None:
             state.header_breadcrumbs.clear()
@@ -4835,7 +5705,9 @@ def _build_page(initial_screen: str = "search") -> None:
                 pass
             dark_mode.set_value(state.theme == "dark")
             touch_activity()
-            if state.screen == "explorer":
+            if state.screen == "home":
+                render_home_screen()
+            elif state.screen == "explorer":
                 try:
                     drawer.set_visibility(True)
                 except Exception:
@@ -4857,7 +5729,12 @@ def _build_page(initial_screen: str = "search") -> None:
 
 @ui.page("/")
 def root_page() -> None:
-    ui.navigate.to("/search")
+    ui.navigate.to("/home")
+
+
+@ui.page("/home")
+def home_page() -> None:
+    _build_page("home")
 
 
 @ui.page("/search")
