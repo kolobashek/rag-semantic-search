@@ -208,19 +208,32 @@ def _telegram_deeplink(bot_link: str, purpose: str, token: str) -> str:
 
 
 def format_fact_answer(result: Dict[str, Any]) -> str:
-    src = result.get("source", {}) or {}
-    filename = _clean_tg_text(src.get("filename", "неизвестный файл"), 200)
-    full_path = str(src.get("full_path", "") or "")
-    excerpt = _clean_tg_text(src.get("text_excerpt", ""), 300)
     answer = _clean_tg_text(result.get("answer", "Ответ не найден"), 800)
-    lines = [answer, f"Файл: {filename}"]
-    if excerpt:
-        lines.append(f"Фрагмент: {excerpt}")
-    if full_path:
-        lines.append(f"Путь: {_clean_tg_text(full_path, 500)}")
-        uri = _file_uri(full_path)
-        if uri:
-            lines.append(f"Ссылка: {uri}")
+    lines = [answer]
+    # Поддерживаем новый формат (sources: list) и старый (source: dict)
+    sources: List[Dict[str, Any]] = list(result.get("sources") or [])
+    if not sources and result.get("source"):
+        sources = [result["source"]]
+    if len(sources) == 1:
+        s = sources[0]
+        filename = _clean_tg_text(str(s.get("filename") or "неизвестный файл"), 200)
+        full_path = str(s.get("full_path") or "")
+        lines.append(f"Файл: {filename}")
+        if full_path:
+            lines.append(f"Путь: {_clean_tg_text(full_path, 500)}")
+            uri = _file_uri(full_path)
+            if uri:
+                lines.append(f"Ссылка: {uri}")
+    elif sources:
+        lines.append("Источники:")
+        for s in sources[:3]:
+            filename = _clean_tg_text(str(s.get("filename") or "неизвестный файл"), 200)
+            full_path = str(s.get("full_path") or "")
+            lines.append(f"  • {filename}")
+            if full_path:
+                uri = _file_uri(full_path)
+                if uri:
+                    lines.append(f"    {uri}")
     return "\n".join(lines)
 
 

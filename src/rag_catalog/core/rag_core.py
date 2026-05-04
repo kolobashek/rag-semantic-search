@@ -64,18 +64,6 @@ FS_CACHE_TTL_SEC = 300
 FS_CACHE_MAX_ITEMS = 250_000
 
 _ENTITY_RE = re.compile(r"\b[a-zа-я]*\d+[a-zа-я0-9\-]*\b", re.IGNORECASE)
-_WEIGHT_LINE_RE = re.compile(
-    r"(масса|вес|снаряженн\w*\s+масса|разрешенн\w*\s+максимальн\w*\s+масса)[^\n\r]{0,80}",
-    re.IGNORECASE,
-)
-_NUMBER_UNIT_RE = re.compile(
-    r"(\d[\d\s.,]{1,15})\s*(кг|килограмм(?:а|ов)?|т|тн|тонн(?:а|ы|)?)\b",
-    re.IGNORECASE,
-)
-_UNIT_NUMBER_RE = re.compile(
-    r"(кг|килограмм(?:а|ов)?|т|тн|тонн(?:а|ы|)?)\)?\s*(\d[\d\s.,]{1,15})\b",
-    re.IGNORECASE,
-)
 
 # Русские морфологические суффиксы для упрощённого стемминга.
 # Упорядочены от длиннейших к коротким — применяется первый подходящий.
@@ -770,21 +758,18 @@ class RAGSearcher:
             return {}
 
     def answer_fact_question(self, question: str, limit: int = 20) -> Dict[str, Any]:
-        """
-        Извлечь факт-ответ из документов.
+        """Ответить на произвольный фактологический вопрос по документам каталога.
 
-        Основной кейс: "Сколько весит PC300?" -> "3400 кг согласно ПСМ" + ссылка.
+        Использует LLM (Ollama) для извлечения ответа из найденных чанков —
+        работает для любых параметров: масса, возраст, дата, номер, стоимость и т.д.
+
+        Если llm_enabled=False в конфиге — возвращает топ-1 фрагмент без интерпретации.
         """
         started = time.perf_counter()
         if not self.connected:
             self.telemetry.log_fact(
-                source="fact",
-                question=question,
-                ok=False,
-                answer="",
-                source_type="",
-                value_kg=None,
-                duration_ms=0,
+                source="fact", question=question, ok=False,
+                answer="", source_type="", value_kg=None, duration_ms=0,
                 error="not_connected",
             )
             return {"ok": False, "error": "Нет подключения к Qdrant"}
@@ -792,34 +777,26 @@ class RAGSearcher:
         q = (question or "").strip()
         if not q:
             self.telemetry.log_fact(
-                source="fact",
-                question=question,
-                ok=False,
-                answer="",
-                source_type="",
-                value_kg=None,
-                duration_ms=0,
+                source="fact", question=question, ok=False,
+                answer="", source_type="", value_kg=None, duration_ms=0,
                 error="empty_question",
             )
             return {"ok": False, "error": "Пустой вопрос"}
 
+        # ── 1. Поиск кандидатов ───────────────────────────────────────
         try:
             candidates = self.search(
                 q, limit=limit, file_type=None, content_only=True, source="fact_search"
             )
         except Exception as exc:
             self.telemetry.log_fact(
-                source="fact",
-                question=q,
-                ok=False,
-                answer="",
-                source_type="",
-                value_kg=None,
-                duration_ms=int((time.perf_counter() - started) * 1000),
+                source="fact", question=q, ok=False, answer="", source_type="",
+                value_kg=None, duration_ms=int((time.perf_counter() - started) * 1000),
                 error=f"fact_search_error: {exc}",
             )
             return {"ok": False, "error": f"Ошибка поиска: {exc}"}
 
+        # ── 2. Расширяем кандидатами по сущностям и алиасам ─────────
         entities = _extract_entities(q)
         alias_entities = self._discover_entity_aliases(entities)
         entities = list(dict.fromkeys([*entities, *alias_entities]))
@@ -836,90 +813,80 @@ class RAGSearcher:
                 if x.get("type") == "file_metadata" and x.get("full_path")
             ]
             candidates.extend(self._content_chunks_for_paths(paths[:10], max_chunks=120))
+
         if not candidates:
             self.telemetry.log_fact(
-                source="fact",
-                question=q,
-                ok=False,
-                answer="",
-                source_type="",
-                value_kg=None,
-                duration_ms=int((time.perf_counter() - started) * 1000),
+                source="fact", question=q, ok=False, answer="", source_type="",
+                value_kg=None, duration_ms=int((time.perf_counter() - started) * 1000),
                 error="no_candidates",
             )
             return {"ok": False, "error": "Ничего не найдено"}
 
+        # ── 3. Ранжируем по релевантности к сущностям запроса ────────
         ranked = sorted(
             candidates,
             key=lambda item: _answer_rank(item, entities),
             reverse=True,
         )
 
-        for item in ranked:
-            text = item.get("text") or ""
-            matches = _extract_weight(text)
-            if not matches:
-                continue
-            source_type = _detect_source_type(item)
-            # Возвращаем все найденные значения; первичный — первый (наиболее релевантный по позиции)
-            primary = matches[0]
-            value_kg = primary["value_kg"]
-            mass_type = primary["mass_type"]
-            if len(matches) == 1:
-                answer = f"{value_kg} кг ({mass_type}) согласно {source_type}"
-            else:
-                all_values = "; ".join(
-                    f"{m['value_kg']} кг ({m['mass_type']})" for m in matches
+        # ── 4. Генерируем ответ ──────────────────────────────────────
+        llm_enabled = bool(self.config.get("llm_enabled"))
+        if llm_enabled:
+            from .llm import rag_answer  # noqa: PLC0415 — ленивый импорт
+            try:
+                answer = rag_answer(
+                    q,
+                    ranked,
+                    model=str(self.config.get("llm_rag_model") or "qwen3:8b"),
+                    ollama_url=str(self.config.get("ollama_url") or "http://localhost:11434"),
+                    top_k=6,
+                    max_chars_per_chunk=1200,
+                    timeout=120,
                 )
-                answer = f"{all_values} — согласно {source_type}"
-            self.telemetry.log_fact(
-                source="fact",
-                question=q,
-                ok=True,
-                answer=answer,
-                source_type=source_type,
-                value_kg=value_kg,
-                duration_ms=int((time.perf_counter() - started) * 1000),
-                error="",
-            )
-            return {
-                "ok": True,
-                "question": q,
-                "answer": answer,
-                "value_kg": value_kg,
-                "mass_type": mass_type,
-                "all_weights": matches,
-                "source_type": source_type,
-                "source": {
-                    "filename": item.get("filename", ""),
-                    "path": item.get("path", ""),
-                    "full_path": item.get("full_path", ""),
-                    "text_excerpt": primary["line"],
-                },
-                "search_result": item,
-            }
+                source_type = "llm"
+            except Exception as exc:
+                logger.error("answer_fact_question LLM failed: %s", exc)
+                answer = ""
+                source_type = "error"
+        else:
+            # Fallback без LLM: отдаём лучший фрагмент напрямую
+            best_text = (ranked[0].get("text") or "")[:800]
+            answer = best_text if best_text else "LLM не включён; текстовые фрагменты найдены, но интерпретация недоступна."
+            source_type = "no_llm"
 
-        best = ranked[0]
-        out = {
-            "ok": False,
-            "error": "В найденных документах не удалось извлечь массу/вес",
-            "best_source": {
-                "filename": best.get("filename", ""),
-                "path": best.get("path", ""),
-                "full_path": best.get("full_path", ""),
-            },
-        }
+        ok = bool(answer and source_type != "error")
+        sources = [
+            {
+                "filename": r.get("filename", ""),
+                "path": r.get("path", ""),
+                "full_path": r.get("full_path", ""),
+            }
+            for r in ranked[:5]
+            if r.get("full_path")
+        ]
+        # Убираем дубли по full_path
+        seen_paths: set[str] = set()
+        unique_sources = []
+        for s in sources:
+            fp = s["full_path"]
+            if fp not in seen_paths:
+                seen_paths.add(fp)
+                unique_sources.append(s)
+
         self.telemetry.log_fact(
-            source="fact",
-            question=q,
-            ok=False,
-            answer="",
-            source_type="",
-            value_kg=None,
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            error=out["error"],
+            source="fact", question=q, ok=ok, answer=answer[:500], source_type=source_type,
+            value_kg=None, duration_ms=int((time.perf_counter() - started) * 1000),
+            error="" if ok else source_type,
         )
-        return out
+        return {
+            "ok": ok,
+            "question": q,
+            "answer": answer,
+            "source_type": source_type,
+            "sources": unique_sources,
+            # value_kg оставлен для обратной совместимости (Telegram-бот и др.)
+            "value_kg": None,
+        }
 
     def _discover_entity_aliases(self, entities: List[str]) -> List[str]:
         aliases: List[str] = []
@@ -972,11 +939,11 @@ def _extract_entities(query: str) -> List[str]:
 
 
 def _answer_rank(item: Dict[str, Any], entities: List[str]) -> float:
-    """
-    Ранговый балл для fact-поиска. Возвращает (entity_bonus, score) как составной ключ
-    сортировки: первичный — бонус за совпадение сущностей и ключевых слов,
-    вторичный — семантический score. Это позволяет score выступать тай-брейкером
-    вместо того чтобы быть заглушенным неограниченным суммированием бонусов.
+    """Ранговый балл для fact-поиска.
+
+    Первичный критерий — насколько полно сущности запроса (артикулы, модели, имена)
+    представлены в тексте/пути документа. Вторичный — семантический score из Qdrant.
+    Нет domain-специфичных бонусов: функция работает для любых параметров и сущностей.
     """
     score = float(item.get("rank_score") or item.get("score") or 0.0)
     text = (item.get("text") or "").lower()
@@ -988,104 +955,7 @@ def _answer_rank(item: Dict[str, Any], entities: List[str]) -> float:
     n_entities = max(len(entities), 1)
     for e in entities:
         if e in bag:
-            entity_bonus += 1.0 / n_entities  # нормализуем по числу сущностей → max 1.0
+            entity_bonus += 1.0 / n_entities  # нормализуем: сумма бонусов ≤ 1.0
 
-    keyword_bonus = 0.0
-    if "псм" in bag:
-        keyword_bonus += 0.3
-    if "птс" in bag:
-        keyword_bonus += 0.2
-    if "масса" in bag or "вес" in bag:
-        keyword_bonus += 0.2
-
-    # Итоговый ключ сортировки: (entity_bonus + keyword_bonus) как первичный, score как тай-брейкер.
-    # Используем скаляр: bonus вносит до ~1.7, score нормализован [0,1] → умножаем score на малый вес.
-    return (entity_bonus + keyword_bonus) * 10.0 + score
-
-
-_MASS_TYPE_RE = re.compile(
-    r"(разрешённая\s+максимальная\s+масса|разрешенная\s+максимальная\s+масса"
-    r"|снаряженная\s+масса|снаряжённая\s+масса"
-    r"|масса\s+без\s+нагрузки|масса\s+с\s+грузом"
-    r"|полная\s+масса|собственная\s+масса"
-    r"|масса|вес)",
-    re.IGNORECASE,
-)
-
-
-def _extract_weight(text: str) -> List[Dict[str, Any]]:
-    """Извлечь все упоминания массы/веса из текста.
-
-    Возвращает список словарей с ключами:
-      - value_kg: значение в килограммах (int)
-      - mass_type: тип массы (str), например «снаряжённая масса»
-      - line: фрагмент строки источника (str)
-
-    Пустой список — если ничего не найдено.
-    """
-    if not text:
-        return []
-
-    lines = [x.strip() for x in re.split(r"[\r\n]+", text) if x.strip()]
-    results: List[Dict[str, Any]] = []
-    seen_values: set[int] = set()
-
-    for i, ln in enumerate(lines):
-        if not _WEIGHT_LINE_RE.search(ln):
-            continue
-        context = " ".join(lines[i : i + 4])
-        m = _NUMBER_UNIT_RE.search(context)
-        if m:
-            raw_number = m.group(1)
-            raw_unit = m.group(2).lower()
-        else:
-            m = _UNIT_NUMBER_RE.search(context)
-            if not m:
-                continue
-            raw_unit = m.group(1).lower()
-            raw_number = m.group(2)
-        value = _parse_number(raw_number)
-        if value is None:
-            continue
-        value_kg = int(round(value * 1000)) if raw_unit.startswith("т") else int(round(value))
-        if value_kg in seen_values:
-            continue  # не дублировать одинаковые значения
-        seen_values.add(value_kg)
-        # Определяем тип массы из строки контекста
-        type_m = _MASS_TYPE_RE.search(context)
-        mass_type = type_m.group(0).lower() if type_m else "масса"
-        results.append({"value_kg": value_kg, "mass_type": mass_type, "line": context[:240]})
-
-    return results
-
-
-def _parse_number(raw: str) -> Optional[float]:
-    cleaned = (raw or "").replace(" ", "")
-    if not cleaned:
-        return None
-    # 1) десятичный разделитель через запятую
-    if "," in cleaned and "." not in cleaned:
-        cleaned = cleaned.replace(",", ".")
-    # 2) если и точка и запятая — удаляем разделители тысяч
-    cleaned = cleaned.replace(",", "")
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-
-def _detect_source_type(item: Dict[str, Any]) -> str:
-    bag = " ".join(
-        [
-            (item.get("filename") or "").lower(),
-            (item.get("path") or "").lower(),
-            (item.get("text") or "").lower()[:2000],
-        ]
-    )
-    if "псм" in bag:
-        return "ПСМ"
-    if "птс" in bag:
-        return "ПТС"
-    if "электронного паспорта" in bag or "выписка из электронного паспорта" in bag:
-        return "электронному паспорту"
-    return "документа"
+    # entity_bonus * 10 → первичный ключ; score → тай-брейкер
+    return entity_bonus * 10.0 + score
