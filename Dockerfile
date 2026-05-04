@@ -23,7 +23,6 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY assets ./assets
 COPY config.docker.example.json ./config.docker.example.json
-COPY nice_app.py telegram_bot.py index_rag.py rag_search.py rag_search_fixed.py ocr_pdfs.py rag_core.py telemetry_db.py user_auth_db.py ./
 
 RUN pip install --upgrade pip \
     && pip install ".[ocr]"
