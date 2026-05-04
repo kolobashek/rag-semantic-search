@@ -19,7 +19,7 @@ from ._platform_compat import apply_windows_platform_workarounds
 apply_windows_platform_workarounds()
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 from .telemetry_db import TelemetryDB
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
 # НЕ импортировать здесь — import тянет torch (~5 сек, 500+ МБ RAM).
@@ -76,6 +76,76 @@ _UNIT_NUMBER_RE = re.compile(
     r"(кг|килограмм(?:а|ов)?|т|тн|тонн(?:а|ы|)?)\)?\s*(\d[\d\s.,]{1,15})\b",
     re.IGNORECASE,
 )
+
+# Русские морфологические суффиксы для упрощённого стемминга.
+# Упорядочены от длиннейших к коротким — применяется первый подходящий.
+_RU_SUFFIXES: tuple[str, ...] = (
+    # падежные окончания множественного числа
+    "ового", "овой", "овых", "овыми", "ового",
+    "ного", "ной", "ных", "ными",
+    "ского", "ской", "ских", "скими",
+    # именительный/родительный/дательный
+    "ами", "ями", "ов", "ев", "ей", "ях", "ам", "ям",
+    # падежные окончания единственного числа
+    "ому", "ему", "ого", "его", "ой", "ей",
+    "ом", "ем", "ым", "им",
+    # мужской/женский/средний род именительный
+    "ый", "ий", "ая", "яя", "ое", "ее",
+    # инфинитив и глагольные формы
+    "ать", "ять", "ить", "еть", "оть",
+    "ается", "яется", "ется", "ится",
+    "ающий", "яющий", "ущий", "ющий",
+    # существительные
+    "ости", "ость", "ение", "ания", "ание",
+    "тель", "ник", "ница",
+    # короткие падежные окончания — добавляются последними (пробуются только если ничего длиннее не подошло)
+    "у", "ю",      # дательный/винительный: паспорту, технику
+    "е",           # предложный: экскаваторе
+    "а", "я",      # родительный: экскаватора, погрузчика
+    "и", "ы",      # родительный ж.р.: техники, системы
+)
+
+
+def _ru_stem(term: str) -> str:
+    """Убрать один русский суффикс, если остаток >= 4 символа. Иначе вернуть term."""
+    for suffix in _RU_SUFFIXES:
+        if term.endswith(suffix) and len(term) - len(suffix) >= 4:
+            return term[: -len(suffix)]
+    return term
+
+
+class LexicalScore:
+    """Именованные константы скоринга для лексического поиска по ФС.
+
+    Тиры упорядочены по убыванию точности совпадения.
+    Изменяйте только здесь — не в теле _lexical_catalog_search.
+    """
+    FOLDER_PREFIX    = 0.999  # папка, чьё имя начинается с первого термина запроса
+    PARENT_PREFIX    = 0.997  # родительская папка файла начинается с первого термина
+    FULL_QUERY_IN_NAME = 0.995  # полный нормализованный запрос входит в имя файла
+    ALL_TERMS_IN_NAME  = 0.975  # все термины найдены в имени файла
+    ALL_TERMS_IN_PATH  = 0.955  # все термины найдены в пути (но не только в имени)
+    PARTIAL_BASE       = 0.86   # частичное совпадение; delta добавляется пропорционально
+    PARTIAL_MAX_DELTA  = 0.08   # максимальная прибавка к PARTIAL_BASE
+
+
+# Доменные правила буста для лексического поиска.
+# Каждая запись: (trigger_terms, file_keywords, score_floor).
+# Если запрос содержит хотя бы один trigger_term, а имя/путь файла содержит file_keyword,
+# score поднимается до score_floor (без снижения, если текущий выше).
+# Добавляйте новые правила сюда — не меняйте _lexical_catalog_search.
+_DOMAIN_BOOST_RULES: List[tuple[frozenset[str], List[str], float]] = [
+    (
+        frozenset({"паспорт", "паспорта", "паспорты", "псм", "птс", "стс", "техпаспорт"}),
+        ["выписка из электронного паспорта", "электронного паспорта"],
+        0.998,
+    ),
+    (
+        frozenset({"паспорт", "паспорта", "паспорты", "псм", "птс", "стс", "техпаспорт"}),
+        ["псм", "птс"],
+        0.996,
+    ),
+]
 
 
 # ─────────────────────────── config helpers ────────────────────────────
@@ -265,6 +335,16 @@ class RAGSearcher:
                 )
             )
 
+        # title_only: ограничить поиск только metadata-точками прямо в Qdrant,
+        # чтобы limit работал корректно (не терять metadata, находящиеся за пределами top-N).
+        if title_only:
+            must_conditions.append(
+                FieldCondition(
+                    key="type",
+                    match=MatchAny(any=["file_metadata", "folder_metadata"]),
+                )
+            )
+
         if must_conditions or must_not_conditions:
             qdrant_filter = Filter(
                 must=must_conditions if must_conditions else None,
@@ -302,7 +382,6 @@ class RAGSearcher:
             raise RuntimeError(f"Ошибка поиска в Qdrant: {exc}") from exc
 
         results: List[Dict[str, Any]] = []
-        metadata_types = {"file_metadata", "folder_metadata"}
         for hit in raw:
             payload = hit.payload or {}
             results.append(
@@ -319,8 +398,6 @@ class RAGSearcher:
                     "chunk_index": payload.get("chunk_index"),
                 }
             )
-        if title_only:
-            results = [item for item in results if str(item.get("type") or "") in metadata_types]
 
         lexical_results = self._lexical_catalog_search(
             query=query_used,
@@ -377,12 +454,25 @@ class RAGSearcher:
         expanded_query = str(expansion.get("expanded_query") or query or "")
         return self._terms_from_text(expanded_query)
 
+    # Паттерн границы слова для русских/латинских символов (включая цифры для артикулов).
+    # Используется только для стемминга — точное совпадение проверяется быстрым `in`.
+    _WB_TMPL = r"(?<![а-яёa-z0-9\-])%s(?![а-яёa-z0-9\-])"
+
     def _term_matches(self, haystack: str, term: str) -> bool:
+        """Проверить, встречается ли term в haystack как целое слово (с учётом морфологии).
+
+        Стратегия двух шагов:
+        1. Быстрый `in` — точное вхождение подстроки (O(n), без regex-оверхеда).
+        2. Regex с word-boundary только для стемминга, когда точное вхождение не нашлось.
+        """
         if term in haystack:
             return True
         if len(term) >= 5:
-            stem = term.rstrip("аеиоуыьъйяю")
-            return len(stem) >= 4 and stem in haystack
+            stem = _ru_stem(term)
+            if stem != term and len(stem) >= 4:
+                # Word-boundary необходим при поиске основы, чтобы "экскаватор"
+                # не матчился как подстрока в "экскаваторный" без учёта контекста.
+                return bool(re.search(self._WB_TMPL % re.escape(stem), haystack, re.IGNORECASE))
         return False
 
     def _refresh_fs_cache(self) -> List[Dict[str, Any]]:
@@ -468,10 +558,16 @@ class RAGSearcher:
             for group in expansion.get("groups", [])
             if isinstance(group, dict) and str(group.get("label") or "").strip()
         ]
-        wants_machine_passport = any(
-            term in {"паспорт", "паспорта", "паспорты", "псм", "птс", "стс", "техпаспорт"}
-            for term in raw_terms
-        ) or any("паспорт техники" in label for label in alias_groups)
+        # Определяем, какие доменные правила активны для данного запроса.
+        active_boost_rules = [
+            (keywords, score_floor)
+            for (trigger_terms, keywords, score_floor) in _DOMAIN_BOOST_RULES
+            if any(t in trigger_terms for t in raw_terms)
+            or any(
+                any(t in trigger_terms for t in re.findall(r"[а-яёa-z]{3,}", label, re.IGNORECASE))
+                for label in alias_groups
+            )
+        ]
         entity_terms = _extract_entities(query)
         query_norm = " ".join(terms)
         out: List[Dict[str, Any]] = []
@@ -492,19 +588,22 @@ class RAGSearcher:
                 continue
             is_folder = item.get("kind") == "folder"
             first_term = terms[0] if terms else ""
-            first_stem = first_term.rstrip("аеиоуыьъйяю") if len(first_term) >= 5 else first_term
+            first_stem = _ru_stem(first_term) if len(first_term) >= 5 else first_term
             if is_folder and first_stem and name.startswith(first_stem):
-                score = 0.999
+                score = LexicalScore.FOLDER_PREFIX
             elif first_stem and parent_name.startswith(first_stem):
-                score = 0.997
+                score = LexicalScore.PARENT_PREFIX
             elif query_norm and query_norm in name:
-                score = 0.995
+                score = LexicalScore.FULL_QUERY_IN_NAME
             elif all(self._term_matches(name, t) for t in terms):
-                score = 0.975
+                score = LexicalScore.ALL_TERMS_IN_NAME
             elif all(self._term_matches(path, t) for t in terms):
-                score = 0.955
+                score = LexicalScore.ALL_TERMS_IN_PATH
             else:
-                score = 0.86 + min(0.08, matched / max(1, len(terms)) * 0.08)
+                score = LexicalScore.PARTIAL_BASE + min(
+                    LexicalScore.PARTIAL_MAX_DELTA,
+                    matched / max(1, len(terms)) * LexicalScore.PARTIAL_MAX_DELTA,
+                )
             raw_matched = 0
             if len(raw_terms) > 1:
                 raw_matched = sum(1 for t in raw_terms if self._term_matches(hay, t))
@@ -522,14 +621,12 @@ class RAGSearcher:
                         break
             if (not raw_terms or raw_matched > 0) and alias_phrases and any(phrase and phrase in hay for phrase in alias_phrases):
                 score = max(score, 0.965)
-            if wants_machine_passport and not is_folder and (
-                "выписка из электронного паспорта" in hay
-                or "электронного паспорта" in hay
-            ):
-                score = max(score, 0.998)
-            elif wants_machine_passport and not is_folder and ("псм" in hay or "птс" in hay):
-                score = max(score, 0.996)
-            elif not is_folder and ("документы на технику" in hay or "док-ты техника" in hay):
+            if not is_folder and active_boost_rules:
+                for keywords, score_floor in active_boost_rules:
+                    if any(kw in hay for kw in keywords):
+                        score = max(score, score_floor)
+                        break
+            if not is_folder and ("документы на технику" in hay or "док-ты техника" in hay):
                 score = min(0.94, score + 0.04)
             out.append({
                 "score": round(score, 3),
@@ -760,12 +857,21 @@ class RAGSearcher:
 
         for item in ranked:
             text = item.get("text") or ""
-            match = _extract_weight(text)
-            if not match:
+            matches = _extract_weight(text)
+            if not matches:
                 continue
             source_type = _detect_source_type(item)
-            value_kg = match["value_kg"]
-            answer = f"{value_kg} кг согласно {source_type}"
+            # Возвращаем все найденные значения; первичный — первый (наиболее релевантный по позиции)
+            primary = matches[0]
+            value_kg = primary["value_kg"]
+            mass_type = primary["mass_type"]
+            if len(matches) == 1:
+                answer = f"{value_kg} кг ({mass_type}) согласно {source_type}"
+            else:
+                all_values = "; ".join(
+                    f"{m['value_kg']} кг ({m['mass_type']})" for m in matches
+                )
+                answer = f"{all_values} — согласно {source_type}"
             self.telemetry.log_fact(
                 source="fact",
                 question=q,
@@ -781,12 +887,14 @@ class RAGSearcher:
                 "question": q,
                 "answer": answer,
                 "value_kg": value_kg,
+                "mass_type": mass_type,
+                "all_weights": matches,
                 "source_type": source_type,
                 "source": {
                     "filename": item.get("filename", ""),
                     "path": item.get("path", ""),
                     "full_path": item.get("full_path", ""),
-                    "text_excerpt": match["line"],
+                    "text_excerpt": primary["line"],
                 },
                 "search_result": item,
             }
@@ -864,45 +972,74 @@ def _extract_entities(query: str) -> List[str]:
 
 
 def _answer_rank(item: Dict[str, Any], entities: List[str]) -> float:
-    score = float(item.get("score", 0.0))
+    """
+    Ранговый балл для fact-поиска. Возвращает (entity_bonus, score) как составной ключ
+    сортировки: первичный — бонус за совпадение сущностей и ключевых слов,
+    вторичный — семантический score. Это позволяет score выступать тай-брейкером
+    вместо того чтобы быть заглушенным неограниченным суммированием бонусов.
+    """
+    score = float(item.get("rank_score") or item.get("score") or 0.0)
     text = (item.get("text") or "").lower()
     filename = (item.get("filename") or "").lower()
     path = (item.get("path") or "").lower()
     bag = " ".join([filename, path, text[:4000]])
 
-    bonus = 0.0
+    entity_bonus = 0.0
+    n_entities = max(len(entities), 1)
     for e in entities:
         if e in bag:
-            bonus += 1.2
+            entity_bonus += 1.0 / n_entities  # нормализуем по числу сущностей → max 1.0
+
+    keyword_bonus = 0.0
     if "псм" in bag:
-        bonus += 1.0
+        keyword_bonus += 0.3
     if "птс" in bag:
-        bonus += 0.8
+        keyword_bonus += 0.2
     if "масса" in bag or "вес" in bag:
-        bonus += 0.7
-    return score + bonus
+        keyword_bonus += 0.2
+
+    # Итоговый ключ сортировки: (entity_bonus + keyword_bonus) как первичный, score как тай-брейкер.
+    # Используем скаляр: bonus вносит до ~1.7, score нормализован [0,1] → умножаем score на малый вес.
+    return (entity_bonus + keyword_bonus) * 10.0 + score
 
 
-def _extract_weight(text: str) -> Optional[Dict[str, Any]]:
+_MASS_TYPE_RE = re.compile(
+    r"(разрешённая\s+максимальная\s+масса|разрешенная\s+максимальная\s+масса"
+    r"|снаряженная\s+масса|снаряжённая\s+масса"
+    r"|масса\s+без\s+нагрузки|масса\s+с\s+грузом"
+    r"|полная\s+масса|собственная\s+масса"
+    r"|масса|вес)",
+    re.IGNORECASE,
+)
+
+
+def _extract_weight(text: str) -> List[Dict[str, Any]]:
+    """Извлечь все упоминания массы/веса из текста.
+
+    Возвращает список словарей с ключами:
+      - value_kg: значение в килограммах (int)
+      - mass_type: тип массы (str), например «снаряжённая масса»
+      - line: фрагмент строки источника (str)
+
+    Пустой список — если ничего не найдено.
+    """
     if not text:
-        return None
+        return []
 
     lines = [x.strip() for x in re.split(r"[\r\n]+", text) if x.strip()]
-    weighted_lines = []
+    results: List[Dict[str, Any]] = []
+    seen_values: set[int] = set()
 
     for i, ln in enumerate(lines):
-        if _WEIGHT_LINE_RE.search(ln):
-            weighted_lines.append(" ".join(lines[i : i + 4]))
-    if not weighted_lines:
-        return None
-
-    for ln in weighted_lines:
-        m = _NUMBER_UNIT_RE.search(ln)
+        if not _WEIGHT_LINE_RE.search(ln):
+            continue
+        context = " ".join(lines[i : i + 4])
+        m = _NUMBER_UNIT_RE.search(context)
         if m:
             raw_number = m.group(1)
             raw_unit = m.group(2).lower()
         else:
-            m = _UNIT_NUMBER_RE.search(ln)
+            m = _UNIT_NUMBER_RE.search(context)
             if not m:
                 continue
             raw_unit = m.group(1).lower()
@@ -910,12 +1047,16 @@ def _extract_weight(text: str) -> Optional[Dict[str, Any]]:
         value = _parse_number(raw_number)
         if value is None:
             continue
-        if raw_unit.startswith("т"):
-            value_kg = int(round(value * 1000))
-        else:
-            value_kg = int(round(value))
-        return {"value_kg": value_kg, "line": ln[:240]}
-    return None
+        value_kg = int(round(value * 1000)) if raw_unit.startswith("т") else int(round(value))
+        if value_kg in seen_values:
+            continue  # не дублировать одинаковые значения
+        seen_values.add(value_kg)
+        # Определяем тип массы из строки контекста
+        type_m = _MASS_TYPE_RE.search(context)
+        mass_type = type_m.group(0).lower() if type_m else "масса"
+        results.append({"value_kg": value_kg, "mass_type": mass_type, "line": context[:240]})
+
+    return results
 
 
 def _parse_number(raw: str) -> Optional[float]:

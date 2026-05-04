@@ -775,21 +775,37 @@ def _run_catalog_search(
             query_original=query_original,
         )
     )
-    if results or content_only or title_only:
+    if content_only or title_only:
         return results
 
     # If the vector path returns an empty/invalid value, keep name/path search usable.
+    # Merge with fallback lexical results, keeping the best rank_score for each unique item.
     try:
-        fallback = searcher._lexical_catalog_search(  # noqa: SLF001 - UI fallback for catalog metadata search
-            query=query_used,
-            limit=max(limit, 10),
-            file_type=file_type,
-            content_only=False,
-            title_only=title_only,
+        fallback = _normalize_search_results(
+            searcher._lexical_catalog_search(  # noqa: SLF001 - UI fallback for catalog metadata search
+                query=query_used,
+                limit=max(limit, 10),
+                file_type=file_type,
+                content_only=False,
+                title_only=title_only,
+            )
         )
     except Exception:
         return results
-    return _normalize_search_results(fallback)[:limit]
+
+    if not fallback:
+        return results
+
+    def _rank_key(item: Dict[str, Any]) -> float:
+        return float(item.get("rank_score") or item.get("score") or 0)
+
+    seen: Dict[str, Dict[str, Any]] = {}
+    for item in [*results, *fallback]:
+        key = f"{item.get('full_path')}::{item.get('chunk_index')}::{item.get('type')}"
+        if key not in seen or _rank_key(item) > _rank_key(seen[key]):
+            seen[key] = item
+    merged = sorted(seen.values(), key=_rank_key, reverse=True)
+    return merged[:limit]
 
 
 def _format_file_size(size_b: int) -> str:
@@ -1229,7 +1245,7 @@ def _grouped_results(results: List[Dict[str, Any]]) -> List[tuple[str, List[Dict
     for result in results:
         grouped.setdefault(_result_group(result), []).append(result)
     return [
-        (group, sorted(grouped[group], key=lambda item: float(item.get("score") or 0), reverse=True))
+        (group, sorted(grouped[group], key=lambda item: float(item.get("rank_score") or item.get("score") or 0), reverse=True))
         for group in order
         if group in grouped
     ]
