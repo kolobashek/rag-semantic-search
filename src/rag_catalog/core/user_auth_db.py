@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .db_contract import ensure_schema_version
+
 
 DEFAULT_SESSION_TTL_DAYS = 7
 MIN_SESSION_TTL_DAYS = 1
@@ -22,6 +24,7 @@ MAX_SESSION_TTL_DAYS = 7
 SESSION_TTL_SETTING_KEY = "session_ttl_days"
 SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
 ANY_TELEGRAM_CHAT_ID = "*"
+SCHEMA_VERSION = 2
 
 
 def _utc_now() -> str:
@@ -200,6 +203,13 @@ class UserAuthDB:
                     """
                 )
                 self._migrate_schema(conn)
+                ensure_schema_version(
+                    conn,
+                    db_kind="user_auth",
+                    db_path=self.db_path,
+                    expected_version=SCHEMA_VERSION,
+                    code_root=Path(__file__).resolve().parents[3],
+                )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
                 self._ensure_default_admin(conn)
 

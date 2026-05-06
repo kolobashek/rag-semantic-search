@@ -26,9 +26,19 @@ from .telemetry_db import TelemetryDB
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
 # НЕ импортировать здесь — import тянет torch (~5 сек, 500+ МБ RAM).
 
-# config.json remains in the project root for backward-compatible launches.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-CONFIG_FILE = PROJECT_ROOT / "config.json"
+
+
+def _resolve_config_file() -> Path:
+    # Nested .claude/.codex worktrees should reuse the nearest ancestor config.
+    for base in [PROJECT_ROOT, *PROJECT_ROOT.parents]:
+        candidate = base / "config.json"
+        if candidate.exists():
+            return candidate
+    return PROJECT_ROOT / "config.json"
+
+
+CONFIG_FILE = _resolve_config_file()
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "catalog_path": r"O:\Обмен",
@@ -98,9 +108,10 @@ def load_config() -> Dict[str, Any]:
     Загрузить конфигурацию из config.json.
     Недостающие ключи берутся из DEFAULT_CONFIG.
     """
-    if CONFIG_FILE.exists():
+    config_file = _resolve_config_file()
+    if config_file.exists():
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as fh:
+            with open(config_file, "r", encoding="utf-8") as fh:
                 user_cfg = json.load(fh)
             return {**DEFAULT_CONFIG, **user_cfg}
         except Exception as exc:
@@ -110,10 +121,11 @@ def load_config() -> Dict[str, Any]:
 
 def save_config(config: Dict[str, Any]) -> None:
     """Сохранить конфигурацию в config.json."""
+    config_file = _resolve_config_file()
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
+        with open(config_file, "w", encoding="utf-8") as fh:
             json.dump(config, fh, indent=2, ensure_ascii=False)
-        logger.info("Конфигурация сохранена: %s", CONFIG_FILE)
+        logger.info("Конфигурация сохранена: %s", config_file)
     except Exception as exc:
         logger.error("Не удалось сохранить config.json: %s", exc)
 

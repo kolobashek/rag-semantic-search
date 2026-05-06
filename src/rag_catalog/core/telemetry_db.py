@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .db_contract import ensure_schema_version
+
+
+SCHEMA_VERSION = 3
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -275,6 +280,13 @@ class TelemetryDB:
                 )
                 self._migrate_schema(conn)
                 self._ensure_default_search_aliases(conn)
+                ensure_schema_version(
+                    conn,
+                    db_kind="telemetry",
+                    db_path=self.db_path,
+                    expected_version=SCHEMA_VERSION,
+                    code_root=Path(__file__).resolve().parents[3],
+                )
                 conn.executescript(
                     """
                     CREATE INDEX IF NOT EXISTS idx_search_logs_ts

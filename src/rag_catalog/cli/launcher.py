@@ -18,14 +18,32 @@ from rag_catalog.core.rag_core import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "logs" / "runtime"
-WEB_PID_FILE = RUNTIME_DIR / "web.pid"
-BOT_PID_FILE = RUNTIME_DIR / "telegram_bot.pid"
-QDRANT_FLAG_FILE = RUNTIME_DIR / "qdrant.managed"
 
 
 def _runtime_dir() -> Path:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     return RUNTIME_DIR
+
+
+def _shared_runtime_dir(cfg: Dict[str, Any]) -> Path:
+    telemetry_path = str(cfg.get("telemetry_db_path") or "").strip()
+    if telemetry_path:
+        base = Path(telemetry_path).resolve().parent
+    else:
+        qdrant_db_path = str(cfg.get("qdrant_db_path") or "").strip()
+        base = Path(qdrant_db_path).resolve() if qdrant_db_path else PROJECT_ROOT.resolve()
+    runtime_dir = base / ".launcher_runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_dir
+
+
+def _pid_file(cfg: Dict[str, Any], kind: str) -> Path:
+    names = {
+        "web": "web.pid",
+        "bot": "telegram_bot.pid",
+        "qdrant": "qdrant.managed",
+    }
+    return _shared_runtime_dir(cfg) / names[kind]
 
 
 def _pid_alive(pid: int) -> bool:
@@ -71,6 +89,30 @@ def _pid_commandline(pid: int) -> str:
         except Exception:
             return ""
     return ""
+
+
+def _find_python_module_pid(module: str) -> int:
+    if os.name != "nt":
+        return 0
+    try:
+        escaped = module.replace("'", "''")
+        cmd = (
+            "$procs=Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -match '^python(\\.exe)?$' -and $_.CommandLine -like '*-m "
+            + escaped
+            + "*' }; "
+            "if($procs){($procs | Select-Object -First 1 -ExpandProperty ProcessId)}"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        value = str(result.stdout or "").strip()
+        return int(value) if value.isdigit() else 0
+    except Exception:
+        return 0
 
 
 def _read_pid(pid_path: Path) -> int:
@@ -198,6 +240,7 @@ def _docker_available() -> bool:
 
 
 def _start_qdrant_if_needed(cfg: Dict[str, Any], mode: str) -> str:
+    qdrant_flag_file = _pid_file(cfg, "qdrant")
     target = _qdrant_target(cfg)
     if target["mode"] == "local":
         return "qdrant=local-mode (embedded via qdrant_db_path)"
@@ -215,7 +258,7 @@ def _start_qdrant_if_needed(cfg: Dict[str, Any], mode: str) -> str:
     result = subprocess.run(compose_cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=180)
     if result.returncode != 0:
         return f"qdrant=failed ({result.stderr.strip() or result.stdout.strip()})"
-    QDRANT_FLAG_FILE.write_text("managed\n", encoding="utf-8")
+    qdrant_flag_file.write_text("managed\n", encoding="utf-8")
     for _ in range(30):
         if _port_open(str(target["host"]), int(target["port"]), timeout=1.0):
             return f"qdrant=started ({target['host']}:{target['port']})"
@@ -224,10 +267,12 @@ def _start_qdrant_if_needed(cfg: Dict[str, Any], mode: str) -> str:
 
 
 def _stop_qdrant_if_managed() -> str:
-    if not QDRANT_FLAG_FILE.exists():
+    cfg = load_config()
+    qdrant_flag_file = _pid_file(cfg, "qdrant")
+    if not qdrant_flag_file.exists():
         return "qdrant=not-managed"
     if not _docker_available():
-        _remove_pid(QDRANT_FLAG_FILE)
+        _remove_pid(qdrant_flag_file)
         return "qdrant=managed-flag-cleared (docker unavailable)"
     result = subprocess.run(
         ["docker", "compose", "stop", "qdrant"],
@@ -236,14 +281,15 @@ def _stop_qdrant_if_managed() -> str:
         text=True,
         timeout=60,
     )
-    _remove_pid(QDRANT_FLAG_FILE)
+    _remove_pid(qdrant_flag_file)
     if result.returncode == 0:
         return "qdrant=stopped"
     return f"qdrant=stop-failed ({result.stderr.strip() or result.stdout.strip()})"
 
 
-def _start_web(host: str, port: int) -> str:
-    payload = _read_pid_payload(WEB_PID_FILE)
+def _start_web(cfg: Dict[str, Any], host: str, port: int) -> str:
+    web_pid_file = _pid_file(cfg, "web")
+    payload = _read_pid_payload(web_pid_file)
     pid = int(payload.get("pid") or 0)
     if pid and _pid_alive(pid):
         return f"web=already-up (pid={pid}, {host}:{port})"
@@ -255,7 +301,7 @@ def _start_web(host: str, port: int) -> str:
         PROJECT_ROOT,
         "web.log",
     )
-    _write_pid(WEB_PID_FILE, new_pid, {"host": host, "port": port, "module": "rag_catalog.ui.nice_app"})
+    _write_pid(web_pid_file, new_pid, {"host": host, "port": port, "module": "rag_catalog.ui.nice_app"})
     for _ in range(40):
         if _port_open(host, port, timeout=1.0):
             return f"web=started (pid={new_pid}, {host}:{port})"
@@ -264,17 +310,20 @@ def _start_web(host: str, port: int) -> str:
 
 
 def _stop_web() -> str:
-    payload = _read_pid_payload(WEB_PID_FILE)
+    cfg = load_config()
+    web_pid_file = _pid_file(cfg, "web")
+    payload = _read_pid_payload(web_pid_file)
     pid = int(payload.get("pid") or 0)
     if pid <= 0:
         return "web=not-managed"
     stopped = _kill_pid(pid)
-    _remove_pid(WEB_PID_FILE)
+    _remove_pid(web_pid_file)
     return f"web={'stopped' if stopped else 'already-down'} (pid={pid})"
 
 
 def _start_bot(enable_mode: str) -> str:
     cfg = load_config()
+    bot_pid_file = _pid_file(cfg, "bot")
     bot_enabled = bool(cfg.get("telegram_enabled"))
     token_set = bool(str(cfg.get("telegram_bot_token") or "").strip())
     q_mode = _qdrant_target(cfg).get("mode")
@@ -284,12 +333,16 @@ def _start_bot(enable_mode: str) -> str:
         return "bot=skipped (local qdrant mode: possible lock conflict with web)"
     if enable_mode == "auto" and (not bot_enabled or not token_set):
         return "bot=skipped (telegram_enabled=false or empty token)"
-    payload = _read_pid_payload(BOT_PID_FILE)
+    payload = _read_pid_payload(bot_pid_file)
     pid = int(payload.get("pid") or 0)
     if pid and _pid_alive(pid):
         return f"bot=already-up (pid={pid})"
+    running_pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+    if running_pid:
+        _write_pid(bot_pid_file, running_pid, {"module": "rag_catalog.integrations.telegram_bot", "discovered": True})
+        return f"bot=already-up (pid={running_pid}, discovered)"
     new_pid = _spawn_python_module("rag_catalog.integrations.telegram_bot", [], PROJECT_ROOT, "telegram_bot.log")
-    _write_pid(BOT_PID_FILE, new_pid, {"module": "rag_catalog.integrations.telegram_bot"})
+    _write_pid(bot_pid_file, new_pid, {"module": "rag_catalog.integrations.telegram_bot"})
     time.sleep(1.0)
     if _pid_alive(new_pid):
         return f"bot=started (pid={new_pid})"
@@ -297,24 +350,35 @@ def _start_bot(enable_mode: str) -> str:
 
 
 def _stop_bot() -> str:
-    payload = _read_pid_payload(BOT_PID_FILE)
+    cfg = load_config()
+    bot_pid_file = _pid_file(cfg, "bot")
+    payload = _read_pid_payload(bot_pid_file)
     pid = int(payload.get("pid") or 0)
     if pid <= 0:
         return "bot=not-managed"
     stopped = _kill_pid(pid)
-    _remove_pid(BOT_PID_FILE)
+    _remove_pid(bot_pid_file)
     return f"bot={'stopped' if stopped else 'already-down'} (pid={pid})"
 
 
 def _status(host: str, port: int) -> int:
     cfg = load_config()
     target = _qdrant_target(cfg)
-    web_payload = _read_pid_payload(WEB_PID_FILE)
-    bot_payload = _read_pid_payload(BOT_PID_FILE)
+    web_payload = _read_pid_payload(_pid_file(cfg, "web"))
+    bot_pid_file = _pid_file(cfg, "bot")
+    bot_payload = _read_pid_payload(bot_pid_file)
     web_pid = int(web_payload.get("pid") or 0)
     bot_pid = int(bot_payload.get("pid") or 0)
     web_alive = _pid_alive(web_pid)
     bot_alive = _pid_alive(bot_pid)
+    bot_discovered = False
+    if not bot_alive:
+        discovered_pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+        if discovered_pid:
+            _write_pid(bot_pid_file, discovered_pid, {"module": "rag_catalog.integrations.telegram_bot", "discovered": True})
+            bot_pid = discovered_pid
+            bot_alive = True
+            bot_discovered = True
 
     print("Launcher status")
     web_port_open = _port_open(host, port)
@@ -331,9 +395,11 @@ def _status(host: str, port: int) -> int:
         q_port = int(target["port"])
         print(f"- qdrant.mode: server ({target['url']})")
         print(f"- qdrant.port: {'open' if _port_open(q_host, q_port) else 'closed'} ({q_host}:{q_port})")
-        print(f"- qdrant.managed: {'yes' if QDRANT_FLAG_FILE.exists() else 'no'}")
+        print(f"- qdrant.managed: {'yes' if _pid_file(cfg, 'qdrant').exists() else 'no'}")
 
     print(f"- bot.process: {'up' if bot_alive else 'down'} (pid={bot_pid or '-'})")
+    if bot_discovered:
+        print("- bot.note: discovered running process from another worktree/runtime")
     print(f"- bot.enabled.config: {bool(cfg.get('telegram_enabled'))}")
     print(f"- bot.token.config: {'set' if str(cfg.get('telegram_bot_token') or '').strip() else 'empty'}")
     return 0
@@ -343,7 +409,7 @@ def _start(args: argparse.Namespace) -> int:
     _runtime_dir()
     cfg = load_config()
     qdrant_msg = _start_qdrant_if_needed(cfg, args.qdrant)
-    web_msg = _start_web(args.host, int(args.port))
+    web_msg = _start_web(cfg, args.host, int(args.port))
     bot_msg = _start_bot(args.bot)
     print(qdrant_msg)
     print(web_msg)

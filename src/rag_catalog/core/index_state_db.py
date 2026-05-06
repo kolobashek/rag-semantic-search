@@ -11,6 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from .db_contract import ensure_schema_version
+
+
+SCHEMA_VERSION = 2
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -55,6 +60,13 @@ class IndexStateDB:
                     CREATE INDEX IF NOT EXISTS idx_state_entries_extension
                       ON state_entries(extension);
                     """
+                )
+                ensure_schema_version(
+                    conn,
+                    db_kind="index_state",
+                    db_path=self.db_path,
+                    expected_version=SCHEMA_VERSION,
+                    code_root=Path(__file__).resolve().parents[3],
                 )
 
     def count(self) -> int:
