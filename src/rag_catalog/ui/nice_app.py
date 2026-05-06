@@ -436,6 +436,11 @@ class PageState:
     header_explorer_actions: Optional[ui.row] = None
     header_breadcrumbs: Optional[ui.row] = None
     telemetry: Optional[TelemetryDB] = None
+    index_progress_timer: Optional[Any] = None
+    stage_status_timer: Optional[Any] = None
+    tg_login_timer: Optional[Any] = None
+    activity_timer: Optional[Any] = None
+    scheduler_timer: Optional[Any] = None
 
 
 def _file_url(full_path: str) -> str:
@@ -569,6 +574,19 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _stop_managed_timer(timer_obj: Any) -> None:
+    if timer_obj is None:
+        return
+    try:
+        timer_obj.active = False
+    except Exception:
+        pass
+    try:
+        timer_obj.delete()
+    except Exception:
+        pass
 
 
 def _effective_workers(configured: Any, *, stage: str = "all", mode: str = "index") -> int:
@@ -2790,7 +2808,10 @@ def _build_page(initial_screen: str = "search") -> None:
         except Exception:
             pass
 
-    ui.timer(3600.0, touch_activity)
+    _stop_managed_timer(state.activity_timer)
+    state.activity_timer = None
+    if state.auth_token and state.current_user:
+        state.activity_timer = ui.timer(3600.0, touch_activity)
 
     # ── Встроенный планировщик ────────────────────────────────────────
     def _tick_scheduler() -> None:
@@ -2828,7 +2849,10 @@ def _build_page(initial_screen: str = "search") -> None:
         except Exception:
             pass
 
-    ui.timer(60.0, _tick_scheduler)
+    _stop_managed_timer(state.scheduler_timer)
+    state.scheduler_timer = None
+    if _is_admin(state):
+        state.scheduler_timer = ui.timer(60.0, _tick_scheduler)
 
     def do_logout() -> None:
         auth_db = _get_auth_db(state)
@@ -4010,7 +4034,8 @@ def _build_page(initial_screen: str = "search") -> None:
             file_path.write_text(text, encoding="utf-8")
             ui.download(file_path, filename=file_path.name)
 
-        ui.timer(1.5, lambda: _refresh_stage_status_log())
+        _stop_managed_timer(state.stage_status_timer)
+        state.stage_status_timer = ui.timer(1.5, lambda: _refresh_stage_status_log())
 
         def show_stage_status_details(row: Dict[str, Any]) -> None:
             stage = str(row.get("stage") or "-")
@@ -4187,7 +4212,8 @@ def _build_page(initial_screen: str = "search") -> None:
             # Initial render
             _refresh_progress()
             # Auto-refresh every 5 seconds while indexing may be running
-            ui.timer(5.0, _refresh_progress)
+            _stop_managed_timer(state.index_progress_timer)
+            state.index_progress_timer = ui.timer(5.0, _refresh_progress)
 
         # ── Расписание и параметры ───────────────────────────────────────
         with ui.column().classes("rag-card w-full p-4 gap-3"):
@@ -4572,7 +4598,8 @@ def _build_page(initial_screen: str = "search") -> None:
                         ui.button("Отправить заявку", icon="how_to_reg", on_click=register_request).props("unelevated")
                         ui.label("После одобрения администратором вы получите доступ к аккаунту.").classes("rag-meta")
 
-                ui.timer(2.0, poll_tg_login)
+                _stop_managed_timer(state.tg_login_timer)
+                state.tg_login_timer = ui.timer(2.0, poll_tg_login)
 
     def render_admin_users(auth_db: UserAuthDB) -> None:
         with ui.column().classes("rag-card w-full p-4 gap-4"):
@@ -5760,6 +5787,20 @@ def _build_page(initial_screen: str = "search") -> None:
             state.header_breadcrumbs.clear()
         if state.header_explorer_actions is not None:
             state.header_explorer_actions.clear()
+        if state.screen != "index":
+            _stop_managed_timer(state.index_progress_timer)
+            state.index_progress_timer = None
+            _stop_managed_timer(state.stage_status_timer)
+            state.stage_status_timer = None
+        if not (state.auth_token and state.current_user):
+            _stop_managed_timer(state.activity_timer)
+            state.activity_timer = None
+        if not _is_admin(state):
+            _stop_managed_timer(state.scheduler_timer)
+            state.scheduler_timer = None
+        if state.current_user is not None or state.screen != "search":
+            _stop_managed_timer(state.tg_login_timer)
+            state.tg_login_timer = None
         update_nav()
         content.clear()
         with content:

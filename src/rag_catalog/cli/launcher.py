@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
+import psutil
 from rag_catalog.core.rag_core import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -92,27 +93,17 @@ def _pid_commandline(pid: int) -> str:
 
 
 def _find_python_module_pid(module: str) -> int:
-    if os.name != "nt":
-        return 0
     try:
-        escaped = module.replace("'", "''")
-        cmd = (
-            "$procs=Get-CimInstance Win32_Process | "
-            "Where-Object { $_.Name -match '^python(\\.exe)?$' -and $_.CommandLine -like '*-m "
-            + escaped
-            + "*' }; "
-            "if($procs){($procs | Select-Object -First 1 -ExpandProperty ProcessId)}"
-        )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", cmd],
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-        value = str(result.stdout or "").strip()
-        return int(value) if value.isdigit() else 0
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = [str(part) for part in (proc.info.get("cmdline") or [])]
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if len(cmdline) >= 3 and cmdline[1] == "-m" and cmdline[2] == module:
+                return int(proc.info.get("pid") or 0)
     except Exception:
         return 0
+    return 0
 
 
 def _read_pid(pid_path: Path) -> int:
@@ -343,9 +334,15 @@ def _start_bot(enable_mode: str) -> str:
         return f"bot=already-up (pid={running_pid}, discovered)"
     new_pid = _spawn_python_module("rag_catalog.integrations.telegram_bot", [], PROJECT_ROOT, "telegram_bot.log")
     _write_pid(bot_pid_file, new_pid, {"module": "rag_catalog.integrations.telegram_bot"})
-    time.sleep(1.0)
-    if _pid_alive(new_pid):
-        return f"bot=started (pid={new_pid})"
+    for _ in range(12):
+        time.sleep(0.5)
+        if _pid_alive(new_pid):
+            return f"bot=started (pid={new_pid})"
+        discovered_pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+        if discovered_pid:
+            _write_pid(bot_pid_file, discovered_pid, {"module": "rag_catalog.integrations.telegram_bot", "discovered": True})
+            return f"bot=started (pid={discovered_pid}, discovered)"
+    _remove_pid(bot_pid_file)
     return "bot=failed-to-start"
 
 

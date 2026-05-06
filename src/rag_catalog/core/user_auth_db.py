@@ -11,6 +11,7 @@ import threading
 import hashlib
 import hmac
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -62,15 +63,28 @@ class UserAuthDB:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _prepare_connection(self, conn: sqlite3.Connection) -> None:
+        last_error: Optional[Exception] = None
+        for _ in range(3):
+            try:
+                conn.execute("PRAGMA busy_timeout=30000;")
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                return
+            except sqlite3.OperationalError as exc:
+                last_error = exc
+                time.sleep(0.25)
+        if last_error is not None:
+            raise last_error
 
     def _init_schema(self) -> None:
         with self._lock:
             with self._connect() as conn:
-                conn.execute("PRAGMA journal_mode=WAL;")
-                conn.execute("PRAGMA synchronous=NORMAL;")
+                self._prepare_connection(conn)
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS users (
