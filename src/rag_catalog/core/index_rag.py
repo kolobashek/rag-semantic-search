@@ -8,10 +8,10 @@ index_rag.py — Индексатор файлов DOCX / XLSX / XLS / PDF / и�
 """
 
 import argparse
-import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -39,6 +39,8 @@ from qdrant_client.models import (
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
+from .index_state_db import IndexStateDB
+from .ocr_runtime import apply_tesseract_runtime, resolve_ocr_runtime
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB
 
@@ -177,6 +179,44 @@ def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) 
     return "large"
 
 
+def _windows_hidden_popen_kwargs() -> Dict[str, Any]:
+    """kwargs for subprocess calls without visible console window on Windows."""
+    if os.name != "nt":
+        return {}
+    kwargs: Dict[str, Any] = {"creationflags": int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)}
+    if hasattr(subprocess, "STARTUPINFO"):
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        kwargs["startupinfo"] = si
+    return kwargs
+
+
+def _patch_pdf2image_popen_for_windows(pdf2image_module: Any) -> None:
+    """
+    Patch pdf2image internal Popen to suppress console flicker on Windows.
+
+    pdf2image already hides some subprocesses, but helper calls (pdfinfo/version)
+    may still open short-lived console windows.
+    """
+    if os.name != "nt":
+        return
+    if getattr(pdf2image_module, "_rag_hidden_popen_patched", False):
+        return
+    original_popen = getattr(pdf2image_module, "Popen", None)
+    if original_popen is None:
+        return
+
+    def _hidden_popen(*args: Any, **kwargs: Any) -> Any:
+        hidden = _windows_hidden_popen_kwargs()
+        for key, value in hidden.items():
+            kwargs.setdefault(key, value)
+        return original_popen(*args, **kwargs)
+
+    pdf2image_module.Popen = _hidden_popen
+    pdf2image_module._rag_hidden_popen_patched = True
+
+
 def _generate_tags(
     filepath: Path,
     relative_path: Path,
@@ -309,10 +349,10 @@ class RAGIndexer:
 
     Особенности:
     - Инкрементальное индексирование (пропускает неизменённые файлы).
-    - Атомарная запись state.json (через временный файл + os.replace).
-    - При --recreate очищает state.json вместе с коллекцией.
+    - Транзакционное состояние в SQLite (index_state.db).
+    - При --recreate очищает state БД вместе с коллекцией.
     - При изменении файла — сначала удаляет старые векторы из Qdrant.
-    - При удалении файла — чистит векторы из Qdrant и из state.json.
+    - При удалении файла — чистит векторы из Qdrant и из state БД.
     - .xls читается через xlrd (старый формат Excel).
     - PDF: сначала pdfplumber (текстовый слой), затем OCR (если слой пуст).
     """
@@ -339,6 +379,9 @@ class RAGIndexer:
         small_office_mb: Optional[float] = None,
         small_pdf_mb: Optional[float] = None,
         synonym_map: Optional[Dict[str, List[str]]] = None,
+        ocr_tesseract_cmd: str = "",
+        ocr_poppler_bin: str = "",
+        qdrant_timeout_sec: int = 60,
     ) -> None:
         # current_stage выставляется при каждом запуске index_directory(stage=...)
         # и определяет поведение skip-логики и экстракции содержимого.
@@ -357,6 +400,7 @@ class RAGIndexer:
         self.skip_ocr = skip_ocr
         self.max_chunks_per_file = max_chunks_per_file  # 0 = без ограничений
         self.read_workers = read_workers
+        self.qdrant_timeout_sec = max(5, int(qdrant_timeout_sec or 60))
         self.small_office_mb = float(
             DEFAULT_SMALL_OFFICE_MB if small_office_mb is None else small_office_mb
         )
@@ -365,6 +409,33 @@ class RAGIndexer:
         )
         # Таблица синонимов для генерации тегов (дополняет DEFAULT_SYNONYM_MAP)
         self.synonym_map: Dict[str, List[str]] = synonym_map or {}
+        self.ocr_tesseract_cmd = str(ocr_tesseract_cmd or "").strip()
+        self.ocr_poppler_bin = str(ocr_poppler_bin or "").strip()
+        if not self.ocr_tesseract_cmd or not self.ocr_poppler_bin:
+            runtime = resolve_ocr_runtime(
+                {
+                    "ocr_tesseract_cmd": self.ocr_tesseract_cmd,
+                    "ocr_poppler_bin": self.ocr_poppler_bin,
+                }
+            )
+            self.ocr_tesseract_cmd = self.ocr_tesseract_cmd or runtime.get("tesseract_cmd", "")
+            self.ocr_poppler_bin = self.ocr_poppler_bin or runtime.get("poppler_bin", "")
+        if self.skip_ocr:
+            logger.info("Inline OCR отключён (--no-ocr).")
+        elif self.ocr_tesseract_cmd and self.ocr_poppler_bin:
+            logger.info(
+                "OCR runtime: tesseract=%s, poppler=%s",
+                self.ocr_tesseract_cmd,
+                self.ocr_poppler_bin,
+            )
+        else:
+            logger.warning(
+                "OCR runtime не полностью настроен. "
+                "Ожидались tools/tesseract и tools/poppler (или ocr_* в config/env). "
+                "tesseract=%s, poppler=%s",
+                self.ocr_tesseract_cmd or "MISSING",
+                self.ocr_poppler_bin or "MISSING",
+            )
         # Расширения, для которых индексируется только метадата (без чтения содержимого).
         # Полезно для быстрого первого прохода по скан-PDF: имя/путь/размер — за секунды.
         self.metadata_only_extensions = {
@@ -398,16 +469,19 @@ class RAGIndexer:
         # Режим подключения: сервер (Docker) или локальный SQLite
         if qdrant_url:
             logger.info("Подключение к Qdrant серверу: %s", qdrant_url)
-            self.qdrant = QdrantClient(url=qdrant_url)
-            # state_file рядом с db-папкой (или в qdrant_db_path как запасной путь)
+            self.qdrant = QdrantClient(url=qdrant_url, timeout=self.qdrant_timeout_sec)
+            # state БД рядом с qdrant_db_path и в серверном режиме тоже локально.
             self.qdrant_db_path.mkdir(parents=True, exist_ok=True)
         else:
             logger.info("Qdrant локальный режим: %s", qdrant_db_path)
-            self.qdrant = QdrantClient(path=str(self.qdrant_db_path))
-        self._setup_collection()
+            self.qdrant = QdrantClient(path=str(self.qdrant_db_path), timeout=self.qdrant_timeout_sec)
+        self.state_db = IndexStateDB(str(self.qdrant_db_path / "index_state.db"))
+        legacy_state_file = self.qdrant_db_path / "index_state.json"
+        imported = self.state_db.bootstrap_from_json(legacy_state_file)
+        if imported:
+            logger.info("Импортировано %d записей legacy state.json в index_state.db", imported)
 
-        self.state_file = self.qdrant_db_path / "index_state.json"
-        self.state = self._load_state()
+        self._setup_collection()
 
         self._points_buffer: List[PointStruct] = []
         self.point_count = 0
@@ -424,11 +498,8 @@ class RAGIndexer:
                 logger.info("Пересоздание коллекции %s…", self.collection_name)
                 self.qdrant.delete_collection(self.collection_name)
                 self._create_collection()
-                # ВАЖНО: очищаем state.json, чтобы он соответствовал пустой коллекции
-                state_file = self.qdrant_db_path / "index_state.json"
-                if state_file.exists():
-                    state_file.unlink()
-                    logger.info("state.json очищен (--recreate)")
+                self.state_db.clear()
+                logger.info("state_entries очищен (--recreate)")
             else:
                 logger.info("Коллекция %s уже существует.", self.collection_name)
         else:
@@ -440,29 +511,6 @@ class RAGIndexer:
             collection_name=self.collection_name,
             vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
         )
-
-    # ── state management ───────────────────────────────────────────────
-
-    def _load_state(self) -> Dict[str, Any]:
-        if self.state_file.exists():
-            try:
-                with open(self.state_file, "r", encoding="utf-8") as fh:
-                    return json.load(fh)
-            except Exception as exc:
-                logger.warning("Не удалось загрузить state.json: %s. Начинаем заново.", exc)
-        return {"files": {}}
-
-    def _save_state(self) -> None:
-        """Атомарная запись: пишем во временный файл, затем os.replace."""
-        tmp = self.state_file.with_suffix(".tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(self.state, fh, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.state_file)
-        except Exception as exc:
-            logger.error("Не удалось сохранить state.json: %s", exc)
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
 
     # ── fingerprint ────────────────────────────────────────────────────
 
@@ -482,13 +530,13 @@ class RAGIndexer:
         только если файл УЖЕ имеет полное содержимое (т.е. state.stage == content).
         Если state.stage == metadata и мы сейчас на small/large — нужно ПРОАПГРЕЙДИТЬ.
         """
-        existing = self.state["files"].get(file_key)
+        existing = self.state_db.get_entry(file_key)
         if not existing:
             return False
-        if existing.get("fingerprint") != fingerprint:
+        if str(existing.get("fingerprint") or "") != fingerprint:
             return False  # файл изменился — обязательно переиндексируем
 
-        existing_stage = existing.get("stage", "content")  # backward compat
+        existing_stage = str(existing.get("stage") or "content")  # backward compat
         # Если текущий этап = metadata, а файл уже проиндексирован (любым этапом) —
         # можем пропустить: мета-запись у файла уже есть.
         if self.current_stage == "metadata":
@@ -503,6 +551,8 @@ class RAGIndexer:
         try:
             self.qdrant.delete(
                 collection_name=self.collection_name,
+                wait=False,
+                timeout=self.qdrant_timeout_sec,
                 points_selector=FilterSelector(
                     filter=Filter(
                         must=[
@@ -690,6 +740,7 @@ class RAGIndexer:
         """OCR сканированного PDF через pytesseract + pdf2image."""
         try:
             import pytesseract  # type: ignore
+            import pdf2image.pdf2image as pdf2image_impl  # type: ignore
             from pdf2image import convert_from_path  # type: ignore
         except ImportError:
             logger.warning(
@@ -699,7 +750,16 @@ class RAGIndexer:
             return ""
 
         try:
-            pages = convert_from_path(str(filepath), dpi=200)
+            apply_tesseract_runtime(
+                pytesseract,
+                getattr(self, "ocr_tesseract_cmd", ""),
+            )
+            _patch_pdf2image_popen_for_windows(pdf2image_impl)
+            convert_kwargs: Dict[str, Any] = {"dpi": 200}
+            poppler_bin = str(getattr(self, "ocr_poppler_bin", "") or "").strip()
+            if poppler_bin:
+                convert_kwargs["poppler_path"] = poppler_bin
+            pages = convert_from_path(str(filepath), **convert_kwargs)
             parts: List[str] = []
             for i, page_img in enumerate(pages):
                 text = pytesseract.image_to_string(page_img, lang="rus+eng")
@@ -734,6 +794,10 @@ class RAGIndexer:
             )
             return ""
         try:
+            apply_tesseract_runtime(
+                pytesseract,
+                getattr(self, "ocr_tesseract_cmd", ""),
+            )
             parts: List[str] = []
             with Image.open(filepath) as img:
                 # Определяем число кадров/страниц (TIFF-сканы бывают многостраничными)
@@ -873,8 +937,9 @@ class RAGIndexer:
         fingerprint, mtime = self._get_file_fingerprint(filepath)
         file_key = str(filepath)
 
-        if file_key in self.state["files"]:
-            if self.state["files"][file_key]["fingerprint"] == fingerprint:
+        existing_entry = self.state_db.get_entry(file_key)
+        if existing_entry:
+            if str(existing_entry.get("fingerprint") or "") == fingerprint:
                 logger.debug("Файл не изменился, пропуск: %s", filepath)
                 return
             logger.info("Файл изменился, удаляю старые векторы: %s", filepath)
@@ -910,12 +975,22 @@ class RAGIndexer:
         else:
             logger.warning("Файл %s: контент пуст, сохраняю только metadata stage", filepath.name)
 
-        self.state["files"][file_key] = {
-            "fingerprint": fingerprint,
-            "mtime": mtime,
-            "stage": stage,
-        }
-        self._save_state()
+        try:
+            size_bytes = int(filepath.stat().st_size)
+        except OSError:
+            size_bytes = 0
+        self.state_db.upsert_many(
+            [
+                {
+                    "full_path": file_key,
+                    "fingerprint": fingerprint,
+                    "mtime": mtime,
+                    "stage": stage,
+                    "size_bytes": size_bytes,
+                    "extension": filepath.suffix.lower(),
+                }
+            ]
+        )
 
     # ── directory scan ─────────────────────────────────────────────────
 
@@ -1004,8 +1079,8 @@ class RAGIndexer:
         # ── буферы для batch-encode ──────────────────────────────────
         pending_texts: List[str] = []
         pending_payloads: List[Dict[str, Any]] = []
-        # (file_key, fingerprint, mtime, stage) — обновление state после записи
-        pending_states: List[Tuple[str, str, float, str]] = []
+        # (file_key, fingerprint, mtime, stage, size_bytes, extension)
+        pending_states: List[Tuple[str, str, float, str, int, str]] = []
 
         def flush() -> None:
             """
@@ -1030,13 +1105,19 @@ class RAGIndexer:
                 self.qdrant.upsert(self.collection_name, points=points)
                 self.point_count += len(points)
                 stage_stats["points_added"] += len(points)
-            for file_key, fingerprint, mtime, file_stage in pending_states:
-                self.state["files"][file_key] = {
-                    "fingerprint": fingerprint,
-                    "mtime": mtime,
-                    "stage": file_stage,
-                }
-            self._save_state()
+            self.state_db.upsert_many(
+                [
+                    {
+                        "full_path": file_key,
+                        "fingerprint": fingerprint,
+                        "mtime": mtime,
+                        "stage": file_stage,
+                        "size_bytes": size_bytes,
+                        "extension": extension,
+                    }
+                    for file_key, fingerprint, mtime, file_stage, size_bytes, extension in pending_states
+                ]
+            )
             logger.info(
                 "Записан батч: %d точек (итого %d)", len(pending_texts), self.point_count
             )
@@ -1200,7 +1281,8 @@ class RAGIndexer:
                 "file_key": file_key,
                 "fingerprint": fingerprint,
                 "mtime": mtime,
-                "was_indexed": file_key in self.state["files"],
+                "size_bytes": int(stat.st_size),
+                "was_indexed": self.state_db.get_entry(file_key) is not None,
                 "meta_text": meta_text,
                 "meta_payload": meta_payload,
                 "chunks": chunks,
@@ -1276,6 +1358,8 @@ class RAGIndexer:
                         result["fingerprint"],
                         result["mtime"],
                         file_stage,
+                        int(result.get("size_bytes") or 0),
+                        str(result["meta_payload"].get("extension") or ""),
                     )
                 )
 
@@ -1333,7 +1417,7 @@ class RAGIndexer:
         По умолчанию: metadata → small → large.
         После каждого этапа индекс УЖЕ пригоден для поиска, качество растёт
         прогрессивно. Если процесс прерывать/перезапускать — продолжит с того
-        этапа, на котором остановился (благодаря полю `stage` в state.json).
+        этапа, на котором остановился (благодаря полю `stage` в state БД).
         """
         stages = list(stages) if stages else list(STAGES)
         logger.info("▶ Многоэтапная индексация: %s", " → ".join(stages))
@@ -1358,16 +1442,15 @@ class RAGIndexer:
         return totals
 
     def _cleanup_deleted_files(self, existing_files: List[Path]) -> int:
-        """Удалить из state.json и Qdrant файлы, которых больше нет на диске."""
+        """Удалить из state БД и Qdrant файлы, которых больше нет на диске."""
         existing_paths = {str(f) for f in existing_files}
-        deleted_keys = [k for k in self.state["files"] if k not in existing_paths]
+        deleted_keys = self.state_db.list_deleted_candidates(existing_paths)
         if not deleted_keys:
             return 0
         logger.info("Удаление %d удалённых файлов из индекса…", len(deleted_keys))
         for key in deleted_keys:
             self._delete_file_vectors(Path(key))
-            del self.state["files"][key]
-        self._save_state()
+        self.state_db.delete_entries(deleted_keys)
         return len(deleted_keys)
 
 
@@ -1485,6 +1568,9 @@ def main() -> None:
         small_pdf_mb=float(cfg.get("small_pdf_mb", DEFAULT_SMALL_PDF_MB)),
         synonym_map=cfg.get("synonym_map") or {},
         ollama_url=str(cfg.get("ollama_url") or "http://localhost:11434"),
+        ocr_tesseract_cmd=str(cfg.get("ocr_tesseract_cmd") or ""),
+        ocr_poppler_bin=str(cfg.get("ocr_poppler_bin") or ""),
+        qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
     )
     run_id = indexer.telemetry.start_index_run(
         catalog_path=args.catalog,
@@ -1511,14 +1597,7 @@ def main() -> None:
             e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
             for e in args.mark_stage_metadata_for.split(",") if e.strip()
         }
-        changed = 0
-        for key, meta in indexer.state["files"].items():
-            if Path(key).suffix.lower() in exts:
-                if meta.get("stage") != "metadata":
-                    meta["stage"] = "metadata"
-                    changed += 1
-        if changed:
-            indexer._save_state()
+        changed = indexer.state_db.update_stage_for_extensions(exts, stage="metadata")
         logger.info("Миграция state: %d записей с расширениями %s помечены stage=metadata",
                     changed, sorted(exts))
 

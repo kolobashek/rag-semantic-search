@@ -784,7 +784,7 @@ class TelemetryDB:
         current["recreate"] = bool(current.get("recreate"))
         current["skip_inline_ocr"] = bool(current.get("skip_inline_ocr"))
         current["ocr_enabled"] = bool(current.get("ocr_enabled"))
-        current["workers"] = max(1, min(32, int(current.get("workers") if current.get("workers") is not None else 4)))
+        current["workers"] = max(0, min(32, int(current.get("workers") if current.get("workers") is not None else 4)))
         current["max_chunks"] = max(0, min(100_000, int(current.get("max_chunks") if current.get("max_chunks") is not None else 0)))
         current["ocr_min_text_len"] = max(1, min(100_000, int(current.get("ocr_min_text_len") if current.get("ocr_min_text_len") is not None else 50)))
         days = current.get("days")

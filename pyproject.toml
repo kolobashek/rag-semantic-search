@@ -59,6 +59,7 @@ rag-index        = "rag_catalog.core.index_rag:main"
 rag-ocr          = "rag_catalog.core.ocr_pdfs:main"
 rag-telegram-bot = "rag_catalog.integrations.telegram_bot:main"
 rag-web          = "rag_catalog.ui.nice_app:main"
+rag-launcher     = "rag_catalog.cli.launcher:main"
 
 [project.gui-scripts]
 rag-windows-app = "rag_catalog.ui.windows_app:main"

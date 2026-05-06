@@ -32,14 +32,14 @@ chardet>=3.0.2,<6
 # Шаг 2: установить Tesseract (движок OCR)
 #   Установщик для Windows (с русским языком):
 #   https://github.com/UB-Mannheim/tesseract/wiki
-#   После установки добавить папку tesseract.exe в PATH.
+#   Можно добавить в PATH ИЛИ положить в tools/tesseract (предпочтительно).
 #
 # Шаг 3: установить Poppler (конвертация страниц PDF в изображения)
 #   Вариант A — через Chocolatey (требует прав администратора):
 #     choco install poppler
 #   Вариант B — portable, без прав:
 #     https://github.com/oschwartz10612/poppler-windows/releases
-#     Распаковать и добавить \Library\bin в PATH.
+#     Распаковать в tools/poppler (предпочтительно) или добавить \Library\bin в PATH.
 #
 # Проверка: tesseract --version  &&  pdftoppm -v
 #

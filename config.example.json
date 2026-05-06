@@ -15,10 +15,17 @@
   "index_default_stage": "all",
   "small_office_mb": 20.0,
   "small_pdf_mb": 2.0,
+  "ocr_tesseract_cmd": "",
+  "ocr_poppler_bin": "",
   "telegram_enabled": false,
   "telegram_bot_token": "",
   "telegram_allowed_chat_id": "",
   "telegram_bot_link": "",
   "users_db_path": "",
-  "telemetry_db_path": ""
+  "telemetry_db_path": "",
+  "rank_feedback_step": 0.02,
+  "rank_feedback_cap": 0.18,
+  "rank_recency_enabled": true,
+  "rank_recency_half_life_days": 180.0,
+  "rank_recency_max_boost": 0.03
 }

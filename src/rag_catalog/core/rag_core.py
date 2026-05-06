@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,7 +20,8 @@ from ._platform_compat import apply_windows_platform_workarounds
 apply_windows_platform_workarounds()
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
+from .index_state_db import IndexStateDB
 from .telemetry_db import TelemetryDB
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
 # НЕ импортировать здесь — import тянет torch (~5 сек, 500+ МБ RAM).
@@ -45,6 +47,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "index_default_stage": "all",
     "small_office_mb": 20.0,
     "small_pdf_mb": 2.0,
+    "qdrant_timeout_sec": 60,
+    "qdrant_scroll_limit": 256,
+    # OCR runtime: можно оставить пустым и использовать bundled tools/
+    "ocr_tesseract_cmd": "",
+    "ocr_poppler_bin": "",
     "telegram_enabled": False,
     "telegram_bot_token": "",
     "telegram_allowed_chat_id": "",
@@ -56,6 +63,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "llm_enabled": False,            # включить RAG Q&A и расширение запроса
     "llm_expand_model": "phi3:mini", # модель для расширения запроса
     "llm_rag_model": "qwen3:8b",     # модель для RAG Q&A
+    # Ранжирование результатов поиска
+    "rank_feedback_step": 0.02,      # шаг буста/штрафа за +1/-1 feedback
+    "rank_feedback_cap": 0.18,       # максимум абсолютного влияния feedback
+    "rank_recency_enabled": True,    # учитывать свежесть modified
+    "rank_recency_half_life_days": 180.0,  # через сколько дней буст в 2 раза меньше
+    "rank_recency_max_boost": 0.03,  # максимум буста за самый свежий документ
 }
 
 logger = logging.getLogger(__name__)
@@ -129,12 +142,13 @@ class RAGSearcher:
         # Подключение: сервер (Docker) имеет приоритет над локальным SQLite
         qdrant_url = config.get("qdrant_url", "")
         qdrant_path = Path(config["qdrant_db_path"])
+        qdrant_timeout = int(config.get("qdrant_timeout_sec", 60) or 60)
         try:
             if qdrant_url:
-                self.qdrant = QdrantClient(url=qdrant_url)
+                self.qdrant = QdrantClient(url=qdrant_url, timeout=qdrant_timeout)
                 logger.info("Подключено к Qdrant-серверу: %s", qdrant_url)
             else:
-                self.qdrant = QdrantClient(path=str(qdrant_path))
+                self.qdrant = QdrantClient(path=str(qdrant_path), timeout=qdrant_timeout)
                 logger.info("Подключено к Qdrant локально: %s", qdrant_path)
             self.qdrant.get_collection(self.collection_name)
             self.connected = True
@@ -255,6 +269,22 @@ class RAGSearcher:
                     match=MatchValue(value=file_type.lower()),
                 )
             )
+        should_conditions = []
+        if title_only:
+            if file_type:
+                must_conditions.append(
+                    FieldCondition(
+                        key="type",
+                        match=MatchValue(value="file_metadata"),
+                    )
+                )
+            else:
+                should_conditions.append(
+                    FieldCondition(
+                        key="type",
+                        match=MatchAny(any=["file_metadata", "folder_metadata"]),
+                    )
+                )
 
         must_not_conditions = []
         if content_only:
@@ -265,8 +295,9 @@ class RAGSearcher:
                 )
             )
 
-        if must_conditions or must_not_conditions:
+        if must_conditions or must_not_conditions or should_conditions:
             qdrant_filter = Filter(
+                should=should_conditions if should_conditions else None,
                 must=must_conditions if must_conditions else None,
                 must_not=must_not_conditions if must_not_conditions else None,
             )
@@ -385,6 +416,38 @@ class RAGSearcher:
             return len(stem) >= 4 and stem in haystack
         return False
 
+    def _modified_to_ts(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            return None
+
+    def _recency_adjustment(self, item: Dict[str, Any], now_ts: float) -> tuple[float, float]:
+        config = getattr(self, "config", {}) or {}
+        if not bool(config.get("rank_recency_enabled", True)):
+            return 0.0, 0.0
+        half_life_days = float(config.get("rank_recency_half_life_days", 180.0) or 180.0)
+        max_boost = float(config.get("rank_recency_max_boost", 0.03) or 0.03)
+        if half_life_days <= 0.0 or max_boost <= 0.0:
+            return 0.0, 0.0
+        modified_ts = self._modified_to_ts(item.get("modified"))
+        if modified_ts is None:
+            return 0.0, 0.0
+        age_days = max(0.0, (now_ts - modified_ts) / 86_400.0)
+        freshness = 0.5 ** (age_days / half_life_days)
+        adjustment = max(0.0, min(max_boost, max_boost * freshness))
+        return freshness, adjustment
+
     def _refresh_fs_cache(self) -> List[Dict[str, Any]]:
         now = time.time()
         cache = getattr(self, "_fs_cache", {"ts": 0.0, "items": []})
@@ -400,6 +463,72 @@ class RAGSearcher:
 
         items: List[Dict[str, Any]] = []
         max_items = int(config.get("filesystem_search_max_items", FS_CACHE_MAX_ITEMS))
+        qdrant_db_path = str(config.get("qdrant_db_path") or "").strip()
+        state_db_path = Path(qdrant_db_path) / "index_state.db" if qdrant_db_path else Path()
+        if state_db_path and state_db_path.exists():
+            try:
+                entries = IndexStateDB(str(state_db_path)).iter_entries()
+                folder_seen: set[str] = set()
+
+                def add_folder(rel_folder: str) -> None:
+                    rel_clean = str(rel_folder or "").strip()
+                    if not rel_clean or rel_clean in folder_seen or len(items) >= max_items:
+                        return
+                    folder_seen.add(rel_clean)
+                    folder_name = rel_clean.replace("/", "\\").rsplit("\\", 1)[-1]
+                    items.append(
+                        {
+                            "kind": "folder",
+                            "filename": folder_name,
+                            "path": rel_clean,
+                            "full_path": str(root / Path(rel_clean)),
+                            "extension": "",
+                        }
+                    )
+
+                for entry in entries:
+                    full_path_str = str(entry.get("full_path") or "").strip()
+                    if not full_path_str:
+                        continue
+                    full_path = Path(full_path_str)
+                    filename = full_path.name
+                    ext = str(entry.get("extension") or full_path.suffix.lower() or "")
+                    try:
+                        rel = str(full_path.relative_to(root))
+                    except ValueError:
+                        rel = str(full_path)
+                    size_b = int(entry.get("size_bytes") or 0)
+                    mtime = float(entry.get("mtime") or 0.0)
+                    items.append(
+                        {
+                            "kind": "file",
+                            "filename": filename,
+                            "path": rel,
+                            "full_path": full_path_str,
+                            "extension": ext,
+                            "size_mb": round(size_b / 1_048_576, 2) if size_b > 0 else None,
+                            "modified": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime)) if mtime > 0 else None,
+                        }
+                    )
+                    parent_parts = [part for part in re.split(r"[\\/]+", rel)[:-1] if part]
+                    for idx in range(1, len(parent_parts) + 1):
+                        add_folder("\\".join(parent_parts[:idx]))
+                    if len(items) >= max_items:
+                        self._fs_cache = {"ts": now, "items": items}
+                        return items
+                for dirpath, dirnames, _filenames in os.walk(root):
+                    base = Path(dirpath)
+                    for dirname in dirnames:
+                        add_folder(str((base / dirname).relative_to(root)))
+                        if len(items) >= max_items:
+                            self._fs_cache = {"ts": now, "items": items}
+                            return items
+                if items:
+                    self._fs_cache = {"ts": now, "items": items}
+                    return items
+            except Exception:
+                items = []
+
         for dirpath, dirnames, filenames in os.walk(root):
             base = Path(dirpath)
             for dirname in dirnames:
@@ -531,8 +660,15 @@ class RAGSearcher:
                 score = max(score, 0.996)
             elif not is_folder and ("документы на технику" in hay or "док-ты техника" in hay):
                 score = min(0.94, score + 0.04)
+            if query_norm and query_norm in name:
+                score += 0.0025
+            elif query_norm and query_norm in path:
+                score += 0.0015
+            if raw_terms:
+                exact_terms_in_name = sum(1 for t in raw_terms if t and self._term_matches(name, t))
+                score += min(0.002, exact_terms_in_name * 0.0004)
             out.append({
-                "score": round(score, 3),
+                "score": round(score, 6),
                 "type": "folder_metadata" if is_folder else "file_metadata",
                 "text": (
                     f"Каталог: {item.get('filename')} | Путь: {item.get('path')}"
@@ -548,7 +684,14 @@ class RAGSearcher:
                 "chunk_index": None,
                 "rank_reason": "совпадение в имени/пути",
             })
-        out.sort(key=lambda x: (float(x.get("score") or 0), -len(str(x.get("path") or ""))), reverse=True)
+        out.sort(
+            key=lambda x: (
+                float(x.get("score") or 0),
+                1 if str(x.get("type") or "") == "file_metadata" else 0,
+                -len(str(x.get("path") or "")),
+            ),
+            reverse=True,
+        )
         return out[:limit]
 
     def _merge_ranked_results(
@@ -572,22 +715,31 @@ class RAGSearcher:
             )
         else:
             feedback = {}
+        config = getattr(self, "config", {}) or {}
+        feedback_step = float(config.get("rank_feedback_step", 0.02) or 0.02)
+        feedback_cap = float(config.get("rank_feedback_cap", 0.18) or 0.18)
+        now_ts = time.time()
         for item in merged.values():
             path = str(item.get("full_path") or "")
             signal = int(feedback.get(path, 0))
+            base_score = float(item.get("score") or 0)
+            if signal:
+                adjustment = max(-feedback_cap, min(feedback_cap, signal * feedback_step))
+            else:
+                adjustment = 0.0
+            freshness, recency_adj = self._recency_adjustment(item, now_ts)
             if not signal:
                 item["feedback_score"] = 0
-                item["rank_score"] = float(item.get("score") or 0)
-                continue
-            base_score = float(item.get("score") or 0)
-            adjustment = max(-0.18, min(0.18, signal * 0.02))
-            item["feedback_score"] = signal
-            item["rank_score"] = max(0.0, min(1.0, base_score + adjustment))
+            else:
+                item["feedback_score"] = signal
+            item["recency_score"] = round(freshness, 4)
+            item["rank_score"] = max(0.0, min(1.0, base_score + adjustment + recency_adj))
         ranked = sorted(
             merged.values(),
             key=lambda x: (
                 float(x.get("rank_score", x.get("score") or 0) or 0),
-                1 if x.get("type") == "folder_metadata" else 0,
+                float(x.get("score") or 0),
+                -len(str(x.get("path") or x.get("full_path") or "")),
             ),
             reverse=True,
         )

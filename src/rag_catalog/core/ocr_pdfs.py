@@ -4,7 +4,7 @@ ocr_pdfs.py — OCR-проход по сканированным PDF в RAG-ка
 Алгоритм:
   1. Подключается к Qdrant и находит PDF-файлы с пустым/коротким текстом
      (индексированные ранее с флагом --no-ocr).
-  2. Удаляет найденные файлы из index_state.json (сбрасывает кэш),
+  2. Удаляет найденные файлы из index_state.db (сбрасывает кэш),
      чтобы index_rag.py переиндексировал их заново.
   3. Запускает index_rag.py без --no-ocr — OCR применяется автоматически
      для файлов с пустым текстовым слоем.
@@ -14,6 +14,10 @@ ocr_pdfs.py — OCR-проход по сканированным PDF в RAG-ка
     Tesseract OCR: https://github.com/UB-Mannheim/tesseract/wiki
     Poppler (для pdf2image): https://github.com/oschwartz10612/poppler-windows
 
+Вариант без системного PATH:
+    tools/tesseract/tesseract.exe
+    tools/poppler/Library/bin
+
 Запуск:
     python ocr_pdfs.py
     python ocr_pdfs.py --url http://localhost:6333 --min-text-len 100
@@ -21,17 +25,18 @@ ocr_pdfs.py — OCR-проход по сканированным PDF в RAG-ка
 """
 
 import argparse
-import json
 import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ._platform_compat import apply_windows_platform_workarounds
 apply_windows_platform_workarounds()
 
+from .index_state_db import IndexStateDB
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB
 
@@ -47,6 +52,35 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_TEXT_LEN = 50
 
 
+def _windows_detached_creationflags() -> int:
+    flags = 0
+    for name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB"):
+        flags |= int(getattr(subprocess, name, 0) or 0)
+    return flags
+
+
+def _is_process_alive(pid: int) -> bool:
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _effective_workers(requested: int) -> int:
+    """workers<=0 трактуем как auto-подбор."""
+    if int(requested or 0) > 0:
+        return max(1, min(32, int(requested)))
+    cpu = max(1, int(os.cpu_count() or 1))
+    return max(1, min(4, max(1, cpu // 2)))
+
+
 # ─────────────────────────── Qdrant helpers ──────────────────────────────────
 
 def find_scanned_pdfs(
@@ -54,6 +88,8 @@ def find_scanned_pdfs(
     collection: str,
     min_text_len: int,
     scroll_limit: int = 1000,
+    qdrant_timeout_sec: int = 60,
+    scroll_retries: int = 4,
 ) -> List[str]:
     """
     Найти пути PDF-файлов без полезного текстового содержимого в Qdrant.
@@ -81,11 +117,14 @@ def find_scanned_pdfs(
 
     try:
         if qdrant_url:
-            client = QdrantClient(url=qdrant_url)
+            client = QdrantClient(url=qdrant_url, timeout=max(5, int(qdrant_timeout_sec or 60)))
         else:
             from .rag_core import load_config as _lc
             cfg = _lc()
-            client = QdrantClient(path=str(cfg["qdrant_db_path"]))
+            client = QdrantClient(
+                path=str(cfg["qdrant_db_path"]),
+                timeout=max(5, int(qdrant_timeout_sec or 60)),
+            )
         client.get_collection(collection)
     except Exception as exc:
         logger.error("Не удалось подключиться к Qdrant: %s", exc)
@@ -96,18 +135,31 @@ def find_scanned_pdfs(
         results: List[Dict[str, Any]] = []
         offset: Optional[Any] = None
         while True:
-            try:
-                records, offset = client.scroll(
-                    collection_name=collection,
-                    scroll_filter=flt,
-                    limit=scroll_limit,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.error("Ошибка прокрутки коллекции: %s", exc)
-                break
+            for attempt in range(max(1, int(scroll_retries or 1))):
+                try:
+                    records, offset = client.scroll(
+                        collection_name=collection,
+                        scroll_filter=flt,
+                        limit=scroll_limit,
+                        offset=offset,
+                        with_payload=True,
+                        with_vectors=False,
+                        timeout=max(5, int(qdrant_timeout_sec or 60)),
+                    )
+                    break
+                except Exception as exc:
+                    if attempt >= max(1, int(scroll_retries or 1)) - 1:
+                        logger.error("Ошибка прокрутки коллекции: %s", exc)
+                        return results
+                    backoff_s = min(8, 2 ** attempt)
+                    logger.warning(
+                        "Прокрутка коллекции временно не удалась (%s). Повтор через %ss (%d/%d)…",
+                        exc,
+                        backoff_s,
+                        attempt + 1,
+                        max(1, int(scroll_retries or 1)),
+                    )
+                    time.sleep(backoff_s)
             results.extend(records)
             if not offset:
                 break
@@ -163,42 +215,16 @@ def find_scanned_pdfs(
 
 # ─────────────────────────── state helpers ───────────────────────────────────
 
-def remove_from_state(state_path: Path, file_paths: List[str]) -> int:
-    """
-    Удалить записи указанных файлов из index_state.json.
-
-    Возвращает количество удалённых записей.
-    """
-    if not state_path.exists():
-        logger.warning("Файл состояния не найден: %s", state_path)
-        return 0
-
-    try:
-        with open(state_path, "r", encoding="utf-8") as fh:
-            state: Dict[str, Any] = json.load(fh)
-    except Exception as exc:
-        logger.error("Не удалось прочитать state-файл: %s", exc)
-        return 0
-
-    files_dict = state.get("files", {})
-    removed = 0
-    path_set = set(file_paths)
-
-    for fp in list(files_dict.keys()):
-        if fp in path_set:
-            del files_dict[fp]
-            removed += 1
-
-    state["files"] = files_dict
-
-    try:
-        with open(state_path, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2, ensure_ascii=False)
-        logger.info("Удалено записей из state: %d", removed)
-    except Exception as exc:
-        logger.error("Не удалось записать state-файл: %s", exc)
-        return 0
-
+def remove_from_state_db(state_db_path: Path, file_paths: List[str]) -> int:
+    """Удалить записи указанных файлов из SQLite state БД."""
+    if not state_db_path.exists():
+        raise FileNotFoundError(
+            f"SQLite state БД не найдена: {state_db_path}. "
+            "Сначала запустите index_rag для инициализации и миграции state."
+        )
+    state_db = IndexStateDB(str(state_db_path))
+    removed = state_db.delete_entries(file_paths)
+    logger.info("Удалено записей из state БД: %d", removed)
     return removed
 
 
@@ -232,7 +258,7 @@ def main() -> int:
         "--state",
         default=cfg["qdrant_db_path"],
         dest="state_dir",
-        help="Папка с index_state.json",
+        help="Папка с index_state.db",
     )
     parser.add_argument(
         "--min-text-len",
@@ -249,10 +275,29 @@ def main() -> int:
     parser.add_argument(
         "--workers",
         type=int,
-        default=1,
-        help="Количество рабочих потоков для индексатора (по умолчанию 1 — OCR CPU-intensive)",
+        default=int(cfg.get("index_read_workers", 4)),
+        help="Количество рабочих потоков для индексатора (по умолчанию index_read_workers из config.json)",
+    )
+    parser.add_argument(
+        "--scroll-limit",
+        type=int,
+        default=int(cfg.get("qdrant_scroll_limit", 256) or 256),
+        help="Размер страницы при scroll в Qdrant (по умолчанию qdrant_scroll_limit из config.json)",
+    )
+    parser.add_argument(
+        "--qdrant-timeout",
+        type=int,
+        default=int(cfg.get("qdrant_timeout_sec", 60) or 60),
+        help="Таймаут запросов к Qdrant в секундах (по умолчанию qdrant_timeout_sec из config.json)",
+    )
+    parser.add_argument(
+        "--scroll-retries",
+        type=int,
+        default=4,
+        help="Число повторов scroll-запросов к Qdrant при временных ошибках/таймаутах",
     )
     args = parser.parse_args()
+    workers_effective = _effective_workers(int(args.workers or 0))
 
     # ── Инициализация телеметрии ─────────────────────────────────────────────
     telemetry_path = (cfg.get("telemetry_db_path") or "").strip()
@@ -260,11 +305,26 @@ def main() -> int:
         telemetry_path = str(Path(args.state_dir) / "rag_telemetry.db")
     telemetry = TelemetryDB(telemetry_path)
 
+    # Не запускаем OCR-проход поверх уже активной индексации, т.к. OCR внутри
+    # сам запускает index_rag (stage=large).
+    active_index = telemetry.get_active_index_run() if hasattr(telemetry, "get_active_index_run") else None
+    if active_index:
+        live_pid = int(active_index.get("worker_pid") or 0)
+        if _is_process_alive(live_pid):
+            logger.warning(
+                "Найдена активная индексация (PID %s). OCR-проход пропущен, чтобы не запускать параллельный index_rag.",
+                live_pid,
+            )
+            return 2
+
     # ── 1. Найти сканы в Qdrant ──────────────────────────────────────────────
     scanned = find_scanned_pdfs(
         qdrant_url=args.qdrant_url,
         collection=args.collection,
         min_text_len=args.min_text_len,
+        scroll_limit=max(50, int(args.scroll_limit or 256)),
+        qdrant_timeout_sec=max(5, int(args.qdrant_timeout or 60)),
+        scroll_retries=max(1, int(args.scroll_retries or 1)),
     )
 
     if not scanned:
@@ -291,11 +351,18 @@ def main() -> int:
     )
     logger.info("OCR run_id: %s", ocr_run_id)
 
-    # ── 2. Убрать их из state.json, чтобы индексатор переобработал ──────────
-    state_path = Path(args.state_dir) / "index_state.json"
-    removed = remove_from_state(state_path, scanned)
-    if removed == 0 and state_path.exists():
-        logger.warning("Записи не найдены в state.json — продолжаю всё равно")
+    # ── 2. Убрать их из state БД, чтобы индексатор переобработал ─────────────
+    state_db_path = Path(args.state_dir) / "index_state.db"
+    try:
+        removed = remove_from_state_db(state_db_path, scanned)
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        telemetry.finish_ocr_run(
+            ocr_run_id=ocr_run_id,
+            status="failed",
+            note=str(exc),
+        )
+        return 1
 
     telemetry.update_ocr_progress(
         ocr_run_id=ocr_run_id,
@@ -312,7 +379,7 @@ def main() -> int:
     cmd += [
         "--db",         cfg["qdrant_db_path"],
         "--collection", args.collection,
-        "--workers",    str(args.workers),
+        "--workers",    str(workers_effective),
         "--stage",      "large",  # сканированные PDF — этап large
         # НЕТ --no-ocr: OCR включён
     ]
@@ -326,7 +393,10 @@ def main() -> int:
     logger.info("")
 
     try:
-        result = subprocess.run(cmd, check=False)
+        run_kwargs: Dict[str, Any] = {"check": False}
+        if os.name == "nt":
+            run_kwargs["creationflags"] = _windows_detached_creationflags()
+        result = subprocess.run(cmd, **run_kwargs)
         exit_code = result.returncode
         status = "completed" if exit_code == 0 else "failed"
         telemetry.finish_ocr_run(

@@ -17,6 +17,7 @@ from rag_catalog.ui.nice_app import (
     _run_catalog_search,
 )
 import rag_catalog.ui.nice_app as nice_app
+from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.telemetry_db import TelemetryDB
 
 
@@ -152,15 +153,26 @@ def test_system_file_icons_are_muted() -> None:
 def test_index_stats_include_total_size(tmp_path) -> None:
     qdrant_dir = tmp_path / "qdrant"
     qdrant_dir.mkdir()
-    catalog = tmp_path / "catalog"
-    catalog.mkdir()
-    pdf = catalog / "a.pdf"
-    pdf.write_bytes(b"12345")
-    docx = catalog / "b.docx"
-    docx.write_bytes(b"123")
-    (qdrant_dir / "index_state.json").write_text(
-        '{"files": {' + f'{pdf.as_posix()!r}: {{}}, {docx.as_posix()!r}: {{}}'.replace("'", '"') + "}}",
-        encoding="utf-8",
+    state_db = IndexStateDB(str(qdrant_dir / "index_state.db"))
+    state_db.upsert_many(
+        [
+            {
+                "full_path": str(tmp_path / "catalog" / "a.pdf"),
+                "fingerprint": "5_1",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 5,
+                "extension": ".pdf",
+            },
+            {
+                "full_path": str(tmp_path / "catalog" / "b.docx"),
+                "fingerprint": "3_1",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 3,
+                "extension": ".docx",
+            },
+        ]
     )
 
     stats = _read_index_stats({"qdrant_db_path": str(qdrant_dir)})
@@ -260,7 +272,7 @@ def test_recover_background_tasks_restarts_dead_index_and_ocr(monkeypatch, tmp_p
     assert ocr_row["status"] == "cancelled"
     assert "server_restart_recovery" in str(ocr_row["note"] or "")
     assert calls["index"]["kwargs"]["stage"] == "small"  # type: ignore[index]
-    assert calls["ocr"]["kwargs"]["min_text_len"] == 50  # type: ignore[index]
+    assert "ocr" not in calls
 
 
 def test_recover_background_tasks_does_not_restart_when_process_is_alive(monkeypatch, tmp_path) -> None:

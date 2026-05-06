@@ -57,6 +57,10 @@ qdrant_db/
 .codex/
 .nicegui/
 
+# ── Bundled third-party tools (large binaries) ────────────────────────
+tools/*
+!tools/README.md
+
 # ── IDE / редакторы ───────────────────────────────────────────────────
 .vscode/
 .idea/
@@ -67,3 +71,6 @@ Thumbs.db
 
 # ── Конфликтующие копии (синхронизация) ───────────────────────────────
 *conflicted copy*
+
+# ── Dependency lockfiles (local) ──────────────────────────────────────
+uv.lock

@@ -1,0 +1,1355 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Brandbook — Rag-search</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Brand */
+    --brand-50:  #eef4ff;
+    --brand-100: #dbe6ff;
+    --brand-200: #b8ccff;
+    --brand-300: #8aabff;
+    --brand-400: #5a85ff;
+    --brand-500: #3d63ff; /* primary */
+    --brand-600: #2949e6;
+    --brand-700: #1f37b3;
+    --brand-800: #182a87;
+    --brand-900: #131f5e;
+
+    --accent-amber: #f59e0b;
+    --accent-emerald: #10b981;
+    --accent-rose: #f43f5e;
+    --accent-violet: #8b5cf6;
+
+    /* Light surfaces */
+    --bg: #fafaf7;
+    --bg-elev: #ffffff;
+    --bg-sunken: #f4f3ee;
+    --line: #e6e3da;
+    --line-strong: #d8d3c4;
+    --ink: #14141a;
+    --ink-2: #3a3a44;
+    --ink-3: #6c6c78;
+    --ink-4: #9a9aa2;
+
+    --ok: #16a34a;
+    --warn: #f59e0b;
+    --err: #dc2626;
+    --info: var(--brand-500);
+
+    --radius-xs: 4px;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 22px;
+    --radius-2xl: 32px;
+
+    --shadow-1: 0 1px 0 rgba(20,20,26,.04), 0 1px 2px rgba(20,20,26,.05);
+    --shadow-2: 0 6px 16px -8px rgba(20,20,26,.12), 0 2px 4px rgba(20,20,26,.04);
+    --shadow-3: 0 24px 48px -16px rgba(20,20,26,.18), 0 8px 16px -8px rgba(20,20,26,.08);
+
+    --font-display: 'Manrope', system-ui, -apple-system, sans-serif;
+    --font-text: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  [data-theme=dark] {
+    --bg: #0c0c0f;
+    --bg-elev: #15151a;
+    --bg-sunken: #08080a;
+    --line: #23232b;
+    --line-strong: #2e2e38;
+    --ink: #f4f4f7;
+    --ink-2: #c8c8d0;
+    --ink-3: #8a8a96;
+    --ink-4: #5a5a64;
+    --brand-500: #6385ff;
+    --brand-600: #4f6dff;
+    --shadow-1: 0 1px 0 rgba(0,0,0,.4);
+    --shadow-2: 0 8px 20px -8px rgba(0,0,0,.6), 0 2px 4px rgba(0,0,0,.3);
+    --shadow-3: 0 30px 60px -20px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: var(--font-text);
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* layout */
+  .shell { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+  .nav {
+    position: sticky; top: 0; align-self: start; height: 100vh;
+    padding: 32px 20px; border-right: 1px solid var(--line);
+    background: var(--bg-elev);
+    overflow-y: auto;
+  }
+  .nav-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .nav-brand-mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: var(--ink); color: var(--bg-elev);
+    display: grid; place-items: center;
+    font-family: var(--font-display); font-weight: 800; font-size: 14px;
+    letter-spacing: -0.02em;
+  }
+  .nav-brand-name { font-family: var(--font-display); font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+  .nav-section { font-family: var(--font-mono); font-size: 10px; color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.1em; margin: 20px 0 8px; }
+  .nav a { display: block; padding: 6px 10px; color: var(--ink-2); text-decoration: none; font-size: 13px; border-radius: 6px; }
+  .nav a:hover { background: var(--bg-sunken); color: var(--ink); }
+  .nav a.active { background: var(--brand-500); color: white; }
+
+  .nav-theme {
+    margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line);
+    display: flex; gap: 6px;
+  }
+  .nav-theme button {
+    flex: 1; padding: 8px 10px; border: 1px solid var(--line); background: var(--bg-elev);
+    color: var(--ink-2); font-family: var(--font-text); font-size: 12px; cursor: pointer;
+    border-radius: 6px;
+  }
+  .nav-theme button.active { background: var(--ink); color: var(--bg-elev); border-color: var(--ink); }
+
+  main { padding: 56px 64px 120px; max-width: 1200px; }
+  section + section { margin-top: 96px; }
+
+  h1.cover {
+    font-family: var(--font-display); font-weight: 800;
+    font-size: clamp(56px, 8vw, 96px); line-height: 0.95;
+    letter-spacing: -0.04em; margin: 0 0 16px;
+  }
+  h1.cover em { font-style: normal; color: var(--brand-500); }
+  .cover-sub {
+    font-size: 18px; color: var(--ink-3); max-width: 620px; line-height: 1.5;
+    margin-bottom: 40px;
+  }
+  .cover-meta {
+    display: flex; gap: 32px; padding: 16px 0;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .cover-meta b { color: var(--ink); font-weight: 600; display: block; margin-top: 4px; font-family: var(--font-display); font-size: 14px; letter-spacing: -0.01em; text-transform: none; }
+
+  h2 {
+    font-family: var(--font-display); font-weight: 700;
+    font-size: 36px; line-height: 1; letter-spacing: -0.03em;
+    margin: 0 0 8px;
+  }
+  .section-num { font-family: var(--font-mono); font-size: 11px; color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px; }
+  .section-sub { color: var(--ink-3); font-size: 15px; max-width: 720px; margin: 0 0 32px; line-height: 1.5; }
+
+  h3 {
+    font-family: var(--font-display); font-weight: 600;
+    font-size: 18px; letter-spacing: -0.01em;
+    margin: 32px 0 12px;
+  }
+
+  /* === LOGO === */
+  .logo-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; }
+  .logo-hero {
+    background: var(--ink); color: var(--bg-elev); border-radius: var(--radius-lg);
+    aspect-ratio: 16/9; display: grid; place-items: center;
+    position: relative; overflow: hidden;
+  }
+  .logo-hero::before {
+    content: ''; position: absolute; inset: 0;
+    background:
+      radial-gradient(600px 200px at 80% 20%, rgba(61,99,255,.25), transparent 60%),
+      radial-gradient(400px 200px at 20% 90%, rgba(245,158,11,.15), transparent 60%);
+  }
+  .lockup {
+    display: flex; align-items: center; gap: 14px;
+    font-family: var(--font-display); font-weight: 800;
+    font-size: 44px; letter-spacing: -0.04em;
+    position: relative;
+  }
+  .mark {
+    width: 56px; height: 56px; flex-shrink: 0;
+    border-radius: 14px; position: relative;
+    background: var(--brand-500);
+    display: grid; place-items: center;
+    overflow: hidden;
+  }
+  .mark::before {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,.2));
+  }
+  .mark svg { position: relative; }
+  .mark-sm { width: 32px; height: 32px; border-radius: 8px; }
+  .mark-sm svg { width: 18px; height: 18px; }
+
+  .logo-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .logo-card {
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: var(--radius-md); padding: 24px 20px;
+    aspect-ratio: 1; display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .logo-card.dark { background: var(--ink); }
+  .logo-card.dark .lockup-name { color: var(--bg-elev); }
+  .logo-card-label {
+    font-family: var(--font-mono); font-size: 10px; color: var(--ink-3);
+    text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .logo-card.dark .logo-card-label { color: var(--ink-4); }
+  .lockup-name { font-family: var(--font-display); font-weight: 800; letter-spacing: -0.03em; font-size: 22px; }
+
+  /* === COLORS === */
+  .swatch-row { display: grid; grid-template-columns: repeat(10, 1fr); gap: 0; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--line); }
+  .swatch {
+    aspect-ratio: 1; padding: 10px; display: flex; flex-direction: column; justify-content: space-between;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--ink); position: relative;
+  }
+  .swatch.on-dark { color: white; }
+  .swatch-label { font-weight: 600; }
+  .swatch-hex { opacity: 0.7; }
+
+  .palette-card {
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: var(--radius-md); padding: 20px; margin-bottom: 16px;
+  }
+  .palette-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+  .palette-name { font-family: var(--font-display); font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+  .palette-desc { font-size: 12px; color: var(--ink-3); }
+
+  .semantic-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .semantic-card {
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: var(--radius-md); padding: 18px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .semantic-dot { width: 32px; height: 32px; border-radius: 10px; }
+  .semantic-name { font-family: var(--font-display); font-weight: 600; font-size: 14px; }
+  .semantic-token { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); }
+  .semantic-use { font-size: 12px; color: var(--ink-3); line-height: 1.4; }
+
+  /* === TYPE === */
+  .type-display { font-family: var(--font-display); font-weight: 800; font-size: 84px; line-height: 0.92; letter-spacing: -0.04em; margin-bottom: 6px; }
+  .type-h1 { font-family: var(--font-display); font-weight: 700; font-size: 48px; line-height: 1; letter-spacing: -0.03em; }
+  .type-h2 { font-family: var(--font-display); font-weight: 700; font-size: 32px; line-height: 1.1; letter-spacing: -0.02em; }
+  .type-h3 { font-family: var(--font-display); font-weight: 600; font-size: 22px; line-height: 1.2; letter-spacing: -0.01em; }
+  .type-body-lg { font-family: var(--font-text); font-weight: 400; font-size: 17px; line-height: 1.55; }
+  .type-body { font-family: var(--font-text); font-weight: 400; font-size: 14px; line-height: 1.55; }
+  .type-body-sm { font-family: var(--font-text); font-weight: 400; font-size: 12px; line-height: 1.5; }
+  .type-mono { font-family: var(--font-mono); font-size: 13px; }
+  .type-caps { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; }
+
+  .type-row {
+    display: grid; grid-template-columns: 220px 1fr 1fr; gap: 24px;
+    padding: 20px 0; border-bottom: 1px solid var(--line); align-items: center;
+  }
+  .type-row:last-child { border-bottom: none; }
+  .type-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+  .type-meta b { color: var(--ink); display: block; font-family: var(--font-display); font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .type-spec { font-family: var(--font-mono); font-size: 10px; color: var(--ink-4); margin-top: 6px; }
+
+  /* === SCALE === */
+  .scale-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
+  .scale-cell {
+    background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 12px; display: flex; flex-direction: column; gap: 8px; align-items: stretch;
+  }
+  .scale-bar { height: 4px; background: var(--brand-500); border-radius: 2px; }
+  .scale-name { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); }
+  .scale-value { font-family: var(--font-display); font-weight: 700; font-size: 16px; }
+
+  .radius-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+  .radius-card { background: var(--brand-500); aspect-ratio: 1; padding: 12px; color: white; font-family: var(--font-mono); font-size: 11px; display: flex; flex-direction: column; justify-content: space-between; }
+
+  .shadow-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .shadow-card { background: var(--bg-elev); border-radius: var(--radius-md); padding: 28px; aspect-ratio: 16/9; display: flex; flex-direction: column; justify-content: space-between; }
+  .shadow-card.s1 { box-shadow: var(--shadow-1); }
+  .shadow-card.s2 { box-shadow: var(--shadow-2); }
+  .shadow-card.s3 { box-shadow: var(--shadow-3); }
+
+  /* === COMPONENTS === */
+  .specimen {
+    background: var(--bg-sunken); border: 1px solid var(--line);
+    border-radius: var(--radius-lg); padding: 32px;
+    margin-bottom: 16px; position: relative;
+  }
+  .specimen-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+  .specimen-label {
+    position: absolute; top: 12px; right: 16px;
+    font-family: var(--font-mono); font-size: 10px; color: var(--ink-4);
+    text-transform: uppercase; letter-spacing: 0.1em;
+  }
+
+  /* Buttons */
+  .btn {
+    position: relative; overflow: hidden; isolation: isolate;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 16px; border-radius: var(--radius-sm);
+    font-family: var(--font-text); font-size: 14px; font-weight: 500;
+    border: 1px solid transparent; cursor: pointer;
+    transition: color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;
+  }
+  .btn::before {
+    content: ''; position: absolute; inset: 0; z-index: -1;
+    transform-origin: left center; transform: scaleX(0);
+    transition: transform 280ms cubic-bezier(.65,0,.35,1);
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); transition-duration: 80ms; }
+
+  .btn-primary { background: var(--brand-500); color: white; }
+  .btn-primary::before { background: var(--brand-700); }
+  .btn-primary:hover { box-shadow: 0 6px 16px -8px rgba(61,99,255,.6); }
+  .btn-primary:hover::before { transform: scaleX(1); }
+
+  .btn-secondary { background: var(--bg-elev); border-color: var(--line-strong); color: var(--ink); }
+  .btn-secondary::before { background: var(--ink); }
+  .btn-secondary:hover { color: var(--bg-elev); border-color: var(--ink); }
+  .btn-secondary:hover::before { transform: scaleX(1); }
+
+  .btn-ghost { background: transparent; color: var(--ink-2); }
+  .btn-ghost::before { background: var(--bg-sunken); }
+  .btn-ghost:hover { color: var(--ink); }
+  .btn-ghost:hover::before { transform: scaleX(1); }
+
+  .btn-danger { background: var(--err); color: white; }
+  .btn-danger::before { background: #991b1b; }
+  .btn-danger:hover { box-shadow: 0 6px 16px -8px rgba(220,38,38,.6); }
+  .btn-danger:hover::before { transform: scaleX(1); }
+  .btn-sm { padding: 6px 10px; font-size: 12px; }
+  .btn-lg { padding: 14px 22px; font-size: 16px; border-radius: var(--radius-md); }
+
+  /* Inputs */
+  .input {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: var(--radius-sm);
+    background: var(--bg-elev); border: 1px solid var(--line-strong);
+    font-family: var(--font-text); font-size: 14px; color: var(--ink);
+    width: 320px;
+  }
+  .input:focus-within { border-color: var(--brand-500); box-shadow: 0 0 0 3px rgba(61,99,255,.15); }
+  .input input { border: none; outline: none; background: transparent; flex: 1; font: inherit; color: inherit; }
+  .input input::placeholder { color: var(--ink-4); }
+
+  /* Tags / chips */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    font-family: var(--font-text); font-size: 12px; font-weight: 500;
+    background: var(--bg-elev); border: 1px solid var(--line);
+    color: var(--ink-2);
+  }
+  .chip-primary { background: var(--brand-500); border-color: var(--brand-500); color: white; }
+  .chip-success { background: rgba(16,185,129,.12); border-color: rgba(16,185,129,.3); color: var(--ok); }
+  .chip-warn { background: rgba(245,158,11,.14); border-color: rgba(245,158,11,.3); color: #b6730a; }
+  .chip-danger { background: rgba(244,63,94,.12); border-color: rgba(244,63,94,.3); color: var(--err); }
+  [data-theme=dark] .chip-warn { color: #fbbf24; }
+
+  /* Card */
+  .card {
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: var(--radius-md); padding: 18px;
+    box-shadow: var(--shadow-1);
+  }
+  .card-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+
+  /* Result row (product-specific) */
+  .result {
+    display: grid; grid-template-columns: 36px 1fr auto auto auto;
+    gap: 16px; align-items: center;
+    padding: 14px 16px;
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .result.selected { border-color: var(--brand-500); background: color-mix(in oklch, var(--brand-500) 8%, var(--bg-elev)); }
+  .file-icon {
+    width: 36px; height: 36px; border-radius: 8px;
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 10px; font-weight: 700; color: white;
+  }
+  .file-icon.pdf { background: #dc2626; }
+  .file-icon.doc { background: #2563eb; }
+  .file-icon.xls { background: #16a34a; }
+  .file-icon.folder { background: #f59e0b; }
+  .file-icon.img { background: #a855f7; }
+  .result-name { font-family: var(--font-display); font-weight: 600; font-size: 14px; }
+  .result-path { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+  .result-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+  .result-score { font-family: var(--font-mono); font-size: 11px; color: var(--ink-4); opacity: 0.6; }
+  .result-actions { color: var(--ink-3); font-size: 18px; cursor: pointer; padding: 0 8px; }
+
+  /* === PHASE PILL (product-specific component) === */
+  .phase {
+    display: grid; grid-template-columns: 36px 1fr 320px 140px;
+    gap: 16px; align-items: center;
+    padding: 14px 16px; background: var(--bg-elev);
+    border: 1px solid var(--line); border-radius: var(--radius-md);
+  }
+  .phase > .btn { justify-self: end; }
+  .phase-bar-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .phase-bar-meta { font-family: var(--font-mono); font-size: 10px; color: var(--ink-4); display: flex; justify-content: space-between; }
+  .phase.running { border-color: var(--brand-500); }
+  .phase-circle { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: white; font-weight: 700; }
+  .phase-name { font-family: var(--font-display); font-weight: 700; font-size: 16px; }
+  .phase-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+  .progress { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .progress > div { height: 100%; background: var(--brand-500); border-radius: 3px; }
+
+  /* freshness bar */
+  .freshness { height: 6px; border-radius: 3px; }
+  .freshness.green { background: var(--ok); }
+  .freshness.blue { background: var(--brand-500); }
+  .freshness.red { background: var(--err); }
+  .freshness.empty { background: var(--line); }
+
+  /* === TOKEN TABLE === */
+  .tokens { width: 100%; border-collapse: collapse; }
+  .tokens th, .tokens td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .tokens th { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 500; }
+  .tokens code { font-family: var(--font-mono); color: var(--brand-500); font-size: 12px; }
+  .tokens .swatch-mini { width: 18px; height: 18px; border-radius: 4px; display: inline-block; vertical-align: middle; border: 1px solid var(--line); margin-right: 8px; }
+
+  /* === MOTION === */
+  .motion-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .motion-card { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; }
+  .motion-bar { height: 4px; background: var(--line); border-radius: 2px; position: relative; margin: 16px 0 10px; overflow: hidden; }
+  .motion-bar div { position: absolute; top: -4px; width: 12px; height: 12px; border-radius: 50%; background: var(--brand-500); animation: bounce 2s infinite; }
+  @keyframes bounce { 0%, 100% { left: 0%; } 50% { left: calc(100% - 12px); } }
+  .motion-card:nth-child(1) .motion-bar div { animation-timing-function: cubic-bezier(.25,.1,.25,1); }
+  .motion-card:nth-child(2) .motion-bar div { animation-timing-function: cubic-bezier(.4,0,.2,1); }
+  .motion-card:nth-child(3) .motion-bar div { animation-timing-function: cubic-bezier(.34,1.56,.64,1); }
+  .motion-card:nth-child(4) .motion-bar div { animation-timing-function: cubic-bezier(.16,1,.3,1); }
+
+  /* iconography */
+  .icon-row { display: grid; grid-template-columns: repeat(8, 1fr); gap: 12px; }
+  .icon-card { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 16px; aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+  .icon-card svg { color: var(--ink-2); }
+  .icon-card span { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); }
+
+  /* tone of voice */
+  .voice-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .voice-card { padding: 18px 20px; border-radius: var(--radius-md); border: 1px solid var(--line); }
+  .voice-do { background: color-mix(in oklch, var(--ok) 6%, var(--bg-elev)); border-color: color-mix(in oklch, var(--ok) 20%, var(--line)); }
+  .voice-dont { background: color-mix(in oklch, var(--err) 6%, var(--bg-elev)); border-color: color-mix(in oklch, var(--err) 20%, var(--line)); }
+  .voice-label { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+  .voice-do .voice-label { color: var(--ok); }
+  .voice-dont .voice-label { color: var(--err); }
+  .voice-text { font-family: var(--font-display); font-weight: 600; font-size: 16px; line-height: 1.4; }
+
+  /* === PREVIEW (real composition) === */
+  .preview-shell {
+    border-radius: var(--radius-lg); overflow: hidden;
+    border: 1px solid var(--line); box-shadow: var(--shadow-2);
+  }
+  .preview-window-bar {
+    background: var(--bg-elev); padding: 12px 14px; display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .preview-window-bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .preview-content { background: var(--bg); padding: 28px 32px; }
+
+  .preview-search {
+    background: var(--bg-elev); border: 1px solid var(--line-strong);
+    border-radius: var(--radius-md); padding: 14px 18px;
+    display: flex; align-items: center; gap: 12px;
+    box-shadow: var(--shadow-1);
+    margin-bottom: 24px;
+  }
+  .preview-search svg { color: var(--ink-3); }
+  .preview-search input { border: none; outline: none; background: transparent; font: inherit; color: var(--ink); flex: 1; font-size: 15px; }
+  .preview-kbd { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg-sunken); }
+
+  /* utilities */
+  .stack > * + * { margin-top: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+
+  hr.rule { border: none; height: 1px; background: var(--line); margin: 64px 0; }
+
+  /* status dot */
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(16,163,74,.15); }
+  .status-dot.run { background: var(--brand-500); box-shadow: 0 0 0 3px rgba(61,99,255,.18); animation: pulse 1.6s infinite; }
+  .status-dot.err { background: var(--err); box-shadow: 0 0 0 3px rgba(220,38,38,.18); }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(61,99,255,.4); } 50% { box-shadow: 0 0 0 6px rgba(61,99,255,0); } }
+
+  /* === IMPRINT === */
+  .imprint {
+    margin-top: 96px; padding: 40px 0; border-top: 1px solid var(--line);
+    display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 32px; font-size: 12px; color: var(--ink-3);
+  }
+  .imprint b { color: var(--ink); display: block; font-family: var(--font-display); font-weight: 600; margin-bottom: 4px; }
+</style>
+</head>
+<body data-theme="light">
+<div class="shell">
+  <nav class="nav">
+    <div class="nav-brand">
+      <div class="nav-brand-mark">R</div>
+      <div class="nav-brand-name">Rag-search<br><span style="color:var(--ink-3); font-weight:500; font-size:11px;">Brandbook v1.0</span></div>
+    </div>
+    <div class="nav-section">Foundations</div>
+    <a href="#cover" class="active">Обложка</a>
+    <a href="#principles">Принципы</a>
+    <a href="#logo">Логотип</a>
+    <a href="#color">Цвет</a>
+    <a href="#type">Типографика</a>
+    <a href="#scale">Сетка & шкалы</a>
+    <a href="#radius">Скругления & тени</a>
+    <a href="#motion">Движение</a>
+
+    <div class="nav-section">System</div>
+    <a href="#components">Компоненты</a>
+    <a href="#patterns">Продуктовые паттерны</a>
+    <a href="#icons">Иконография</a>
+    <a href="#voice">Tone of voice</a>
+    <a href="#preview">Композиция</a>
+    <a href="#tokens">Токены</a>
+
+    <div class="nav-theme">
+      <button data-set-theme="light" class="active">☀ light</button>
+      <button data-set-theme="dark">☾ dark</button>
+    </div>
+  </nav>
+
+  <main>
+    <!-- COVER -->
+    <section id="cover">
+      <div class="row" style="margin-bottom: 32px; gap: 12px;">
+        <span class="chip">v1.0</span>
+        <span class="chip">04.05.2026</span>
+        <span class="chip chip-primary">design system</span>
+      </div>
+      <h1 class="cover">Найдём всё, <em>за секунду.</em></h1>
+      <p class="cover-sub">Брендбук Rag-search — корпоративного семантического поиска по документам. Серьёзный инструмент для серьёзной работы. Linear-уровень полировки, корпоративная надёжность, нулевая визуальная навязчивость.</p>
+      <div class="cover-meta">
+        <div>Аудитория<b>смешанная: офис, склад, IT</b></div>
+        <div>Характер<b>современный, серьёзный, плотный</b></div>
+        <div>Темы<b>light + dark, паритет</b></div>
+        <div>Платформа<b>web · desktop-first</b></div>
+      </div>
+    </section>
+
+    <!-- PRINCIPLES -->
+    <section id="principles">
+      <div class="section-num">01 — Foundations</div>
+      <h2>Принципы</h2>
+      <p class="section-sub">Шесть правил, которые определяют каждое решение. Если что-то противоречит принципу — это не дизайн.</p>
+
+      <div class="grid-3">
+        <div class="card">
+          <div class="type-caps" style="color: var(--brand-500); margin-bottom: 8px;">01</div>
+          <h3 style="margin-top: 0;">Тишина</h3>
+          <p class="type-body" style="color: var(--ink-3); margin: 0;">Никаких градиентов «для красоты», ноль декоративного шума. Каждый пиксель работает.</p>
+        </div>
+        <div class="card">
+          <div class="type-caps" style="color: var(--brand-500); margin-bottom: 8px;">02</div>
+          <h3 style="margin-top: 0;">Плотность</h3>
+          <p class="type-body" style="color: var(--ink-3); margin: 0;">Это инструмент, а не лендинг. Информация плотная, но дышит. Воздух только там, где помогает читать.</p>
+        </div>
+        <div class="card">
+          <div class="type-caps" style="color: var(--brand-500); margin-bottom: 8px;">03</div>
+          <h3 style="margin-top: 0;">Поиск — герой</h3>
+          <p class="type-body" style="color: var(--ink-3); margin: 0;">Поле поиска — самый заметный элемент. ⌘K доступен везде. Всё остальное — поддержка.</p>
+        </div>
+        <div class="card">
+          <div class="type-caps" style="color: var(--brand-500); margin-bottom: 8px;">04</div>
+          <h3 style="margin-top: 0;">Паритет тем</h3>
+          <p class="type-body" style="color: var(--ink-3); margin: 0;">Светлая и тёмная — не «светлая и недотёмная». Контрасты, читаемость, иерархия одинаковые.</p>
+        </div>
+        <div class="card">
+          <div class="type-caps" style="color: var(--brand-500); margin-bottom: 8px;">05</div>
+          <h3 style="margin-top: 0;">Привычное побеждает</h3>
+          <p class="type-body" style="color: var(--ink-3); margin: 0;">Файлы — как Windows Explorer. Настройки — как VSCode. Поиск — как Google. Не изобретаем велосипеды.</p>
+        </div>
+        <div class="card">
+          <div class="type-caps" style="color: var(--brand-500); margin-bottom: 8px;">06</div>
+          <h3 style="margin-top: 0;">AI — слой, а не центр</h3>
+          <p class="type-body" style="color: var(--ink-3); margin: 0;">AI помогает, не ведёт. Сводка, объяснение, дополнение — но решает пользователь.</p>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- LOGO -->
+    <section id="logo">
+      <div class="section-num">02 — Identity</div>
+      <h2>Логотип</h2>
+      <p class="section-sub">Знак — стилизованная буква R, в которой угадывается лупа. Локап — Manrope ExtraBold, оптические ниже минус-четыре от стандартного трекинга.</p>
+
+      <div class="logo-grid" style="margin-bottom: 32px;">
+        <div class="logo-hero">
+          <div class="lockup" style="color: var(--bg-elev);">
+            <div class="mark">
+              <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                <path d="M9 8 L9 24 M9 8 L17 8 Q22 8 22 13 Q22 18 17 18 L9 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="22" cy="22" r="4.5" stroke="white" stroke-width="3" fill="none"/>
+              </svg>
+            </div>
+            Rag-search
+          </div>
+        </div>
+
+        <div class="logo-row">
+          <div class="logo-card">
+            <div class="logo-card-label">Primary · Light</div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <div class="mark mark-sm">
+                <svg width="18" height="18" viewBox="0 0 32 32" fill="none">
+                  <path d="M9 8 L9 24 M9 8 L17 8 Q22 8 22 13 Q22 18 17 18 L9 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                  <circle cx="22" cy="22" r="4.5" stroke="white" stroke-width="3" fill="none"/>
+                </svg>
+              </div>
+              <span class="lockup-name">Rag-search</span>
+            </div>
+          </div>
+          <div class="logo-card dark">
+            <div class="logo-card-label">Primary · Dark</div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <div class="mark mark-sm">
+                <svg width="18" height="18" viewBox="0 0 32 32" fill="none">
+                  <path d="M9 8 L9 24 M9 8 L17 8 Q22 8 22 13 Q22 18 17 18 L9 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                  <circle cx="22" cy="22" r="4.5" stroke="white" stroke-width="3" fill="none"/>
+                </svg>
+              </div>
+              <span class="lockup-name">Rag-search</span>
+            </div>
+          </div>
+          <div class="logo-card">
+            <div class="logo-card-label">Mark only · 32px</div>
+            <div class="mark mark-sm" style="margin: 0 auto;">
+              <svg width="18" height="18" viewBox="0 0 32 32" fill="none">
+                <path d="M9 8 L9 24 M9 8 L17 8 Q22 8 22 13 Q22 18 17 18 L9 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="22" cy="22" r="4.5" stroke="white" stroke-width="3" fill="none"/>
+              </svg>
+            </div>
+          </div>
+          <div class="logo-card">
+            <div class="logo-card-label">Mono · 16px</div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <div style="width: 16px; height: 16px; border-radius: 4px; background: var(--ink); display: grid; place-items: center; color: var(--bg-elev); font-family: var(--font-display); font-weight: 800; font-size: 10px;">R</div>
+              <span style="font-family: var(--font-display); font-weight: 700; font-size: 12px; letter-spacing: -0.02em;">Rag-search</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h3>Правила</h3>
+      <div class="grid-3">
+        <div class="card"><b>Защитное поле</b><p class="type-body" style="color: var(--ink-3); margin: 6px 0 0;">Минимум 1× высоты знака со всех сторон.</p></div>
+        <div class="card"><b>Минимальный размер</b><p class="type-body" style="color: var(--ink-3); margin: 6px 0 0;">16px знак, 14px текст. Меньше — только знак.</p></div>
+        <div class="card"><b>Никогда</b><p class="type-body" style="color: var(--ink-3); margin: 6px 0 0;">Не вращать, не растягивать, не менять цвет, не накладывать на сложный фон.</p></div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- COLOR -->
+    <section id="color">
+      <div class="section-num">03 — Color</div>
+      <h2>Цвет</h2>
+      <p class="section-sub">Один акцент — глубокий ультрамарин. Нейтрали — тёплые серые. Семантика — четыре строгих тона. Никаких декоративных gradiens.</p>
+
+      <h3>Brand · ультрамарин</h3>
+      <div class="palette-card" style="padding: 20px;">
+        <div class="palette-head">
+          <div>
+            <div class="palette-name">Brand</div>
+            <div class="palette-desc">основной акцент — кнопки, фокус, активные состояния, ссылки</div>
+          </div>
+          <code style="font-family: var(--font-mono); font-size: 12px; color: var(--ink-3);">--brand-{50…900}</code>
+        </div>
+        <div class="swatch-row">
+          <div class="swatch" style="background:#eef4ff;"><span class="swatch-label">50</span><span class="swatch-hex">#eef4ff</span></div>
+          <div class="swatch" style="background:#dbe6ff;"><span class="swatch-label">100</span><span class="swatch-hex">#dbe6ff</span></div>
+          <div class="swatch" style="background:#b8ccff;"><span class="swatch-label">200</span><span class="swatch-hex">#b8ccff</span></div>
+          <div class="swatch" style="background:#8aabff;"><span class="swatch-label">300</span><span class="swatch-hex">#8aabff</span></div>
+          <div class="swatch on-dark" style="background:#5a85ff;"><span class="swatch-label">400</span><span class="swatch-hex">#5a85ff</span></div>
+          <div class="swatch on-dark" style="background:#3d63ff;"><span class="swatch-label">500</span><span class="swatch-hex">#3d63ff</span></div>
+          <div class="swatch on-dark" style="background:#2949e6;"><span class="swatch-label">600</span><span class="swatch-hex">#2949e6</span></div>
+          <div class="swatch on-dark" style="background:#1f37b3;"><span class="swatch-label">700</span><span class="swatch-hex">#1f37b3</span></div>
+          <div class="swatch on-dark" style="background:#182a87;"><span class="swatch-label">800</span><span class="swatch-hex">#182a87</span></div>
+          <div class="swatch on-dark" style="background:#131f5e;"><span class="swatch-label">900</span><span class="swatch-hex">#131f5e</span></div>
+        </div>
+      </div>
+
+      <h3>Neutral · тёплые серые</h3>
+      <div class="palette-card" style="padding: 20px;">
+        <div class="palette-head">
+          <div>
+            <div class="palette-name">Neutral</div>
+            <div class="palette-desc">фон, поверхности, текст, разделители, иконки</div>
+          </div>
+          <code style="font-family: var(--font-mono); font-size: 12px; color: var(--ink-3);">--neutral-{50…900}</code>
+        </div>
+        <div class="swatch-row">
+          <div class="swatch" style="background:#fafaf7;"><span class="swatch-label">50</span><span class="swatch-hex">fafaf7</span></div>
+          <div class="swatch" style="background:#f4f3ee;"><span class="swatch-label">100</span><span class="swatch-hex">f4f3ee</span></div>
+          <div class="swatch" style="background:#e6e3da;"><span class="swatch-label">200</span><span class="swatch-hex">e6e3da</span></div>
+          <div class="swatch" style="background:#d8d3c4;"><span class="swatch-label">300</span><span class="swatch-hex">d8d3c4</span></div>
+          <div class="swatch" style="background:#9a9aa2;"><span class="swatch-label">400</span><span class="swatch-hex">9a9aa2</span></div>
+          <div class="swatch on-dark" style="background:#6c6c78;"><span class="swatch-label">500</span><span class="swatch-hex">6c6c78</span></div>
+          <div class="swatch on-dark" style="background:#3a3a44;"><span class="swatch-label">600</span><span class="swatch-hex">3a3a44</span></div>
+          <div class="swatch on-dark" style="background:#23232b;"><span class="swatch-label">700</span><span class="swatch-hex">23232b</span></div>
+          <div class="swatch on-dark" style="background:#15151a;"><span class="swatch-label">800</span><span class="swatch-hex">15151a</span></div>
+          <div class="swatch on-dark" style="background:#0c0c0f;"><span class="swatch-label">900</span><span class="swatch-hex">0c0c0f</span></div>
+        </div>
+      </div>
+
+      <h3>Semantic</h3>
+      <div class="semantic-grid">
+        <div class="semantic-card">
+          <div class="semantic-dot" style="background: var(--ok);"></div>
+          <div>
+            <div class="semantic-name">Success</div>
+            <div class="semantic-token">--ok · #16a34a</div>
+          </div>
+          <div class="semantic-use">Завершено, актуально, индекс свежий, успешный поиск.</div>
+        </div>
+        <div class="semantic-card">
+          <div class="semantic-dot" style="background: var(--warn);"></div>
+          <div>
+            <div class="semantic-name">Warning</div>
+            <div class="semantic-token">--warn · #f59e0b</div>
+          </div>
+          <div class="semantic-use">Требует внимания, давно не запускалось, неполные данные.</div>
+        </div>
+        <div class="semantic-card">
+          <div class="semantic-dot" style="background: var(--err);"></div>
+          <div>
+            <div class="semantic-name">Error</div>
+            <div class="semantic-token">--err · #dc2626</div>
+          </div>
+          <div class="semantic-use">Ошибка, критическое действие, удаление, отмена.</div>
+        </div>
+        <div class="semantic-card">
+          <div class="semantic-dot" style="background: var(--brand-500);"></div>
+          <div>
+            <div class="semantic-name">Info / Active</div>
+            <div class="semantic-token">--info · brand-500</div>
+          </div>
+          <div class="semantic-use">Идёт процесс, активный таб, выделение, фокус.</div>
+        </div>
+      </div>
+
+      <h3>File-type colors</h3>
+      <p class="type-body-sm" style="color: var(--ink-3); margin-bottom: 12px;">Цвета для иконок типов файлов — единственное место, где цвет не от палитры. Используются только в иконках и индикаторах, не в фонах.</p>
+      <div class="row">
+        <div class="row" style="gap: 6px;"><div class="file-icon folder">FLD</div><span class="type-mono">folder · #f59e0b</span></div>
+        <div class="row" style="gap: 6px;"><div class="file-icon doc">DOC</div><span class="type-mono">docx · #2563eb</span></div>
+        <div class="row" style="gap: 6px;"><div class="file-icon pdf">PDF</div><span class="type-mono">pdf · #dc2626</span></div>
+        <div class="row" style="gap: 6px;"><div class="file-icon xls">XLS</div><span class="type-mono">xlsx · #16a34a</span></div>
+        <div class="row" style="gap: 6px;"><div class="file-icon img">IMG</div><span class="type-mono">img · #a855f7</span></div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- TYPE -->
+    <section id="type">
+      <div class="section-num">04 — Typography</div>
+      <h2>Типографика</h2>
+      <p class="section-sub">Manrope для дисплейного и заголовочного текста — широкая, дружелюбная гротеск. Inter для тела — лучшая читаемость на экране. JetBrains Mono для данных и кода.</p>
+
+      <div class="grid-2" style="margin-bottom: 40px;">
+        <div class="card" style="padding: 32px;">
+          <div class="type-caps" style="color: var(--ink-3);">Display</div>
+          <div style="font-family: var(--font-display); font-weight: 800; font-size: 96px; line-height: 0.9; letter-spacing: -0.04em; margin: 16px 0;">Manrope</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">ExtraBold 800 · Bold 700 · SemiBold 600 · Medium 500 · Regular 400</div>
+        </div>
+        <div class="card" style="padding: 32px;">
+          <div class="type-caps" style="color: var(--ink-3);">Body</div>
+          <div style="font-family: var(--font-text); font-weight: 400; font-size: 96px; line-height: 0.9; letter-spacing: -0.03em; margin: 16px 0;">Inter</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Bold 700 · SemiBold 600 · Medium 500 · Regular 400</div>
+        </div>
+      </div>
+
+      <div class="card" style="padding: 0 32px;">
+        <div class="type-row">
+          <div class="type-meta"><b>Display</b>display / 84 / 0.92 / -0.04em<div class="type-spec">--text-display</div></div>
+          <div class="type-display">35 167 файлов.</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Hero на главной, цифры-герои в KPI, заголовки разделов брендбука.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>H1</b>display / 48 / 1 / -0.03em<div class="type-spec">--text-h1</div></div>
+          <div class="type-h1">Карточка предприятия</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Заголовок страницы, имя выбранного файла в превью.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>H2</b>display / 32 / 1.1 / -0.02em<div class="type-spec">--text-h2</div></div>
+          <div class="type-h2">Состояние индекса</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Заголовок секции, имя блока на главной.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>H3</b>display / 22 / 1.2 / -0.01em<div class="type-spec">--text-h3</div></div>
+          <div class="type-h3">Расписание индексации</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Подзаголовок, имя карточки в списке.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>Body large</b>text / 17 / 1.55<div class="type-spec">--text-body-lg</div></div>
+          <div class="type-body-lg">Семантический поиск по 35 167 документам компании. Ищите по смыслу, не по точному совпадению.</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Лиды, описания, главные сообщения.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>Body</b>text / 14 / 1.55<div class="type-spec">--text-body</div></div>
+          <div class="type-body">Стандартный текст — описания, подписи под полями, сообщения интерфейса. Используется в 80% случаев.</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Базовый текст, формы, описания.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>Body small</b>text / 12 / 1.5<div class="type-spec">--text-body-sm</div></div>
+          <div class="type-body-sm">Подписи к иконкам, метаданные, вторичная информация в плотных списках.</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Метаданные, hint'ы, footnotes.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>Mono</b>JB Mono / 13<div class="type-spec">--text-mono</div></div>
+          <div class="type-mono">/Магазин/Карточки/ООО Спецмаш.docx · 142 КБ · 28.04 14:23</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Пути, ID, размеры, время, числа в таблицах.</div>
+        </div>
+        <div class="type-row">
+          <div class="type-meta"><b>Caps</b>JB Mono / 11 / +0.12em<div class="type-spec">--text-caps</div></div>
+          <div class="type-caps" style="color: var(--ink-2);">МОЯ ИСТОРИЯ · ЧАСТО ИЩУТ</div>
+          <div class="type-body-sm" style="color: var(--ink-3);">Категории, группы, метки секций.</div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- SCALE -->
+    <section id="scale">
+      <div class="section-num">05 — Spacing</div>
+      <h2>Сетка и шкалы</h2>
+      <p class="section-sub">Базовая единица — 4px. Все размеры, отступы и сетки кратны 4. Колоночная сетка — 12 колонок с гаттером 24px для desktop.</p>
+
+      <h3>Spacing scale</h3>
+      <div class="scale-grid">
+        <div class="scale-cell"><div class="scale-bar" style="width: 4px;"></div><div class="scale-name">space-1</div><div class="scale-value">4</div></div>
+        <div class="scale-cell"><div class="scale-bar" style="width: 8px;"></div><div class="scale-name">space-2</div><div class="scale-value">8</div></div>
+        <div class="scale-cell"><div class="scale-bar" style="width: 12px;"></div><div class="scale-name">space-3</div><div class="scale-value">12</div></div>
+        <div class="scale-cell"><div class="scale-bar" style="width: 16px;"></div><div class="scale-name">space-4</div><div class="scale-value">16</div></div>
+        <div class="scale-cell"><div class="scale-bar" style="width: 24px;"></div><div class="scale-name">space-6</div><div class="scale-value">24</div></div>
+        <div class="scale-cell"><div class="scale-bar" style="width: 32px;"></div><div class="scale-name">space-8</div><div class="scale-value">32</div></div>
+        <div class="scale-cell"><div class="scale-bar" style="width: 48px;"></div><div class="scale-name">space-12</div><div class="scale-value">48</div></div>
+        <div class="scale-cell"><div class="scale-bar" style="width: 64px;"></div><div class="scale-name">space-16</div><div class="scale-value">64</div></div>
+      </div>
+
+      <h3>Density modes</h3>
+      <p class="type-body-sm" style="color: var(--ink-3); margin-bottom: 12px;">Пользователь выбирает в Настройках. Проводник наследует Windows-style density.</p>
+      <div class="grid-3">
+        <div class="card"><b>Compact</b><div class="type-body-sm" style="color: var(--ink-3); margin-top: 4px;">высота строки 28px, padding 8px</div><div class="type-mono" style="margin-top:8px; color:var(--ink-4);">для админов, плотных таблиц</div></div>
+        <div class="card" style="border-color: var(--brand-500); border-width: 2px;"><b>Default</b><div class="type-body-sm" style="color: var(--ink-3); margin-top: 4px;">высота строки 36px, padding 12px</div><div class="type-mono" style="margin-top:8px; color:var(--ink-4);">по умолчанию</div></div>
+        <div class="card"><b>Comfort</b><div class="type-body-sm" style="color: var(--ink-3); margin-top: 4px;">высота строки 44px, padding 16px</div><div class="type-mono" style="margin-top:8px; color:var(--ink-4);">для редкого использования, обучения</div></div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- RADIUS / SHADOWS -->
+    <section id="radius">
+      <div class="section-num">06 — Surface</div>
+      <h2>Скругления и тени</h2>
+      <p class="section-sub">Скругления геометричны и не громоздки. Тени — функциональны: каждая обозначает уровень элевации, а не «красоту».</p>
+
+      <h3>Radius scale</h3>
+      <div class="radius-row">
+        <div class="radius-card" style="border-radius: 4px;"><span>xs</span><span>4px</span></div>
+        <div class="radius-card" style="border-radius: 6px;"><span>sm</span><span>6px</span></div>
+        <div class="radius-card" style="border-radius: 10px;"><span>md</span><span>10px</span></div>
+        <div class="radius-card" style="border-radius: 14px;"><span>lg</span><span>14px</span></div>
+        <div class="radius-card" style="border-radius: 22px;"><span>xl</span><span>22px</span></div>
+        <div class="radius-card" style="border-radius: 32px;"><span>2xl</span><span>32px</span></div>
+      </div>
+      <p class="type-body-sm" style="color: var(--ink-3); margin-top: 12px;">xs — input, chip · sm — кнопки, теги · md — карточки, попапы · lg — модалки, drawer · xl — full-screen sheets · 2xl — лендинговые блоки (не используется в продукте).</p>
+
+      <h3>Elevation</h3>
+      <div class="shadow-row">
+        <div class="shadow-card s1"><b>Elevation 1</b><div class="type-mono" style="color: var(--ink-3);">--shadow-1<br>лежит на поверхности</div></div>
+        <div class="shadow-card s2"><b>Elevation 2</b><div class="type-mono" style="color: var(--ink-3);">--shadow-2<br>над поверхностью (попап, hover)</div></div>
+        <div class="shadow-card s3"><b>Elevation 3</b><div class="type-mono" style="color: var(--ink-3);">--shadow-3<br>модалка, dropdown, focus mode</div></div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- MOTION -->
+    <section id="motion">
+      <div class="section-num">07 — Motion</div>
+      <h2>Движение</h2>
+      <p class="section-sub">Анимации функциональные: показывают изменение состояния, переход между местами. Никакого декоративного «оживления». Длительность строгая, кривая — материальная.</p>
+
+      <div class="motion-row">
+        <div class="motion-card">
+          <b>Instant</b>
+          <div class="motion-bar"><div></div></div>
+          <div class="type-mono" style="color: var(--ink-3);">120ms · ease-out</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 6px;">Hover, фокус, цвет.</div>
+        </div>
+        <div class="motion-card">
+          <b>Quick</b>
+          <div class="motion-bar"><div></div></div>
+          <div class="type-mono" style="color: var(--ink-3);">200ms · ease-in-out</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 6px;">Открытие dropdown, сортировка.</div>
+        </div>
+        <div class="motion-card">
+          <b>Bounce</b>
+          <div class="motion-bar"><div></div></div>
+          <div class="type-mono" style="color: var(--ink-3);">340ms · spring</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 6px;">Drawer, модалка.</div>
+        </div>
+        <div class="motion-card">
+          <b>Cinema</b>
+          <div class="motion-bar"><div></div></div>
+          <div class="type-mono" style="color: var(--ink-3);">600ms · expo</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 6px;">Full-screen переходы.</div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- COMPONENTS -->
+    <section id="components">
+      <div class="section-num">08 — System</div>
+      <h2>Компоненты</h2>
+      <p class="section-sub">Базовый набор, из которого собран весь интерфейс. У каждого — состояния (default · hover · active · disabled · focus) и размеры (sm · md · lg).</p>
+
+      <h3>Buttons</h3>
+      <div class="specimen">
+        <span class="specimen-label">Button</span>
+        <div class="specimen-row">
+          <button class="btn btn-primary">Найти</button>
+          <button class="btn btn-secondary">Отмена</button>
+          <button class="btn btn-ghost">Очистить</button>
+          <button class="btn btn-danger">Удалить</button>
+        </div>
+        <div class="specimen-row" style="margin-top: 16px;">
+          <button class="btn btn-primary btn-sm">⌘K</button>
+          <button class="btn btn-primary">Стандарт</button>
+          <button class="btn btn-primary btn-lg">Большая</button>
+        </div>
+        <div class="specimen-row" style="margin-top: 16px;">
+          <button class="btn btn-primary" disabled style="opacity:.5; cursor:not-allowed;">Disabled</button>
+          <button class="btn btn-primary" style="box-shadow: 0 0 0 3px rgba(61,99,255,.25);">Focused</button>
+        </div>
+      </div>
+
+      <h3>Inputs</h3>
+      <div class="specimen">
+        <span class="specimen-label">Input</span>
+        <div class="specimen-row">
+          <div class="input">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5"/><path d="m11 11 3 3"/></svg>
+            <input placeholder="введите запрос…" />
+            <span class="preview-kbd">⌘K</span>
+          </div>
+          <div class="input">
+            <input value="карточка предприятия" />
+          </div>
+          <div class="input" style="border-color: var(--err);">
+            <input value="" placeholder="не может быть пустым" />
+          </div>
+        </div>
+      </div>
+
+      <h3>Chips & Tags</h3>
+      <div class="specimen">
+        <span class="specimen-label">Chip</span>
+        <div class="specimen-row">
+          <span class="chip">тип файла</span>
+          <span class="chip chip-primary">+ фильтр</span>
+          <span class="chip chip-success">✓ indexed</span>
+          <span class="chip chip-warn">○ pending</span>
+          <span class="chip chip-danger">✗ failed</span>
+          <span class="chip">× Спецмаш</span>
+        </div>
+      </div>
+
+      <h3>Status indicators</h3>
+      <div class="specimen">
+        <span class="specimen-label">Status</span>
+        <div class="specimen-row">
+          <span class="row" style="gap: 8px;"><span class="status-dot ok"></span><span class="type-body-sm">Индекс актуален</span></span>
+          <span class="row" style="gap: 8px;"><span class="status-dot run"></span><span class="type-body-sm">Идёт индексация · 72%</span></span>
+          <span class="row" style="gap: 8px;"><span class="status-dot err"></span><span class="type-body-sm">1 408 ошибок</span></span>
+        </div>
+      </div>
+
+      <h3>Cards</h3>
+      <div class="specimen">
+        <span class="specimen-label">Card</span>
+        <div class="card-row">
+          <div class="card">
+            <div class="type-caps" style="color: var(--ink-3); margin-bottom: 8px;">Файлов</div>
+            <div style="font-family: var(--font-display); font-weight: 800; font-size: 36px; letter-spacing: -0.02em;">35 167</div>
+            <div class="type-body-sm" style="color: var(--ok); margin-top: 4px;">+143 за сутки</div>
+          </div>
+          <div class="card">
+            <div class="type-caps" style="color: var(--ink-3); margin-bottom: 8px;">Размер индекса</div>
+            <div style="font-family: var(--font-display); font-weight: 800; font-size: 36px; letter-spacing: -0.02em;">12.8 ГБ</div>
+            <div class="type-body-sm" style="color: var(--ink-3); margin-top: 4px;">из 28 ГБ</div>
+          </div>
+          <div class="card">
+            <div class="type-caps" style="color: var(--ink-3); margin-bottom: 8px;">Поисков сегодня</div>
+            <div style="font-family: var(--font-display); font-weight: 800; font-size: 36px; letter-spacing: -0.02em;">187</div>
+            <div class="type-body-sm" style="color: var(--ok); margin-top: 4px;">команда · +23%</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- PRODUCT PATTERNS -->
+    <section id="patterns">
+      <div class="section-num">09 — Product</div>
+      <h2>Продуктовые паттерны</h2>
+      <p class="section-sub">Компоненты, специфичные для Rag-search. Они не общесистемные — они описывают именно поиск, файлы и индексацию.</p>
+
+      <h3>Result row</h3>
+      <div class="specimen">
+        <span class="specimen-label">Result</span>
+        <div class="stack">
+          <div class="result selected">
+            <div class="file-icon doc">DOC</div>
+            <div>
+              <div class="result-name">ООО Спецмаш (почта, телефон).docx</div>
+              <div class="result-path">Магазин / Карточки / ООО Спецмаш</div>
+            </div>
+            <div class="result-meta">98 КБ</div>
+            <div class="result-meta">04.04.2026</div>
+            <div class="result-actions">⋯</div>
+          </div>
+          <div class="result">
+            <div class="file-icon pdf">PDF</div>
+            <div>
+              <div class="result-name">Карточка предприятия Спецмаш 2026.pdf</div>
+              <div class="result-path">Магазин / Нужное / Карточки</div>
+            </div>
+            <div class="result-meta">1.4 МБ</div>
+            <div class="result-meta">05.04.2026</div>
+            <div class="result-actions">⋯</div>
+          </div>
+          <div class="result">
+            <div class="file-icon folder">FLD</div>
+            <div>
+              <div class="result-name">Карточки предприятий</div>
+              <div class="result-path">Магазин / Карточки предпр.</div>
+            </div>
+            <div class="result-meta">14 файлов</div>
+            <div class="result-meta">12.04.2026</div>
+            <div class="result-actions">⋯</div>
+          </div>
+        </div>
+      </div>
+
+      <h3>Index phase</h3>
+      <div class="specimen">
+        <span class="specimen-label">Phase pill</span>
+        <div class="stack">
+          <div class="phase">
+            <div class="phase-circle" style="background: var(--ok);">✓</div>
+            <div>
+              <div class="phase-name">metadata</div>
+              <div class="phase-meta">старт 02:00 · длительность 12 мин · 85 193 файлов · 0 ошибок</div>
+            </div>
+            <div class="phase-bar-wrap">
+              <div class="progress"><div style="width: 100%; background: var(--ok);"></div></div>
+              <div class="phase-bar-meta"><span>завершено</span><span>100%</span></div>
+            </div>
+            <button class="btn btn-ghost btn-sm">↻ перезапустить</button>
+          </div>
+          <div class="phase running">
+            <div class="phase-circle" style="background: var(--brand-500);">◷</div>
+            <div>
+              <div class="phase-name">large</div>
+              <div class="phase-meta">старт 03:01 · идёт ~30 мин · 328 / 11 800</div>
+            </div>
+            <div class="phase-bar-wrap">
+              <div class="progress"><div style="width: 72%;"></div></div>
+              <div class="phase-bar-meta"><span>идёт</span><span>72%</span></div>
+            </div>
+            <button class="btn btn-ghost btn-sm">⏸ пауза</button>
+          </div>
+          <div class="phase">
+            <div class="phase-circle" style="background: var(--err);">✗</div>
+            <div>
+              <div class="phase-name">small</div>
+              <div class="phase-meta">старт 02:12 · 1 408 ошибок · требует внимания</div>
+            </div>
+            <div class="phase-bar-wrap">
+              <div class="progress"><div style="width: 38%; background: var(--err);"></div></div>
+              <div class="phase-bar-meta"><span>с ошибками</span><span>38%</span></div>
+            </div>
+            <button class="btn btn-ghost btn-sm">логи</button>
+          </div>
+          <div class="phase">
+            <div class="phase-circle" style="background: var(--ink-4);">5</div>
+            <div>
+              <div class="phase-name">OCR</div>
+              <div class="phase-meta">было 22.04 04:00 · 849 PDF · 4 280 страниц</div>
+            </div>
+            <div class="phase-bar-wrap">
+              <div class="progress"><div style="width: 0%;"></div></div>
+              <div class="phase-bar-meta"><span>не запущено</span><span>—</span></div>
+            </div>
+            <button class="btn btn-ghost btn-sm">▶ запустить</button>
+          </div>
+        </div>
+      </div>
+
+      <h3>Search dropdown</h3>
+      <div class="specimen">
+        <span class="specimen-label">Autocomplete</span>
+        <div style="background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; max-width: 720px; box-shadow: var(--shadow-2);">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+            <div>
+              <div class="type-caps" style="color: var(--brand-500); margin-bottom: 12px;">МОЯ ИСТОРИЯ</div>
+              <div class="stack" style="gap: 8px;">
+                <div class="type-body" style="display: flex; gap: 10px; align-items: center;"><span style="color: var(--ink-4);">🕒</span><span>карточка предприятия</span></div>
+                <div class="type-body" style="display: flex; gap: 10px; align-items: center;"><span style="color: var(--ink-4);">🕒</span><span>PC300</span></div>
+                <div class="type-body" style="display: flex; gap: 10px; align-items: center;"><span style="color: var(--ink-4);">🕒</span><span>паспорт цыбусов</span></div>
+              </div>
+            </div>
+            <div>
+              <div class="type-caps" style="color: var(--brand-500); margin-bottom: 12px;">ЧАСТО ИЩУТ</div>
+              <div class="stack" style="gap: 8px;">
+                <div class="type-body" style="display: flex; gap: 10px; align-items: center;"><span style="color: var(--brand-500);">↗</span><span>Спецмаш</span></div>
+                <div class="type-body" style="display: flex; gap: 10px; align-items: center;"><span style="color: var(--brand-500);">↗</span><span>vin lovol</span></div>
+                <div class="type-body" style="display: flex; gap: 10px; align-items: center;"><span style="color: var(--brand-500);">↗</span><span>Сколько весит PC300</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- ICONS -->
+    <section id="icons">
+      <div class="section-num">10 — Iconography</div>
+      <h2>Иконография</h2>
+      <p class="section-sub">Линейные иконки 1.5px stroke, размер 16/20/24. Геометрические, без декоративных деталей. На углах — round, на стыках — round-join.</p>
+
+      <div class="icon-row">
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg><span>search</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></svg><span>folder</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2h6l4 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"/><path d="M12 2v4h4"/></svg><span>file</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 2.5"/></svg><span>history</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12 3-3 3 3 6-6"/><path d="M12 6h4v4"/></svg><span>trend</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m10 2 2.5 5 5.5.8-4 4 1 5.5L10 15l-5 2.3 1-5.5-4-4 5.5-.8L10 2Z"/></svg><span>star</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M10 7v3l2 1.5"/></svg><span>schedule</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h14"/><path d="M5 17V8m4 9V4m4 13V10m4 7V6"/></svg><span>chart</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 1.8 11.6 4l2.6-.5.7 2.5 2.3 1.4-1.1 2.4 1.1 2.4-2.3 1.4-.7 2.5-2.6-.5L10 18.2 8.4 16l-2.6.5-.7-2.5-2.3-1.4 1.1-2.4L2.8 7.8l2.3-1.4.7-2.5L8.4 4 10 1.8Z"/><circle cx="10" cy="10" r="2.5"/></svg><span>settings</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="6" r="3"/><path d="M3 17a7 7 0 0 1 14 0"/></svg><span>user</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v16M2 10h16"/></svg><span>plus</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l12 12M4 16 16 4"/></svg><span>close</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 7 6 6 6-6"/></svg><span>chevron</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="1.5"/><circle cx="10" cy="4" r="1.5"/><circle cx="10" cy="16" r="1.5"/></svg><span>more</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v10m0 0-4-4m4 4 4-4"/><path d="M3 17h14"/></svg><span>download</span></div>
+        <div class="icon-card"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h14v3H3z"/><path d="M5 7v9a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V7"/><path d="M8 4V2h4v2"/></svg><span>delete</span></div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- VOICE -->
+    <section id="voice">
+      <div class="section-num">11 — Voice</div>
+      <h2>Tone of voice</h2>
+      <p class="section-sub">Спокойно, по делу, на «вы». Не паясничаем, не извиняемся, не нагнетаем. Цифры — точные, действия — глаголы в повелительном или инфинитиве.</p>
+
+      <div class="grid-2">
+        <div class="voice-card voice-do">
+          <div class="voice-label">✓ говорим</div>
+          <div class="voice-text">«Найдено 50 документов за 0.42 с»</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 8px;">Точные цифры, спокойная констатация.</div>
+        </div>
+        <div class="voice-card voice-dont">
+          <div class="voice-label">✗ не говорим</div>
+          <div class="voice-text">«Ура! Мы нашли для вас целых 50 документов! 🎉»</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 8px;">Никакого восклицания, эмодзи, фальшивого энтузиазма.</div>
+        </div>
+        <div class="voice-card voice-do">
+          <div class="voice-label">✓ говорим</div>
+          <div class="voice-text">«Индекс не запускался 12 дней — проверьте расписание»</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 8px;">Факт + ясное действие.</div>
+        </div>
+        <div class="voice-card voice-dont">
+          <div class="voice-label">✗ не говорим</div>
+          <div class="voice-text">«Ой! Кажется, что-то пошло не так с индексацией…»</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 8px;">Не извиняемся, не паникуем, не уменьшительные.</div>
+        </div>
+        <div class="voice-card voice-do">
+          <div class="voice-label">✓ говорим</div>
+          <div class="voice-text">«Удалить 12 файлов?»</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 8px;">Прямой вопрос с количеством.</div>
+        </div>
+        <div class="voice-card voice-dont">
+          <div class="voice-label">✗ не говорим</div>
+          <div class="voice-text">«Вы точно-точно уверены, что хотите удалить эти файлики?»</div>
+          <div class="type-body-sm" style="color: var(--ink-3); margin-top: 8px;">Не дублируем, не уговариваем.</div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- PREVIEW (composition) -->
+    <section id="preview">
+      <div class="section-num">12 — Composition</div>
+      <h2>Композиция</h2>
+      <p class="section-sub">Всё вместе. Так выглядит интерфейс, когда система применяется правильно.</p>
+
+      <div class="preview-shell">
+        <div class="preview-window-bar">
+          <i style="background: #ff5f57;"></i>
+          <i style="background: #febc2e;"></i>
+          <i style="background: #28c840;"></i>
+          <span style="margin-left: 16px; font-size: 12px; color: var(--ink-3); font-family: var(--font-mono);">rag-search.local — Поиск</span>
+        </div>
+        <div class="preview-content">
+          <div class="row" style="margin-bottom: 24px; justify-content: space-between;">
+            <div class="row" style="gap: 8px;">
+              <div class="mark mark-sm"><svg width="18" height="18" viewBox="0 0 32 32" fill="none"><path d="M9 8 L9 24 M9 8 L17 8 Q22 8 22 13 Q22 18 17 18 L9 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="22" cy="22" r="4.5" stroke="white" stroke-width="3" fill="none"/></svg></div>
+              <span style="font-family: var(--font-display); font-weight: 700; font-size: 15px; letter-spacing: -0.02em;">Rag-search</span>
+            </div>
+            <div class="row" style="gap: 6px;">
+              <span class="chip"><span class="status-dot ok"></span> индекс актуален</span>
+              <span class="chip">A admin</span>
+            </div>
+          </div>
+
+          <div class="preview-search">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>
+            <input value="карточка предприятия" />
+            <span class="preview-kbd">⌘K</span>
+          </div>
+
+          <div class="row" style="gap: 8px; margin-bottom: 20px;">
+            <span class="type-caps" style="color: var(--ink-3);">фильтры:</span>
+            <span class="chip chip-primary">× Спецмаш</span>
+            <span class="chip chip-primary">× docx</span>
+            <span class="chip">+ дата</span>
+            <span class="chip">+ автор</span>
+          </div>
+
+          <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
+            <span class="type-h3" style="margin: 0;">12 результатов</span>
+            <span class="type-body-sm" style="color: var(--ink-3);">по релевантности · 8 точных в названии · 4 в содержимом</span>
+          </div>
+
+          <div class="stack">
+            <div class="result selected">
+              <div class="file-icon doc">DOC</div>
+              <div>
+                <div class="result-name">ООО Спецмаш (почта, телефон).docx</div>
+                <div class="result-path">Магазин / Карточки / ООО Спецмаш</div>
+              </div>
+              <div class="result-meta">98 КБ</div>
+              <div class="result-meta">04.04.2026</div>
+              <div class="result-actions">⋯</div>
+            </div>
+            <div class="result">
+              <div class="file-icon pdf">PDF</div>
+              <div>
+                <div class="result-name">Карточка предприятия Спецмаш 2026.pdf</div>
+                <div class="result-path">Магазин / Нужное / Карточки</div>
+              </div>
+              <div class="result-meta">1.4 МБ</div>
+              <div class="result-meta">05.04.2026</div>
+              <div class="result-actions">⋯</div>
+            </div>
+            <div class="result">
+              <div class="file-icon folder">FLD</div>
+              <div>
+                <div class="result-name">Карточки предприятий</div>
+                <div class="result-path">Магазин / Карточки предпр.</div>
+              </div>
+              <div class="result-meta">14 файлов</div>
+              <div class="result-meta">12.04.2026</div>
+              <div class="result-actions">⋯</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- TOKENS -->
+    <section id="tokens">
+      <div class="section-num">13 — Reference</div>
+      <h2>Токены</h2>
+      <p class="section-sub">CSS custom properties, готовые к импорту. Все компоненты выше построены на этих токенах.</p>
+
+      <h3>Color tokens</h3>
+      <table class="tokens">
+        <thead><tr><th></th><th>token</th><th>light</th><th>dark</th><th>назначение</th></tr></thead>
+        <tbody>
+          <tr><td><span class="swatch-mini" style="background:#fafaf7;"></span></td><td><code>--bg</code></td><td>#fafaf7</td><td>#0c0c0f</td><td>основной фон страницы</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#ffffff;"></span></td><td><code>--bg-elev</code></td><td>#ffffff</td><td>#15151a</td><td>карточки, попапы</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#f4f3ee;"></span></td><td><code>--bg-sunken</code></td><td>#f4f3ee</td><td>#08080a</td><td>«утопленный» фон</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#e6e3da;"></span></td><td><code>--line</code></td><td>#e6e3da</td><td>#23232b</td><td>тонкие разделители</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#14141a;"></span></td><td><code>--ink</code></td><td>#14141a</td><td>#f4f4f7</td><td>основной текст</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#3a3a44;"></span></td><td><code>--ink-2</code></td><td>#3a3a44</td><td>#c8c8d0</td><td>усиленный вторичный</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#6c6c78;"></span></td><td><code>--ink-3</code></td><td>#6c6c78</td><td>#8a8a96</td><td>вторичный текст</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#3d63ff;"></span></td><td><code>--brand-500</code></td><td>#3d63ff</td><td>#6385ff</td><td>акцент / primary</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#16a34a;"></span></td><td><code>--ok</code></td><td>#16a34a</td><td>#16a34a</td><td>success</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#f59e0b;"></span></td><td><code>--warn</code></td><td>#f59e0b</td><td>#f59e0b</td><td>warning</td></tr>
+          <tr><td><span class="swatch-mini" style="background:#dc2626;"></span></td><td><code>--err</code></td><td>#dc2626</td><td>#dc2626</td><td>error</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Other tokens</h3>
+      <table class="tokens">
+        <thead><tr><th>token</th><th>value</th><th>применение</th></tr></thead>
+        <tbody>
+          <tr><td><code>--radius-xs</code></td><td>4px</td><td>chip, badge</td></tr>
+          <tr><td><code>--radius-sm</code></td><td>6px</td><td>button, input</td></tr>
+          <tr><td><code>--radius-md</code></td><td>10px</td><td>card, dropdown</td></tr>
+          <tr><td><code>--radius-lg</code></td><td>14px</td><td>modal, drawer</td></tr>
+          <tr><td><code>--shadow-1</code></td><td>0 1px 0 rgba(0,0,0,.04)</td><td>лежит на поверхности</td></tr>
+          <tr><td><code>--shadow-2</code></td><td>0 6px 16px -8px rgba(0,0,0,.12)</td><td>над поверхностью (popup)</td></tr>
+          <tr><td><code>--shadow-3</code></td><td>0 24px 48px -16px rgba(0,0,0,.18)</td><td>модалка, dropdown</td></tr>
+          <tr><td><code>--font-display</code></td><td>'Manrope', system-ui</td><td>заголовки, hero</td></tr>
+          <tr><td><code>--font-text</code></td><td>'Inter', system-ui</td><td>тело, формы</td></tr>
+          <tr><td><code>--font-mono</code></td><td>'JetBrains Mono'</td><td>пути, числа, код</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <div class="imprint">
+      <div>
+        <b>Rag-search · Brandbook v1.0</b>
+        Это живой документ. Последнее обновление — 04.05.2026. По всем вопросам — Telegram @danofigdolat.
+      </div>
+      <div><b>Шрифты</b>Manrope · Inter · JetBrains Mono · все Open Source, Google Fonts</div>
+      <div><b>Лицензия</b>Внутренний документ Rag-search. Не для распространения.</div>
+    </div>
+  </main>
+</div>
+
+<script>
+  document.querySelectorAll('[data-set-theme]').forEach(b => {
+    b.addEventListener('click', () => {
+      const t = b.dataset.setTheme;
+      document.body.dataset.theme = t;
+      document.querySelectorAll('[data-set-theme]').forEach(x => x.classList.toggle('active', x === b));
+    });
+  });
+  // Active nav link on scroll
+  const links = [...document.querySelectorAll('.nav a')];
+  const sections = links.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+  const setActive = () => {
+    let active = sections[0];
+    for (const s of sections) {
+      if (s.getBoundingClientRect().top < 120) active = s;
+    }
+    links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + active.id));
+  };
+  document.addEventListener('scroll', setActive, { passive: true });
+</script>
+</body>
+</html>

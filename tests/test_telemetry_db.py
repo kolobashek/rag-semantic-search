@@ -226,6 +226,9 @@ def test_index_settings_are_persisted_and_normalized(tmp_path) -> None:
     assert loaded["time"] == "02:30"
     assert loaded["recreate"] is True
 
+    saved_auto = db.save_index_settings({"workers": 0})
+    assert saved_auto["workers"] == 0
+
 
 def test_worker_pid_columns_are_added_for_legacy_index_and_ocr_tables(tmp_path) -> None:
     db_path = tmp_path / "telemetry.db"
