@@ -483,6 +483,11 @@ class RAGIndexer:
 
         self._setup_collection()
 
+        # Backward-compatible in-memory view for tests/helpers that construct
+        # RAGIndexer via __new__ and expect idx.state["files"][path] to exist.
+        # In normal runtime the source of truth is SQLite (state_db).
+        self.state: Dict[str, Any] = {"files": {}}
+
         self._points_buffer: List[PointStruct] = []
         self.point_count = 0
 
@@ -530,7 +535,7 @@ class RAGIndexer:
         только если файл УЖЕ имеет полное содержимое (т.е. state.stage == content).
         Если state.stage == metadata и мы сейчас на small/large — нужно ПРОАПГРЕЙДИТЬ.
         """
-        existing = self.state_db.get_entry(file_key)
+        existing = self._get_state_entry(file_key)
         if not existing:
             return False
         if str(existing.get("fingerprint") or "") != fingerprint:
@@ -543,6 +548,37 @@ class RAGIndexer:
             return True
         # Для small/large пропускаем только если у файла уже есть "content"
         return existing_stage == "content"
+
+    def _save_state(self) -> None:
+        """Compatibility shim for legacy JSON state (no-op with SQLite)."""
+        return
+
+    def _get_state_entry(self, full_path: str) -> Optional[Dict[str, Any]]:
+        """Read state entry from SQLite when available, else from in-memory state."""
+        if hasattr(self, "state_db"):
+            try:
+                return self.state_db.get_entry(full_path)
+            except Exception:
+                return None
+        state = getattr(self, "state", None)
+        files = state.get("files") if isinstance(state, dict) else None
+        if isinstance(files, dict) and full_path in files:
+            return dict(files.get(full_path) or {})
+        return None
+
+    def _upsert_state_entry(self, entry: Dict[str, Any]) -> None:
+        """Write state entry to SQLite when available and keep in-memory mirror."""
+        full_path = str(entry.get("full_path") or "")
+        if hasattr(self, "state_db"):
+            try:
+                self.state_db.upsert_many([entry])
+            except Exception:
+                pass
+        if not hasattr(self, "state") or not isinstance(getattr(self, "state"), dict):
+            self.state = {"files": {}}
+        self.state.setdefault("files", {})
+        if full_path:
+            self.state["files"][full_path] = dict(entry)
 
     # ── Qdrant vector deletion ─────────────────────────────────────────
 
@@ -847,7 +883,13 @@ class RAGIndexer:
         chunks: List[str] = []
         start = 0
         while start < len(text):
-            chunks.append(text[start : start + self.chunk_size])
+            chunk = text[start : start + self.chunk_size]
+            # Don't emit a tiny tail chunk that is fully covered by the previous overlap.
+            if chunks and len(chunk) <= self.chunk_overlap:
+                break
+            chunks.append(chunk)
+            if start + self.chunk_size >= len(text):
+                break
             start += step
         return chunks
 
@@ -937,7 +979,7 @@ class RAGIndexer:
         fingerprint, mtime = self._get_file_fingerprint(filepath)
         file_key = str(filepath)
 
-        existing_entry = self.state_db.get_entry(file_key)
+        existing_entry = self._get_state_entry(file_key)
         if existing_entry:
             if str(existing_entry.get("fingerprint") or "") == fingerprint:
                 logger.debug("Файл не изменился, пропуск: %s", filepath)
@@ -979,18 +1021,17 @@ class RAGIndexer:
             size_bytes = int(filepath.stat().st_size)
         except OSError:
             size_bytes = 0
-        self.state_db.upsert_many(
-            [
-                {
-                    "full_path": file_key,
-                    "fingerprint": fingerprint,
-                    "mtime": mtime,
-                    "stage": stage,
-                    "size_bytes": size_bytes,
-                    "extension": filepath.suffix.lower(),
-                }
-            ]
+        self._upsert_state_entry(
+            {
+                "full_path": file_key,
+                "fingerprint": fingerprint,
+                "mtime": mtime,
+                "stage": stage,
+                "size_bytes": size_bytes,
+                "extension": filepath.suffix.lower(),
+            }
         )
+        self._save_state()
 
     # ── directory scan ─────────────────────────────────────────────────
 
@@ -1105,22 +1146,36 @@ class RAGIndexer:
                 self.qdrant.upsert(self.collection_name, points=points)
                 self.point_count += len(points)
                 stage_stats["points_added"] += len(points)
-            self.state_db.upsert_many(
-                [
-                    {
-                        "full_path": file_key,
-                        "fingerprint": fingerprint,
-                        "mtime": mtime,
-                        "stage": file_stage,
-                        "size_bytes": size_bytes,
-                        "extension": extension,
-                    }
-                    for file_key, fingerprint, mtime, file_stage, size_bytes, extension in pending_states
-                ]
-            )
             logger.info(
                 "Записан батч: %d точек (итого %d)", len(pending_texts), self.point_count
             )
+            if hasattr(self, "state_db"):
+                self.state_db.upsert_many(
+                    [
+                        {
+                            "full_path": file_key,
+                            "fingerprint": fingerprint,
+                            "mtime": mtime,
+                            "stage": file_stage,
+                            "size_bytes": size_bytes,
+                            "extension": extension,
+                        }
+                        for file_key, fingerprint, mtime, file_stage, size_bytes, extension in pending_states
+                    ]
+                )
+            else:
+                for file_key, fingerprint, mtime, file_stage, size_bytes, extension in pending_states:
+                    self._upsert_state_entry(
+                        {
+                            "full_path": file_key,
+                            "fingerprint": fingerprint,
+                            "mtime": mtime,
+                            "stage": file_stage,
+                            "size_bytes": size_bytes,
+                            "extension": extension,
+                        }
+                    )
+            self._save_state()
             pending_texts.clear()
             pending_payloads.clear()
             pending_states.clear()
@@ -1243,7 +1298,7 @@ class RAGIndexer:
                 chunks = chunks[: self.max_chunks_per_file]
 
             # Генерируем теги для файла (по пути, содержимому, синонимам)
-            tags = _generate_tags(filepath, relative_path, full_text, self.synonym_map)
+            tags = _generate_tags(filepath, relative_path, full_text, getattr(self, "synonym_map", {}) or {})
 
             stat = filepath.stat()
             meta_text = (
@@ -1282,7 +1337,7 @@ class RAGIndexer:
                 "fingerprint": fingerprint,
                 "mtime": mtime,
                 "size_bytes": int(stat.st_size),
-                "was_indexed": self.state_db.get_entry(file_key) is not None,
+                "was_indexed": self._get_state_entry(file_key) is not None,
                 "meta_text": meta_text,
                 "meta_payload": meta_payload,
                 "chunks": chunks,
