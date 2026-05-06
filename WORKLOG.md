@@ -57,3 +57,5 @@ Status: implemented locally
 Validation: py_compile; pytest tests/test_launcher.py; launcher status/start smoke
 Notes: launcher now stores PID state in shared runtime derived from config paths; bot uses process discovery fallback and status reports discovered running instance
 ```
+
+- 2026-05-06: SQLite/state migrated to D:\Docs\Claude\Projects\Semantic search\data ("rag_telemetry.db", "rag_users.db", "index_state.db"). Config switched off O:\qdrant_db. State bootstrapped from D:\qdrant_state\index_state.json because O: was unavailable; current local state snapshot contains 4299 entries.

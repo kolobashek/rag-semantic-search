@@ -43,6 +43,7 @@ artifacts/*
 !artifacts/.gitkeep
 tmp/*
 !tmp/.gitkeep
+.launcher_runtime/
 
 # ── Qdrant база данных ────────────────────────────────────────────────
 qdrant_db/
@@ -52,6 +53,8 @@ qdrant_db/
 *.db-wal
 *.sqlite-shm
 *.sqlite-wal
+data/*.pre_o_sync.bak
+data/*.legacy.json
 
 # ── Временные файлы Office ────────────────────────────────────────────
 ~$*

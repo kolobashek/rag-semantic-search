@@ -19,6 +19,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+import psutil
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from nicegui import app, events, run, ui
@@ -56,6 +57,7 @@ _FAILED_RESTART_MAX_ATTEMPTS = 3
 _FAILED_RESTART_WINDOW_SEC = 15 * 60
 _FAILED_RESTART_HISTORY: Dict[str, List[float]] = {"index": [], "ocr": []}
 _FAILED_RESTART_RESTARTED_IDS: Dict[str, set[str]] = {"index": set(), "ocr": set()}
+_RUNTIME_DIR = PROJECT_ROOT / "runtime"
 
 
 def _open_log(log_path: "Path", label: str) -> "Any":
@@ -89,7 +91,81 @@ def _is_process_alive(pid: int) -> bool:
     return True
 
 
+def _find_module_process_pids(module_name: str) -> List[int]:
+    pids: List[int] = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        joined = " ".join(str(part) for part in cmdline)
+        if module_name not in joined:
+            continue
+        pid = int(proc.info.get("pid") or 0)
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+
+def _runtime_marker_path(kind: str) -> Path:
+    _RUNTIME_DIR.mkdir(exist_ok=True)
+    return _RUNTIME_DIR / f"{kind}_active.json"
+
+
+def _read_runtime_marker(kind: str) -> Optional[Dict[str, Any]]:
+    path = _runtime_marker_path(kind)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    pid = _safe_int(data.get("pid"), 0)
+    if not _is_process_alive(pid):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    data["pid"] = pid
+    return data
+
+
+def _write_runtime_marker(kind: str, *, pid: int, stage: str = "", source: str = "nice_app") -> None:
+    path = _runtime_marker_path(kind)
+    payload = {
+        "pid": int(pid),
+        "stage": str(stage or ""),
+        "source": source,
+        "ts_started": datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _clear_runtime_marker(kind: str, *, pid: int = 0) -> None:
+    path = _runtime_marker_path(kind)
+    if not path.exists():
+        return
+    if pid > 0:
+        marker = _read_runtime_marker(kind)
+        if marker and _safe_int(marker.get("pid"), 0) != int(pid):
+            return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def _find_live_running_index_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any]]:
+    marker = _read_runtime_marker("index")
+    if marker:
+        return {
+            "run_id": "",
+            "status": "running",
+            "worker_pid": _safe_int(marker.get("pid"), 0),
+            "note": f"stage={marker.get('stage') or 'all'} | runtime_marker",
+            "_runtime_marker_only": True,
+        }
     rows = telemetry.fetch_dicts(
         "SELECT * FROM index_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 20"
     )
@@ -97,10 +173,28 @@ def _find_live_running_index_run(telemetry: TelemetryDB) -> Optional[Dict[str, A
         pid = _safe_int(row.get("worker_pid"), 0)
         if _is_process_alive(pid):
             return row
+    process_pids = _find_module_process_pids("rag_catalog.core.index_rag")
+    if process_pids:
+        return {
+            "run_id": "",
+            "status": "running",
+            "worker_pid": process_pids[0],
+            "note": "process_scan",
+            "_process_scan_only": True,
+        }
     return None
 
 
 def _find_live_running_ocr_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any]]:
+    marker = _read_runtime_marker("ocr")
+    if marker:
+        return {
+            "ocr_run_id": "",
+            "status": "running",
+            "worker_pid": _safe_int(marker.get("pid"), 0),
+            "note": "runtime_marker",
+            "_runtime_marker_only": True,
+        }
     rows = telemetry.fetch_dicts(
         "SELECT * FROM ocr_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 20"
     )
@@ -108,6 +202,15 @@ def _find_live_running_ocr_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any
         pid = _safe_int(row.get("worker_pid"), 0)
         if _is_process_alive(pid):
             return row
+    process_pids = _find_module_process_pids("rag_catalog.core.ocr_pdfs")
+    if process_pids:
+        return {
+            "ocr_run_id": "",
+            "status": "running",
+            "worker_pid": process_pids[0],
+            "note": "process_scan",
+            "_process_scan_only": True,
+        }
     return None
 
 
@@ -165,6 +268,7 @@ def _launch_indexer(
             stderr=log_fh,
             creationflags=_windows_detached_creationflags(),
         )
+        _write_runtime_marker("index", pid=proc.pid, stage=stage)
     finally:
         log_fh.close()
     return proc.pid
@@ -208,6 +312,7 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optiona
             stderr=log_fh,
             creationflags=_windows_detached_creationflags(),
         )
+        _write_runtime_marker("ocr", pid=proc.pid)
     finally:
         log_fh.close()
     return proc.pid
@@ -3931,7 +4036,7 @@ def _build_page(initial_screen: str = "search") -> None:
             with ui.row().classes("w-full items-center gap-2"):
                 ui.icon("account_tree").classes("text-2xl text-indigo-500")
                 ui.label("Pipeline индексации").classes("text-xl font-semibold")
-                ui.label(active_label).classes("rag-chip")
+                active_chip = ui.label(active_label).classes("rag-chip")
                 ui.space()
                 refresh_btn = ui.button(icon="refresh", on_click=lambda: _refresh_progress()).props("flat dense round").tooltip("Обновить")
             ui.label(
@@ -4021,6 +4126,7 @@ def _build_page(initial_screen: str = "search") -> None:
             def _refresh_progress() -> None:
                 fresh = _read_index_telemetry(state.cfg)
                 stats = _read_index_stats(state.cfg)
+                active_chip.set_text("running" if (fresh.get("active_stages") or fresh.get("active_ocr")) else "idle")
                 by_stage = dict(stats.get("by_stage") or {})
                 total_files = int(stats.get("total") or 0)
                 content_files = int(by_stage.get("content") or 0)
@@ -4053,6 +4159,16 @@ def _build_page(initial_screen: str = "search") -> None:
                         row = dict(summary_by_stage.get(stage_key) or {})
                         row.update(latest_by_stage.get(stage_key) or {})
                         row.update(active_by_stage.get(stage_key) or {})
+                        if not row and stage_key == "metadata":
+                            live_index = _find_live_running_index_run(_get_telemetry(state))
+                            if live_index:
+                                row = {
+                                    "stage": stage_key,
+                                    "status": "running",
+                                    "processed_files": 0,
+                                    "total_files": 0,
+                                    "duration_sec": 0,
+                                }
                         render_phase_row(
                             key=stage_key,
                             label=_STAGE_LABELS.get(stage_key, stage_key),
