@@ -39,6 +39,7 @@ from qdrant_client.models import (
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
+from .indexer_control import read_indexer_control, write_indexer_control
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB
 
@@ -150,6 +151,15 @@ _TAG_STOPWORDS: Set[str] = {
 # Порядок важен: чем меньше число, тем «старше» этап (больше информации).
 STAGES = ("metadata", "small", "large")
 STAGE_RANK = {name: i for i, name in enumerate(STAGES)}
+
+
+class IndexerCancelled(KeyboardInterrupt):
+    """Поднимается, когда UI просит отменить индексацию через управляющий файл.
+
+    Наследуется от KeyboardInterrupt, чтобы существующий обработчик в main()
+    финализировал run-запись со статусом cancelled.
+    """
+
 
 # Пороги для категоризации файлов между small/large (дефолты из config).
 DEFAULT_SMALL_OFFICE_MB = 20.0
@@ -377,6 +387,9 @@ class RAGIndexer:
         self.telemetry = TelemetryDB(telemetry_path)
         self.run_id: str = ""
         self._run_deleted_files = 0
+        # Состояние кооперативного управления (для пауз/отмен из UI).
+        self._was_paused: bool = False
+        self._last_control_check: float = 0.0
 
         if embedding_model.startswith("ollama:"):
             from .llm import OllamaEmbedder  # noqa: PLC0415
@@ -414,6 +427,81 @@ class RAGIndexer:
 
     def set_run_id(self, run_id: str) -> None:
         self.run_id = run_id or ""
+
+    # ── кооперативное управление (Пауза/Отмена из UI) ─────────────────
+
+    def _check_indexer_control(self, *, stage: str, stage_stats: Dict[str, int]) -> None:
+        """
+        Читает logs/indexer_control.json и кооперативно реагирует:
+          - "running" — продолжаем работу;
+          - "pause"   — обновляем телеметрию (status='paused'), спим в цикле;
+          - "cancel"  — поднимаем IndexerCancelled (наследник KeyboardInterrupt).
+
+        Дросселируем чтение (не чаще раза в 0.25с), чтобы не нагружать I/O.
+        """
+        # Устойчиво к моку без __init__ (тесты): подкладываем дефолты.
+        if not hasattr(self, "_last_control_check"):
+            self._last_control_check = 0.0
+        if not hasattr(self, "_was_paused"):
+            self._was_paused = False
+        now = time.monotonic()
+        if (now - self._last_control_check) < 0.25:
+            return
+        self._last_control_check = now
+
+        ctrl = read_indexer_control()
+        cmd = str(ctrl.get("command") or "running").lower()
+
+        if cmd == "cancel":
+            logger.warning("Индексация отменена пользователем через UI.")
+            raise IndexerCancelled()
+
+        if cmd == "pause":
+            if not self._was_paused:
+                logger.info("Индексация поставлена на паузу пользователем.")
+                self._was_paused = True
+                if self.run_id:
+                    try:
+                        self.telemetry.update_stage(
+                            run_id=self.run_id,
+                            stage=stage,
+                            processed_files=stage_stats.get("processed_files", 0),
+                            added_files=stage_stats.get("added_files", 0),
+                            updated_files=stage_stats.get("updated_files", 0),
+                            skipped_files=stage_stats.get("skipped_files", 0),
+                            error_files=stage_stats.get("error_files", 0),
+                            points_added=stage_stats.get("points_added", 0),
+                            status="paused",
+                        )
+                    except Exception as exc:
+                        logger.warning("Не удалось пометить этап paused: %s", exc)
+            # Цикл ожидания: каждую секунду перечитываем команду.
+            while True:
+                time.sleep(1.0)
+                ctrl = read_indexer_control()
+                cmd = str(ctrl.get("command") or "running").lower()
+                if cmd == "cancel":
+                    logger.warning("Индексация отменена пользователем (во время паузы).")
+                    raise IndexerCancelled()
+                if cmd != "pause":
+                    break
+            logger.info("Индексация возобновлена.")
+            self._was_paused = False
+            if self.run_id:
+                try:
+                    self.telemetry.update_stage(
+                        run_id=self.run_id,
+                        stage=stage,
+                        processed_files=stage_stats.get("processed_files", 0),
+                        added_files=stage_stats.get("added_files", 0),
+                        updated_files=stage_stats.get("updated_files", 0),
+                        skipped_files=stage_stats.get("skipped_files", 0),
+                        error_files=stage_stats.get("error_files", 0),
+                        points_added=stage_stats.get("points_added", 0),
+                        status="running",
+                    )
+                except Exception as exc:
+                    logger.warning("Не удалось пометить этап running после resume: %s", exc)
 
     # ── collection setup ───────────────────────────────────────────────
 
@@ -1247,6 +1335,8 @@ class RAGIndexer:
             futures = {pool.submit(extract_one, f): f for f in scope_files}
             for future in tqdm(as_completed(futures), total=len(scope_files),
                                 desc=f"Этап {stage}"):
+                # Кооперативное управление (Пауза/Отмена через UI):
+                self._check_indexer_control(stage=stage, stage_stats=stage_stats)
                 try:
                     result = future.result()
                 except Exception as exc:

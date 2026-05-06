@@ -22,6 +22,10 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from nicegui import app, events, run, ui
 
+from rag_catalog.core.indexer_control import (
+    get_current_command as _get_indexer_command,
+    write_indexer_control as _write_indexer_control,
+)
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -76,6 +80,29 @@ def _is_process_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _terminate_process(pid: int) -> bool:
+    """
+    Жесткая остановка процесса. На Windows — taskkill /F, на POSIX — SIGTERM.
+    Используется как fallback после кооперативного cancel.
+    """
+    pid_int = int(pid or 0)
+    if pid_int <= 0:
+        return False
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(
+                ["taskkill", "/PID", str(pid_int), "/F", "/T"],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            import signal as _signal
+            os.kill(pid_int, _signal.SIGTERM)
+        return True
+    except OSError:
+        return False
 
 
 def _find_live_running_index_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any]]:
@@ -137,6 +164,12 @@ def _launch_indexer(
         args.append("--recreate")
     if skip_inline_ocr:
         args.append("--no-ocr")
+    # Сбрасываем контрольный файл — на случай если в нём осталась команда
+    # cancel/pause от предыдущего прогона.
+    try:
+        _write_indexer_control("running")
+    except (OSError, ValueError):
+        pass
     log_fh = _open_log(PROJECT_ROOT / "logs" / "indexer.log", f"INDEXER  stage={stage}")
     try:
         proc = subprocess.Popen(
@@ -3783,17 +3816,160 @@ def _build_page(initial_screen: str = "search") -> None:
                 except Exception:
                     return 0.0
 
+            def _normalize_stage_row(stage_key: str, source: Dict[str, Any]) -> Dict[str, Any]:
+                """Унифицирует поля: ts_started/ts_finished → started_at/finished_at."""
+                row: Dict[str, Any] = dict(source)
+                row.setdefault("stage", stage_key)
+                if not row.get("started_at"):
+                    row["started_at"] = source.get("ts_started") or ""
+                if not row.get("finished_at"):
+                    row["finished_at"] = source.get("ts_finished") or ""
+                # stage_summary возвращает last_duration_sec; active_stages — duration_sec
+                if not row.get("duration_sec"):
+                    row["duration_sec"] = (
+                        source.get("duration_sec")
+                        or source.get("last_duration_sec")
+                        or 0
+                    )
+                return row
+
             def _refresh_progress() -> None:
                 fresh = _read_index_telemetry(state.cfg)
+                # Используем stage_summary (последний завершённый прогон каждого
+                # этапа независимо), а active_stages накладываем сверху для
+                # текущих running строк. latest_stages нам НЕ нужен — он
+                # ограничен одним последним run_id и врёт когда пользователь
+                # запускал отдельные этапы.
+                summary = fresh.get("stage_summary") or []
                 active = fresh.get("active_stages") or []
-                latest = fresh.get("latest_stages") or []
+                active_runs = fresh.get("active_runs") or []
+                active_ocr = fresh.get("active_ocr")
+                last_ocr = fresh.get("last_ocr")
 
-                # Build a map stage → row (prefer active over latest)
-                all_rows: dict = {}
-                for _row in latest:
-                    all_rows[str(_row.get("stage") or "")] = _row
+                all_rows: Dict[str, Dict[str, Any]] = {}
+                for _row in summary:
+                    sk = str(_row.get("stage") or "")
+                    if sk:
+                        all_rows[sk] = _normalize_stage_row(sk, _row)
                 for _row in active:
-                    all_rows[str(_row.get("stage") or "")] = _row
+                    sk = str(_row.get("stage") or "")
+                    if sk:
+                        all_rows[sk] = _normalize_stage_row(sk, _row)
+
+                # OCR живёт в отдельной таблице ocr_runs — добавляем как
+                # псевдо-этап с собственными счётчиками.
+                ocr_src = active_ocr or last_ocr
+                if ocr_src:
+                    ocr_row = _normalize_stage_row("ocr", ocr_src)
+                    ocr_row.setdefault("processed_files", int(ocr_src.get("processed_pdfs") or 0))
+                    ocr_row.setdefault("total_files", int(ocr_src.get("found_scanned") or 0))
+                    if active_ocr:
+                        ocr_row["status"] = "running"
+                    all_rows["ocr"] = ocr_row
+
+                # Текущая команда управления (для отображения paused и выбора кнопок).
+                control_cmd = _get_indexer_command()
+                indexer_alive = bool(active_runs)
+                live_pid = 0
+                for r in active_runs:
+                    try:
+                        pid_i = int(r.get("worker_pid") or 0)
+                    except (TypeError, ValueError):
+                        pid_i = 0
+                    if pid_i > 0:
+                        live_pid = pid_i
+                        break
+
+                # ── фабрики обработчиков (замыкаем state/settings) ────
+                def _make_pause_handler():
+                    def _h() -> None:
+                        try:
+                            _write_indexer_control("pause")
+                            _log_app_event(state, "index", "control_pause")
+                            ui.notify("Команда «Пауза» отправлена.", type="info")
+                        except (OSError, ValueError) as exc:
+                            ui.notify(f"Не удалось поставить на паузу: {exc}", type="negative")
+                        _refresh_progress()
+                    return _h
+
+                def _make_resume_handler():
+                    def _h() -> None:
+                        try:
+                            _write_indexer_control("running")
+                            _log_app_event(state, "index", "control_resume")
+                            ui.notify("Индексация возобновлена.", type="positive")
+                        except (OSError, ValueError) as exc:
+                            ui.notify(f"Не удалось возобновить: {exc}", type="negative")
+                        _refresh_progress()
+                    return _h
+
+                def _make_cancel_handler():
+                    def _h() -> None:
+                        try:
+                            _write_indexer_control("cancel")
+                        except (OSError, ValueError) as exc:
+                            ui.notify(f"Не удалось отправить отмену: {exc}", type="negative")
+                            return
+                        _log_app_event(state, "index", "control_cancel", details={"pid": live_pid})
+                        ui.notify(
+                            "Команда «Отмена» отправлена. "
+                            "Индексатор завершится после текущего файла.",
+                            type="warning",
+                        )
+                        _refresh_progress()
+                    return _h
+
+                def _make_kill_handler(pid: int):
+                    def _h() -> None:
+                        if pid <= 0:
+                            ui.notify("Не найден живой процесс индексатора.", type="warning")
+                            return
+                        if _terminate_process(pid):
+                            _log_app_event(state, "index", "control_kill", details={"pid": pid})
+                            ui.notify(
+                                f"Процесс индексатора (PID {pid}) принудительно остановлен.",
+                                type="warning",
+                            )
+                        else:
+                            ui.notify(f"Не удалось остановить PID {pid}.", type="negative")
+                        _refresh_progress()
+                    return _h
+
+                def _make_stage_runner(stage_key: str):
+                    def _h() -> None:
+                        try:
+                            pid = _launch_indexer(
+                                state.cfg,
+                                stage=stage_key,
+                                workers=int(settings.get("workers") or state.cfg.get("index_read_workers") or 4),
+                                max_chunks=int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000),
+                                skip_inline_ocr=bool(settings.get("skip_inline_ocr")),
+                            )
+                        except RuntimeError as exc:
+                            ui.notify(str(exc), type="warning")
+                            return
+                        _log_app_event(state, "index", "run_stage", details={"stage": stage_key, "pid": pid})
+                        ui.notify(
+                            f"Этап «{_STAGE_LABELS.get(stage_key, stage_key)}» запущен (PID {pid}).",
+                            type="positive",
+                        )
+                        _refresh_progress()
+                    return _h
+
+                def _make_ocr_runner():
+                    def _h() -> None:
+                        try:
+                            pid = _launch_ocr(
+                                state.cfg,
+                                min_text_len=int(settings.get("ocr_min_text_len") or 50),
+                            )
+                        except RuntimeError as exc:
+                            ui.notify(str(exc), type="warning")
+                            return
+                        _log_app_event(state, "index", "run_ocr_stage", details={"pid": pid})
+                        ui.notify(f"OCR-проход запущен (PID {pid}).", type="positive")
+                        _refresh_progress()
+                    return _h
 
                 # V2 phase order (including OCR as a separate phase)
                 phase_order = ["metadata", "small", "large", "content", "ocr"]
@@ -3822,22 +3998,49 @@ def _build_page(initial_screen: str = "search") -> None:
                                         sanitize=False,
                                     )
                                     ui.html('<span class="rag-meta">не запускался</span>', sanitize=False)
+                                    if not indexer_alive:
+                                        with ui.row().classes("gap-2 mt-1"):
+                                            if stage_key == "ocr":
+                                                ui.button(
+                                                    "Запустить", icon="play_arrow",
+                                                    on_click=_make_ocr_runner(),
+                                                ).props("outline dense color=primary size=sm")
+                                            elif stage_key != "content":
+                                                ui.button(
+                                                    "Запустить", icon="play_arrow",
+                                                    on_click=_make_stage_runner(stage_key),
+                                                ).props("outline dense color=primary size=sm")
                             continue
 
                         processed = int(row.get("processed_files") or 0)
                         total_f = int(row.get("total_files") or 0)
                         pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if str(row.get("status") or "") not in ("running", "") else 0.0)
-                        status_str = str(row.get("status") or "-")
-                        is_running = status_str == "running"
-                        is_done = status_str in ("done", "completed", "finished")
-                        is_error = status_str in ("error", "failed")
+                        raw_status = str(row.get("status") or "-").lower()
+                        is_running_db = raw_status == "running"
+                        is_paused_db = raw_status == "paused"
+                        # Если в БД running, но UI попросил pause — отображаем как paused.
+                        # OCR не использует контрольный файл, на него не распространяем.
+                        if stage_key == "ocr":
+                            is_paused = is_paused_db
+                            is_running = is_running_db
+                        else:
+                            is_paused = is_paused_db or (is_running_db and control_cmd == "pause")
+                            is_running = is_running_db and not is_paused
+                        is_done = raw_status in ("done", "completed", "finished")
+                        is_error = raw_status in ("error", "failed")
+                        is_cancelled = raw_status in ("cancelled", "canceled", "aborted")
+                        # Display label учитывает paused-наложение
+                        status_str = "paused" if is_paused else raw_status
 
                         stage_label = _STAGE_LABELS.get(stage_key, stage_key)
                         finished_at = str(row.get("finished_at") or "")
                         started_at = str(row.get("started_at") or "")[:16].replace("T", " ")
                         duration_str = _format_duration_seconds(row.get("duration_sec"))
 
-                        if is_running:
+                        if is_paused:
+                            circle_bg = "#f59e0b"
+                            circle_icon = "⏸"
+                        elif is_running:
                             circle_bg = "var(--rag-accent)"
                             circle_icon = "◷"
                         elif is_done:
@@ -3846,11 +4049,14 @@ def _build_page(initial_screen: str = "search") -> None:
                         elif is_error:
                             circle_bg = "var(--rag-danger)"
                             circle_icon = "✗"
+                        elif is_cancelled:
+                            circle_bg = "var(--rag-muted)"
+                            circle_icon = "■"
                         else:
                             circle_bg = "var(--rag-muted)"
                             circle_icon = "—"
 
-                        row_extra = "running" if is_running else ""
+                        row_extra = "running" if (is_running or is_paused) else ""
                         fresh_color = _freshness_color(finished_at)
                         fresh_pct = _freshness_pct(finished_at) * 100
 
@@ -3864,7 +4070,8 @@ def _build_page(initial_screen: str = "search") -> None:
                                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                                     ui.html(f'<span class="font-semibold">{stage_label}</span>', sanitize=False)
                                     status_bg = (
-                                        "var(--rag-accent)" if is_running
+                                        "#f59e0b" if is_paused
+                                        else "var(--rag-accent)" if is_running
                                         else "var(--rag-ok)" if is_done
                                         else "var(--rag-danger)" if is_error
                                         else "var(--rag-muted)"
@@ -3880,10 +4087,15 @@ def _build_page(initial_screen: str = "search") -> None:
                                     if duration_str:
                                         ui.html(f'<span class="rag-meta font-mono">{duration_str}</span>', sanitize=False)
 
-                                if is_running or total_f > 0:
-                                    ui.linear_progress(value=pct).props(
-                                        "color=primary" if is_running else ("color=positive" if is_done else ("color=negative" if is_error else ""))
-                                    ).classes("w-full")
+                                if is_running or is_paused or total_f > 0:
+                                    progress_color = (
+                                        "warning" if is_paused
+                                        else "primary" if is_running
+                                        else "positive" if is_done
+                                        else "negative" if is_error
+                                        else "grey"
+                                    )
+                                    ui.linear_progress(value=pct).props(f"color={progress_color}").classes("w-full")
                                     ui.html(
                                         f'<span class="rag-meta">{processed:,} / {total_f:,} файлов</span>'.replace(",", " "),
                                         sanitize=False,
@@ -3925,18 +4137,63 @@ def _build_page(initial_screen: str = "search") -> None:
                                     )
 
                                 with ui.row().classes("gap-2 mt-1"):
-                                    if is_running:
-                                        ui.button("Пауза", icon="pause").props("outline dense color=orange size=sm")
-                                        ui.button("Отмена", icon="stop").props("outline dense color=negative size=sm")
+                                    if stage_key == "ocr":
+                                        # OCR — отдельный процесс, контрольный
+                                        # файл его не охватывает. На running —
+                                        # только жёсткая остановка.
+                                        if is_running:
+                                            ocr_pid = int((active_ocr or {}).get("worker_pid") or 0)
+                                            ui.button(
+                                                "Остановить", icon="stop",
+                                                on_click=lambda p=ocr_pid: (
+                                                    _terminate_process(p),
+                                                    _refresh_progress(),
+                                                ),
+                                            ).props("outline dense color=negative size=sm")
+                                        else:
+                                            lbl_btn = "Перезапустить" if is_error else "Запустить"
+                                            ico_btn = "replay" if is_error else "play_arrow"
+                                            ui.button(
+                                                lbl_btn, icon=ico_btn,
+                                                on_click=_make_ocr_runner(),
+                                            ).props("outline dense color=primary size=sm")
+                                    elif is_running or is_paused:
+                                        # Активный индекс-этап: Пауза / Возобновить + Отмена + жёсткий kill
+                                        if is_paused:
+                                            ui.button(
+                                                "Возобновить", icon="play_arrow",
+                                                on_click=_make_resume_handler(),
+                                            ).props("unelevated dense color=primary size=sm")
+                                        else:
+                                            ui.button(
+                                                "Пауза", icon="pause",
+                                                on_click=_make_pause_handler(),
+                                            ).props("outline dense color=warning size=sm")
+                                        ui.button(
+                                            "Отмена", icon="stop",
+                                            on_click=_make_cancel_handler(),
+                                        ).props("outline dense color=negative size=sm")
+                                        if live_pid > 0:
+                                            ui.button(
+                                                icon="power_settings_new",
+                                                on_click=_make_kill_handler(live_pid),
+                                            ).props("flat dense round color=negative size=sm").tooltip(
+                                                f"Принудительно завершить PID {live_pid}"
+                                            )
                                     else:
-                                        _sk = stage_key
-
-                                        async def _run_stage(sk=_sk):
-                                            await run_index_now(settings, sk)
-
-                                        lbl_btn = "Перезапустить" if is_error else "Запустить"
-                                        ico_btn = "replay" if is_error else "play_arrow"
-                                        ui.button(lbl_btn, icon=ico_btn).props("outline dense color=primary size=sm").on("click", _run_stage)
+                                        if indexer_alive:
+                                            ui.html(
+                                                '<span class="rag-meta" style="font-size:12px;">'
+                                                'индексатор занят другим этапом</span>',
+                                                sanitize=False,
+                                            )
+                                        elif stage_key != "content":
+                                            lbl_btn = "Перезапустить" if is_error else "Запустить"
+                                            ico_btn = "replay" if is_error else "play_arrow"
+                                            ui.button(
+                                                lbl_btn, icon=ico_btn,
+                                                on_click=_make_stage_runner(stage_key),
+                                            ).props("outline dense color=primary size=sm")
 
             # Initial render
             _refresh_progress()
@@ -4290,9 +4547,16 @@ def _build_page(initial_screen: str = "search") -> None:
 
             # Статус индекса (от телеметрии)
             _telemetry = _read_index_telemetry(state.cfg)
+            # Используем stage_summary (последний завершённый прогон каждого
+            # этапа), а active_stages накладываем сверху для running.
             _active = _telemetry.get("active_stages") or []
-            _latest = _telemetry.get("latest_stages") or []
-            _stages_data = _active or _latest or []
+            _summary = _telemetry.get("stage_summary") or []
+            _stages_map: Dict[str, Dict[str, Any]] = {}
+            for _r in _summary:
+                _stages_map[str(_r.get("stage") or "")] = dict(_r)
+            for _r in _active:
+                _stages_map[str(_r.get("stage") or "")] = dict(_r)
+            _stages_data = list(_stages_map.values())
 
             with ui.expansion("⚙ Состояние индекса", value=True).classes("rag-card flex-1 min-w-0"):
                 if not _stages_data:
@@ -4339,7 +4603,13 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.linear_progress(value=pct, color="primary").classes("w-full")
                     else:
                         _last = _stages_data[0] if _stages_data else {}
-                        _last_ts = str(_last.get("finished_at") or _last.get("started_at") or "—")[:16].replace("T", " ")
+                        _last_ts = str(
+                            _last.get("ts_finished")
+                            or _last.get("finished_at")
+                            or _last.get("ts_started")
+                            or _last.get("started_at")
+                            or "—"
+                        )[:16].replace("T", " ")
                         ui.label(f"Последний запуск: {_last_ts}").classes("rag-meta px-2 pb-2")
 
         # ── Виджеты ────────────────────────────────────────────────────────
@@ -4353,7 +4623,7 @@ def _build_page(initial_screen: str = "search") -> None:
                         _err_rows = _db_query_dicts(
                             telemetry_path,
                             """SELECT SUM(error_files) AS errs FROM index_runs
-                               WHERE finished_at >= datetime('now','-2 days','localtime')""",
+                               WHERE ts_finished >= datetime('now','-2 days','localtime')""",
                         )
                         _errs = int((_err_rows[0] if _err_rows else {}).get("errs") or 0)
                         if _errs > 0:
