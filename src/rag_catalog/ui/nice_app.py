@@ -31,6 +31,7 @@ from .helpers import (
     OFFICE_PREVIEW_EXTENSIONS,
     PAGE_SIZE,
     _apply_explorer_filter_input,
+    _cd_acl_allows,
     _cd_breadcrumb_chain,
     _cd_file_jobs_map,
     _cd_file_size,
@@ -311,6 +312,11 @@ def _build_page(initial_screen: str = "search") -> None:
             )
             if state.search_request_id != request_id:
                 return
+            quick_results = [
+                item for item in quick_results
+                if not (item.get("cloud_file_id") or item.get("cloud_path"))
+                or _cd_acl_allows(state.cfg, state.current_user, str(item.get("cloud_path") or item.get("path") or ""))
+            ]
             state.results = quick_results
             exact_count = _count_exact_name_matches(query, quick_results)
             state.search_stats_hint = f"Быстро найдено: {len(quick_results)} · точных совпадений: {exact_count}"
@@ -374,6 +380,11 @@ def _build_page(initial_screen: str = "search") -> None:
             if state.search_request_id != request_id:
                 return
             state.results = _merge_search_results(state.results, full_results, limit=state.limit)
+            state.results = [
+                item for item in state.results
+                if not (item.get("cloud_file_id") or item.get("cloud_path"))
+                or _cd_acl_allows(state.cfg, state.current_user, str(item.get("cloud_path") or item.get("path") or ""))
+            ]
             cloud_semantic_count = sum(
                 1
                 for item in state.results

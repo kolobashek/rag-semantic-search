@@ -13,6 +13,7 @@ from rag_catalog.ui.state import (
 )
 from rag_catalog.ui.helpers import (
     _apply_explorer_filter_input,
+    _cd_acl_allows,
     _file_rows,
     _file_icon_svg,
     _is_system_file,
@@ -833,6 +834,41 @@ def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:
     assert user["username"] == "user"
     header_user = cloud_api._require_cloud_drive_api_user(cfg, authorization=f"Bearer {token}")
     assert header_user["username"] == "user"
+
+
+def test_cloud_drive_acl_allows_user_and_role_prefixes() -> None:
+    cfg = {
+        "cloud_drive_acl": {
+            "users": {"ivan": ["Projects/A"]},
+            "roles": {"viewer": ["Public"]},
+        }
+    }
+    user = {"username": "ivan", "role": "viewer"}
+
+    assert _cd_acl_allows(cfg, user, "Projects/A/report.docx")
+    assert _cd_acl_allows(cfg, user, "Public/readme.txt")
+    assert not _cd_acl_allows(cfg, user, "Private/secret.txt")
+    assert _cd_acl_allows({}, user, "Private/secret.txt")
+
+
+def test_cloud_drive_api_acl_rejects_forbidden_path(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "cloud_drive_acl": {"users": {"user": ["Allowed"]}},
+    }
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api_cloud_drive_list("Blocked")
+
+    assert exc.value.status_code == 403
 
 
 def test_cloud_drive_api_admin_guard_rejects_non_admin(tmp_path) -> None:

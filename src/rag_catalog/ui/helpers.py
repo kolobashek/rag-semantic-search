@@ -710,6 +710,51 @@ def _cd_file_jobs_map(registry: "Any", file_ids: "list[str]") -> "Dict[str, Dict
         return {}
 
 
+def _cd_acl_allows(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) -> bool:
+    """Opt-in Cloud Drive ACL hook.
+
+    Config shape:
+      cloud_drive_acl = {
+        "users": {"ivan": ["Public", "Projects/A"], "*": ["Public"]},
+        "roles": {"admin": ["*"], "user": ["Public"]},
+      }
+    Empty/missing ACL means allow, so existing installs keep working.
+    """
+    acl = cfg.get("cloud_drive_acl")
+    if not isinstance(acl, dict) or not acl:
+        return True
+    username = str((user or {}).get("username") or "").strip().lower()
+    role = str((user or {}).get("role") or "").strip().lower()
+    normalized_path = str(path or "").strip().strip("/")
+
+    def _prefixes(section: str, key: str) -> list[str]:
+        block = acl.get(section)
+        if not isinstance(block, dict):
+            return []
+        value = block.get(key)
+        if value is None and key != "*":
+            value = block.get("*")
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        return []
+
+    allowed = [
+        *_prefixes("users", username),
+        *_prefixes("roles", role),
+    ]
+    if not allowed:
+        return False
+    for prefix in allowed:
+        clean = str(prefix or "").strip().strip("/")
+        if clean in {"", "*"}:
+            return True
+        if normalized_path == clean or normalized_path.startswith(f"{clean}/"):
+            return True
+    return False
+
+
 # ─────────────────────────── index stats / telemetry ────────────────────────
 
 def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
