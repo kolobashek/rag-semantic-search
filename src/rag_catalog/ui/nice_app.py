@@ -495,6 +495,12 @@ class PageState:
     ai_search_expand: bool = True  # включать AI-дополнение поискового запроса
     rag_answer_text: str = ""      # RAG Q&A ответ (пусто если LLM отключён)
     rag_answer_loading: bool = False
+    doc_explain_path: str = ""       # путь к документу для "Пояснить"
+    doc_explain_text: str = ""       # LLM объяснение документа
+    doc_explain_loading: bool = False
+    selected_result_paths: List[str] = field(default_factory=list)  # выбранные для "Сводки"
+    selection_summary_text: str = ""   # итог "Сводки по выбранным"
+    selection_summary_loading: bool = False
     settings_section: str = "profile"  # активная секция в настройках (IDE-навигация)
     displayed_count: int = 10
     active_type_filter: Optional[str] = None
@@ -3407,6 +3413,12 @@ def _build_page(initial_screen: str = "search") -> None:
         state.expanded_query = ""
         state.rag_answer_text = ""
         state.rag_answer_loading = False
+        state.doc_explain_path = ""
+        state.doc_explain_text = ""
+        state.doc_explain_loading = False
+        state.selected_result_paths = []
+        state.selection_summary_text = ""
+        state.selection_summary_loading = False
         state.displayed_count = 10
         state.active_type_filter = None
         _remember_query(state, query)
@@ -3780,6 +3792,70 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.label("Встроенный просмотр для этого формата не поддерживается. Используйте скачивание или открытие в ОС.").classes("rag-meta")
         dialog.open()
 
+    def _parse_rag_answer(text: str) -> tuple[str, List[str]]:
+        """Split RAG answer into (body, list_of_source_filenames)."""
+        marker = "Источники:"
+        idx = text.rfind(marker)
+        if idx == -1:
+            return text.strip(), []
+        body = text[:idx].strip()
+        sources_raw = text[idx + len(marker):].strip()
+        sources = [s.strip() for s in sources_raw.split(",") if s.strip()]
+        return body, sources
+
+    async def ask_explain(result: Dict[str, Any]) -> None:
+        """Run rag_answer() focused on a single document and display inline."""
+        if not bool(state.cfg.get("llm_enabled")):
+            ui.notify("LLM не включён в настройках.", type="warning")
+            return
+        path = str(result.get("full_path") or result.get("path") or "")
+        fname = str(result.get("filename") or path)
+        state.doc_explain_path = path or fname
+        state.doc_explain_text = ""
+        state.doc_explain_loading = True
+        render()
+        try:
+            from rag_catalog.core.llm import rag_answer  # noqa: PLC0415
+            ollama_url = str(state.cfg.get("ollama_url") or "http://localhost:11434")
+            rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
+            query = state.searched_query or "Опиши содержимое этого документа"
+            answer = await run.io_bound(
+                rag_answer, query, [result], model=rag_model, ollama_url=ollama_url
+            )
+            state.doc_explain_text = answer or "Модель не дала ответа."
+        except Exception as exc:
+            state.doc_explain_text = f"Ошибка: {exc}"
+        finally:
+            state.doc_explain_loading = False
+        render()
+
+    async def summarize_selection() -> None:
+        """Run rag_answer() over currently selected results."""
+        if not bool(state.cfg.get("llm_enabled")):
+            ui.notify("LLM не включён в настройках.", type="warning")
+            return
+        selected = [r for r in state.results if str(r.get("full_path") or r.get("path") or "") in state.selected_result_paths]
+        if len(selected) < 2:
+            ui.notify("Выберите хотя бы 2 документа.", type="warning")
+            return
+        state.selection_summary_text = ""
+        state.selection_summary_loading = True
+        render()
+        try:
+            from rag_catalog.core.llm import rag_answer  # noqa: PLC0415
+            ollama_url = str(state.cfg.get("ollama_url") or "http://localhost:11434")
+            rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
+            query = state.searched_query or "Сделай сводку по выбранным документам"
+            answer = await run.io_bound(
+                rag_answer, query, selected, model=rag_model, ollama_url=ollama_url
+            )
+            state.selection_summary_text = answer or "Модель не дала ответа."
+        except Exception as exc:
+            state.selection_summary_text = f"Ошибка: {exc}"
+        finally:
+            state.selection_summary_loading = False
+        render()
+
     def render_result(result: Dict[str, Any], index: int) -> None:
         name = str(result.get("filename") or "Без имени")
         path = str(result.get("path") or "")
@@ -3837,8 +3913,22 @@ def _build_page(initial_screen: str = "search") -> None:
                 track_result_use("open_viewer")
                 open_file_viewer(p)
 
+        result_key = full_path or path or name
+        llm_on = bool(state.cfg.get("llm_enabled"))
+        is_selected = result_key in state.selected_result_paths
+        is_explaining = state.doc_explain_path == result_key
+
         with ui.column().classes("rag-result gap-2"):
             with ui.row().classes("w-full items-start gap-2"):
+                if llm_on:
+                    def _toggle_select(rk: str = result_key) -> None:
+                        if rk in state.selected_result_paths:
+                            state.selected_result_paths = [x for x in state.selected_result_paths if x != rk]
+                        else:
+                            state.selected_result_paths = [*state.selected_result_paths, rk]
+                        render()
+                    _cb = ui.checkbox(value=is_selected, on_change=lambda _: _toggle_select()).props("dense")
+                    _cb.classes("mt-1")
                 opener = ui.row().classes("flex-1 min-w-0 items-start gap-2 cursor-pointer").on("click", open_primary)
                 with opener:
                     ui.html(_file_icon_svg(full_path or path, kind), sanitize=False)
@@ -3863,6 +3953,19 @@ def _build_page(initial_screen: str = "search") -> None:
                             if p and p.exists() and p.is_file():
                                 ui.button("Скачать", icon="download", on_click=lambda pth=p: ui.download(pth, filename=pth.name)).props("outline dense")
                         ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda pth=full_path: _open_os_path(str(Path(pth).parent if kind != "Каталог" else pth))).props("outline dense")
+                    if llm_on and kind != "Каталог":
+                        if is_explaining and state.doc_explain_loading:
+                            ui.spinner(size="xs").classes("ml-1")
+                        else:
+                            async def _explain_click(r: Dict[str, Any] = result) -> None:
+                                if state.doc_explain_path == (str(r.get("full_path") or r.get("path") or "")):
+                                    state.doc_explain_path = ""
+                                    state.doc_explain_text = ""
+                                    render()
+                                else:
+                                    await ask_explain(r)
+                            _explain_label = "Скрыть" if (is_explaining and state.doc_explain_text) else "Пояснить"
+                            ui.button(_explain_label, icon="psychology", on_click=_explain_click).props("flat dense no-caps").classes("text-indigo-600")
                 with ui.row().classes("items-center justify-end gap-1"):
                     bad = ui.button(icon="thumb_down", on_click=lambda: rate_result(-3), color=None).props("flat round dense")
                     bad.classes("rag-feedback-btn")
@@ -3900,8 +4003,22 @@ def _build_page(initial_screen: str = "search") -> None:
                                         file_btn.tooltip(str(item_path))
                         if children.get("truncated"):
                             ui.label("Показаны первые элементы. Полный список доступен в проводнике приложения.").classes("rag-meta")
-            elif preview:
-                ui.label(preview).classes("rag-meta")
+            else:
+                if preview:
+                    ui.label(preview).classes("rag-meta")
+                # Inline explain result
+                if is_explaining:
+                    if state.doc_explain_loading:
+                        with ui.row().classes("items-center gap-2 bg-indigo-50 border border-indigo-200 rounded p-2 w-full"):
+                            ui.spinner(size="xs")
+                            ui.label("Анализирую документ…").classes("rag-meta text-xs")
+                    elif state.doc_explain_text:
+                        _exp_body, _exp_sources = _parse_rag_answer(state.doc_explain_text)
+                        with ui.column().classes("bg-indigo-50 border border-indigo-200 rounded p-3 gap-1 w-full"):
+                            with ui.row().classes("items-center gap-1"):
+                                ui.icon("psychology", size="16px").classes("text-indigo-500")
+                                ui.label("Пояснение по документу").classes("text-xs font-semibold text-indigo-700")
+                            ui.label(_exp_body).classes("text-sm whitespace-pre-wrap")
 
     def _render_cd_search_hints(query: str) -> None:
         """Render a compact Cloud Drive registry section above main search results."""
@@ -3994,17 +4111,56 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.spinner(size="sm")
                 ui.label("Догружаю дополнительные совпадения…").classes("rag-meta")
 
-        # RAG Q&A карточка
+        # RAG Q&A карточка (основной ответ по всем результатам)
         if state.rag_answer_loading:
             with ui.row().classes("rag-card w-full p-3 gap-2 items-center"):
                 ui.spinner(size="sm")
                 ui.label("Анализирую документы…").classes("rag-meta")
         elif state.rag_answer_text:
-            with ui.column().classes("rag-card w-full p-3 gap-1"):
+            _body, _sources = _parse_rag_answer(state.rag_answer_text)
+            with ui.column().classes("rag-card w-full p-3 gap-2"):
                 with ui.row().classes("items-center gap-1"):
                     ui.icon("smart_toy", size="18px").classes("text-indigo-500")
                     ui.label("Ответ ИИ").classes("font-semibold text-sm text-indigo-700")
-                ui.label(state.rag_answer_text).classes("text-sm whitespace-pre-wrap")
+                ui.label(_body).classes("text-sm whitespace-pre-wrap")
+                if _sources:
+                    ui.separator()
+                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                        ui.label("Источники:").classes("rag-meta text-xs font-medium")
+                        for _src in _sources:
+                            _src_result = next(
+                                (r for r in state.results if str(r.get("filename") or "").lower() == _src.lower()),
+                                None,
+                            )
+                            _src_path = Path(str(_src_result.get("full_path") or "")) if _src_result else None
+                            if _src_path and _src_path.exists() and _src_path.is_file():
+                                ui.button(_src, icon="description", on_click=lambda p=_src_path: open_file_viewer(p)).props("outline dense no-caps").classes("text-xs")
+                            else:
+                                ui.label(_src).classes("rag-chip text-xs")
+
+        # Сводка по выбранным
+        if state.selection_summary_loading:
+            with ui.row().classes("rag-card w-full p-3 gap-2 items-center bg-violet-50 border border-violet-200"):
+                ui.spinner(size="sm")
+                ui.label("Формирую сводку по выбранным документам…").classes("rag-meta")
+        elif state.selection_summary_text:
+            _sel_body, _sel_sources = _parse_rag_answer(state.selection_summary_text)
+            with ui.column().classes("rag-card w-full p-3 gap-2 bg-violet-50 border border-violet-200"):
+                with ui.row().classes("items-center justify-between w-full"):
+                    with ui.row().classes("items-center gap-1"):
+                        ui.icon("summarize", size="18px").classes("text-violet-600")
+                        ui.label("Сводка по выбранным").classes("font-semibold text-sm text-violet-700")
+                    ui.button(icon="close", on_click=lambda: (
+                        state.__setattr__("selection_summary_text", ""),
+                        render(),
+                    ), color=None).props("flat round dense")
+                ui.label(_sel_body).classes("text-sm whitespace-pre-wrap")
+                if _sel_sources:
+                    ui.separator()
+                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                        ui.label("Источники:").classes("rag-meta text-xs font-medium")
+                        for _src in _sel_sources:
+                            ui.label(_src).classes("rag-chip text-xs")
 
         if not state.results:
             ui.label("Совпадений не найдено.").classes("rag-card p-4 rag-meta")
@@ -4033,6 +4189,21 @@ def _build_page(initial_screen: str = "search") -> None:
             state.active_type_filter = gname
             state.displayed_count = 10
             render()
+
+        # Бар выбранных документов (показывается когда выбрано ≥1)
+        llm_enabled_for_select = bool(state.cfg.get("llm_enabled"))
+        if llm_enabled_for_select and state.selected_result_paths:
+            n_sel = len(state.selected_result_paths)
+            with ui.row().classes("w-full items-center gap-2 bg-violet-50 border border-violet-200 rounded p-2"):
+                ui.icon("checklist").classes("text-violet-500")
+                ui.label(f"Выбрано: {n_sel}").classes("text-violet-700 text-sm font-medium flex-1")
+                if n_sel >= 2:
+                    ui.button("Сводка", icon="summarize", on_click=summarize_selection).props("unelevated dense no-caps").classes("bg-violet-600 text-white")
+                def clear_selection() -> None:
+                    state.selected_result_paths = []
+                    state.selection_summary_text = ""
+                    render()
+                ui.button("Снять выбор", icon="close", on_click=clear_selection, color=None).props("flat dense no-caps")
 
         # Чипы-фильтры
         with ui.row().classes("w-full gap-2 flex-wrap"):
