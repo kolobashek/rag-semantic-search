@@ -3417,6 +3417,99 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.button("Отменить", icon="close", on_click=reset_security).props("flat dense")
                     ui.button("Сохранить настройки безопасности", icon="save", on_click=save_session_ttl).props("outline dense")
 
+        # ── Auth event log ────────────────────────────────────────────────────
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Журнал входов").classes("text-xl font-semibold")
+            ui.label("Последние 100 событий авторизации: входы, выходы, смены пароля.").classes("rag-meta")
+            if not recent_events:
+                with ui.element("div").classes("cd-empty-state py-4"):
+                    ui.icon("history", size="28px").classes("opacity-30")
+                    ui.label("Событий пока нет.").classes("text-xs")
+            else:
+                _AUTH_ACTION_LABELS = {
+                    "login": "Вход",
+                    "login_failed": "Ошибка входа",
+                    "logout": "Выход",
+                    "session_restore": "Восстановление сессии",
+                    "password_change": "Смена пароля",
+                    "register": "Регистрация",
+                }
+                with ui.element("div").classes("w-full overflow-x-auto"):
+                    with ui.element("table").classes("w-full text-xs border-collapse"):
+                        with ui.element("thead"):
+                            with ui.element("tr").classes("border-b rag-section-label"):
+                                for col in ("Время", "Пользователь", "Событие", "IP / детали"):
+                                    ui.element("th").classes("text-left p-2 font-semibold").text = col
+                        with ui.element("tbody"):
+                            for ev in recent_events[:100]:
+                                ok_ev = bool(ev.get("ok", True))
+                                row_cls = "border-b hover:bg-slate-50 dark:hover:bg-slate-800" + (" text-negative" if not ok_ev else "")
+                                with ui.element("tr").classes(row_cls):
+                                    ts = str(ev.get("ts") or "")[:19].replace("T", " ")
+                                    ui.element("td").classes("p-2 font-mono whitespace-nowrap").text = ts
+                                    ui.element("td").classes("p-2 font-medium").text = str(ev.get("username") or "—")
+                                    action_lbl = _AUTH_ACTION_LABELS.get(str(ev.get("event_type") or ""), str(ev.get("event_type") or "—"))
+                                    with ui.element("td").classes("p-2"):
+                                        with ui.row().classes("items-center gap-1"):
+                                            ui.icon("check_circle" if ok_ev else "cancel", size="14px").classes("text-positive" if ok_ev else "text-negative")
+                                            ui.label(action_lbl)
+                                    details = ev.get("details") or {}
+                                    detail_text = str(details.get("ip") or details.get("error") or details.get("reason") or "")
+                                    ui.element("td").classes("p-2 rag-meta truncate max-w-xs").text = detail_text
+
+        # ── Cloud Drive audit log ─────────────────────────────────────────────
+        telemetry = _get_telemetry(state)
+        cd_audit_events = telemetry.list_app_events(feature="cloud_drive", limit=100)
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Аудит Cloud Drive").classes("text-xl font-semibold")
+            ui.label("Последние операции с файлами через API: загрузка, скачивание, перемещение, удаление.").classes("rag-meta")
+            if not cd_audit_events:
+                with ui.element("div").classes("cd-empty-state py-4"):
+                    ui.icon("folder_off", size="28px").classes("opacity-30")
+                    ui.label("Операций через API пока не было.").classes("text-xs")
+            else:
+                _CD_ACTION_LABELS = {
+                    "upload": "Загрузка",
+                    "download": "Скачивание",
+                    "delete": "Удаление",
+                    "move": "Перемещение",
+                    "rename": "Переименование",
+                    "create_folder": "Создание папки",
+                    "list_directory": "Просмотр папки",
+                    "view_node": "Просмотр",
+                    "versions": "Версии",
+                    "reindex": "Переиндексация",
+                }
+                _CD_ACTION_ICON = {
+                    "upload": "upload", "download": "download", "delete": "delete",
+                    "move": "drive_file_move", "rename": "edit", "create_folder": "create_new_folder",
+                    "reindex": "refresh",
+                }
+                with ui.element("div").classes("w-full overflow-x-auto"):
+                    with ui.element("table").classes("w-full text-xs border-collapse"):
+                        with ui.element("thead"):
+                            with ui.element("tr").classes("border-b rag-section-label"):
+                                for col in ("Время", "Пользователь", "Действие", "Путь / детали"):
+                                    ui.element("th").classes("text-left p-2 font-semibold").text = col
+                        with ui.element("tbody"):
+                            for ev in cd_audit_events[:100]:
+                                ok_ev = bool(ev.get("ok", True))
+                                row_cls = "border-b hover:bg-slate-50 dark:hover:bg-slate-800" + (" text-negative" if not ok_ev else "")
+                                with ui.element("tr").classes(row_cls):
+                                    ts = str(ev.get("ts") or "")[:19].replace("T", " ")
+                                    ui.element("td").classes("p-2 font-mono whitespace-nowrap").text = ts
+                                    ui.element("td").classes("p-2 font-medium").text = str(ev.get("username") or "—")
+                                    action = str(ev.get("action") or "")
+                                    action_lbl = _CD_ACTION_LABELS.get(action, action)
+                                    icon_name = _CD_ACTION_ICON.get(action, "storage")
+                                    with ui.element("td").classes("p-2"):
+                                        with ui.row().classes("items-center gap-1"):
+                                            ui.icon(icon_name, size="14px").classes("" if ok_ev else "text-negative")
+                                            ui.label(action_lbl).classes("" if ok_ev else "text-negative")
+                                    details = ev.get("details") or {}
+                                    path = str(details.get("path") or details.get("filename") or details.get("name") or details.get("error") or "")
+                                    ui.element("td").classes("p-2 rag-meta font-mono truncate max-w-xs").text = path
+
     def render_admin_path_settings() -> None:
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             initial_paths = {

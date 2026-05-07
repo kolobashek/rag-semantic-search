@@ -782,6 +782,51 @@ class TelemetryDB:
                     ),
                 )
 
+    def list_app_events(
+        self,
+        *,
+        feature: Optional[str] = None,
+        action: Optional[str] = None,
+        username: Optional[str] = None,
+        ok: Optional[bool] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Return recent app_events rows, newest first."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if feature:
+            clauses.append("feature=?")
+            params.append(str(feature))
+        if action:
+            clauses.append("action=?")
+            params.append(str(action))
+        if username:
+            clauses.append("username=?")
+            params.append(str(username).strip().lower())
+        if ok is not None:
+            clauses.append("ok=?")
+            params.append(1 if ok else 0)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM app_events {where} ORDER BY ts DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "ts": str(row["ts"] or ""),
+                "username": str(row["username"] or ""),
+                "screen": str(row["screen"] or ""),
+                "feature": str(row["feature"] or ""),
+                "action": str(row["action"] or ""),
+                "ok": bool(int(row["ok"] or 0)),
+                "details": json.loads(str(row["details_json"] or "{}")),
+            }
+            for row in rows
+        ]
+
     # ── index runs ────────────────────────────────────────────────────
 
     def get_index_settings(self) -> Dict[str, Any]:
