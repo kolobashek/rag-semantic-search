@@ -574,9 +574,13 @@ def _build_page(initial_screen: str = "search") -> None:
                 suggest_area.clear()
                 await run_search(typed)
 
+            def close_suggestions(_: events.GenericEventArguments | None = None) -> None:
+                suggest_area.clear()
+
             search_input.on("focus", handle_input)
             search_input.on("input", handle_input)
             search_input.on("keyup.enter", submit_from_input)
+            search_input.on("keyup.escape", close_suggestions)
 
     def render_results_loading() -> None:
         content.clear()
@@ -1812,13 +1816,9 @@ def _build_page(initial_screen: str = "search") -> None:
                 on_click=_cd_upload_dialog, color=None,
             ).props("flat dense no-caps align=left").classes("w-full")
             if cd_path:
-                def _search_this_folder(p: str = cd_path) -> None:
-                    state.query = f"path:{p}"
-                    state.screen = "search"
-                    render()
                 ui.button(
                     "Найти в этой папке", icon="search",
-                    on_click=_search_this_folder, color=None,
+                    on_click=choose_query_handler(f"path:{cd_path}"), color=None,
                 ).props("flat dense no-caps align=left").classes("w-full")
             ui.separator()
             ui.label("Фильтры").classes("font-semibold text-sm")
@@ -2455,8 +2455,15 @@ def _build_page(initial_screen: str = "search") -> None:
                 render_star(current_for_toolbar, item_type="folder")
             with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
                 ui.icon("search").classes("text-lg")
-                ui.input(placeholder="Семантический поиск только в этой папке").props("borderless dense").classes("flex-1")
-                ui.checkbox("Включая подпапки", value=True)
+                _folder_search_input = ui.input(placeholder="Семантический поиск только в этой папке").props("borderless dense").classes("flex-1")
+
+                async def _run_folder_search(_: events.GenericEventArguments | None = None) -> None:
+                    q = str(_folder_search_input.value or "").strip()
+                    if q:
+                        await choose_query(f"{q} path:{current_for_toolbar}")
+
+                _folder_search_input.on("keyup.enter", _run_folder_search)
+                ui.button(icon="search", on_click=_run_folder_search, color=None).props("flat round dense")
                 ui.checkbox("AI", value=bool(state.cfg.get("llm_enabled")))
             with ui.row().classes("rag-card w-full p-3 gap-3 items-center"):
                 filter_input = ui.input(placeholder="Фильтр по имени", value=state.explorer_filter).props("dense outlined clearable debounce=0").classes("min-w-64 flex-1")
