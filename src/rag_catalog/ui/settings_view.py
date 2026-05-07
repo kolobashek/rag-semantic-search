@@ -1,0 +1,1832 @@
+"""
+settings_view.py — Settings screen renderer (user profile + admin panels).
+
+Depends on: .state, .helpers, .system, nicegui, rag_catalog.core.
+Imported by: nice_app.py.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import threading
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from nicegui import app, run, ui
+
+from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.rag_core import load_config
+from rag_catalog.core.user_auth_db import UserAuthDB
+
+from .helpers import (
+    _cd_get_service,
+    _telegram_deeplink,
+)
+from .state import (
+    CONFIG_PATH_KEYS,
+    PageState,
+    _get_auth_db,
+    _get_telemetry,
+    _log_app_event,
+    _refresh_current_user,
+    _save_config_patch,
+    _toggle_favorite,
+    _toggle_saved_search,
+    _username,
+)
+from .system import (
+    _read_cloud_bootstrap_status,
+    _safe_int,
+    _stop_managed_timer,
+)
+
+
+def render_settings_screen(
+    state: PageState,
+    *,
+    render_fn: Callable,
+    query_handler: Callable,
+) -> None:
+
+    def render_admin_users(auth_db: UserAuthDB) -> None:
+        with ui.column().classes("rag-card w-full p-4 gap-4"):
+            ui.label("Админ-панель пользователей").classes("text-xl font-semibold")
+            with ui.expansion("Создать пользователя", icon="person_add").classes("w-full"):
+                new_username = ui.input("Логин").props("dense outlined").classes("w-full")
+                new_display = ui.input("Имя").props("dense outlined").classes("w-full")
+                new_telegram = ui.input("Telegram chat id").props("dense outlined").classes("w-full")
+                new_telegram_username = ui.input("Telegram username").props("dense outlined prefix=@").classes("w-full")
+                new_password = ui.input("Временный пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                new_role = ui.select(["user", "admin"], value="user", label="Роль").props("dense outlined").classes("w-full")
+                new_status = ui.select(["active", "pending", "blocked"], value="active", label="Статус").props("dense outlined").classes("w-full")
+                new_must_change = ui.checkbox("Потребовать смену пароля", value=True)
+
+                def create_user() -> None:
+                    ok = auth_db.admin_create_user(
+                        username=str(new_username.value or ""),
+                        display_name=str(new_display.value or ""),
+                        telegram_chat_id=str(new_telegram.value or ""),
+                        telegram_username=str(new_telegram_username.value or ""),
+                        password=str(new_password.value or ""),
+                        role=str(new_role.value or "user"),
+                        status=str(new_status.value or "active"),
+                        must_change_password=bool(new_must_change.value),
+                    )
+                    ui.notify("Пользователь создан." if ok else "Не удалось создать пользователя.", type="positive" if ok else "negative")
+                    render_fn()
+
+                ui.button("Создать", icon="person_add", on_click=create_user).props("unelevated")
+
+            users = auth_db.list_users()
+            for user in users:
+                username = str(user.get("username") or "")
+                role = str(user.get("role") or "user")
+                status = str(user.get("status") or "")
+                with ui.expansion(f"{username} · {role} · {status}", icon="person").classes("w-full"):
+                    initial_user = {
+                        "display_name": str(user.get("display_name") or ""),
+                        "telegram_chat_id": str(user.get("telegram_chat_id") or ""),
+                        "telegram_username": str(user.get("telegram_username") or ""),
+                        "role": role,
+                        "status": status or "active",
+                        "must_change_password": bool(int(user.get("must_change_password") or 0)),
+                    }
+                    display_input = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
+                    telegram_input = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
+                    telegram_username_input = ui.input("Telegram username", value=str(user.get("telegram_username") or "")).props("dense outlined prefix=@").classes("w-full")
+                    role_input = ui.select(["user", "admin"], value=role, label="Роль").props("dense outlined").classes("w-full")
+                    status_input = ui.select(["active", "pending", "blocked"], value=status or "active", label="Статус").props("dense outlined").classes("w-full")
+                    must_input = ui.checkbox("Потребовать смену пароля", value=bool(int(user.get("must_change_password") or 0)))
+                    reset_password = ui.input("Новый временный пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+                    def save_user(
+                        username: str = username,
+                        display_input: Any = display_input,
+                        telegram_input: Any = telegram_input,
+                        telegram_username_input: Any = telegram_username_input,
+                        role_input: Any = role_input,
+                        status_input: Any = status_input,
+                        must_input: Any = must_input,
+                    ) -> None:
+                        ok = auth_db.admin_update_user(
+                            username=username,
+                            display_name=str(display_input.value or ""),
+                            telegram_chat_id=str(telegram_input.value or ""),
+                            telegram_username=str(telegram_username_input.value or ""),
+                            role=str(role_input.value or "user"),
+                            status=str(status_input.value or "active"),
+                            must_change_password=bool(must_input.value),
+                        )
+                        initial_user.update({
+                            "display_name": str(display_input.value or ""),
+                            "telegram_chat_id": str(telegram_input.value or ""),
+                            "telegram_username": str(telegram_username_input.value or ""),
+                            "role": str(role_input.value or "user"),
+                            "status": str(status_input.value or "active"),
+                            "must_change_password": bool(must_input.value),
+                        })
+                        user_actions.set_visibility(False)
+                        ui.notify("Пользователь обновлен." if ok else "Не удалось обновить пользователя.", type="positive" if ok else "negative")
+                        _refresh_current_user(state)
+                        render_fn()
+
+                    def set_password(
+                        username: str = username,
+                        reset_password: Any = reset_password,
+                    ) -> None:
+                        ok = auth_db.admin_set_password(
+                            username=username,
+                            new_password=str(reset_password.value or ""),
+                            must_change_password=True,
+                        )
+                        ui.notify("Пароль обновлен." if ok else "Введите новый пароль.", type="positive" if ok else "warning")
+                        render_fn()
+
+                    user_actions = ui.row().classes("rag-dirty-actions")
+                    user_actions.set_visibility(False)
+
+                    def current_user_values() -> Dict[str, Any]:
+                        return {
+                            "display_name": str(display_input.value or ""),
+                            "telegram_chat_id": str(telegram_input.value or ""),
+                            "telegram_username": str(telegram_username_input.value or ""),
+                            "role": str(role_input.value or "user"),
+                            "status": str(status_input.value or "active"),
+                            "must_change_password": bool(must_input.value),
+                        }
+
+                    def refresh_user_dirty() -> None:
+                        user_actions.set_visibility(current_user_values() != initial_user)
+
+                    def reset_user_fields() -> None:
+                        display_input.set_value(initial_user["display_name"])
+                        telegram_input.set_value(initial_user["telegram_chat_id"])
+                        telegram_username_input.set_value(initial_user["telegram_username"])
+                        role_input.set_value(initial_user["role"])
+                        status_input.set_value(initial_user["status"])
+                        must_input.set_value(initial_user["must_change_password"])
+                        user_actions.set_visibility(False)
+
+                    display_input.on_value_change(lambda _: refresh_user_dirty())
+                    telegram_input.on_value_change(lambda _: refresh_user_dirty())
+                    telegram_username_input.on_value_change(lambda _: refresh_user_dirty())
+                    role_input.on_value_change(lambda _: refresh_user_dirty())
+                    status_input.on_value_change(lambda _: refresh_user_dirty())
+                    must_input.on_value_change(lambda _: refresh_user_dirty())
+
+                    with ui.row().classes("gap-2"):
+                        ui.button("Сбросить пароль", icon="key", on_click=set_password).props("outline")
+                        def make_invite(
+                            username: str = username,
+                            display_input: Any = display_input,
+                            telegram_username_input: Any = telegram_username_input,
+                        ) -> None:
+                            bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+                            if not bot_link:
+                                ui.notify("В config.json не задан telegram_bot_link.", type="warning")
+                                return
+                            out = auth_db.create_telegram_token(
+                                purpose="invite",
+                                username=username,
+                                display_name=str(display_input.value or ""),
+                                telegram_username=str(telegram_username_input.value or ""),
+                                created_by=_username(state),
+                                ttl_minutes=7 * 24 * 60,
+                            )
+                            link = _telegram_deeplink(bot_link, "invite", str(out.get("token") or ""))
+                            ui.notify(f"Invite-link: {link}", type="positive", timeout=12000)
+
+                        ui.button("Invite Telegram", icon="link", on_click=make_invite).props("outline")
+                    with user_actions:
+                        with ui.row().classes("rag-dirty-actions-inner"):
+                            ui.button("Отменить", icon="close", on_click=reset_user_fields).props("flat dense")
+                            ui.button("Сохранить", icon="save", on_click=save_user).props("outline dense")
+
+    def render_admin_telegram_chats(auth_db: UserAuthDB) -> None:
+        rows = auth_db.list_telegram_chats()
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Telegram чаты").classes("text-xl font-semibold")
+            if not rows:
+                ui.label("Привязанных Telegram chat_id пока нет.").classes("rag-meta")
+                return
+            ui.table(
+                rows=rows,
+                columns=[
+                    {"name": "username", "label": "Пользователь", "field": "username"},
+                    {"name": "display_name", "label": "Имя", "field": "display_name"},
+                    {"name": "role", "label": "Роль", "field": "role"},
+                    {"name": "status", "label": "Статус", "field": "status"},
+                    {"name": "telegram_chat_id", "label": "Chat ID", "field": "telegram_chat_id"},
+                    {"name": "last_telegram_event_at", "label": "Последнее Telegram-событие", "field": "last_telegram_event_at"},
+                    {"name": "last_login_at", "label": "Последний web-вход", "field": "last_login_at"},
+                ],
+                pagination=10,
+            ).classes("w-full")
+
+    def render_admin_registration_requests(auth_db: UserAuthDB) -> None:
+        rows = auth_db.list_registration_requests(status="pending", limit=50)
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Заявки на регистрацию").classes("text-xl font-semibold")
+            if not rows:
+                ui.label("Ожидающих заявок нет.").classes("rag-meta")
+                return
+            for row in rows:
+                req_id = int(row.get("id") or 0)
+                title = str(row.get("username") or row.get("display_name") or f"заявка {req_id}")
+                tg = str(row.get("telegram_username") or row.get("telegram_chat_id") or "")
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label(f"#{req_id}").classes("rag-chip")
+                    ui.label(title).classes("font-medium")
+                    ui.label(f"Telegram: {tg or '-'}").classes("rag-meta flex-1")
+                    ui.label(str(row.get("source") or "")).classes("rag-meta")
+
+                    def approve(req_id: int = req_id) -> None:
+                        out = auth_db.review_registration_request(
+                            request_id=req_id,
+                            reviewed_by=_username(state),
+                            decision="approved",
+                        )
+                        ui.notify(
+                            f"Заявка одобрена: {out.get('username')}" if out.get("ok") else f"Не удалось одобрить: {out.get('reason')}",
+                            type="positive" if out.get("ok") else "negative",
+                        )
+                        render_fn()
+
+                    def reject(req_id: int = req_id) -> None:
+                        out = auth_db.review_registration_request(
+                            request_id=req_id,
+                            reviewed_by=_username(state),
+                            decision="rejected",
+                        )
+                        ui.notify(
+                            "Заявка отклонена." if out.get("ok") else f"Не удалось отклонить: {out.get('reason')}",
+                            type="positive" if out.get("ok") else "negative",
+                        )
+                        render_fn()
+
+                    ui.button("Одобрить", icon="check", on_click=approve).props("outline dense")
+                    ui.button("Отклонить", icon="close", on_click=reject).props("flat dense")
+
+    def render_admin_security_settings(auth_db: UserAuthDB) -> None:
+        current_ttl = auth_db.get_session_ttl_days()
+        current_show_system = auth_db.get_show_system_files_for_admin()
+        all_users = auth_db.list_users()
+        must_change_users = [u for u in all_users if int(u.get("must_change_password") or 0)]
+        recent_events = auth_db.list_auth_events(limit=100)
+        failed_logins = [e for e in recent_events if not int(e.get("ok") or 0) and str(e.get("event_type") or "") == "login_failed"]
+
+        # Critical: default admin password still in use
+        if auth_db.has_default_admin_password():
+            with ui.row().classes("items-center gap-3 bg-red-50 dark:bg-red-950 border border-red-300 dark:border-red-700 rounded-lg p-4 w-full"):
+                ui.icon("gpp_bad").classes("text-red-500 text-3xl flex-shrink-0")
+                with ui.column().classes("flex-1 gap-1"):
+                    ui.label("Критическая уязвимость: пароль admin не изменён").classes("font-semibold text-red-700 dark:text-red-300")
+                    ui.label(
+                        "Пользователь admin использует пароль по умолчанию «admin». "
+                        "Смените пароль немедленно — любой может получить права администратора."
+                    ).classes("text-red-600 dark:text-red-400 text-sm")
+                ui.button(
+                    "Сменить пароль", icon="key",
+                    on_click=lambda: setattr(state, "settings_section", "profile") or render_fn(),
+                ).props("outline dense color=negative")
+
+        if must_change_users:
+            with ui.row().classes("items-center gap-2 bg-orange-50 border border-orange-200 rounded p-3 w-full"):
+                ui.icon("warning").classes("text-orange-500")
+                with ui.column().classes("gap-0"):
+                    ui.label(f"{len(must_change_users)} пользователей должны сменить пароль").classes("text-orange-700 text-sm font-medium")
+                    ui.label(", ".join(str(u.get("username") or "") for u in must_change_users)).classes("text-orange-600 text-xs")
+
+        with ui.row().classes("w-full gap-3"):
+            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                ui.icon("group").classes("text-2xl text-primary")
+                ui.label(str(len(all_users))).classes("text-xl font-semibold")
+                ui.label("Пользователей").classes("rag-meta text-xs")
+            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                count_color = "text-negative" if must_change_users else "text-positive"
+                ui.icon("lock_reset").classes(f"text-2xl {count_color}")
+                ui.label(str(len(must_change_users))).classes(f"text-xl font-semibold {count_color}")
+                ui.label("Смена пароля").classes("rag-meta text-xs")
+            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                fail_color = "text-negative" if failed_logins else "text-positive"
+                ui.icon("no_accounts").classes(f"text-2xl {fail_color}")
+                ui.label(str(len(failed_logins))).classes(f"text-xl font-semibold {fail_color}")
+                ui.label("Неудачных входов").classes("rag-meta text-xs")
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            initial_security = {
+                "ttl": int(current_ttl),
+                "show_system": bool(current_show_system),
+            }
+            ui.label("Безопасность").classes("text-xl font-semibold")
+            ui.label("Максимальная длительность новой сессии пользователя. Допустимый диапазон: 1-7 дней.").classes("rag-meta")
+            ttl_input = ui.number(
+                "Срок сессии, дней",
+                value=current_ttl,
+                min=1,
+                max=7,
+                step=1,
+            ).props("dense outlined").classes("w-full max-w-xs")
+            show_system_input = ui.checkbox(
+                "Показывать служебные файлы администратору",
+                value=current_show_system,
+            )
+            ui.label("Обычные пользователи служебные файлы не видят независимо от этой настройки.").classes("rag-meta")
+            action_row = ui.row().classes("rag-dirty-actions")
+            action_row.set_visibility(False)
+
+            def current_security() -> Dict[str, Any]:
+                return {
+                    "ttl": int(ttl_input.value or current_ttl),
+                    "show_system": bool(show_system_input.value),
+                }
+
+            def refresh_security_dirty() -> None:
+                action_row.set_visibility(current_security() != initial_security)
+
+            def reset_security() -> None:
+                ttl_input.set_value(initial_security["ttl"])
+                show_system_input.set_value(initial_security["show_system"])
+                action_row.set_visibility(False)
+
+            def save_session_ttl() -> None:
+                saved = auth_db.set_session_ttl_days(int(ttl_input.value or current_ttl))
+                show_system = auth_db.set_show_system_files_for_admin(bool(show_system_input.value))
+                initial_security.update({"ttl": int(saved), "show_system": bool(show_system)})
+                action_row.set_visibility(False)
+                _log_app_event(
+                    state,
+                    "settings",
+                    "security",
+                    details={"session_ttl_days": saved, "show_system_files_for_admin": show_system},
+                )
+                ui.notify(f"Сохранено: сессии {saved} дн., служебные файлы {'видны админу' if show_system else 'скрыты'}.", type="positive")
+                render_fn()
+
+            ttl_input.on_value_change(lambda _: refresh_security_dirty())
+            show_system_input.on_value_change(lambda _: refresh_security_dirty())
+            with action_row:
+                with ui.row().classes("rag-dirty-actions-inner"):
+                    ui.button("Отменить", icon="close", on_click=reset_security).props("flat dense")
+                    ui.button("Сохранить настройки безопасности", icon="save", on_click=save_session_ttl).props("outline dense")
+
+        # ── Auth event log ────────────────────────────────────────────────────
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Журнал входов").classes("text-xl font-semibold")
+            ui.label("Последние 100 событий авторизации: входы, выходы, смены пароля.").classes("rag-meta")
+            if not recent_events:
+                with ui.element("div").classes("cd-empty-state py-4"):
+                    ui.icon("history", size="28px").classes("opacity-30")
+                    ui.label("Событий пока нет.").classes("text-xs")
+            else:
+                _AUTH_ACTION_LABELS = {
+                    "login": "Вход",
+                    "login_failed": "Ошибка входа",
+                    "logout": "Выход",
+                    "session_restore": "Восстановление сессии",
+                    "password_change": "Смена пароля",
+                    "register": "Регистрация",
+                }
+                with ui.element("div").classes("w-full overflow-x-auto"):
+                    with ui.element("table").classes("w-full text-xs border-collapse"):
+                        with ui.element("thead"):
+                            with ui.element("tr").classes("border-b rag-section-label"):
+                                for col in ("Время", "Пользователь", "Событие", "IP / детали"):
+                                    ui.element("th").classes("text-left p-2 font-semibold").text = col
+                        with ui.element("tbody"):
+                            for ev in recent_events[:100]:
+                                ok_ev = bool(ev.get("ok", True))
+                                row_cls = "border-b hover:bg-slate-50 dark:hover:bg-slate-800" + (" text-negative" if not ok_ev else "")
+                                with ui.element("tr").classes(row_cls):
+                                    ts = str(ev.get("ts") or "")[:19].replace("T", " ")
+                                    ui.element("td").classes("p-2 font-mono whitespace-nowrap").text = ts
+                                    ui.element("td").classes("p-2 font-medium").text = str(ev.get("username") or "—")
+                                    action_lbl = _AUTH_ACTION_LABELS.get(str(ev.get("event_type") or ""), str(ev.get("event_type") or "—"))
+                                    with ui.element("td").classes("p-2"):
+                                        with ui.row().classes("items-center gap-1"):
+                                            ui.icon("check_circle" if ok_ev else "cancel", size="14px").classes("text-positive" if ok_ev else "text-negative")
+                                            ui.label(action_lbl)
+                                    details = ev.get("details") or {}
+                                    detail_text = str(details.get("ip") or details.get("error") or details.get("reason") or "")
+                                    ui.element("td").classes("p-2 rag-meta truncate max-w-xs").text = detail_text
+
+        # ── Cloud Drive audit log ─────────────────────────────────────────────
+        telemetry = _get_telemetry(state)
+        cd_audit_events = telemetry.list_app_events(feature="cloud_drive", limit=100)
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Аудит Cloud Drive").classes("text-xl font-semibold")
+            ui.label("Последние операции с файлами через API: загрузка, скачивание, перемещение, удаление.").classes("rag-meta")
+            if not cd_audit_events:
+                with ui.element("div").classes("cd-empty-state py-4"):
+                    ui.icon("folder_off", size="28px").classes("opacity-30")
+                    ui.label("Операций через API пока не было.").classes("text-xs")
+            else:
+                _CD_ACTION_LABELS = {
+                    "upload": "Загрузка",
+                    "download": "Скачивание",
+                    "delete": "Удаление",
+                    "move": "Перемещение",
+                    "rename": "Переименование",
+                    "create_folder": "Создание папки",
+                    "list_directory": "Просмотр папки",
+                    "view_node": "Просмотр",
+                    "versions": "Версии",
+                    "reindex": "Переиндексация",
+                }
+                _CD_ACTION_ICON = {
+                    "upload": "upload", "download": "download", "delete": "delete",
+                    "move": "drive_file_move", "rename": "edit", "create_folder": "create_new_folder",
+                    "reindex": "refresh",
+                }
+                with ui.element("div").classes("w-full overflow-x-auto"):
+                    with ui.element("table").classes("w-full text-xs border-collapse"):
+                        with ui.element("thead"):
+                            with ui.element("tr").classes("border-b rag-section-label"):
+                                for col in ("Время", "Пользователь", "Действие", "Путь / детали"):
+                                    ui.element("th").classes("text-left p-2 font-semibold").text = col
+                        with ui.element("tbody"):
+                            for ev in cd_audit_events[:100]:
+                                ok_ev = bool(ev.get("ok", True))
+                                row_cls = "border-b hover:bg-slate-50 dark:hover:bg-slate-800" + (" text-negative" if not ok_ev else "")
+                                with ui.element("tr").classes(row_cls):
+                                    ts = str(ev.get("ts") or "")[:19].replace("T", " ")
+                                    ui.element("td").classes("p-2 font-mono whitespace-nowrap").text = ts
+                                    ui.element("td").classes("p-2 font-medium").text = str(ev.get("username") or "—")
+                                    action = str(ev.get("action") or "")
+                                    action_lbl = _CD_ACTION_LABELS.get(action, action)
+                                    icon_name = _CD_ACTION_ICON.get(action, "storage")
+                                    with ui.element("td").classes("p-2"):
+                                        with ui.row().classes("items-center gap-1"):
+                                            ui.icon(icon_name, size="14px").classes("" if ok_ev else "text-negative")
+                                            ui.label(action_lbl).classes("" if ok_ev else "text-negative")
+                                    details = ev.get("details") or {}
+                                    path = str(details.get("path") or details.get("filename") or details.get("name") or details.get("error") or "")
+                                    ui.element("td").classes("p-2 rag-meta font-mono truncate max-w-xs").text = path
+
+    def render_admin_path_settings() -> None:
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            initial_paths = {
+                "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
+                "qdrant_url": str(state.cfg.get("qdrant_url") or "").strip(),
+                "qdrant_db_path": str(state.cfg.get("qdrant_db_path") or "").strip(),
+                "collection_name": str(state.cfg.get("collection_name") or "catalog").strip() or "catalog",
+                "telemetry_db_path": str(state.cfg.get("telemetry_db_path") or "").strip(),
+                "log_file": str(state.cfg.get("log_file") or "").strip(),
+            }
+            ui.label("Пути и подключение").classes("text-xl font-semibold")
+            ui.label("Эти настройки видны только администратору. После сохранения поиск переподключается к Qdrant с новыми значениями.").classes("rag-meta")
+            catalog_input = ui.input("Каталог документов", value=str(state.cfg.get("catalog_path") or "")).props("dense outlined").classes("w-full")
+            qdrant_url_input = ui.input("Qdrant URL", value=str(state.cfg.get("qdrant_url") or "")).props("dense outlined").classes("w-full")
+            qdrant_db_input = ui.input("Локальный путь Qdrant", value=str(state.cfg.get("qdrant_db_path") or "")).props("dense outlined").classes("w-full")
+            collection_input = ui.input("Коллекция", value=str(state.cfg.get("collection_name") or "catalog")).props("dense outlined").classes("w-full")
+            telemetry_input = ui.input("БД телеметрии", value=str(state.cfg.get("telemetry_db_path") or "")).props("dense outlined").classes("w-full")
+            log_input = ui.input("Лог автоматизации", value=str(state.cfg.get("log_file") or "")).props("dense outlined").classes("w-full")
+
+            with ui.row().classes("w-full gap-2"):
+                ui.label(f"Текущий каталог: {state.cfg.get('catalog_path') or '-'}").classes("rag-path")
+                ui.label(f"Текущий Qdrant: {state.cfg.get('qdrant_url') or state.cfg.get('qdrant_db_path') or '-'}").classes("rag-path")
+            action_row = ui.row().classes("rag-dirty-actions")
+            action_row.set_visibility(False)
+
+            def current_paths() -> Dict[str, Any]:
+                return {
+                    "catalog_path": str(catalog_input.value or "").strip(),
+                    "qdrant_url": str(qdrant_url_input.value or "").strip(),
+                    "qdrant_db_path": str(qdrant_db_input.value or "").strip(),
+                    "collection_name": str(collection_input.value or "catalog").strip() or "catalog",
+                    "telemetry_db_path": str(telemetry_input.value or "").strip(),
+                    "log_file": str(log_input.value or "").strip(),
+                }
+
+            def refresh_paths_dirty() -> None:
+                action_row.set_visibility(current_paths() != initial_paths)
+
+            def reset_paths() -> None:
+                catalog_input.set_value(initial_paths["catalog_path"])
+                qdrant_url_input.set_value(initial_paths["qdrant_url"])
+                qdrant_db_input.set_value(initial_paths["qdrant_db_path"])
+                collection_input.set_value(initial_paths["collection_name"])
+                telemetry_input.set_value(initial_paths["telemetry_db_path"])
+                log_input.set_value(initial_paths["log_file"])
+                action_row.set_visibility(False)
+
+            def save_paths() -> None:
+                values = current_paths()
+                new_catalog = values["catalog_path"]
+                if new_catalog and not Path(new_catalog).exists():
+                    ui.notify("Каталог документов не найден. Проверьте путь.", type="negative")
+                    return
+                new_qdrant_url = values["qdrant_url"]
+                new_qdrant_db = values["qdrant_db_path"]
+                if not new_qdrant_url and not new_qdrant_db:
+                    ui.notify("Укажите Qdrant URL или локальный путь Qdrant.", type="warning")
+                    return
+                try:
+                    state.cfg = _save_config_patch(values)
+                    initial_paths.update(values)
+                    action_row.set_visibility(False)
+                    state.searcher = None
+                    state.searcher_error = ""
+                    state.telemetry = None
+                    _log_app_event(state, "settings", "save_paths", details={key: state.cfg.get(key) for key in CONFIG_PATH_KEYS})
+                    ui.notify("Пути сохранены.", type="positive")
+                    render_fn()
+                except Exception as exc:
+                    ui.notify(f"Не удалось сохранить пути: {exc}", type="negative")
+
+            catalog_input.on_value_change(lambda _: refresh_paths_dirty())
+            qdrant_url_input.on_value_change(lambda _: refresh_paths_dirty())
+            qdrant_db_input.on_value_change(lambda _: refresh_paths_dirty())
+            collection_input.on_value_change(lambda _: refresh_paths_dirty())
+            telemetry_input.on_value_change(lambda _: refresh_paths_dirty())
+            log_input.on_value_change(lambda _: refresh_paths_dirty())
+            with action_row:
+                with ui.row().classes("rag-dirty-actions-inner"):
+                    ui.button("Отменить", icon="close", on_click=reset_paths).props("flat dense")
+                    ui.button("Сохранить пути", icon="save", on_click=save_paths).props("outline dense")
+
+    def render_admin_cloud_drive_settings() -> None:
+        default_db_path = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_drive.db").resolve())
+        default_storage_root = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_storage").resolve())
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            initial_cloud = {
+                "cloud_drive_enabled": bool(state.cfg.get("cloud_drive_enabled")),
+                "cloud_drive_db_path": str(state.cfg.get("cloud_drive_db_path") or default_db_path).strip(),
+                "cloud_drive_storage": str(state.cfg.get("cloud_drive_storage") or "local").strip() or "local",
+                "cloud_drive_storage_root": str(state.cfg.get("cloud_drive_storage_root") or default_storage_root).strip(),
+                "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
+            }
+            stats_ref: Dict[str, Any] = {"value": None}
+            ui.label("Cloud Drive").classes("text-xl font-semibold")
+            ui.label(
+                "Централизованный реестр файлов и папок: дерево каталогов, версии, фоновые задачи. "
+                "Поддерживается local storage; импорт — из указанного каталога источника."
+            ).classes("rag-meta")
+
+            enabled_input = ui.checkbox("Включить Cloud Drive", value=initial_cloud["cloud_drive_enabled"])
+            enabled_input.tooltip("Включает реестр файлов и хранилище Cloud Drive. После включения в проводнике используется реестр вместо прямого обхода файловой системы.")
+
+            db_input = ui.input("База реестра Cloud Drive", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("w-full")
+            db_input.tooltip("SQLite-база реестра: хранит структуру папок, метаданные файлов, версии и историю фоновых задач.")
+
+            storage_kind = ui.select(
+                {"local": "Local storage", "s3": "S3 / MinIO"},
+                value=initial_cloud["cloud_drive_storage"],
+                label="Хранилище файлов",
+            ).props("dense outlined").classes("w-full max-w-sm")
+            storage_kind.tooltip("Место физического хранения содержимого файлов. Local — локальная папка на сервере; S3/MinIO — объектное хранилище.")
+
+            storage_root_input = ui.input("Папка хранения файлов", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("w-full")
+            storage_root_input.tooltip("Корневая папка, куда сохраняются физические файлы при использовании local storage. Должна существовать и быть доступна для записи.")
+
+            catalog_input = ui.input("Источник импорта", value=initial_cloud["catalog_path"]).props("dense outlined").classes("w-full")
+            catalog_input.tooltip("Каталог источника для импорта: bootstrap сканирует его дерево папок и файлов и заносит в реестр. Обычно совпадает с основным каталогом документов.")
+
+            bootstrap_limit = ui.number("Лимит импорта файлов (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full max-w-sm")
+            bootstrap_limit.tooltip("Ограничивает количество файлов при пробном запуске импорта. 0 — без ограничения, импортируются все файлы из каталога источника.")
+
+            status_box = ui.column().classes("w-full gap-1")
+            bootstrap_box = ui.column().classes("w-full gap-1")
+            jobs_box = ui.column().classes("w-full gap-2")
+            action_row = ui.row().classes("rag-dirty-actions")
+            action_row.set_visibility(False)
+
+            def current_cloud_values() -> Dict[str, Any]:
+                return {
+                    "cloud_drive_enabled": bool(enabled_input.value),
+                    "cloud_drive_db_path": str(db_input.value or "").strip(),
+                    "cloud_drive_storage": str(storage_kind.value or "local").strip() or "local",
+                    "cloud_drive_storage_root": str(storage_root_input.value or "").strip(),
+                    "catalog_path": str(catalog_input.value or "").strip(),
+                }
+
+            def refresh_cloud_visibility() -> None:
+                is_local = str(storage_kind.value or "local") == "local"
+                storage_root_input.set_visibility(is_local)
+
+            def refresh_cloud_dirty() -> None:
+                action_row.set_visibility(current_cloud_values() != initial_cloud)
+
+            def reset_cloud_settings() -> None:
+                enabled_input.set_value(initial_cloud["cloud_drive_enabled"])
+                db_input.set_value(initial_cloud["cloud_drive_db_path"])
+                storage_kind.set_value(initial_cloud["cloud_drive_storage"])
+                storage_root_input.set_value(initial_cloud["cloud_drive_storage_root"])
+                catalog_input.set_value(initial_cloud["catalog_path"])
+                refresh_cloud_visibility()
+                action_row.set_visibility(False)
+
+            def render_cloud_stats(stats_obj: Any, *, title: str) -> None:
+                stats_ref["value"] = stats_obj
+                status_box.clear()
+                with status_box:
+                    ui.label(title).classes("font-semibold text-sm")
+                    if not stats_obj:
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("cloud_off", size="28px").classes("opacity-30")
+                            ui.label("Реестр ещё не инициализирован — нажмите «Инициализировать реестр».").classes("text-center")
+                        return
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        for icon_name, lbl, val in [
+                            ("folder",      "Папок",  f"{int(getattr(stats_obj, 'folders', 0)):,}".replace(",", " ")),
+                            ("description", "Файлов", f"{int(getattr(stats_obj, 'files', 0)):,}".replace(",", " ")),
+                            ("history",     "Версий", f"{int(getattr(stats_obj, 'versions', 0)):,}".replace(",", " ")),
+                            ("pending",     "Jobs",   f"{int(getattr(stats_obj, 'pending_jobs', 0)):,}".replace(",", " ")),
+                        ]:
+                            with ui.column().classes("rag-card p-2 gap-0 items-center min-w-20 flex-1"):
+                                ui.icon(icon_name, size="18px").classes("text-indigo-400")
+                                ui.label(val).classes("text-base font-semibold leading-tight")
+                                ui.label(lbl).classes("rag-meta text-xs")
+                    root_path = str(getattr(stats_obj, "root_path", "") or "")
+                    if root_path:
+                        ui.label(f"Корень: {root_path}").classes("rag-path text-xs")
+
+            _CD_STATUS_META = {
+                "pending":   ("schedule",     "cd-status-pending",   "Ожидание"),
+                "running":   ("sync",         "cd-status-running",   "Выполняется"),
+                "done":      ("check_circle", "cd-status-done",      "Завершён"),
+                "error":     ("error",        "cd-status-error",     "Ошибка"),
+                "stale":     ("warning",      "cd-status-error",     "Состояние устарело"),
+                "cancelled": ("cancel",       "cd-status-cancelled", "Отменён"),
+            }
+
+            def _cd_status_badge(status: str) -> None:
+                icon_name, css_cls, label_ru = _CD_STATUS_META.get(
+                    status, ("help", "cd-status-cancelled", status)
+                )
+                with ui.element("span").classes(f"cd-status-badge {css_cls}"):
+                    ui.icon(icon_name, size="14px")
+                    ui.label(label_ru)
+
+            def render_bootstrap_status() -> None:
+                bootstrap_state = _read_cloud_bootstrap_status(build_cloud_config())
+                bootstrap_box.clear()
+                with bootstrap_box:
+                    ui.label("Статус импорта").classes("font-semibold text-sm")
+                    raw_status = str(bootstrap_state.get("status") or bootstrap_state.get("job_status") or "idle")
+                    status = {
+                        "pending": "pending",
+                        "running": "running",
+                        "completed": "done",
+                        "failed": "error",
+                        "cancelled": "cancelled",
+                    }.get(raw_status, raw_status)
+                    if status == "idle":
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("cloud_upload", size="24px").classes("opacity-30")
+                            ui.label("Импорт не запущен. Нажмите «Импортировать в реестр» ниже.").classes("text-center")
+                        return
+                    _cd_status_badge(status)
+                    imported_files = _safe_int(bootstrap_state.get("imported_files"), 0)
+                    imported_folders = _safe_int(bootstrap_state.get("imported_folders"), 0)
+                    total_files = _safe_int(bootstrap_state.get("total_files"), 0)
+                    if total_files > 0:
+                        ratio = max(0.0, min(1.0, imported_files / total_files))
+                        ui.linear_progress(value=ratio).classes("w-full")
+                        ui.label(
+                            f"Файлы: {imported_files:,} / {total_files:,} ({round(ratio * 100)}%)".replace(",", " ")
+                        ).classes("rag-meta")
+                    else:
+                        ui.label(f"Файлы: {imported_files:,}".replace(",", " ")).classes("rag-meta")
+                    ui.label(f"Папки: {imported_folders:,}".replace(",", " ")).classes("rag-meta")
+                    current_path = str(bootstrap_state.get("current_path") or "").strip()
+                    if current_path:
+                        ui.label(f"Текущий путь: {current_path}").classes("rag-path")
+                    error_text = str(bootstrap_state.get("error") or "").strip()
+                    if error_text:
+                        ui.label(error_text).classes("text-negative text-sm")
+                    started_at = str(bootstrap_state.get("started_at") or "").strip()
+                    finished_at = str(bootstrap_state.get("finished_at") or "").strip()
+                    if started_at:
+                        ui.label(f"Старт: {started_at[:19].replace('T', ' ')}").classes("rag-meta")
+                    if finished_at:
+                        ui.label(f"Финиш: {finished_at[:19].replace('T', ' ')}").classes("rag-meta")
+
+            def render_bootstrap_jobs() -> None:
+                jobs_box.clear()
+                cfg_now = build_cloud_config()
+                if not str(cfg_now.get("cloud_drive_db_path") or "").strip():
+                    with jobs_box:
+                        ui.label("Последние задачи").classes("font-semibold text-sm")
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("settings", size="24px").classes("opacity-30")
+                            ui.label("Сохраните настройки Cloud Drive, чтобы видеть историю задач.").classes("text-center")
+                    return
+                try:
+                    service = CloudDriveService.from_config(cfg_now)
+                    jobs = service.list_bootstrap_jobs(limit=8)
+                except Exception as exc:
+                    with jobs_box:
+                        ui.label("Последние задачи").classes("font-semibold text-sm")
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("error_outline", size="24px").classes("text-red-400 opacity-70")
+                            ui.label(f"Не удалось прочитать jobs: {exc}").classes("text-center text-red-600 text-xs")
+                    return
+                with jobs_box:
+                    ui.label("Последние задачи").classes("font-semibold text-sm")
+                    if not jobs:
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("history", size="24px").classes("opacity-30")
+                            ui.label("История задач пуста. Запустите импорт, чтобы начать.").classes("text-center")
+                        return
+                    for job in jobs:
+                        progress = dict(job.progress or {})
+                        raw_status = str(job.status or progress.get("status") or "")
+                        norm_status = {
+                            "pending": "pending", "running": "running",
+                            "completed": "done", "failed": "error", "cancelled": "cancelled",
+                        }.get(raw_status, raw_status)
+                        imported_files = _safe_int(progress.get("imported_files"), 0)
+                        total_files = _safe_int(progress.get("total_files"), 0)
+                        current_path = str(progress.get("current_path") or progress.get("catalog") or "").strip()
+                        error_text = str(job.last_error or progress.get("error") or "").strip()
+                        with ui.element("div").classes("cd-jobs-card w-full"):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                _cd_status_badge(norm_status)
+                                ui.space()
+                                ui.label(job.id[:8]).classes("font-mono text-xs rag-meta")
+                            if total_files > 0:
+                                ratio = max(0.0, min(1.0, imported_files / total_files))
+                                ui.linear_progress(value=ratio, size="4px", show_value=False).classes("w-full my-1").props("color=indigo")
+                                ui.label(
+                                    f"{imported_files:,} / {total_files:,} файлов ({round(ratio * 100)}%)".replace(",", " ")
+                                ).classes("rag-meta text-xs")
+                            elif imported_files:
+                                ui.label(f"{imported_files:,} файлов".replace(",", " ")).classes("rag-meta text-xs")
+                            if current_path:
+                                ui.label(current_path).classes("rag-path text-xs truncate")
+                            if error_text and norm_status in ("error", "cancelled"):
+                                ui.label(error_text).classes("text-red-600 text-xs mt-1 truncate")
+                            with ui.row().classes("gap-1 mt-1"):
+                                if raw_status in {"running", "pending"}:
+                                    ui.button(
+                                        "Отменить", icon="close",
+                                        on_click=lambda _e=None, job_id=job.id: cancel_bootstrap_job(job_id),
+                                    ).props("outline dense size=sm")
+                                if raw_status in {"failed", "cancelled", "completed"}:
+                                    ui.button(
+                                        "Повторить", icon="replay",
+                                        on_click=lambda _e=None, job_id=job.id: retry_bootstrap_job(job_id),
+                                    ).props("outline dense size=sm")
+
+            def build_cloud_config() -> Dict[str, Any]:
+                values = current_cloud_values()
+                cfg = dict(state.cfg)
+                cfg.update(values)
+                return cfg
+
+            def persist_cloud_values(values: Dict[str, Any]) -> Dict[str, Any]:
+                cfg = load_config()
+                cfg.update(values)
+                save_config(cfg)
+                state.cfg = cfg
+                initial_cloud.update(values)
+                return cfg
+
+            def save_cloud_settings() -> None:
+                values = current_cloud_values()
+                if not values["cloud_drive_db_path"]:
+                    ui.notify("Укажите путь к базе данных реестра.", type="warning")
+                    return
+                if values["cloud_drive_storage"] == "local" and not values["cloud_drive_storage_root"]:
+                    ui.notify("Укажите папку хранения файлов для локального хранилища.", type="warning")
+                    return
+                try:
+                    persist_cloud_values(values)
+                    refresh_cloud_visibility()
+                    action_row.set_visibility(False)
+                    _log_app_event(state, "settings", "save_cloud_drive", details=values)
+                    ui.notify("Настройки Cloud Drive сохранены.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось сохранить настройки: {exc}", type="negative")
+
+            async def init_registry() -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    stats_obj = await run.io_bound(service.registry.stats)
+                    render_cloud_stats(stats_obj, title="Реестр инициализирован")
+                    _log_app_event(state, "cloud_drive", "init_registry", details=current_cloud_values())
+                    ui.notify("Реестр Cloud Drive инициализирован.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось инициализировать реестр: {exc}", type="negative")
+
+            async def refresh_registry_stats() -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    stats_obj = await run.io_bound(service.registry.stats)
+                    render_cloud_stats(stats_obj, title="Статистика реестра")
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                except Exception as exc:
+                    ui.notify(f"Не удалось прочитать stats: {exc}", type="negative")
+
+            def _run_bootstrap_background(cfg: Dict[str, Any], *, job_id: str) -> None:
+                try:
+                    service = CloudDriveService.from_config(cfg)
+                    service.run_bootstrap_job(job_id)
+                except Exception:
+                    pass
+
+            async def bootstrap_registry(*, import_files: bool) -> None:
+                catalog = str(catalog_input.value or "").strip()
+                if not catalog:
+                    ui.notify("Укажите источник импорта.", type="warning")
+                    return
+                if not Path(catalog).exists():
+                    ui.notify("Источник импорта не найден.", type="negative")
+                    return
+                limit_value = int(bootstrap_limit.value or 0)
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    current_state = _read_cloud_bootstrap_status(cfg)
+                    if str(current_state.get("job_status") or current_state.get("status") or "") in {"running", "pending"}:
+                        ui.notify("Импорт уже выполняется.", type="warning")
+                        render_bootstrap_status()
+                        return
+                    service = CloudDriveService.from_config(cfg)
+                    job = service.create_bootstrap_job(
+                        catalog_root=catalog,
+                        max_files=None if limit_value <= 0 else limit_value,
+                        import_files=import_files,
+                    )
+                    thread = threading.Thread(
+                        target=_run_bootstrap_background,
+                        kwargs={"cfg": cfg, "job_id": job.id},
+                        name="cloud-drive-bootstrap",
+                        daemon=True,
+                    )
+                    thread.start()
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                    _log_app_event(
+                        state,
+                        "cloud_drive",
+                        "bootstrap",
+                        details={"catalog": catalog, "import_files": import_files, "limit": limit_value},
+                    )
+                    ui.notify("Импорт запущен в фоне.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось запустить импорт: {exc}", type="negative")
+
+            async def cancel_bootstrap_job(job_id: str) -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    await run.io_bound(service.cancel_job, job_id)
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                    ui.notify("Отмена задачи запрошена.", type="warning")
+                except Exception as exc:
+                    ui.notify(f"Не удалось отменить задачу: {exc}", type="negative")
+
+            async def retry_bootstrap_job(job_id: str) -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    current_state = _read_cloud_bootstrap_status(cfg)
+                    if str(current_state.get("job_status") or current_state.get("status") or "") in {"running", "pending"}:
+                        ui.notify("Сейчас уже выполняется другой импорт.", type="warning")
+                        return
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    job = await run.io_bound(service.retry_bootstrap_job, job_id)
+                    thread = threading.Thread(
+                        target=_run_bootstrap_background,
+                        kwargs={"cfg": cfg, "job_id": job.id},
+                        name="cloud-drive-bootstrap",
+                        daemon=True,
+                    )
+                    thread.start()
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                    ui.notify("Импорт перезапущен.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось повторить импорт: {exc}", type="negative")
+
+            refresh_cloud_visibility()
+            render_cloud_stats(None, title="Статистика реестра")
+            render_bootstrap_status()
+            render_bootstrap_jobs()
+
+            enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
+            db_input.on_value_change(lambda _: refresh_cloud_dirty())
+            storage_kind.on_value_change(lambda _: (refresh_cloud_visibility(), refresh_cloud_dirty()))
+            storage_root_input.on_value_change(lambda _: refresh_cloud_dirty())
+            catalog_input.on_value_change(lambda _: refresh_cloud_dirty())
+
+            with action_row:
+                with ui.row().classes("rag-dirty-actions-inner"):
+                    ui.button("Отменить", icon="close", on_click=reset_cloud_settings).props("flat dense")
+                    ui.button("Сохранить настройки", icon="save", on_click=save_cloud_settings).props("outline dense")
+
+            with ui.row().classes("w-full gap-2 flex-wrap"):
+                ui.button("Инициализировать реестр", icon="database", on_click=init_registry).props("outline")
+                ui.button("Обновить статистику", icon="monitoring", on_click=refresh_registry_stats).props("outline")
+                ui.button("Сканировать структуру", icon="sync", on_click=lambda: bootstrap_registry(import_files=False)).props("outline")
+                ui.button("Импортировать в реестр", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
+            bootstrap_box
+            jobs_box
+            _stop_managed_timer(state.cloud_drive_timer)
+            state.cloud_drive_timer = ui.timer(3.0, lambda: (render_bootstrap_status(), render_bootstrap_jobs()))
+
+    def render_admin_cloud_sync_settings() -> None:  # noqa: PLR0912,PLR0915
+        """Sprint 4: Sync client admin settings — folder pairs, policies, connected clients."""
+        cd_enabled = bool(state.cfg.get("cloud_drive_enabled"))
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Sync клиент").classes("text-xl font-semibold")
+            ui.label(
+                "Управление desktop sync-клиентами: отслеживание подключённых устройств, "
+                "настройка пар папок и политики разрешения конфликтов."
+            ).classes("rag-meta")
+
+            if not cd_enabled:
+                with ui.element("div").classes("cd-empty-state w-full py-6"):
+                    ui.icon("cloud_off", size="32px").classes("opacity-30")
+                    ui.label("Cloud Drive не включён — активируйте его в настройках Cloud Drive.").classes("text-center")
+                    ui.button(
+                        "Перейти в Cloud Drive",
+                        icon="cloud",
+                        on_click=lambda: (setattr(state, "settings_section", "cloud_drive"), render_fn()),
+                        color=None,
+                    ).props("outline dense")
+                return
+
+            ui.separator()
+
+            # ── Подключённые клиенты ──────────────────────────────────────
+            with ui.expansion("Подключённые клиенты", icon="computer", value=True).classes("w-full"):
+                with ui.element("div").classes("cd-empty-state w-full py-4"):
+                    ui.icon("sync_disabled", size="28px").classes("opacity-30")
+                    ui.label("Нет подключённых sync-клиентов.").classes("text-center")
+                    ui.label(
+                        "Desktop sync-агент будет доступен в следующем релизе. "
+                        "Клиент подключается автоматически по токену пользователя."
+                    ).classes("text-center rag-meta text-xs")
+
+            ui.separator()
+
+            # ── Пары папок ────────────────────────────────────────────────
+            sync_pairs_raw = state.cfg.get("cloud_sync_folder_pairs") or []
+            if not isinstance(sync_pairs_raw, list):
+                sync_pairs_raw = []
+            sync_pairs: list = [dict(p) for p in sync_pairs_raw if isinstance(p, dict)]
+
+            pairs_dirty = [False]
+            pairs_container = ui.column().classes("w-full gap-2")
+
+            def _save_sync_pairs() -> None:
+                cfg_copy = dict(state.cfg)
+                cfg_copy["cloud_sync_folder_pairs"] = sync_pairs
+                try:
+                    save_config(cfg_copy)
+                    state.cfg = cfg_copy
+                    ui.notify("Пары папок сохранены.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Ошибка сохранения: {exc}", type="negative")
+                pairs_dirty[0] = False
+                render_fn()
+
+            def _render_pairs() -> None:
+                pairs_container.clear()
+                with pairs_container:
+                    if not sync_pairs:
+                        with ui.element("div").classes("cd-empty-state w-full py-3"):
+                            ui.icon("folder_copy", size="24px").classes("opacity-30")
+                            ui.label("Нет настроенных пар для синхронизации.").classes("text-center")
+                    else:
+                        for idx, pair in enumerate(sync_pairs):
+                            with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                ui.icon("folder_copy", size="20px").classes("text-indigo-400")
+                                with ui.column().classes("flex-1 gap-0"):
+                                    ui.label(str(pair.get("local_path") or "(не задано)")).classes("text-sm font-medium")
+                                    cd_target = str(pair.get("cd_path") or "/")
+                                    ui.label(f"→ Cloud Drive: {cd_target}").classes("rag-meta text-xs")
+                                policy = str(pair.get("conflict_policy") or "ask")
+                                policy_labels = {"ask": "Спрашивать", "server_wins": "Сервер приоритетнее", "local_wins": "Локальная приоритетнее"}
+                                ui.badge(policy_labels.get(policy, policy), color="grey-4").classes("text-xs")
+                                ui.button(
+                                    icon="delete",
+                                    color=None,
+                                    on_click=lambda i=idx: (sync_pairs.pop(i), _render_pairs()),
+                                ).props("flat round dense").tooltip("Удалить пару").classes("text-negative")
+
+            _render_pairs()
+
+            # Add pair dialog
+            async def _add_pair_dialog() -> None:
+                with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-[480px]"):
+                    ui.label("Добавить пару синхронизации").classes("text-lg font-semibold")
+                    local_input = ui.input(
+                        "Локальная папка",
+                        placeholder="C:\\Users\\Иван\\Documents\\Рабочие",
+                    ).props("dense outlined").classes("w-full")
+                    local_input.tooltip("Путь к локальной папке на компьютере пользователя (заполняется sync-агентом).")
+
+                    # Cloud Drive folder picker
+                    try:
+                        _cd_svc = _cd_get_service(state.cfg)
+                        if _cd_svc is not None:
+                            with _cd_svc.registry._connect() as _c:
+                                _frows = _c.execute("SELECT * FROM cloud_folders ORDER BY path").fetchall()
+                            _cd_folders = {fo.path: (fo.path or "Корень") for fo in [_cd_svc.registry._folder_from_row(r) for r in _frows]}
+                        else:
+                            _cd_folders = {"/": "Корень"}
+                    except Exception:
+                        _cd_folders = {"/": "Корень"}
+
+                    cd_sel = ui.select(
+                        options=_cd_folders,
+                        value=list(_cd_folders.keys())[0] if _cd_folders else "",
+                        label="Папка в Cloud Drive",
+                    ).props("dense outlined emit-value map-options").classes("w-full")
+
+                    conflict_sel = ui.select(
+                        options={
+                            "ask": "Спрашивать при конфликте",
+                            "server_wins": "Сервер приоритетнее",
+                            "local_wins": "Локальная версия приоритетнее",
+                        },
+                        value="ask",
+                        label="Политика конфликтов",
+                    ).props("dense outlined emit-value map-options").classes("w-full")
+
+                    def _do_add() -> None:
+                        lp = str(local_input.value or "").strip()
+                        cdp = str(cd_sel.value or "").strip() or "/"
+                        pol = str(conflict_sel.value or "ask")
+                        if not lp:
+                            ui.notify("Укажите локальную папку.", type="warning")
+                            return
+                        sync_pairs.append({"local_path": lp, "cd_path": cdp, "conflict_policy": pol})
+                        dlg.close()
+                        _render_pairs()
+
+                    with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                        ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                        ui.button("Добавить", icon="add", on_click=_do_add).props("unelevated dense")
+                dlg.open()
+
+            with ui.row().classes("w-full gap-2 mt-1"):
+                ui.button("Добавить пару", icon="add_link", on_click=_add_pair_dialog).props("outline dense")
+                ui.button("Сохранить", icon="save", on_click=_save_sync_pairs).props("unelevated dense")
+
+            ui.separator()
+
+            # ── Глобальная политика конфликтов ────────────────────────────
+            with ui.expansion("Глобальная политика конфликтов", icon="merge", value=False).classes("w-full"):
+                ui.label(
+                    "Эти настройки применяются по умолчанию ко всем парам папок, "
+                    "если для них не задана индивидуальная политика."
+                ).classes("rag-meta text-xs")
+                global_policy = str(state.cfg.get("cloud_sync_conflict_policy") or "ask")
+                policy_sel = ui.select(
+                    options={
+                        "ask": "Всегда спрашивать пользователя",
+                        "server_wins": "Серверная версия приоритетнее",
+                        "local_wins": "Локальная версия приоритетнее",
+                        "newest_wins": "Более новая версия приоритетнее (по времени модификации)",
+                    },
+                    value=global_policy,
+                    label="Политика конфликтов",
+                ).props("dense outlined emit-value map-options").classes("w-full max-w-sm")
+
+                def _save_conflict_policy() -> None:
+                    cfg_copy = dict(state.cfg)
+                    cfg_copy["cloud_sync_conflict_policy"] = str(policy_sel.value or "ask")
+                    try:
+                        save_config(cfg_copy)
+                        state.cfg = cfg_copy
+                        ui.notify("Политика конфликтов сохранена.", type="positive")
+                    except Exception as exc:
+                        ui.notify(f"Ошибка: {exc}", type="negative")
+
+                ui.button("Сохранить политику", icon="save", on_click=_save_conflict_policy).props("outline dense").classes("mt-1")
+
+            ui.separator()
+
+            # ── Выборочная синхронизация ──────────────────────────────────
+            with ui.expansion("Выборочная синхронизация (Selective Sync)", icon="checklist", value=False).classes("w-full"):
+                ui.label(
+                    "Укажите, какие папки Cloud Drive включать в синхронизацию. "
+                    "Остальные папки будут доступны только через web-интерфейс."
+                ).classes("rag-meta text-xs")
+
+                try:
+                    _cd_svc2 = _cd_get_service(state.cfg)
+                    if _cd_svc2 is not None:
+                        with _cd_svc2.registry._connect() as _c2:
+                            _frows2 = _c2.execute(
+                                "SELECT * FROM cloud_folders WHERE depth <= 2 AND is_root=0 ORDER BY path"
+                            ).fetchall()
+                        _top_folders = [_cd_svc2.registry._folder_from_row(r) for r in _frows2]
+                    else:
+                        _top_folders = []
+                except Exception:
+                    _top_folders = []
+
+                excluded_raw = state.cfg.get("cloud_sync_excluded_paths") or []
+                excluded_set: set = set(excluded_raw if isinstance(excluded_raw, list) else [])
+
+                if not _top_folders:
+                    with ui.element("div").classes("cd-empty-state w-full py-3"):
+                        ui.icon("folder_off", size="24px").classes("opacity-30")
+                        ui.label("Нет папок в реестре. Запустите импорт в Cloud Drive.").classes("text-center")
+                else:
+                    checkboxes: Dict[str, Any] = {}
+                    with ui.column().classes("w-full gap-1"):
+                        for _fo in _top_folders:
+                            _cb = ui.checkbox(_fo.path, value=(_fo.path not in excluded_set))
+                            checkboxes[_fo.path] = _cb
+
+                    def _save_selective_sync() -> None:
+                        new_excluded = [p for p, cb in checkboxes.items() if not cb.value]
+                        cfg_copy = dict(state.cfg)
+                        cfg_copy["cloud_sync_excluded_paths"] = new_excluded
+                        try:
+                            save_config(cfg_copy)
+                            state.cfg = cfg_copy
+                            ui.notify("Выборочная синхронизация сохранена.", type="positive")
+                        except Exception as exc:
+                            ui.notify(f"Ошибка: {exc}", type="negative")
+
+                    ui.button("Сохранить", icon="save", on_click=_save_selective_sync).props("outline dense").classes("mt-1")
+
+            ui.separator()
+
+            # ── История конфликтов ────────────────────────────────────────
+            with ui.expansion("Журнал конфликтов", icon="history_toggle_off", value=False).classes("w-full"):
+                with ui.element("div").classes("cd-empty-state w-full py-3"):
+                    ui.icon("history_toggle_off", size="24px").classes("opacity-30")
+                    ui.label("Конфликтов не зафиксировано.").classes("text-center")
+                    ui.label("История конфликтов появится после подключения sync-клиента.").classes("text-center rag-meta text-xs")
+
+    def render_admin_llm_settings() -> None:
+        def _fetch_ollama_models(ollama_url: str) -> List[str]:
+            """Запросить список моделей из Ollama /api/tags. Возвращает [] при ошибке."""
+            try:
+                import json as _json  # noqa: PLC0415
+                import urllib.request as _ur  # noqa: PLC0415
+                req = _ur.Request(f"{ollama_url.rstrip('/')}/api/tags", method="GET")
+                with _ur.urlopen(req, timeout=4) as resp:
+                    data = _json.loads(resp.read().decode())
+                return sorted(m["name"] for m in (data.get("models") or []) if m.get("name"))
+            except Exception:
+                return []
+
+        current_url = str(state.cfg.get("ollama_url") or "http://localhost:11434")
+        current_expand = str(state.cfg.get("llm_expand_model") or "phi3:mini")
+        current_rag = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
+
+        # Подтягиваем модели сразу при рендере
+        available_models = _fetch_ollama_models(current_url)
+        # Гарантируем, что текущие значения есть в списке даже если Ollama недоступен
+        for m in [current_expand, current_rag]:
+            if m and m not in available_models:
+                available_models.insert(0, m)
+        if not available_models:
+            available_models = [current_expand, current_rag]
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            initial_llm = {
+                "llm_enabled": bool(state.cfg.get("llm_enabled")),
+                "ollama_url": current_url.strip(),
+                "llm_expand_model": current_expand.strip(),
+                "llm_rag_model": current_rag.strip(),
+            }
+            ui.label("Нейросеть (LLM)").classes("text-xl font-semibold")
+            ui.label(
+                "Используется Ollama, запущенный локально. "
+                "Включите, чтобы получать ответ ИИ по документам и автоматически расширять запросы."
+            ).classes("rag-meta")
+
+            llm_toggle = ui.switch(
+                "Включить ИИ-ответ и расширение запроса",
+                value=bool(state.cfg.get("llm_enabled")),
+            )
+            ollama_url_input = ui.input(
+                "Ollama URL",
+                value=current_url,
+            ).props("dense outlined").classes("w-full")
+
+            status_label = ui.label(
+                f"Найдено моделей: {len(available_models)}" if available_models else "Ollama недоступен — список пуст"
+            ).classes("rag-meta text-sm")
+
+            expand_select = ui.select(
+                label="Модель расширения запроса (быстрая, лёгкая)",
+                options=available_models,
+                value=current_expand,
+                with_input=True,
+            ).props("dense outlined").classes("w-full")
+
+            rag_select = ui.select(
+                label="Модель RAG Q&A (умная, для анализа документов)",
+                options=available_models,
+                value=current_rag,
+                with_input=True,
+            ).props("dense outlined").classes("w-full")
+
+            async def refresh_models() -> None:
+                url = str(ollama_url_input.value or "http://localhost:11434").strip()
+                models = await run.io_bound(_fetch_ollama_models, url)
+                for m in [str(expand_select.value or ""), str(rag_select.value or "")]:
+                    if m and m not in models:
+                        models.insert(0, m)
+                if not models:
+                    status_label.set_text("Ollama недоступен или нет установленных моделей")
+                    ui.notify("Ollama не отвечает по адресу: " + url, type="warning")
+                    return
+                expand_select.options = models
+                rag_select.options = models
+                expand_select.update()
+                rag_select.update()
+                status_label.set_text(f"Найдено моделей: {len(models)}")
+                ui.notify(f"Обновлено: {len(models)} моделей", type="positive")
+
+            ui.button("Обновить список моделей", icon="refresh", on_click=refresh_models).props("flat dense")
+
+            action_row = ui.row().classes("rag-dirty-actions")
+            action_row.set_visibility(False)
+
+            def current_llm_settings() -> Dict[str, Any]:
+                return {
+                    "llm_enabled": bool(llm_toggle.value),
+                    "ollama_url": str(ollama_url_input.value or "http://localhost:11434").strip(),
+                    "llm_expand_model": str(expand_select.value or "phi3:mini").strip(),
+                    "llm_rag_model": str(rag_select.value or "qwen3:8b").strip(),
+                }
+
+            def refresh_llm_dirty() -> None:
+                action_row.set_visibility(current_llm_settings() != initial_llm)
+
+            def reset_llm_settings() -> None:
+                llm_toggle.set_value(initial_llm["llm_enabled"])
+                ollama_url_input.set_value(initial_llm["ollama_url"])
+                expand_select.set_value(initial_llm["llm_expand_model"])
+                rag_select.set_value(initial_llm["llm_rag_model"])
+                action_row.set_visibility(False)
+
+            def save_llm_settings() -> None:
+                try:
+                    values = current_llm_settings()
+                    cfg = load_config()
+                    cfg["llm_enabled"] = values["llm_enabled"]
+                    cfg["ollama_url"] = values["ollama_url"]
+                    cfg["llm_expand_model"] = values["llm_expand_model"]
+                    cfg["llm_rag_model"] = values["llm_rag_model"]
+                    save_config(cfg)
+                    state.cfg = cfg
+                    initial_llm.update(values)
+                    action_row.set_visibility(False)
+                    _log_app_event(state, "settings", "save_llm", details={
+                        "llm_enabled": cfg["llm_enabled"],
+                        "ollama_url": cfg["ollama_url"],
+                    })
+                    ui.notify("Настройки нейросети сохранены.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось сохранить: {exc}", type="negative")
+
+            llm_toggle.on_value_change(lambda _: refresh_llm_dirty())
+            ollama_url_input.on_value_change(lambda _: refresh_llm_dirty())
+            expand_select.on_value_change(lambda _: refresh_llm_dirty())
+            rag_select.on_value_change(lambda _: refresh_llm_dirty())
+            with action_row:
+                with ui.row().classes("rag-dirty-actions-inner"):
+                    ui.button("Отменить", icon="close", on_click=reset_llm_settings).props("flat dense")
+                    ui.button("Сохранить настройки нейросети", icon="save", on_click=save_llm_settings).props("outline dense")
+
+    def render_admin_search_aliases() -> None:
+        telemetry = _get_telemetry(state)
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Синонимы поиска").classes("text-xl font-semibold")
+            ui.label(
+                "Группы расширяют запросы без переиндексации: например, «реквизиты» ищет карточки предприятия и расчетные счета."
+            ).classes("rag-meta")
+
+            groups = telemetry.list_search_alias_groups() if hasattr(telemetry, "list_search_alias_groups") else []
+            with ui.expansion("Добавить группу", icon="add", value=False).classes("w-full"):
+                new_key = ui.input("Ключ группы", placeholder="company_card").props("dense outlined").classes("w-full")
+                new_label = ui.input("Название", placeholder="Карточка предприятия").props("dense outlined").classes("w-full")
+                new_aliases = ui.textarea("Синонимы, по одному на строку").props("dense outlined autogrow").classes("w-full")
+                new_negative = ui.textarea("Исключения, по одному на строку").props("dense outlined autogrow").classes("w-full")
+
+                def add_group() -> None:
+                    label = str(new_label.value or "").strip()
+                    key = str(new_key.value or label).strip()
+                    aliases = [x.strip() for x in str(new_aliases.value or "").splitlines() if x.strip()]
+                    negatives = [x.strip() for x in str(new_negative.value or "").splitlines() if x.strip()]
+                    try:
+                        telemetry.save_search_alias_group(key=key, label=label or key, aliases=aliases, negative_aliases=negatives)
+                        _log_app_event(state, "settings", "search_alias_add", details={"key": key, "label": label})
+                        ui.notify("Группа синонимов добавлена.", type="positive")
+                        render_fn()
+                    except Exception as exc:
+                        ui.notify(f"Не удалось сохранить: {exc}", type="negative")
+
+                ui.button("Добавить группу", icon="save", on_click=add_group).props("outline")
+
+            for group in groups:
+                group_key = str(group.get("key") or "")
+                alias_text = "\n".join(str(a.get("alias") or "") for a in group.get("aliases") or [])
+                negative_text = "\n".join(str(x) for x in group.get("negative_aliases") or [])
+                with ui.expansion(str(group.get("label") or group_key), icon="travel_explore", value=False).classes("w-full"):
+                    initial_group = {
+                        "label": str(group.get("label") or ""),
+                        "aliases": alias_text,
+                        "negative": negative_text,
+                    }
+                    label_input = ui.input("Название", value=str(group.get("label") or "")).props("dense outlined").classes("w-full")
+                    aliases_input = ui.textarea("Синонимы", value=alias_text).props("dense outlined autogrow").classes("w-full")
+                    negative_input = ui.textarea("Исключения", value=negative_text).props("dense outlined autogrow").classes("w-full")
+                    ui.label(f"Ключ: {group_key} · обновлено: {group.get('updated_at') or '-'}").classes("rag-meta")
+
+                    def save_group(
+                        key: str = group_key,
+                        label_ref: Any = label_input,
+                        aliases_ref: Any = aliases_input,
+                        negative_ref: Any = negative_input,
+                    ) -> None:
+                        aliases = [x.strip() for x in str(aliases_ref.value or "").splitlines() if x.strip()]
+                        negatives = [x.strip() for x in str(negative_ref.value or "").splitlines() if x.strip()]
+                        telemetry.save_search_alias_group(
+                            key=key,
+                            label=str(label_ref.value or key),
+                            aliases=aliases,
+                            negative_aliases=negatives,
+                        )
+                        initial_group.update({
+                            "label": str(label_ref.value or key),
+                            "aliases": str(aliases_ref.value or ""),
+                            "negative": str(negative_ref.value or ""),
+                        })
+                        group_actions.set_visibility(False)
+                        _log_app_event(state, "settings", "search_alias_save", details={"key": key})
+                        ui.notify("Синонимы сохранены.", type="positive")
+                        render_fn()
+
+                    def delete_group(key: str = group_key) -> None:
+                        telemetry.delete_search_alias_group(key=key)
+                        _log_app_event(state, "settings", "search_alias_delete", details={"key": key})
+                        ui.notify("Группа удалена.", type="positive")
+                        render_fn()
+
+                    group_actions = ui.row().classes("rag-dirty-actions")
+                    group_actions.set_visibility(False)
+
+                    def current_group_values() -> Dict[str, Any]:
+                        return {
+                            "label": str(label_input.value or group_key),
+                            "aliases": str(aliases_input.value or ""),
+                            "negative": str(negative_input.value or ""),
+                        }
+
+                    def refresh_group_dirty() -> None:
+                        group_actions.set_visibility(current_group_values() != initial_group)
+
+                    def reset_group_fields() -> None:
+                        label_input.set_value(initial_group["label"])
+                        aliases_input.set_value(initial_group["aliases"])
+                        negative_input.set_value(initial_group["negative"])
+                        group_actions.set_visibility(False)
+
+                    label_input.on_value_change(lambda _: refresh_group_dirty())
+                    aliases_input.on_value_change(lambda _: refresh_group_dirty())
+                    negative_input.on_value_change(lambda _: refresh_group_dirty())
+
+                    with ui.row().classes("gap-2"):
+                        ui.button("Удалить", icon="delete", on_click=delete_group).props("flat dense")
+                    with group_actions:
+                        with ui.row().classes("rag-dirty-actions-inner"):
+                            ui.button("Отменить", icon="close", on_click=reset_group_fields).props("flat dense")
+                            ui.button("Сохранить", icon="save", on_click=save_group).props("outline dense")
+
+            candidates = telemetry.suggest_search_alias_candidates(limit=12) if hasattr(telemetry, "suggest_search_alias_candidates") else []
+            with ui.expansion("Кандидаты из истории поиска", icon="psychology", value=False).classes("w-full"):
+                if not candidates:
+                    ui.label("Пока нет кандидатов. Они появятся после положительных реакций на результаты поиска.").classes("rag-meta")
+
+                def _quick_add_alias(cq: str, cp: str) -> None:
+                    import re as _re
+                    _key = _re.sub(r"[^a-z0-9]+", "_", cq.lower()).strip("_") or "alias"
+                    try:
+                        telemetry.save_search_alias_group(
+                            key=_key, label=cq, aliases=[cq, cp], source="analytics"
+                        )
+                        _log_app_event(state, "settings", "search_alias_add", details={"key": _key, "from": "admin_candidate"})
+                        ui.notify(f"Синоним добавлен: «{cq}» = «{cp}»", type="positive")
+                        render_fn()
+                    except Exception as exc:
+                        ui.notify(f"Не удалось добавить: {exc}", type="negative")
+
+                for item in candidates:
+                    cand_q = str(item.get("query") or "")
+                    cand_p = str(item.get("candidate") or "")
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(cand_p).classes("font-medium")
+                        ui.label(f"запрос: {cand_q}").classes("rag-meta")
+                        ui.label(str(item.get("title") or item.get("path") or "")).classes("rag-path flex-1")
+                        ui.button("Добавить", icon="add", on_click=lambda cq=cand_q, cp=cand_p: _quick_add_alias(cq, cp)).props("flat dense no-caps").classes("text-xs")
+
+
+    # ── Settings screen body ──────────────────────────────────────────────
+    auth_db = _get_auth_db(state)
+
+    # ── Форма входа (без боковой панели) ────────────────────────────
+    if state.current_user is None:
+        ui.label("Настройки").classes("text-2xl font-semibold")
+        with ui.column().classes("rag-card w-full max-w-xl p-4 gap-3"):
+            ui.label("Вход пользователя").classes("text-xl font-semibold")
+            ui.label("Для первого входа администратора используйте admin / admin, затем смените пароль.").classes("rag-meta")
+            username_input = ui.input("Логин").props("dense outlined").classes("w-full")
+            password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+            def login() -> None:
+                user = auth_db.login(username=str(username_input.value or ""), password=str(password_input.value or ""))
+                if not user:
+                    ui.notify("Неверный логин или пароль.", type="negative")
+                    return
+                state.current_user = user
+                state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
+                try:
+                    app.storage.user["auth_token"] = state.auth_token
+                except Exception:
+                    pass
+                ui.notify("Вход выполнен.", type="positive")
+                render_fn()
+
+            username_input.on("keyup.enter", lambda _: ui.run_javascript(
+                "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
+                "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
+                "if(i>=0&&ins[i+1])ins[i+1].focus();"
+            ))
+            password_input.on("keyup.enter", lambda _: login())
+            ui.button("Войти", icon="login", on_click=login).props("unelevated")
+        return
+
+    user = state.current_user
+    is_admin = str(user.get("role") or "user") == "admin"
+
+    # ── Реестр секций: (key, icon, label, keywords) ─────────────────
+    user_sections: List[tuple] = [
+        ("profile",         "person",         "Профиль",                  ["имя", "аккаунт", "профиль"]),
+        ("telegram_sync",   "sync",           "Синхронизация Telegram",   ["telegram", "бот", "синхронизация"]),
+        ("cloud_sync_user", "sync_alt",       "Cloud Sync",               ["sync", "синхронизация", "папка", "desktop"]),
+        ("explorer",        "folder_open",    "Проводник",                ["файлы", "вид", "сортировка"]),
+        ("favorites",       "star_border",    "Избранное",                ["закладки"]),
+        ("saved_searches",  "bookmark",       "Сохранённые запросы",      ["запросы", "поиск", "сохранено"]),
+        ("password",        "key",            "Пароль и выход",           ["смена", "выход", "logout"]),
+    ]
+    admin_sections: List[tuple] = [
+        ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
+        ("cloud_drive",   "cloud",          "Cloud Drive",            ["cloud", "registry", "bootstrap", "storage", "s3"]),
+        ("cloud_sync",    "sync_alt",       "Sync клиент",            ["sync", "синхронизация", "клиент", "desktop", "папка"]),
+        ("llm",           "smart_toy",      "Нейросеть",              ["ollama", "модель", "ai", "llm", "rag"]),
+        ("aliases",       "travel_explore", "Синонимы поиска",        ["группы", "расширение", "запросы"]),
+        ("indexing",      "build",          "Индексация",             ["индекс", "статус", "прогресс"]),
+        ("security",      "security",       "Сессии и безопасность",  ["сессии", "системные файлы"]),
+        ("users",         "group",          "Пользователи",           ["роль", "статус", "логин"]),
+        ("registrations", "person_add",     "Регистрации",            ["заявки", "одобрить"]),
+        ("telegram_bot",   "send",           "Telegram бот",           ["бот", "chat id", "telegram"]),
+    ]
+
+    active = [state.settings_section]  # сохраняем между ре-рендерами
+    q_ref  = [""]
+
+    # ── IDE-лейаут ───────────────────────────────────────────────────
+    with ui.row().classes("w-full gap-0 items-start"):
+
+        # Левая боковая панель
+        with ui.column().classes("flex-none gap-1").style(
+            "width:220px; min-width:220px; border-right:1px solid #e5e7eb; padding-right:12px; margin-right:16px"
+        ):
+            ui.label("Настройки").classes("text-xl font-semibold mb-2")
+            search_box = ui.input(
+                placeholder="Поиск настроек…",
+                on_change=lambda e: (q_ref.__setitem__(0, str(e.value or "").lower()), render_nav()),
+            ).props("dense outlined clearable").classes("w-full")
+
+            nav_col = ui.column().classes("w-full gap-0")
+
+        # Правая область контента
+        content_col = ui.column().classes("flex-1 gap-3 min-w-0")
+
+    # ── Навигация ────────────────────────────────────────────────────
+    def _visible(entry: tuple) -> bool:
+        q = q_ref[0]
+        if not q:
+            return True
+        key, icon, label, kws = entry
+        return q in label.lower() or any(q in kw.lower() for kw in kws)
+
+    def render_nav() -> None:
+        nav_col.clear()
+        with nav_col:
+            groups: List[tuple] = [("", user_sections)]
+            if is_admin:
+                groups.append(("Администратор", admin_sections))
+            for group_label, sections in groups:
+                filtered = [s for s in sections if _visible(s)]
+                if not filtered:
+                    continue
+                if group_label:
+                    ui.label(group_label.upper()).classes(
+                        "text-xs text-gray-400 font-semibold mt-3 mb-1 px-2"
+                    )
+                for key, icon, label, _ in filtered:
+                    is_active = active[0] == key
+                    bg = "background:#eef2ff;" if is_active else ""
+                    with ui.row().classes("w-full items-center gap-2 px-2 py-1 rounded cursor-pointer").style(
+                        bg + "user-select:none"
+                    ).on("click", lambda k=key: navigate(k)):
+                        ui.icon(icon, size="16px").classes(
+                            "text-indigo-600" if is_active else "text-gray-400"
+                        )
+                        ui.label(label).classes(
+                            "text-sm font-medium text-indigo-700" if is_active else "text-sm text-gray-700"
+                        )
+
+    # ── Контент секции ───────────────────────────────────────────────
+    def render_section() -> None:
+        content_col.clear()
+        with content_col:
+            sec = active[0]
+
+            if sec == "profile":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    initial_profile = {
+                        "display_name": str(user.get("display_name") or ""),
+                    }
+                    ui.label("Профиль").classes("text-xl font-semibold")
+                    ui.label(
+                        f"Логин: {user.get('username')} · роль: {user.get('role')} · статус: {user.get('status')}"
+                    ).classes("rag-meta")
+                    disp_in = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
+                    linked_tg_id = str(user.get("telegram_chat_id") or "").strip()
+                    linked_tg_un = str(user.get("telegram_username") or "").strip()
+
+                    def save_profile() -> None:
+                        auth_db.update_profile(
+                            username=str(user.get("username") or ""),
+                            display_name=str(disp_in.value or ""),
+                            telegram_chat_id=linked_tg_id,
+                            telegram_username=linked_tg_un,
+                        )
+                        initial_profile["display_name"] = str(disp_in.value or "")
+                        _refresh_current_user(state)
+                        profile_actions.set_visibility(False)
+                        ui.notify("Профиль сохранён.", type="positive")
+
+                    profile_actions = ui.row().classes("rag-dirty-actions")
+                    profile_actions.set_visibility(False)
+
+                    def refresh_profile_dirty() -> None:
+                        profile_actions.set_visibility(str(disp_in.value or "") != initial_profile["display_name"])
+
+                    def reset_profile() -> None:
+                        disp_in.set_value(initial_profile["display_name"])
+                        profile_actions.set_visibility(False)
+
+                    disp_in.on_value_change(lambda _: refresh_profile_dirty())
+                    with profile_actions:
+                        with ui.row().classes("rag-dirty-actions-inner"):
+                            ui.button("Отменить", icon="close", on_click=reset_profile).props("flat dense")
+                            ui.button("Сохранить профиль", icon="save", on_click=save_profile).props("outline dense")
+
+            elif sec == "telegram_sync":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    linked_tg_id = str(user.get("telegram_chat_id") or "").strip()
+                    linked_tg_un = str(user.get("telegram_username") or "").strip()
+                    linked_label = f"@{linked_tg_un}" if linked_tg_un else linked_tg_id
+                    ui.label("Синхронизация Telegram").classes("text-xl font-semibold")
+                    ui.label("Связь нужна для входа через Telegram и команд бота от вашего имени.").classes("rag-meta")
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.icon("check_circle" if linked_tg_id else "radio_button_unchecked").classes(
+                            "text-green-600" if linked_tg_id else "text-gray-400"
+                        )
+                        ui.label(f"Привязан: {linked_label}" if linked_tg_id else "Telegram не привязан").classes("font-medium")
+
+                    def bind_tg() -> None:
+                        bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+                        if not bot_link:
+                            ui.notify("В config.json не задан telegram_bot_link.", type="warning")
+                            return
+                        out = auth_db.create_telegram_link_token(username=str(user.get("username") or ""))
+                        if not out.get("ok"):
+                            ui.notify(f"Ошибка: {out.get('reason')}", type="negative")
+                            return
+                        link = _telegram_deeplink(bot_link, "link", str(out.get("token") or ""))
+                        if not link:
+                            ui.notify("Не удалось создать ссылку привязки.", type="negative")
+                            return
+                        ui.run_javascript(
+                            "(() => {"
+                            f"const url = {json.dumps(link)};"
+                            "const w = window.open(url, '_blank', 'noopener,noreferrer');"
+                            "if (!w) { window.location.href = url; }"
+                            "})();"
+                        )
+                        ui.notify("Откройте Telegram и подтвердите привязку.", type="positive")
+
+                    def unlink_tg() -> None:
+                        if not linked_tg_id:
+                            return
+                        auth_db.unlink_telegram_chat_id(linked_tg_id)
+                        _refresh_current_user(state)
+                        ui.notify("Telegram отвязан.", type="warning")
+                        render_section()
+
+                    with ui.row().classes("gap-2"):
+                        ui.button("Синхронизировать", icon="link", on_click=bind_tg).props("outline")
+                        if linked_tg_id:
+                            ui.button("Отвязать", icon="link_off", on_click=unlink_tg).props("flat color=negative")
+
+            elif sec == "cloud_sync_user":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    ui.label("Cloud Sync").classes("text-xl font-semibold")
+                    ui.label(
+                        "Desktop sync-клиент синхронизирует выбранные папки вашего компьютера "
+                        "с Cloud Drive. Настройте пары папок и политику конфликтов."
+                    ).classes("rag-meta")
+                    cd_enabled2 = bool(state.cfg.get("cloud_drive_enabled"))
+                    if not cd_enabled2:
+                        with ui.element("div").classes("cd-empty-state w-full py-4"):
+                            ui.icon("cloud_off", size="28px").classes("opacity-30")
+                            ui.label("Cloud Drive не включён — обратитесь к администратору.").classes("text-center")
+                    else:
+                        # Status card
+                        with ui.row().classes("w-full items-center gap-3 p-3 rag-explorer-item"):
+                            ui.icon("sync_disabled", size="24px").classes("text-slate-400")
+                            with ui.column().classes("flex-1 gap-0"):
+                                ui.label("Sync-клиент не подключён").classes("font-medium")
+                                ui.label("Установите desktop sync-агент, чтобы автоматически синхронизировать файлы.").classes("rag-meta text-xs")
+                            ui.badge("Не подключён", color="grey-4").classes("text-xs")
+
+                        ui.separator()
+                        ui.label("Мои папки синхронизации").classes("font-semibold")
+
+                        user_pairs_raw = state.cfg.get("cloud_sync_folder_pairs") or []
+                        user_pairs = [p for p in (user_pairs_raw if isinstance(user_pairs_raw, list) else []) if isinstance(p, dict)]
+
+                        if not user_pairs:
+                            with ui.element("div").classes("cd-empty-state w-full py-3"):
+                                ui.icon("folder_copy", size="24px").classes("opacity-30")
+                                ui.label("Нет настроенных папок для синхронизации.").classes("text-center")
+                                ui.label("Добавьте пары папок в Настройках → Sync клиент (доступно администраторам).").classes("text-center rag-meta text-xs")
+                        else:
+                            with ui.column().classes("w-full gap-1"):
+                                for _pair in user_pairs:
+                                    with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                        ui.icon("folder_copy", size="20px").classes("text-indigo-400")
+                                        with ui.column().classes("flex-1 gap-0"):
+                                            ui.label(str(_pair.get("local_path") or "(не задано)")).classes("text-sm font-medium")
+                                            ui.label(f"→ Cloud Drive: {_pair.get('cd_path', '/')}").classes("rag-meta text-xs")
+                                        _pol = str(_pair.get("conflict_policy") or "ask")
+                                        _pol_lbl = {"ask": "Спрашивать", "server_wins": "Сервер", "local_wins": "Локальная"}.get(_pol, _pol)
+                                        ui.badge(_pol_lbl, color="grey-4").classes("text-xs")
+
+            elif sec == "explorer":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    ui.label("Проводник").classes("text-xl font-semibold")
+                    ui.label(
+                        f"Вид: {state.explorer_view} · сортировка: {state.explorer_sort} · "
+                        f"{'убывание' if state.explorer_desc else 'возрастание'} · тип: {state.explorer_ext}"
+                    ).classes("rag-meta")
+
+                    def reset_explorer() -> None:
+                        auth_db.reset_user_settings(username=str(user.get("username") or ""))
+                        state.explorer_view = "Таблица"
+                        state.explorer_sort = "По имени"
+                        state.explorer_desc = False
+                        state.explorer_ext = "Все"
+                        _log_app_event(state, "settings", "reset_explorer")
+                        ui.notify("Настройки проводника сброшены.", type="positive")
+                        render_section()
+
+                    ui.button("Сбросить настройки проводника", icon="restart_alt", on_click=reset_explorer).props("outline")
+
+            elif sec == "favorites":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    ui.label("Избранное").classes("text-xl font-semibold")
+                    if not state.favorites:
+                        ui.label("Закладок пока нет. Добавьте файл или папку звёздочкой в проводнике.").classes("rag-meta")
+                    for fav in state.favorites:
+                        fav_path = Path(str(fav.get("path") or ""))
+                        item_type = str(fav.get("item_type") or "")
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.icon("folder" if item_type == "folder" else "description")
+                            ui.label(str(fav.get("title") or fav_path.name or fav_path)).classes("font-medium")
+                            ui.label(str(fav_path)).classes("rag-path flex-1")
+                            if item_type == "folder":
+                                ui.button("Открыть", on_click=lambda p=fav_path: go_explorer(str(p))).props("outline dense")
+                            else:
+                                ui.button("Открыть", on_click=lambda p=fav_path: open_file_viewer(p)).props("outline dense")
+                            ui.button(icon="delete", on_click=lambda p=fav_path: (
+                                _toggle_favorite(state, p), render_section()
+                            )).props("flat round dense")
+
+            elif sec == "saved_searches":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    ui.label("Сохранённые запросы").classes("text-xl font-semibold")
+                    if not state.saved_searches:
+                        ui.label("Нет сохранённых запросов. Нажмите на закладку рядом с результатами поиска, чтобы сохранить запрос.").classes("rag-meta")
+                    for ss in state.saved_searches:
+                        ss_q = str(ss.get("query") or "")
+                        ss_label = str(ss.get("label") or ss_q)
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.icon("bookmark", size="16px").classes("text-amber-500 shrink-0")
+                            with ui.column().classes("flex-1 min-w-0 gap-0"):
+                                ui.label(ss_label).classes("text-sm font-medium truncate")
+                                if ss_label != ss_q:
+                                    ui.label(ss_q).classes("rag-path text-xs truncate")
+                            ui.button(icon="search", on_click=query_handler(ss_q), color=None).props("flat round dense").tooltip("Выполнить этот запрос")
+                            ui.button(icon="delete", on_click=lambda q=ss_q: (
+                                _toggle_saved_search(state, q), render_section()
+                            ), color=None).props("flat round dense")
+
+            elif sec == "password":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    ui.label("Смена пароля").classes("text-xl font-semibold")
+                    old_pw = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                    new_pw = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                    new_pw2 = ui.input("Повторите пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                    _focus_next_js = (
+                        "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
+                        "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
+                        "if(i>=0&&ins[i+1])ins[i+1].focus();"
+                    )
+                    old_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
+                    new_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
+
+                    def change_pw() -> None:
+                        if str(new_pw.value or "") != str(new_pw2.value or ""):
+                            ui.notify("Пароли не совпадают.", type="warning")
+                            return
+                        ok = auth_db.change_password(
+                            username=str(user.get("username") or ""),
+                            old_password=str(old_pw.value or ""),
+                            new_password=str(new_pw.value or ""),
+                        )
+                        if ok:
+                            _refresh_current_user(state)
+                        ui.notify("Пароль изменён." if ok else "Не удалось изменить пароль.",
+                                  type="positive" if ok else "negative")
+
+                    new_pw2.on("keyup.enter", lambda _: change_pw())
+                    with ui.row().classes("gap-2"):
+                        ui.button("Сменить пароль", icon="key", on_click=change_pw).props("outline")
+                        ui.button("Выйти", icon="logout", on_click=do_logout).props("flat")
+
+            elif sec == "paths":
+                render_admin_path_settings()
+            elif sec == "cloud_drive":
+                render_admin_cloud_drive_settings()
+            elif sec == "cloud_sync":
+                render_admin_cloud_sync_settings()
+            elif sec == "llm":
+                render_admin_llm_settings()
+            elif sec == "aliases":
+                render_admin_search_aliases()
+            elif sec == "indexing":
+                render_index_dashboard()
+            elif sec == "security":
+                render_admin_security_settings(auth_db)
+            elif sec == "users":
+                render_admin_users(auth_db)
+            elif sec == "registrations":
+                render_admin_registration_requests(auth_db)
+            elif sec == "telegram_bot":
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    enabled = bool(state.cfg.get("telegram_enabled"))
+                    token_set = bool(str(state.cfg.get("telegram_bot_token") or "").strip())
+                    bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+                    ui.label("Управление Telegram ботом").classes("text-xl font-semibold")
+                    with ui.row().classes("gap-2 flex-wrap"):
+                        ui.label(f"Статус: {'включен' if enabled else 'выключен'}").classes("rag-chip")
+                        ui.label(f"Токен: {'задан' if token_set else 'не задан'}").classes("rag-chip")
+                        ui.label(f"Ссылка: {'задана' if bot_link else 'не задана'}").classes("rag-chip")
+                    if bot_link:
+                        ui.link("Открыть бота", bot_link, new_tab=True).classes("rag-link")
+                render_admin_telegram_chats(auth_db)
+
+    def navigate(key: str) -> None:
+        active[0] = key
+        state.settings_section = key
+        render_nav()
+        render_section()
+
+    render_nav()
+    render_section()
+
+def render_telegram_screen() -> None:
+    enabled = bool(state.cfg.get("telegram_enabled"))
+    token_set = bool(str(state.cfg.get("telegram_bot_token") or "").strip())
+    with ui.column().classes("rag-card w-full p-4 gap-2"):
+        ui.label(f"Статус: {'включен' if enabled else 'выключен'}").classes("text-lg font-semibold")
+        ui.label(f"Токен: {'задан' if token_set else 'не задан'}").classes("rag-meta")
+        bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+        if bot_link:
+            ui.link("Открыть бота", bot_link, new_tab=True)
+
+# ── Analytics / stats screen ───────────────────────────────────────────
