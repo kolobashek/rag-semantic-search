@@ -55,6 +55,59 @@ Optional explicit overrides in `config.json`:
 - `ocr_tesseract_cmd`
 - `ocr_poppler_bin`
 
+## Cloud Drive
+
+Cloud Drive adds a central registry of folders/files plus a managed storage backend.
+
+Current supported backends:
+
+- `local`
+- `s3` / `minio` (backend contract and health-check; production rollout still in progress)
+
+Main config keys in `config.json`:
+
+- `cloud_drive_enabled`
+- `cloud_drive_db_path`
+- `cloud_drive_storage`
+- `cloud_drive_storage_root`
+- `cloud_drive_bucket`
+- `cloud_drive_s3_endpoint`
+- `cloud_drive_s3_region`
+- `cloud_drive_s3_access_key`
+- `cloud_drive_s3_secret_key`
+
+Quick start:
+
+```powershell
+python cloud_drive.py init --enable
+python cloud_drive.py stats
+python cloud_drive.py bootstrap --max-files 1000
+```
+
+Admin UI:
+
+- `Settings -> Cloud Drive`
+- actions: `Инициализировать реестр`, `Статистика`, `Импортировать структуру`, `Импортировать структуру и файлы`
+
+Current API endpoints:
+
+- `GET /api/cloud-drive/node`
+- `GET /api/cloud-drive/list`
+- `POST /api/cloud-drive/folders`
+- `POST /api/cloud-drive/upload`
+- `GET /api/cloud-drive/download`
+- `GET /api/cloud-drive/versions`
+- `POST /api/cloud-drive/move`
+- `POST /api/cloud-drive/rename`
+- `POST /api/cloud-drive/delete`
+- `POST /api/cloud-drive/reindex`
+- `GET /api/cloud-drive/jobs`
+- `GET /api/cloud-drive/job`
+- `GET /api/cloud-drive/job-latest`
+- `GET /api/cloud-drive/bootstrap-status`
+- `GET /api/cloud-drive/bootstrap-jobs`
+- `GET /api/cloud-drive/storage-health`
+
 ## Documentation
 
 - Full Russian operations guide: `ИНСТРУКЦИЯ.md`
