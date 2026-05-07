@@ -68,6 +68,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "telegram_bot_link": "",
     "users_db_path": "",
     "telemetry_db_path": "",
+    # ── Cloud drive foundation ──────────────────────────────────────────
+    "cloud_drive_enabled": False,
+    "cloud_drive_db_path": "",
+    "cloud_drive_storage": "local",
+    "cloud_drive_storage_root": "",
+    "cloud_drive_bucket": "",
+    "cloud_drive_s3_endpoint": "",
+    "cloud_drive_s3_region": "",
+    "cloud_drive_s3_access_key": "",
+    "cloud_drive_s3_secret_key": "",
     # ── LLM / Ollama ──────────────────────────────────────────────────────
     "ollama_url": "http://localhost:11434",
     "llm_enabled": False,            # включить RAG Q&A и расширение запроса
