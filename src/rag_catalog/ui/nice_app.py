@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse
 from nicegui import app, events, run, ui
 
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
+from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -5016,6 +5017,177 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.button("Отменить", icon="close", on_click=reset_paths).props("flat dense")
                     ui.button("Сохранить пути", icon="save", on_click=save_paths).props("outline dense")
 
+    def render_admin_cloud_drive_settings() -> None:
+        default_db_path = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_drive.db").resolve())
+        default_storage_root = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_storage").resolve())
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            initial_cloud = {
+                "cloud_drive_enabled": bool(state.cfg.get("cloud_drive_enabled")),
+                "cloud_drive_db_path": str(state.cfg.get("cloud_drive_db_path") or default_db_path).strip(),
+                "cloud_drive_storage": str(state.cfg.get("cloud_drive_storage") or "local").strip() or "local",
+                "cloud_drive_storage_root": str(state.cfg.get("cloud_drive_storage_root") or default_storage_root).strip(),
+                "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
+            }
+            stats_ref: Dict[str, Any] = {"value": None}
+            ui.label("Cloud Drive").classes("text-xl font-semibold")
+            ui.label(
+                "Центральный registry для облачного диска: папки, файлы, версии и фоновые задачи. "
+                "Сейчас поддержан local storage и bootstrap из текущего catalog_path."
+            ).classes("rag-meta")
+
+            enabled_input = ui.checkbox("Включить Cloud Drive", value=initial_cloud["cloud_drive_enabled"])
+            db_input = ui.input("Путь к registry БД", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("w-full")
+            storage_kind = ui.select({"local": "Local storage", "s3": "S3 / MinIO"}, value=initial_cloud["cloud_drive_storage"], label="Storage backend").props("dense outlined").classes("w-full max-w-sm")
+            storage_root_input = ui.input("Корень local storage", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("w-full")
+            catalog_input = ui.input("Каталог для bootstrap", value=initial_cloud["catalog_path"]).props("dense outlined").classes("w-full")
+            bootstrap_limit = ui.number("Ограничить импорт файлами (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full max-w-sm")
+
+            status_box = ui.column().classes("w-full gap-1")
+            action_row = ui.row().classes("rag-dirty-actions")
+            action_row.set_visibility(False)
+
+            def current_cloud_values() -> Dict[str, Any]:
+                return {
+                    "cloud_drive_enabled": bool(enabled_input.value),
+                    "cloud_drive_db_path": str(db_input.value or "").strip(),
+                    "cloud_drive_storage": str(storage_kind.value or "local").strip() or "local",
+                    "cloud_drive_storage_root": str(storage_root_input.value or "").strip(),
+                    "catalog_path": str(catalog_input.value or "").strip(),
+                }
+
+            def refresh_cloud_visibility() -> None:
+                is_local = str(storage_kind.value or "local") == "local"
+                storage_root_input.set_visibility(is_local)
+
+            def refresh_cloud_dirty() -> None:
+                action_row.set_visibility(current_cloud_values() != initial_cloud)
+
+            def reset_cloud_settings() -> None:
+                enabled_input.set_value(initial_cloud["cloud_drive_enabled"])
+                db_input.set_value(initial_cloud["cloud_drive_db_path"])
+                storage_kind.set_value(initial_cloud["cloud_drive_storage"])
+                storage_root_input.set_value(initial_cloud["cloud_drive_storage_root"])
+                catalog_input.set_value(initial_cloud["catalog_path"])
+                refresh_cloud_visibility()
+                action_row.set_visibility(False)
+
+            def render_cloud_stats(stats_obj: Any, *, title: str) -> None:
+                stats_ref["value"] = stats_obj
+                status_box.clear()
+                with status_box:
+                    ui.label(title).classes("font-semibold")
+                    if not stats_obj:
+                        ui.label("Статистика пока недоступна.").classes("rag-meta")
+                        return
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        ui.label(f"Папок: {int(getattr(stats_obj, 'folders', 0)):,}".replace(",", " ")).classes("rag-chip")
+                        ui.label(f"Файлов: {int(getattr(stats_obj, 'files', 0)):,}".replace(",", " ")).classes("rag-chip")
+                        ui.label(f"Версий: {int(getattr(stats_obj, 'versions', 0)):,}".replace(",", " ")).classes("rag-chip")
+                        ui.label(f"Jobs: {int(getattr(stats_obj, 'pending_jobs', 0)):,}".replace(",", " ")).classes("rag-chip")
+                    root_path = str(getattr(stats_obj, "root_path", "") or "")
+                    if root_path:
+                        ui.label(f"Корень registry: {root_path}").classes("rag-path")
+
+            def build_cloud_config() -> Dict[str, Any]:
+                values = current_cloud_values()
+                cfg = dict(state.cfg)
+                cfg.update(values)
+                return cfg
+
+            def save_cloud_settings() -> None:
+                values = current_cloud_values()
+                if not values["cloud_drive_db_path"]:
+                    ui.notify("Укажите путь к registry БД.", type="warning")
+                    return
+                if values["cloud_drive_storage"] == "local" and not values["cloud_drive_storage_root"]:
+                    ui.notify("Укажите корень local storage.", type="warning")
+                    return
+                try:
+                    cfg = load_config()
+                    cfg.update(values)
+                    save_config(cfg)
+                    state.cfg = cfg
+                    initial_cloud.update(values)
+                    refresh_cloud_visibility()
+                    action_row.set_visibility(False)
+                    _log_app_event(state, "settings", "save_cloud_drive", details=values)
+                    ui.notify("Настройки Cloud Drive сохранены.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось сохранить Cloud Drive: {exc}", type="negative")
+
+            async def init_registry() -> None:
+                try:
+                    cfg = build_cloud_config()
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    stats_obj = await run.io_bound(service.registry.stats)
+                    render_cloud_stats(stats_obj, title="Registry инициализирован")
+                    _log_app_event(state, "cloud_drive", "init_registry", details=current_cloud_values())
+                    ui.notify("Cloud Drive registry инициализирован.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось инициализировать registry: {exc}", type="negative")
+
+            async def refresh_registry_stats() -> None:
+                try:
+                    cfg = build_cloud_config()
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    stats_obj = await run.io_bound(service.registry.stats)
+                    render_cloud_stats(stats_obj, title="Текущая статистика registry")
+                except Exception as exc:
+                    ui.notify(f"Не удалось прочитать stats: {exc}", type="negative")
+
+            async def bootstrap_registry(*, import_files: bool) -> None:
+                catalog = str(catalog_input.value or "").strip()
+                if not catalog:
+                    ui.notify("Укажите каталог для bootstrap.", type="warning")
+                    return
+                if not Path(catalog).exists():
+                    ui.notify("Каталог для bootstrap не найден.", type="negative")
+                    return
+                limit_value = int(bootstrap_limit.value or 0)
+                try:
+                    cfg = build_cloud_config()
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    stats_obj = await run.io_bound(
+                        lambda: service.bootstrap_from_catalog(
+                            catalog,
+                            max_files=None if limit_value <= 0 else limit_value,
+                            import_files=import_files,
+                        )
+                    )
+                    render_cloud_stats(
+                        stats_obj,
+                        title="Bootstrap завершён" + (" с копированием файлов" if import_files else " (только registry)"),
+                    )
+                    _log_app_event(
+                        state,
+                        "cloud_drive",
+                        "bootstrap",
+                        details={"catalog": catalog, "import_files": import_files, "limit": limit_value},
+                    )
+                    ui.notify("Bootstrap Cloud Drive завершён.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Bootstrap Cloud Drive не удался: {exc}", type="negative")
+
+            refresh_cloud_visibility()
+            render_cloud_stats(None, title="Cloud Drive ещё не инициализирован")
+
+            enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
+            db_input.on_value_change(lambda _: refresh_cloud_dirty())
+            storage_kind.on_value_change(lambda _: (refresh_cloud_visibility(), refresh_cloud_dirty()))
+            storage_root_input.on_value_change(lambda _: refresh_cloud_dirty())
+            catalog_input.on_value_change(lambda _: refresh_cloud_dirty())
+
+            with action_row:
+                with ui.row().classes("rag-dirty-actions-inner"):
+                    ui.button("Отменить", icon="close", on_click=reset_cloud_settings).props("flat dense")
+                    ui.button("Сохранить Cloud Drive", icon="save", on_click=save_cloud_settings).props("outline dense")
+
+            with ui.row().classes("w-full gap-2 flex-wrap"):
+                ui.button("Init registry", icon="database", on_click=init_registry).props("outline")
+                ui.button("Stats", icon="monitoring", on_click=refresh_registry_stats).props("outline")
+                ui.button("Bootstrap metadata", icon="sync", on_click=lambda: bootstrap_registry(import_files=False)).props("outline")
+                ui.button("Bootstrap + import files", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
+
     def render_admin_llm_settings() -> None:
         def _fetch_ollama_models(ollama_url: str) -> List[str]:
             """Запросить список моделей из Ollama /api/tags. Возвращает [] при ошибке."""
@@ -5309,6 +5481,7 @@ def _build_page(initial_screen: str = "search") -> None:
         ]
         admin_sections: List[tuple] = [
             ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
+            ("cloud_drive",   "cloud",          "Cloud Drive",            ["cloud", "registry", "bootstrap", "storage", "s3"]),
             ("llm",           "smart_toy",      "Нейросеть",              ["ollama", "модель", "ai", "llm", "rag"]),
             ("aliases",       "travel_explore", "Синонимы поиска",        ["группы", "расширение", "запросы"]),
             ("indexing",      "build",          "Индексация",             ["индекс", "статус", "прогресс"]),
@@ -5536,6 +5709,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 elif sec == "paths":
                     render_admin_path_settings()
+                elif sec == "cloud_drive":
+                    render_admin_cloud_drive_settings()
                 elif sec == "llm":
                     render_admin_llm_settings()
                 elif sec == "aliases":
