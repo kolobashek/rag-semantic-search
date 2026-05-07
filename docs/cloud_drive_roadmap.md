@@ -50,9 +50,9 @@
 - добавлены `cancel/retry` для bootstrap jobs;
 - добавлена история последних bootstrap jobs в admin UI;
 - добавлен recovery для `running/pending` bootstrap jobs после рестарта.
+- добавлены read-only API endpoints для bootstrap status и списка bootstrap jobs.
 
 Осталось в этапе:
-- status API для jobs;
 - добить остаточные runtime fallback до чистой job-модели.
 
 ### Этап 2. Registry-backed Explorer
@@ -117,7 +117,7 @@
 #### 1. Runtime и foundation hardening
 
 - [x] Довести bootstrap state до полноценной job-модели в `cloud_jobs`.
-- [ ] Добавить отдельные статусы `pending/running/completed/failed/cancelled`.
+- [x] Добавить отдельные статусы `pending/running/completed/failed/cancelled`.
 - [x] Привязать bootstrap/import/reindex к `job_id`, а не только к runtime JSON.
 - [x] Добавить cancellable long-running jobs.
 - [x] Убрать остаточные page-bound timer зависимости.
@@ -147,7 +147,7 @@
   - versions;
   - jobs/status.
 - Подготовить auth/authorization hooks для API.
-- Добавить endpoint bootstrap status / job status.
+- [x] Добавить endpoint bootstrap status / job status.
 
 #### 4. Search/index integration
 
@@ -249,7 +249,7 @@ Codex:
 - [x] job model для bootstrap/import;
 - [x] scheduler hardening;
 - [ ] registry migrations;
-- [ ] bootstrap status API.
+- [x] bootstrap status API.
 - [x] cancel/retry bootstrap jobs;
 - [x] stale bootstrap recovery.
 

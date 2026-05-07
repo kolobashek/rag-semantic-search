@@ -675,6 +675,33 @@ def api_view_file(path: str) -> FileResponse:
     return FileResponse(str(resolved), media_type=media_type, filename=resolved.name)
 
 
+@app.get("/api/cloud-drive/bootstrap-status")
+def api_cloud_drive_bootstrap_status() -> Dict[str, Any]:
+    cfg = load_config()
+    return _read_cloud_bootstrap_status(cfg)
+
+
+@app.get("/api/cloud-drive/bootstrap-jobs")
+def api_cloud_drive_bootstrap_jobs(limit: int = 20) -> List[Dict[str, Any]]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    jobs = service.list_bootstrap_jobs(limit=max(1, min(int(limit), 100)))
+    return [
+        {
+            "id": job.id,
+            "job_type": job.job_type,
+            "status": job.status,
+            "payload": job.payload,
+            "progress": job.progress,
+            "attempts": job.attempts,
+            "last_error": job.last_error,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+        }
+        for job in jobs
+    ]
+
+
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     explicit = str(cfg.get("telemetry_db_path") or "").strip()
     if explicit:

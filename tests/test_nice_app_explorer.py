@@ -15,10 +15,13 @@ from rag_catalog.ui.nice_app import (
     _save_config_patch,
     _normalize_search_results,
     _run_catalog_search,
+    api_cloud_drive_bootstrap_jobs,
+    api_cloud_drive_bootstrap_status,
 )
 import rag_catalog.ui.nice_app as nice_app
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.telemetry_db import TelemetryDB
+from rag_catalog.core.cloud_drive.service import CloudDriveService
 
 
 @dataclass
@@ -335,3 +338,51 @@ def test_save_config_patch_only_updates_allowed_path_keys(monkeypatch) -> None:
     assert result["telegram_bot_token"] == "secret"
     assert "unknown" not in result
     assert saved == result
+
+
+def test_cloud_drive_bootstrap_status_api_reads_current_status(monkeypatch) -> None:
+    cfg = {"cloud_drive_db_path": "D:/cloud_drive.db"}
+    expected = {"status": "running", "files_imported": 12}
+
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_read_cloud_bootstrap_status", lambda current_cfg: expected if current_cfg == cfg else {})
+
+    assert api_cloud_drive_bootstrap_status() == expected
+
+
+def test_cloud_drive_bootstrap_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    job = service.create_bootstrap_job(catalog_root="O:/Обмен", max_files=25, import_files=True)
+    service.registry.update_job(
+        job.id,
+        status="running",
+        payload={
+            **job.payload,
+            "progress": {
+                "status": "running",
+                "files_imported": 7,
+                "total_files": 25,
+            },
+        },
+        attempts=2,
+    )
+
+    monkeypatch.setattr(
+        nice_app,
+        "load_config",
+        lambda: dict(cfg),
+    )
+
+    jobs = api_cloud_drive_bootstrap_jobs(limit=1)
+
+    assert len(jobs) == 1
+    assert jobs[0]["id"] == job.id
+    assert jobs[0]["job_type"] == "bootstrap"
+    assert jobs[0]["status"] == "running"
+    assert jobs[0]["attempts"] == 2
+    assert jobs[0]["progress"]["files_imported"] == 7
