@@ -551,6 +551,32 @@ class TestChunkText:
         assert chunks[0].endswith("\n")
         assert "Второй абзац" not in chunks[0]
 
+    def test_chunk_provenance_extracts_page_sheet_and_parent_group(self):
+        idx = self._make_indexer(180, 20)
+        out = idx._chunk_provenance(
+            chunk="Страница: 12\nЛист: Техника\n1. Характеристики\nМасса 1000 кг",
+            chunk_index=5,
+            doc_id="file:abc",
+        )
+
+        assert out["parent_id"] == "file:abc:chunk-group:1"
+        assert out["page"] == 12
+        assert out["sheet"] == "Техника"
+        assert out["section"] == "1. Характеристики"
+
+    def test_base_provenance_uses_cloud_file_id_when_available(self, tmp_path):
+        idx = self._make_indexer(180, 20)
+        path = tmp_path / "doc.pdf"
+        out = idx._base_provenance(
+            filepath=path,
+            relative_path=Path("folder") / "doc.pdf",
+            state_key=str(path),
+            payload_extra={"cloud_file_id": "cf-1"},
+        )
+
+        assert out["doc_id"] == "cloud:cf-1"
+        assert out["parent_id"] == "cloud:cf-1"
+
 
 # ═══════════════════════════ Многостраничный TIFF ═════════════════════════════
 

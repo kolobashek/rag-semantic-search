@@ -398,6 +398,10 @@ def test_answer_documents_generates_answer_with_sources(monkeypatch) -> None:
             "text": "Подтвержденный фрагмент документа",
             "score": 0.91,
             "chunk_index": 0,
+            "doc_id": "file:source",
+            "parent_id": "file:source:chunk-group:0",
+            "page": 3,
+            "section": "1. Условия",
         }
     ]
     monkeypatch.setattr(llm, "rag_answer", lambda query, results, **kwargs: "Ответ на основе источника")
@@ -408,6 +412,9 @@ def test_answer_documents_generates_answer_with_sources(monkeypatch) -> None:
     assert out["answer"] == "Ответ на основе источника"
     assert out["sources"][0]["filename"] == "source.docx"
     assert out["sources"][0]["excerpt"].startswith("Подтвержденный")
+    assert out["sources"][0]["doc_id"] == "file:source"
+    assert out["sources"][0]["page"] == 3
+    assert out["sources"][0]["section"] == "1. Условия"
 
 
 def test_answer_documents_rejects_unsupported_numeric_facts(monkeypatch) -> None:

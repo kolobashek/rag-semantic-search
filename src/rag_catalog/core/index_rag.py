@@ -8,6 +8,7 @@ index_rag.py — Индексатор файлов DOCX / XLSX / XLS / PDF / и�
 """
 
 import argparse
+import hashlib
 import logging
 import os
 import re
@@ -730,10 +731,10 @@ class RAGIndexer:
             import fitz  # pymupdf
             parts: List[str] = []
             with fitz.open(str(filepath)) as doc:
-                for page in doc:
+                for page_idx, page in enumerate(doc, start=1):
                     text = page.get_text()
                     if text and text.strip():
-                        parts.append(text)
+                        parts.append(f"Страница: {page_idx}\n{text}")
             full_text = "\n".join(parts).strip()
             if full_text:
                 return full_text
@@ -758,10 +759,10 @@ class RAGIndexer:
         try:
             parts = []
             with pdfplumber.open(filepath) as pdf:
-                for page in pdf.pages:
+                for page_idx, page in enumerate(pdf.pages, start=1):
                     text = page.extract_text()
                     if text and text.strip():
-                        parts.append(text)
+                        parts.append(f"Страница: {page_idx}\n{text}")
             full_text = "\n".join(parts).strip()
             if full_text:
                 return full_text
@@ -802,7 +803,7 @@ class RAGIndexer:
             for i, page_img in enumerate(pages):
                 text = pytesseract.image_to_string(page_img, lang="rus+eng")
                 if text.strip():
-                    parts.append(text)
+                    parts.append(f"Страница: {i + 1}\n{text}")
                 logger.debug("OCR страница %d/%d — %s", i + 1, len(pages), filepath.name)
             return "\n".join(parts)
         except Exception as exc:
@@ -933,6 +934,96 @@ class RAGIndexer:
             return max_end
         return min(max_end, min_end + best + 1)
 
+    def _doc_id(self, state_key: str, relative_path: Path, payload_extra: Optional[Dict[str, Any]] = None) -> str:
+        if payload_extra:
+            cloud_id = str(payload_extra.get("cloud_file_id") or "").strip()
+            if cloud_id:
+                return f"cloud:{cloud_id}"
+        key = str(state_key or relative_path)
+        return "file:" + hashlib.sha1(key.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _base_provenance(
+        self,
+        *,
+        filepath: Path,
+        relative_path: Path,
+        state_key: Optional[str],
+        payload_extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        doc_id = self._doc_id(str(state_key or filepath), relative_path, payload_extra)
+        return {
+            "doc_id": doc_id,
+            "parent_id": doc_id,
+            "section": "",
+            "page": None,
+            "sheet": "",
+            "row_start": None,
+            "row_end": None,
+            "provenance": {
+                "doc_id": doc_id,
+                "path": str(relative_path),
+                "full_path": str(filepath),
+            },
+        }
+
+    def _chunk_provenance(
+        self,
+        *,
+        chunk: str,
+        chunk_index: int,
+        doc_id: str,
+    ) -> Dict[str, Any]:
+        page = self._extract_marker_int(chunk, r"Страница:\s*(\d+)")
+        row = self._extract_marker_int(chunk, r"Строка:\s*(\d+)")
+        sheet = self._extract_marker_text(chunk, r"Лист:\s*([^\n\r]+)")
+        section = self._extract_section_title(chunk)
+        parent_id = f"{doc_id}:chunk-group:{chunk_index // 4}"
+        return {
+            "parent_id": parent_id,
+            "section": section,
+            "page": page,
+            "sheet": sheet,
+            "row_start": row,
+            "row_end": row,
+            "provenance": {
+                "doc_id": doc_id,
+                "parent_id": parent_id,
+                "section": section,
+                "page": page,
+                "sheet": sheet,
+                "row_start": row,
+                "row_end": row,
+            },
+        }
+
+    @staticmethod
+    def _extract_marker_int(text: str, pattern: str) -> Optional[int]:
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _extract_marker_text(text: str, pattern: str) -> str:
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        return str(match.group(1)).strip()[:160] if match else ""
+
+    @staticmethod
+    def _extract_section_title(text: str) -> str:
+        for line in str(text or "").splitlines():
+            title = line.strip()
+            if not title:
+                continue
+            if re.match(r"^(Страница|Лист|Строка):", title, flags=re.IGNORECASE):
+                continue
+            if len(title) <= 120 and (title.isupper() or re.match(r"^\d+(?:\.\d+)*[.)]?\s+\S+", title)):
+                return title[:120]
+            break
+        return ""
+
     # ── indexing helpers ───────────────────────────────────────────────
 
     def _add_points(self, points: List[PointStruct]) -> None:
@@ -973,6 +1064,14 @@ class RAGIndexer:
             "full_path": str(filepath),
             "state_key": str(state_key or filepath),
         }
+        payload.update(
+            self._base_provenance(
+                filepath=filepath,
+                relative_path=relative_path,
+                state_key=state_key,
+                payload_extra=payload_extra,
+            )
+        )
         if payload_extra:
             payload.update(payload_extra)
         point = PointStruct(
@@ -1008,6 +1107,13 @@ class RAGIndexer:
         )
         ext = filepath.suffix.lower()
         points = []
+        base_provenance = self._base_provenance(
+            filepath=filepath,
+            relative_path=relative_path,
+            state_key=state_key,
+            payload_extra=payload_extra,
+        )
+        doc_id = str(base_provenance["doc_id"])
         for idx, (v, chunk) in enumerate(zip(vectors, chunks)):
             payload: Dict[str, Any] = {
                 "type": f"{file_type}_content",
@@ -1019,6 +1125,8 @@ class RAGIndexer:
                 "chunk_index": idx,
                 "state_key": str(state_key or filepath),
             }
+            payload.update(base_provenance)
+            payload.update(self._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id))
             if payload_extra:
                 payload.update(payload_extra)
             points.append(PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=payload))
@@ -1383,6 +1491,14 @@ class RAGIndexer:
                 "full_path": str(filepath),
                 "tags": tags,
             }
+            base_provenance = self._base_provenance(
+                filepath=filepath,
+                relative_path=relative_path,
+                state_key=file_key,
+                payload_extra=None,
+            )
+            meta_payload.update(base_provenance)
+            doc_id = str(base_provenance["doc_id"])
             content_payloads = [
                 {
                     "type": f"{file_type}_content",
@@ -1393,6 +1509,8 @@ class RAGIndexer:
                     "full_path": str(filepath),
                     "chunk_index": idx,
                     "tags": tags,
+                    **base_provenance,
+                    **self._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
                 }
                 for idx, chunk in enumerate(chunks)
             ]

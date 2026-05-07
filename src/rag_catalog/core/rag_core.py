@@ -408,6 +408,14 @@ class RAGSearcher:
                     "cloud_version_id": payload.get("cloud_version_id", ""),
                     "cloud_path": payload.get("cloud_path", ""),
                     "storage_key": payload.get("storage_key", ""),
+                    "doc_id": payload.get("doc_id", ""),
+                    "parent_id": payload.get("parent_id", ""),
+                    "section": payload.get("section", ""),
+                    "page": payload.get("page"),
+                    "sheet": payload.get("sheet", ""),
+                    "row_start": payload.get("row_start"),
+                    "row_end": payload.get("row_end"),
+                    "provenance": payload.get("provenance") or {},
                 }
             )
         if title_only:
@@ -1020,6 +1028,14 @@ class RAGSearcher:
                     "cloud_version_id": payload.get("cloud_version_id", ""),
                     "cloud_path": payload.get("cloud_path", ""),
                     "storage_key": payload.get("storage_key", ""),
+                    "doc_id": payload.get("doc_id", ""),
+                    "parent_id": payload.get("parent_id", ""),
+                    "section": payload.get("section", ""),
+                    "page": payload.get("page"),
+                    "sheet": payload.get("sheet", ""),
+                    "row_start": payload.get("row_start"),
+                    "row_end": payload.get("row_end"),
+                    "provenance": payload.get("provenance") or {},
                     "rank_reason": "content by exact entity path",
                 })
         return out
@@ -1129,6 +1145,14 @@ class RAGSearcher:
                     "full_path": item.get("full_path", ""),
                     "chunk_index": item.get("chunk_index"),
                     "score": item.get("rank_score", item.get("score")),
+                    "doc_id": item.get("doc_id", ""),
+                    "parent_id": item.get("parent_id", ""),
+                    "section": item.get("section", ""),
+                    "page": item.get("page"),
+                    "sheet": item.get("sheet", ""),
+                    "row_start": item.get("row_start"),
+                    "row_end": item.get("row_end"),
+                    "provenance": item.get("provenance") or {},
                     "excerpt": text[:500],
                 }
             )

@@ -433,7 +433,7 @@ Codex:
 - [x] Добавить reranker stage для top-N результатов. Реализован feature-flagged CrossEncoder reranker (`retrieval_reranker_*`) поверх retrieval v2 candidates.
 - [x] Подготовить migration path для новых embedding models (`bge-m3`, `multilingual-e5-*`) через версионированные Qdrant collections. Добавлен opt-in `embedding_collection_versioning`/`embedding_collection_suffix`.
 - [x] Улучшить chunking: paragraph/sentence-aware минимум, затем structural chunking для DOCX/PDF/XLSX. Минимум закрыт: `_chunk_text` теперь предпочитает границы абзацев/предложений; structural chunking остается отдельным upgrade.
-- [ ] Добавить parent-child retrieval и provenance: page/sheet/row/section.
+- [x] Добавить parent-child retrieval и provenance: page/sheet/row/section. Добавлены `doc_id`, `parent_id`, chunk-group parent, page/sheet/row/section markers и проброс provenance в search/RAG sources.
 - [x] Добавить grouping/diversity: лимит чанков на документ и MMR-подобную диверсификацию. Добавлен configurable cap `rank_max_chunks_per_document`; MMR остается возможным upgrade.
 
 Claude:
