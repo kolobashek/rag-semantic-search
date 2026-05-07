@@ -173,14 +173,22 @@
 
 #### 1. Cloud Drive admin UX
 
-- Довести секцию Cloud Drive в настройках:
-  - нормальные подписи;
-  - tooltips;
-  - progress/status;
-  - кнопки refresh/cancel/retry;
-  - журнал последних операций.
-- Привести блок к brandbook/wireframe v2.
-- Добавить понятные empty/error/loading states.
+Примечание: Codex уже реализовал `render_admin_cloud_drive_settings()` со всей базовой функциональностью
+(config dirty-tracking, live progress bar, jobs history, cancel/retry per job, 3s auto-refresh, stats panel, tooltips).
+Задача Claude — довести UX до brandbook-уровня поверх готового backend.
+
+- [x] Нормальные подписи и tooltips — ✅ сделано Codex
+- [x] progress/status (live progress bar, file count, current path) — ✅ сделано Codex
+- [x] кнопки cancel/retry — ✅ сделано Codex
+- [x] журнал последних операций — ✅ сделано Codex
+- [ ] Привести блок к brandbook/wireframe v2:
+  - статус-бейджи вместо plain `rag-chip` текста;
+  - иконки статусов (schedule/sync/check_circle/error/cancel);
+  - карточки jobs с визуальной иерархией.
+- [ ] Добавить понятные empty/error/loading states:
+  - loading skeleton пока stats/jobs грузятся;
+  - empty state когда jobs история пуста (иконка + текст);
+  - error state когда CloudDriveService.from_config выбрасывает (нет cloud_drive_db_path).
 
 #### 2. Explorer on registry
 
@@ -255,10 +263,9 @@ Codex:
 - [x] stale bootstrap recovery.
 
 Claude:
-- Cloud Drive admin UX;
-- live progress;
-- error/empty/loading states;
-- cleanup настроек и терминологии.
+- [ ] brandbook/wireframe v2 для jobs history (статус-бейджи, иконки);
+- [ ] empty/error/loading states в Cloud Drive admin;
+- [ ] cleanup настроек и терминологии.
 
 ### Sprint 2
 
