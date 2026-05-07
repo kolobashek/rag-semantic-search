@@ -4061,6 +4061,20 @@ def _build_page(initial_screen: str = "search") -> None:
         breadcrumbs = _cd_breadcrumb_chain(svc, cd_path)
         root_folder = svc.registry.get_root_folder()
 
+        # ── Sync header breadcrumbs ───────────────────────────────────────
+        if page_state.header_breadcrumbs is not None:
+            page_state.header_breadcrumbs.clear()
+            with page_state.header_breadcrumbs:
+                for idx, folder in enumerate(breadcrumbs):
+                    label = "Cloud Drive" if folder.is_root else folder.name
+                    ui.button(
+                        label,
+                        on_click=lambda p=folder.path: _cd_open_folder(p),
+                        color=None,
+                    ).props("flat dense no-caps")
+                    if idx < len(breadcrumbs) - 1:
+                        ui.icon("chevron_right").classes("text-slate-400")
+
         # filter & sort
         name_q = page_state.explorer_filter.strip().lower()
         ext_q = page_state.explorer_ext if page_state.explorer_ext != "Все" else ""
