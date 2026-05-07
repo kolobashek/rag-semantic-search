@@ -807,6 +807,7 @@ def _build_page(initial_screen: str = "search") -> None:
             status = str(cloud_job.get("status") or "")
             if status == "completed":
                 return
+            job_type = str(cloud_job.get("job_type") or "reindex")
             icon = {
                 "pending": "hourglass_empty",
                 "running": "sync",
@@ -819,12 +820,13 @@ def _build_page(initial_screen: str = "search") -> None:
                 "failed": "cd-status-error",
                 "cancelled": "cd-status-error",
             }.get(status, "cd-status-pending")
-            label = {
-                "pending": "В очереди",
-                "running": "Индексируется",
-                "failed": "Ошибка индексации",
-                "cancelled": "Отменено",
-            }.get(status, status)
+            _job_type_labels: Dict[str, Dict[str, str]] = {
+                "reindex": {"pending": "В очереди", "running": "Индексируется", "failed": "Ошибка индексации", "cancelled": "Отменено"},
+                "cleanup": {"pending": "Очистка", "running": "Очищается", "failed": "Ошибка очистки", "cancelled": "Отменено"},
+                "ocr": {"pending": "OCR ожидает", "running": "OCR…", "failed": "Ошибка OCR", "cancelled": "Отменено"},
+                "preview": {"pending": "Preview ожидает", "running": "Preview…", "failed": "Ошибка preview", "cancelled": "Отменено"},
+            }
+            label = _job_type_labels.get(job_type, _job_type_labels["reindex"]).get(status, status)
             tip = label
             if status == "failed" and cloud_job.get("last_error"):
                 tip = f"Ошибка: {str(cloud_job.get('last_error'))[:160]}"
@@ -1679,19 +1681,33 @@ def _build_page(initial_screen: str = "search") -> None:
 
         _JOB_ICON = {"pending": "hourglass_empty", "running": "sync", "completed": "check_circle", "failed": "error_outline"}
         _JOB_CSS  = {"pending": "cd-status-pending", "running": "cd-status-running", "completed": "cd-status-done", "failed": "cd-status-error"}
-        _JOB_TIP  = {"pending": "В очереди на индексацию", "running": "Индексируется…", "completed": "Проиндексировано", "failed": "Ошибка индексации"}
+        _JOB_TYPE_LABEL = {
+            "reindex": {"pending": "В очереди", "running": "Индексируется", "failed": "Ошибка индексации"},
+            "cleanup": {"pending": "Очистка", "running": "Очищается", "failed": "Ошибка очистки"},
+            "ocr": {"pending": "OCR ожидает", "running": "OCR…", "failed": "Ошибка OCR"},
+            "preview": {"pending": "Preview ожидает", "running": "Preview…", "failed": "Ошибка Preview"},
+        }
+        _JOB_TYPE_TIP = {
+            "reindex": {"pending": "Файл ожидает индексации", "running": "Индексируется…", "completed": "Проиндексировано", "failed": "Ошибка индексации"},
+            "cleanup": {"pending": "Очистка в очереди", "running": "Удаление из индекса…", "completed": "Очищено", "failed": "Ошибка очистки"},
+            "ocr": {"pending": "OCR в очереди", "running": "Распознавание текста…", "completed": "OCR завершён", "failed": "Ошибка OCR"},
+            "preview": {"pending": "Preview в очереди", "running": "Создание preview…", "completed": "Preview готов", "failed": "Ошибка preview"},
+        }
 
         def _render_file_status(file_id: str) -> None:
             job = _file_jobs.get(file_id)
             if not job:
                 return
             status = job.get("status", "")
+            job_type = job.get("job_type", "reindex")
             if status not in _JOB_ICON or status == "completed":
                 return
-            tip = _JOB_TIP[status]
+            type_labels = _JOB_TYPE_LABEL.get(job_type, _JOB_TYPE_LABEL["reindex"])
+            type_tips = _JOB_TYPE_TIP.get(job_type, _JOB_TYPE_TIP["reindex"])
+            label_text = type_labels.get(status, "")
+            tip = type_tips.get(status, label_text)
             if status == "failed" and job.get("last_error"):
-                tip = f"Ошибка: {job['last_error'][:80]}"
-            label_text = {"pending": "В очереди", "running": "Индексируется", "failed": "Ошибка"}.get(status, "")
+                tip = f"Ошибка: {job['last_error'][:120]}"
             with ui.element("span").classes(f"cd-status-badge {_JOB_CSS[status]}"):
                 ui.icon(_JOB_ICON[status], size="14px")
                 if label_text:

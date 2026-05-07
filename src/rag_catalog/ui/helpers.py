@@ -716,7 +716,7 @@ def _cd_file_jobs_map(registry: "Any", file_ids: "list[str]") -> "Dict[str, Dict
     if not file_ids:
         return {}
     try:
-        jobs = registry.list_latest_jobs_for_files(file_ids, job_types=["reindex", "cleanup"])
+        jobs = registry.list_latest_jobs_for_files(file_ids, job_types=["reindex", "cleanup", "ocr", "preview"])
         return {
             str(file_id): {
                 "status": str(job.status or ""),
