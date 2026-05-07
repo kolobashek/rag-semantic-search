@@ -255,13 +255,17 @@ _Коммит: f73fb36 (feat(ui): Cloud Drive Sprint 3 — upload, versions, dow
 
 #### 4. Search UX over Cloud Drive
 
-- Перевести search UI на Cloud Drive сущности.
-- Сделать быстрый вывод:
-  - папки;
-  - файлы;
-  - lazy semantic layer.
-- Визуально связать результаты поиска с каталогом, версией, preview и действиями.
-- Довести карточки и историю запросов под новую модель.
+- [x] Сделать быстрый вывод из реестра:
+  - [x] папки (depth ≤ 3, до 5 совпадений по имени);
+  - [x] файлы (корневой уровень, до 5 совпадений по имени);
+  - [ ] lazy semantic layer — ждёт Codex index/OCR pipeline.
+- [x] Карточка «Cloud Drive» показывается над семантическими результатами.
+- [x] Клик по папке → переход в explorer на эту папку.
+- [x] Клик по файлу → открытие viewer (если файл на диске).
+- [ ] Визуально связать результаты поиска с версией, preview и действиями — ждёт Codex.
+- [ ] История запросов под новую Cloud Drive модель.
+
+_Коммит: 487abb8 (feat(ui): Cloud Drive search hints — registry name matching in search)_
 
 #### 5. Клиентская логика sync/scenarios
 
