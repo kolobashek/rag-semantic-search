@@ -1199,7 +1199,21 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.label(_src).classes("rag-chip text-xs")
 
         if not state.results:
-            ui.label("Совпадений не найдено.").classes("rag-card p-4 rag-meta")
+            with ui.column().classes("rag-card w-full p-6 gap-3 items-center"):
+                ui.icon("search_off", size="40px").classes("text-slate-300 dark:text-slate-600")
+                ui.label("Совпадений не найдено.").classes("text-lg font-semibold text-slate-500")
+                q = state.searched_query or ""
+                hints: List[str] = []
+                if state.content_only or state.title_only:
+                    hints.append("Снимите фильтр «Только содержимое» или «Только название»")
+                if state.file_type and state.file_type != "Все":
+                    hints.append(f"Попробуйте сбросить фильтр типа файла «{state.file_type}»")
+                if len(q.split()) > 4:
+                    hints.append("Сократите запрос до ключевых слов")
+                hints.append("Проверьте, что индекс создан и Qdrant доступен в настройках")
+                with ui.column().classes("gap-1 items-center"):
+                    for hint in hints:
+                        ui.label(f"• {hint}").classes("rag-meta text-sm")
             return
 
         # Все результаты — плоский список, отсортированный по релевантности
@@ -1789,6 +1803,15 @@ def _build_page(initial_screen: str = "search") -> None:
                 "Загрузить файлы", icon="upload_file",
                 on_click=_cd_upload_dialog, color=None,
             ).props("flat dense no-caps align=left").classes("w-full")
+            if cd_path:
+                def _search_this_folder(p: str = cd_path) -> None:
+                    state.query = f"path:{p}"
+                    state.screen = "search"
+                    render()
+                ui.button(
+                    "Найти в этой папке", icon="search",
+                    on_click=_search_this_folder, color=None,
+                ).props("flat dense no-caps align=left").classes("w-full")
             ui.separator()
             ui.label("Фильтры").classes("font-semibold text-sm")
             with ui.column().classes("w-full gap-1"):
