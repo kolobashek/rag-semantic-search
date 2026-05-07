@@ -296,9 +296,9 @@ Codex:
 - storage health and contract.
 
 Claude:
-- explorer на registry;
-- breadcrumbs/tree/list integration;
-- visual states и actions.
+- [x] explorer на registry;
+- [x] breadcrumbs/tree/list integration;
+- [x] visual states и actions.
 
 ### Sprint 3
 
