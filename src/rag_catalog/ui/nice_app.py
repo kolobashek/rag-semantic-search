@@ -2321,7 +2321,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_index_screen() -> None:  # noqa: C901
         if not _is_admin(state):
-            ui.label("Раздел индексирования доступен только администратору.").classes("rag-card p-4 text-red-700")
+            render_access_denied(hint="Управление индексом и расписание индексации доступны только администраторам.")
             return
         stats = _read_index_stats(state.cfg)
         telemetry = _read_index_telemetry(state.cfg)
@@ -2945,6 +2945,19 @@ def _build_page(initial_screen: str = "search") -> None:
                 for ext, count in list(stats["by_ext"].items())[:12]:
                     ui.label(f"{ext}: {count}").classes("rag-meta")
 
+    def render_access_denied(
+        message: str = "Этот раздел доступен только администраторам.",
+        *,
+        icon: str = "lock",
+        hint: str = "",
+    ) -> None:
+        with ui.column().classes("w-full items-center justify-center py-16 gap-4"):
+            ui.icon(icon, size="48px").classes("text-slate-300 dark:text-slate-600")
+            ui.label(message).classes("text-lg font-semibold text-slate-500")
+            if hint:
+                ui.label(hint).classes("rag-meta text-sm text-center max-w-md")
+            ui.button("На главную", icon="home", on_click=lambda: set_screen("search")).props("flat")
+
     def render_force_change_password_screen() -> None:
         auth_db = _get_auth_db(state)
         user = state.current_user or {}
@@ -3016,7 +3029,17 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 def login() -> None:
                     username = str(username_input.value or "")
-                    user = auth_db.login(username=username, password=str(password_input.value or ""))
+                    result = auth_db.login_with_reason(username=username, password=str(password_input.value or ""))
+                    reason = str(result.get("reason") or "")
+                    user = result.get("user")
+                    if reason == "pending":
+                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="pending")
+                        ui.notify("Ваша заявка ещё не активирована администратором.", type="warning", timeout=6000)
+                        return
+                    if reason == "blocked":
+                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="blocked")
+                        ui.notify("Аккаунт заблокирован. Обратитесь к администратору.", type="negative")
+                        return
                     if not user:
                         auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
                         ui.notify("Неверный логин или пароль.", type="negative")
@@ -3336,6 +3359,21 @@ def _build_page(initial_screen: str = "search") -> None:
         must_change_users = [u for u in all_users if int(u.get("must_change_password") or 0)]
         recent_events = auth_db.list_auth_events(limit=100)
         failed_logins = [e for e in recent_events if not int(e.get("ok") or 0) and str(e.get("event_type") or "") == "login_failed"]
+
+        # Critical: default admin password still in use
+        if auth_db.has_default_admin_password():
+            with ui.row().classes("items-center gap-3 bg-red-50 dark:bg-red-950 border border-red-300 dark:border-red-700 rounded-lg p-4 w-full"):
+                ui.icon("gpp_bad").classes("text-red-500 text-3xl flex-shrink-0")
+                with ui.column().classes("flex-1 gap-1"):
+                    ui.label("Критическая уязвимость: пароль admin не изменён").classes("font-semibold text-red-700 dark:text-red-300")
+                    ui.label(
+                        "Пользователь admin использует пароль по умолчанию «admin». "
+                        "Смените пароль немедленно — любой может получить права администратора."
+                    ).classes("text-red-600 dark:text-red-400 text-sm")
+                ui.button(
+                    "Сменить пароль", icon="key",
+                    on_click=lambda: setattr(state, "settings_section", "profile") or render(),
+                ).props("outline dense color=negative")
 
         if must_change_users:
             with ui.row().classes("items-center gap-2 bg-orange-50 border border-orange-200 rounded p-3 w-full"):
@@ -4826,7 +4864,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_stats_screen() -> None:
         if str((state.current_user or {}).get("role") or "") != "admin":
-            ui.label("Раздел доступен только администратору.").classes("rag-card p-4 text-red-700")
+            render_access_denied(hint="Статистика поиска, аудит и бенчмарк доступны только администраторам.")
             return
         telemetry_path = _telemetry_db_path(state.cfg)
         auth_db = _get_auth_db(state)

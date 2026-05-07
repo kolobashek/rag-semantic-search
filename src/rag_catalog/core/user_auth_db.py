@@ -1000,6 +1000,48 @@ class UserAuthDB:
                 data.pop("password_hash", None)
                 return data
 
+    def login_with_reason(
+        self,
+        *,
+        username: str,
+        password: str = "",
+    ) -> Dict[str, Any]:
+        """Like login() but returns {user, reason} where reason is one of:
+        'ok', 'invalid_credentials', 'pending', 'blocked', 'not_found'."""
+        usr = (username or "").strip().lower()
+        if not usr:
+            return {"user": None, "reason": "not_found"}
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT * FROM users WHERE username=?", (usr,)
+                ).fetchone()
+        if row is None:
+            return {"user": None, "reason": "not_found"}
+        status = str(row["status"] or "")
+        if status == "pending":
+            return {"user": None, "reason": "pending"}
+        if status not in ("active",):
+            return {"user": None, "reason": "blocked"}
+        if not _verify_password(password, str(row["password_hash"] or "")):
+            return {"user": None, "reason": "invalid_credentials"}
+        data = dict(row)
+        data.pop("password_hash", None)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("UPDATE users SET last_login_at=? WHERE username=?", (_utc_now(), usr))
+        return {"user": data, "reason": "ok"}
+
+    def has_default_admin_password(self) -> bool:
+        """Returns True if 'admin' user exists and still uses the default 'admin' password."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT password_hash FROM users WHERE username='admin'"
+            ).fetchone()
+        if row is None:
+            return False
+        return _verify_password("admin", str(row["password_hash"] or ""))
+
     def _normalize_session_ttl_days(self, value: Any) -> int:
         try:
             days = int(value)
