@@ -426,8 +426,8 @@ Claude:
 
 Codex:
 - [x] Добавить offline relevance benchmark: golden queries, expected docs, `Recall@k`, `MRR`, `nDCG`, latency p50/p95.
-- [ ] Добавить retrieval v2 feature flag.
-- [ ] Вынести retrieval pipeline в `src/rag_catalog/core/retrieval/`.
+- [x] Добавить retrieval v2 feature flag.
+- [x] Вынести retrieval pipeline в `src/rag_catalog/core/retrieval/`.
 - [ ] Добавить RRF fusion поверх dense + текущего lexical.
 - [ ] Добавить BM25/sparse слой или Qdrant sparse vector path.
 - [ ] Добавить reranker stage для top-N результатов.

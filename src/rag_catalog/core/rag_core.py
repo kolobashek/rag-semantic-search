@@ -92,6 +92,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rank_recency_enabled": True,    # учитывать свежесть modified
     "rank_recency_half_life_days": 180.0,  # через сколько дней буст в 2 раза меньше
     "rank_recency_max_boost": 0.03,  # максимум буста за самый свежий документ
+    "retrieval_pipeline": "legacy",  # legacy|v2
+    "retrieval_dense_top_k": 50,
+    "retrieval_lexical_top_k": 50,
+    "retrieval_final_top_k": 10,
 }
 
 logger = logging.getLogger(__name__)
