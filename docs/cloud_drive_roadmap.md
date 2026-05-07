@@ -238,18 +238,20 @@ _Коммит: 6678ff5 (feat(ui): Cloud Drive registry-backed explorer — Sprin
 #### 3. User file workflows
 
 - UI для:
-  - создания папки;
-  - загрузки файлов;
-  - drag-and-drop;
-  - rename/move/delete;
-  - версий файла;
-  - скачивания;
-  - предпросмотра.
+  - [x] создания папки — диалог `_cd_new_folder_dialog`, кнопка в toolbar;
+  - [x] загрузки файлов — диалог `_cd_upload_dialog` с `ui.upload`, кнопка в toolbar;
+  - [x] drag-and-drop — `ui.upload` с auto_upload поддерживает drag-and-drop;
+  - [ ] rename/move/delete — ждёт backend от Codex;
+  - [x] версий файла — диалог `_cd_versions_dialog`, кнопка history на каждом файле;
+  - [x] скачивания — кнопка download на файлах с storage_key → `/api/cloud-drive/download`;
+  - [ ] предпросмотра — ждёт backend (index/OCR pipeline).
 - Визуальный статус фоновых задач по файлу:
-  - indexing;
-  - OCR;
-  - preview;
-  - ошибки.
+  - [ ] indexing;
+  - [ ] OCR;
+  - [ ] preview;
+  - [ ] ошибки.
+
+_Коммит: f73fb36 (feat(ui): Cloud Drive Sprint 3 — upload, versions, download UI)_
 
 #### 4. Search UX over Cloud Drive
 
@@ -315,13 +317,20 @@ Claude:
 ### Sprint 3
 
 Codex:
-- upload/version/delete/move backend;
-- search/index registry integration.
+- [x] upload backend + API;
+- [x] download backend + API;
+- [x] versions backend + API;
+- [x] create folder backend + API;
+- [ ] delete/move/rename backend;
+- [ ] search/index registry integration.
 
 Claude:
-- upload/versioning UI;
-- file actions UI;
-- search UX adaptation.
+- [x] upload UI (диалог + toolbar кнопка + empty state shortcut);
+- [x] versioning UI (история версий на каждом файле);
+- [x] download UI (кнопка для файлов в storage);
+- [x] create folder UI (диалог + toolbar кнопка);
+- [ ] file actions UI (rename/move/delete — ждёт Codex);
+- [ ] search UX adaptation (ждёт Codex search/index integration).
 
 ### Sprint 4
 
