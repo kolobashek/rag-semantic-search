@@ -95,6 +95,8 @@
 - Reindex handler вызывает текущий `RAGIndexer` для файлов из `catalog_path` и local Cloud Drive storage.
 - Qdrant payload и `index_state.db` получили Cloud Drive identity: `cloud_file_id`, `cloud_version_id`, `cloud_path`, `storage_key`.
 - `cleanup` jobs удаляют Qdrant points по Cloud Drive identity.
+- добавлен API статусов по файлам:
+  - `GET /api/cloud-drive/file-statuses`
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -393,12 +395,13 @@ Codex:
 - [ ] Связать `cloud_files.id` / `cloud_file_versions.id` с telemetry; `index_state` и Qdrant payload уже связаны.
 - [x] На upload/move/rename/delete автоматически ставить нужные reindex/cleanup jobs.
 - [x] Сделать local storage-aware indexing для файлов, загруженных в Cloud Drive storage вне `catalog_path`.
-- [ ] Добавить per-file job status API для indexing/OCR/preview/error.
+- [x] Добавить per-file job status API для indexing/OCR/preview/error.
 - [ ] Добавить retry/requeue для registry jobs.
 - [x] Добавить cleanup job для удалённых/старых Qdrant points.
 
 Claude:
-- [ ] Показать per-file indexing/OCR/preview/error status в проводнике и карточках поиска.
+- [x] Показать per-file indexing/OCR/preview/error status в проводнике.
+- [ ] Показать per-file status в карточках поиска.
 - [ ] Доделать lazy semantic layer в Cloud Drive search после backend-интеграции.
 - [ ] Связать search results с version, preview и file actions.
 

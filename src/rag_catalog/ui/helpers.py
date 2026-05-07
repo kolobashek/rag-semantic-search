@@ -697,29 +697,14 @@ def _cd_file_jobs_map(registry: "Any", file_ids: "list[str]") -> "Dict[str, Dict
     if not file_ids:
         return {}
     try:
-        placeholders = ",".join("?" for _ in file_ids)
-        with registry._connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT j.file_id, j.job_type, j.status, j.last_error
-                FROM cloud_jobs j
-                INNER JOIN (
-                    SELECT file_id, MAX(created_at) AS max_ts
-                    FROM cloud_jobs
-                    WHERE file_id IN ({placeholders})
-                      AND job_type IN ('reindex', 'cleanup')
-                    GROUP BY file_id
-                ) latest ON j.file_id = latest.file_id AND j.created_at = latest.max_ts
-                """,
-                file_ids,
-            ).fetchall()
+        jobs = registry.list_latest_jobs_for_files(file_ids, job_types=["reindex", "cleanup"])
         return {
-            str(row["file_id"]): {
-                "status": str(row["status"] or ""),
-                "job_type": str(row["job_type"] or ""),
-                "last_error": str(row["last_error"] or ""),
+            str(file_id): {
+                "status": str(job.status or ""),
+                "job_type": str(job.job_type or ""),
+                "last_error": str(job.last_error or ""),
             }
-            for row in rows
+            for file_id, job in jobs.items()
         }
     except Exception:
         return {}

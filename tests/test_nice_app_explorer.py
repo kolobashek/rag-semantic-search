@@ -32,6 +32,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_download,
     api_cloud_drive_delete,
     api_cloud_drive_job,
+    api_cloud_drive_file_statuses,
     api_cloud_drive_job_latest,
     api_cloud_drive_job_run,
     api_cloud_drive_jobs,
@@ -472,6 +473,36 @@ def test_cloud_drive_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> 
     assert latest["started_at"] != ""
     assert fetched["id"] == reindex.id
     assert fetched["job_type"] == "reindex"
+
+
+def test_cloud_drive_file_statuses_api_returns_latest_job_by_file(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    folder = service.registry.upsert_folder(path="Folder A", name="Folder A", parent_id=root.id, depth=1, source_path="")
+    file_row = service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Folder A/hello.txt",
+        name="hello.txt",
+        storage_key="Folder A/hello.txt",
+        mime_type="text/plain",
+        size_bytes=5,
+        checksum="abc",
+        source_path="",
+    )
+    service.registry.queue_job(job_type="reindex", status="pending", file_id=file_row.id, payload={"progress": {"status": "pending"}})
+    latest = service.registry.queue_job(job_type="reindex", status="running", file_id=file_row.id, payload={"progress": {"status": "running"}})
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+
+    statuses = api_cloud_drive_file_statuses(paths="Folder A/hello.txt")
+
+    assert statuses[file_row.id]["id"] == latest.id
+    assert statuses[file_row.id]["status"] == "running"
 
 
 def test_cloud_drive_node_and_list_api(monkeypatch, tmp_path) -> None:

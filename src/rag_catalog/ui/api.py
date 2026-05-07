@@ -124,6 +124,21 @@ def api_cloud_drive_job(job_id: str, auth_token: str = "") -> Dict[str, Any]:
     return _serialize_cloud_drive_job(job)
 
 
+@app.get("/api/cloud-drive/file-statuses")
+def api_cloud_drive_file_statuses(file_ids: str = "", paths: str = "", auth_token: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    _require_cloud_drive_api_user(cfg, auth_token=auth_token)
+    service = CloudDriveService.from_config(cfg)
+    ids = [part.strip() for part in str(file_ids or "").split(",") if part.strip()]
+    for path in [part.strip() for part in str(paths or "").split(",") if part.strip()]:
+        file_row = service.registry.get_file_by_path(path)
+        if file_row is not None:
+            ids.append(file_row.id)
+    ids = list(dict.fromkeys(ids))
+    jobs = service.registry.list_latest_jobs_for_files(ids)
+    return {file_id: _serialize_cloud_drive_job(job) for file_id, job in jobs.items()}
+
+
 @app.get("/api/cloud-drive/job-latest")
 def api_cloud_drive_job_latest(job_type: str, auth_token: str = "") -> Dict[str, Any]:
     cfg = load_config()

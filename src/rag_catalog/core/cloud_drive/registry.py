@@ -621,6 +621,36 @@ class CloudDriveRegistryDB:
                 ).fetchall()
             return [self._job_from_row(row) for row in rows]
 
+    def list_latest_jobs_for_files(
+        self,
+        file_ids: List[str],
+        *,
+        job_types: Optional[List[str]] = None,
+    ) -> Dict[str, CloudDriveJob]:
+        ids = [str(file_id or '').strip() for file_id in file_ids if str(file_id or '').strip()]
+        if not ids:
+            return {}
+        types = [str(job_type or '').strip() for job_type in (job_types or ['reindex', 'cleanup', 'ocr', 'preview']) if str(job_type or '').strip()]
+        id_placeholders = ','.join('?' for _ in ids)
+        type_placeholders = ','.join('?' for _ in types)
+        params = [*ids, *types]
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT j.*
+                FROM cloud_jobs j
+                INNER JOIN (
+                    SELECT file_id, MAX(created_at) AS max_ts
+                    FROM cloud_jobs
+                    WHERE file_id IN ({id_placeholders})
+                      AND job_type IN ({type_placeholders})
+                    GROUP BY file_id
+                ) latest ON j.file_id = latest.file_id AND j.created_at = latest.max_ts
+                """,
+                params,
+            ).fetchall()
+        return {str(row['file_id']): self._job_from_row(row) for row in rows}
+
     def update_job(
         self,
         job_id: str,
