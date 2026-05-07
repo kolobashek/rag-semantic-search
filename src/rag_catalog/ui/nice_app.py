@@ -2240,7 +2240,8 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.html(icon, sanitize=False)
                     name_label = ui.label(path.name).classes("rag-explorer-name text-center text-sm")
                     name_label.tooltip(str(path.name))
-                os_button = ui.button(on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("data-rag-os")
+                _os_fn_tile = (lambda p=path: _open_os_path(str(p))) if is_dir else (lambda p=path: _select_in_os_explorer(str(p)))
+                os_button = ui.button(on_click=_os_fn_tile).props("data-rag-os")
                 os_button.classes("hidden")
 
         def render_row(path: Path, is_dir: bool, compact: bool = False) -> None:
@@ -2439,32 +2440,76 @@ def _build_page(initial_screen: str = "search") -> None:
                         ui.button("Вперед", on_click=lambda: (setattr(state, "explorer_page", state.explorer_page + 1), render_entries())).props("outline")
 
         with tree_area:
-            ui.input(placeholder="Фильтр по дереву").props("dense outlined clearable").classes("w-full")
-            ui.label("ИЗБРАННОЕ").classes("rag-section-label")
-            if state.favorites:
-                for fav in state.favorites[:5]:
-                    fav_path = Path(str(fav.get("path") or ""))
-                    ui.button(
-                        str(fav.get("title") or fav_path.name or fav_path),
-                        icon="folder" if str(fav.get("item_type") or "") == "folder" else "description",
-                        on_click=lambda p=fav_path: go_explorer(str(p)),
-                        color=None,
-                    ).props("flat align=left no-caps dense").classes("rag-nav-button rag-tree-button w-full")
-            else:
-                ui.label("Нет закреплённых элементов").classes("rag-meta")
-            ui.label("ДЕРЕВО").classes("rag-section-label")
-            current_tree_path = _safe_explorer_path(state)
-            current_ancestors = {str(part) for part in _explorer_path_parts(root, current_tree_path)}
-            render_tree_node(root, 0, current_tree_path, current_ancestors)
+            _tree_filter = [""]
+            tree_filter_input = ui.input(placeholder="Фильтр по дереву").props("dense outlined clearable").classes("w-full")
+            tree_content = ui.column().classes("w-full gap-0")
+
+            def _find_matching_folders(needle: str, max_results: int = 20) -> List[Path]:
+                results: List[Path] = []
+                queue = [(root, 0)]
+                while queue and len(results) < max_results:
+                    cur, depth = queue.pop(0)
+                    if depth > 6:
+                        continue
+                    try:
+                        children = sorted(
+                            [p for p in cur.iterdir() if p.is_dir() and not p.name.startswith(".")],
+                            key=lambda p: p.name.lower(),
+                        )
+                    except Exception:
+                        children = []
+                    for child in children:
+                        if needle.lower() in child.name.lower():
+                            results.append(child)
+                        queue.append((child, depth + 1))
+                return results
+
+            def _render_tree_content(needle: str = "") -> None:
+                tree_content.clear()
+                with tree_content:
+                    ui.label("ИЗБРАННОЕ").classes("rag-section-label")
+                    if state.favorites:
+                        for fav in state.favorites[:5]:
+                            fav_path = Path(str(fav.get("path") or ""))
+                            ui.button(
+                                str(fav.get("title") or fav_path.name or fav_path),
+                                icon="folder" if str(fav.get("item_type") or "") == "folder" else "description",
+                                on_click=lambda p=fav_path: go_explorer(str(p)),
+                                color=None,
+                            ).props("flat align=left no-caps dense").classes("rag-nav-button rag-tree-button w-full")
+                    else:
+                        ui.label("Нет закреплённых элементов").classes("rag-meta")
+                    ui.label("ДЕРЕВО").classes("rag-section-label")
+                    if needle:
+                        matches = _find_matching_folders(needle)
+                        if matches:
+                            for m in matches:
+                                ui.button(
+                                    m.name,
+                                    icon="folder",
+                                    on_click=lambda p=m: open_folder(p),
+                                    color=None,
+                                ).props("flat align=left no-caps dense").classes("rag-nav-button rag-tree-button w-full").tooltip(str(m))
+                        else:
+                            ui.label("Совпадений нет").classes("rag-meta text-xs px-2")
+                    else:
+                        current_tree_path = _safe_explorer_path(state)
+                        current_ancestors = {str(part) for part in _explorer_path_parts(root, current_tree_path)}
+                        render_tree_node(root, 0, current_tree_path, current_ancestors)
+
+            def _on_tree_filter_change(e: events.ValueChangeEventArguments) -> None:
+                _tree_filter[0] = str(e.value or "").strip()
+                _render_tree_content(_tree_filter[0])
+
+            tree_filter_input.on_value_change(_on_tree_filter_change)
+            _render_tree_content()
 
         render_explorer_details()
 
         with toolbar:
             current_for_toolbar = _safe_explorer_path(state)
             with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
-                ui.button(icon="arrow_back", color=None).props("flat round dense").tooltip("Назад")
-                ui.button(icon="arrow_forward", color=None).props("flat round dense").tooltip("Вперёд")
-                up_btn = ui.button(icon="arrow_upward", on_click=lambda: open_folder(current_for_toolbar.parent), color=None).props("flat round dense")
+                up_btn = ui.button(icon="arrow_upward", on_click=lambda: open_folder(current_for_toolbar.parent), color=None).props("flat round dense").tooltip("На уровень вверх")
                 if current_for_toolbar == root:
                     up_btn.disable()
                 render_breadcrumbs(root, current_for_toolbar)
@@ -2481,7 +2526,11 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 _folder_search_input.on("keyup.enter", _run_folder_search)
                 ui.button(icon="search", on_click=_run_folder_search, color=None).props("flat round dense")
-                ui.checkbox("AI", value=bool(state.cfg.get("llm_enabled")))
+                _folder_ai_cb = ui.checkbox("AI", value=bool(state.ai_search_expand)).props("dense").classes("rag-ai-expand")
+                _folder_ai_cb.tooltip("AI-дополнение запроса")
+                if not bool(state.cfg.get("llm_enabled")):
+                    _folder_ai_cb.disable()
+                _folder_ai_cb.on_value_change(lambda e: (setattr(state, "ai_search_expand", bool(e.value)), _save_ui_settings(state)))
             with ui.row().classes("rag-card w-full p-3 gap-3 items-center"):
                 filter_input = ui.input(placeholder="Фильтр по имени", value=state.explorer_filter).props("dense outlined clearable debounce=0").classes("min-w-64 flex-1")
 
