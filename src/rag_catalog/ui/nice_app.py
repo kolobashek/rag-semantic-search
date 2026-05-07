@@ -2864,6 +2864,20 @@ def _install_css() -> None:
           color: var(--rag-muted);
           font-size: 13px;
         }
+        /* Cloud Drive drag-drop zone */
+        .cd-drop-zone .q-uploader {
+          border: 2px dashed var(--rag-border);
+          border-radius: 10px;
+          background: var(--rag-sunken);
+          transition: border-color 0.15s, background 0.15s;
+        }
+        .cd-drop-zone .q-uploader:hover,
+        .cd-drop-zone .q-uploader--dnd {
+          border-color: var(--rag-accent);
+          background: rgba(61, 99, 255, 0.04);
+        }
+        /* Context-menu hover highlight */
+        .q-menu .q-item.text-negative:hover { background: rgba(220, 38, 38, 0.08); }
         .rag-suggest-item {
           min-width: 0;
           overflow: hidden;
@@ -3926,13 +3940,25 @@ def _build_page(initial_screen: str = "search") -> None:
                                     open_file_viewer(p)
                                 else:
                                     ui.notify(f"Файл «{fname}» недоступен на диске.", type="warning")
-                            with ui.element("div").classes(
-                                "rag-card p-2 gap-1 flex flex-row items-center cursor-pointer hover:bg-slate-50"
-                            ).on("click", _go_file):
-                                ui.html(_file_icon_svg(f.name, "Файл"), sanitize=False)
-                                with ui.column().classes("gap-0"):
-                                    ui.label(f.name).classes("text-sm font-medium leading-tight")
-                                    ui.label(_cd_file_size(f.size_bytes)).classes("rag-path text-xs")
+                            def _show_in_explorer(fp: str = f.path) -> None:
+                                parent = fp.rsplit("/", 1)[0] if "/" in fp else ""
+                                state.explorer_cd_path = parent
+                                state.screen = "explorer"
+                                render()
+                            with ui.row().classes("rag-card p-2 gap-2 items-center"):
+                                with ui.element("div").classes(
+                                    "flex flex-row items-center gap-2 cursor-pointer hover:bg-slate-50 flex-1"
+                                ).on("click", _go_file):
+                                    ui.html(_file_icon_svg(f.name, "Файл"), sanitize=False)
+                                    with ui.column().classes("gap-0"):
+                                        ui.label(f.name).classes("text-sm font-medium leading-tight")
+                                        parent_lbl = f.path.rsplit("/", 1)[0] if "/" in f.path else "Корень"
+                                        ui.label(f"{parent_lbl} · {_cd_file_size(f.size_bytes)}").classes("rag-path text-xs")
+                                ui.button(
+                                    icon="folder_open",
+                                    on_click=_show_in_explorer,
+                                    color=None,
+                                ).props("flat round dense").tooltip("Показать в Cloud Drive")
         except Exception:
             pass  # don't break search if registry lookup fails
 
