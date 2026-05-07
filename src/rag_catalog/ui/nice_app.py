@@ -509,6 +509,7 @@ class PageState:
     auth_db: Optional[UserAuthDB] = None
     current_user: Optional[Dict[str, Any]] = None
     auth_token: str = ""
+    session_expired: bool = False
     theme: str = "light"
     favorites: List[Dict[str, Any]] = field(default_factory=list)
     header_explorer_actions: Optional[ui.row] = None
@@ -3258,6 +3259,13 @@ def _build_page(initial_screen: str = "search") -> None:
             if state.current_user:
                 _load_user_state(state)
                 _get_auth_db(state).log_auth_event(username=_username(state), event_type="session_restore", ok=True)
+            else:
+                state.session_expired = True
+                state.auth_token = ""
+                try:
+                    app.storage.user.pop("auth_token", None)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -5748,10 +5756,58 @@ def _build_page(initial_screen: str = "search") -> None:
                 for ext, count in list(stats["by_ext"].items())[:12]:
                     ui.label(f"{ext}: {count}").classes("rag-meta")
 
+    def render_force_change_password_screen() -> None:
+        auth_db = _get_auth_db(state)
+        user = state.current_user or {}
+        username = str(user.get("username") or "")
+        with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
+            with ui.column().classes("rag-card w-full max-w-xl p-5 gap-4"):
+                with ui.row().classes("items-center gap-3"):
+                    ui.icon("lock_reset").classes("text-3xl text-warning")
+                    ui.label("Смена пароля обязательна").classes("text-2xl font-semibold")
+                ui.label(
+                    "Администратор установил требование смены пароля. "
+                    "Введите текущий временный пароль и задайте новый пароль для продолжения."
+                ).classes("rag-meta")
+                ui.separator()
+                old_pw = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                new_pw = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                new_pw2 = ui.input("Повторите новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+
+                def force_change() -> None:
+                    new_password = str(new_pw.value or "")
+                    if str(new_pw2.value or "") != new_password:
+                        ui.notify("Пароли не совпадают.", type="warning")
+                        return
+                    if len(new_password) < 6:
+                        ui.notify("Пароль должен быть не менее 6 символов.", type="warning")
+                        return
+                    ok = auth_db.change_password(
+                        username=username,
+                        old_password=str(old_pw.value or ""),
+                        new_password=new_password,
+                    )
+                    if ok:
+                        _refresh_current_user(state)
+                        auth_db.log_auth_event(username=username, event_type="password_changed_forced", ok=True)
+                        ui.notify("Пароль успешно изменён.", type="positive")
+                        render()
+                    else:
+                        ui.notify("Не удалось изменить пароль. Проверьте текущий пароль.", type="negative")
+
+                new_pw2.on("keyup.enter", lambda _: force_change())
+                with ui.row().classes("gap-2"):
+                    ui.button("Сменить пароль", icon="key", on_click=force_change).props("unelevated")
+                    ui.button("Выйти", icon="logout", on_click=do_logout).props("flat")
+
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
         with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
             with ui.column().classes("rag-card w-full max-w-xl p-5 gap-3"):
+                if state.session_expired:
+                    with ui.row().classes("items-center gap-2 bg-orange-50 border border-orange-200 rounded p-3 w-full"):
+                        ui.icon("schedule").classes("text-orange-500")
+                        ui.label("Сессия истекла — выполните вход снова.").classes("text-orange-700 text-sm")
                 ui.label("Вход в RAG Каталог").classes("text-2xl font-semibold")
                 ui.label("Войдите в аккаунт или отправьте заявку на доступ.").classes("rag-meta")
 
@@ -6087,6 +6143,34 @@ def _build_page(initial_screen: str = "search") -> None:
     def render_admin_security_settings(auth_db: UserAuthDB) -> None:
         current_ttl = auth_db.get_session_ttl_days()
         current_show_system = auth_db.get_show_system_files_for_admin()
+        all_users = auth_db.list_users()
+        must_change_users = [u for u in all_users if int(u.get("must_change_password") or 0)]
+        recent_events = auth_db.list_auth_events(limit=100)
+        failed_logins = [e for e in recent_events if not int(e.get("ok") or 0) and str(e.get("event_type") or "") == "login_failed"]
+
+        if must_change_users:
+            with ui.row().classes("items-center gap-2 bg-orange-50 border border-orange-200 rounded p-3 w-full"):
+                ui.icon("warning").classes("text-orange-500")
+                with ui.column().classes("gap-0"):
+                    ui.label(f"{len(must_change_users)} пользователей должны сменить пароль").classes("text-orange-700 text-sm font-medium")
+                    ui.label(", ".join(str(u.get("username") or "") for u in must_change_users)).classes("text-orange-600 text-xs")
+
+        with ui.row().classes("w-full gap-3"):
+            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                ui.icon("group").classes("text-2xl text-primary")
+                ui.label(str(len(all_users))).classes("text-xl font-semibold")
+                ui.label("Пользователей").classes("rag-meta text-xs")
+            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                count_color = "text-negative" if must_change_users else "text-positive"
+                ui.icon("lock_reset").classes(f"text-2xl {count_color}")
+                ui.label(str(len(must_change_users))).classes(f"text-xl font-semibold {count_color}")
+                ui.label("Смена пароля").classes("rag-meta text-xs")
+            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                fail_color = "text-negative" if failed_logins else "text-positive"
+                ui.icon("no_accounts").classes(f"text-2xl {fail_color}")
+                ui.label(str(len(failed_logins))).classes(f"text-xl font-semibold {fail_color}")
+                ui.label("Неудачных входов").classes("rag-meta text-xs")
+
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             initial_security = {
                 "ttl": int(current_ttl),
@@ -7758,6 +7842,17 @@ def _build_page(initial_screen: str = "search") -> None:
                 except Exception:
                     pass
                 render_login_screen()
+                return
+            if int((state.current_user or {}).get("must_change_password") or 0):
+                try:
+                    drawer.set_visibility(False)
+                except Exception:
+                    pass
+                try:
+                    menu_button.set_visibility(False)
+                except Exception:
+                    pass
+                render_force_change_password_screen()
                 return
             try:
                 drawer.set_visibility(True)
