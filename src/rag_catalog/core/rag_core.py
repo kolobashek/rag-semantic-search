@@ -23,8 +23,9 @@ apply_windows_platform_workarounds()
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
+from .embedding_collections import resolve_collection_name_from_config
 from .index_state_db import IndexStateDB
-from .retrieval import rrf_fuse
+from .retrieval import bm25_rank_items, rrf_fuse
 from .telemetry_db import TelemetryDB
 
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
@@ -51,6 +52,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "log_file": r"O:\rag_automation.log",
     "collection_name": "catalog",
     "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "embedding_collection_versioning": False,
+    "embedding_collection_suffix": "",
     "vector_size": 384,
     "chunk_size": 500,
     "chunk_overlap": 100,
@@ -93,10 +96,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rank_recency_enabled": True,    # учитывать свежесть modified
     "rank_recency_half_life_days": 180.0,  # через сколько дней буст в 2 раза меньше
     "rank_recency_max_boost": 0.03,  # максимум буста за самый свежий документ
+    "rank_max_chunks_per_document": 3,
     "retrieval_pipeline": "legacy",  # legacy|v2
     "retrieval_dense_top_k": 50,
     "retrieval_lexical_top_k": 50,
+    "retrieval_bm25_enabled": True,
+    "retrieval_bm25_top_k": 50,
     "retrieval_final_top_k": 10,
+    "retrieval_reranker_enabled": False,
+    "retrieval_reranker_model": "",
+    "retrieval_reranker_top_n": 30,
+    "retrieval_reranker_weight": 0.65,
 }
 
 logger = logging.getLogger(__name__)
@@ -160,9 +170,10 @@ class RAGSearcher:
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
-        self.collection_name = config["collection_name"]
+        self.collection_name = resolve_collection_name_from_config(config)
         self.connected = False
         self._embedder: Optional[Any] = None  # SentenceTransformer, загружается лениво
+        self._reranker: Optional[Any] = None  # CrossEncoder, загружается лениво
         self._fs_cache: Dict[str, Any] = {"ts": 0.0, "items": []}
         telemetry_path = (config.get("telemetry_db_path") or "").strip()
         if not telemetry_path:
@@ -207,6 +218,19 @@ class RAGSearcher:
                 logger.info("Загрузка модели эмбеддинга: %s", model_name)
                 self._embedder = SentenceTransformer(model_name)
         return self._embedder
+
+    @property
+    def reranker(self) -> Optional[Any]:
+        """Lazy CrossEncoder reranker for retrieval v2, enabled by config only."""
+        model_name = str(self.config.get("retrieval_reranker_model") or "").strip()
+        if not model_name:
+            return None
+        if getattr(self, "_reranker", None) is None:
+            from sentence_transformers import CrossEncoder  # noqa: PLC0415
+
+            logger.info("Загрузка reranker-модели: %s", model_name)
+            self._reranker = CrossEncoder(model_name)
+        return self._reranker
 
     # ── search ────────────────────────────────────────────────────────
 
@@ -395,8 +419,18 @@ class RAGSearcher:
             title_only=title_only,
         )
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
-            fused = rrf_fuse([lexical_results, results], limit=max(limit * 4, 40))
-            results = self._merge_ranked_results([], fused, limit=limit, query=query_used)
+            rerank_top_n = max(limit, int(self.config.get("retrieval_reranker_top_n", max(limit * 3, 30)) or limit))
+            bm25_results = self._bm25_catalog_search(
+                query=query_used,
+                limit=int(self.config.get("retrieval_bm25_top_k", max(limit * 4, 40)) or max(limit * 4, 40)),
+                file_type=file_type,
+                content_only=content_only,
+                title_only=title_only,
+            )
+            channels = [lexical_results, bm25_results, results]
+            fused = rrf_fuse(channels, limit=max(limit * 4, 40))
+            results = self._merge_ranked_results([], fused, limit=rerank_top_n, query=query_used)
+            results = self._rerank_results(query_used, results, limit=limit)
         else:
             results = self._merge_ranked_results(lexical_results, results, limit=limit, query=query_used)
 
@@ -608,6 +642,57 @@ class RAGSearcher:
         self._fs_cache = {"ts": now, "items": items}
         return items
 
+    def _bm25_catalog_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        file_type: Optional[str],
+        content_only: bool,
+        title_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        _ = title_only  # BM25 channel is metadata/title search by design.
+        if content_only or not bool(self.config.get("retrieval_bm25_enabled", True)):
+            return []
+        if not str(self.config.get("catalog_path") or "").strip():
+            return []
+        terms = self._query_terms(query)
+        if not terms:
+            return []
+        candidates: List[Dict[str, Any]] = []
+        for item in self._refresh_fs_cache():
+            if file_type and item.get("kind") == "folder":
+                continue
+            if file_type and str(item.get("extension") or "").lower() != file_type.lower():
+                continue
+            candidates.append(item)
+
+        ranked = bm25_rank_items(candidates, terms, limit=limit)
+        out: List[Dict[str, Any]] = []
+        for item in ranked:
+            is_folder = item.get("kind") == "folder"
+            out.append(
+                {
+                    "score": item.get("score", 0),
+                    "type": "folder_metadata" if is_folder else "file_metadata",
+                    "text": (
+                        f"Каталог: {item.get('filename')} | Путь: {item.get('path')}"
+                        if is_folder
+                        else f"Файл: {item.get('filename')} | Путь: {item.get('path')} | Расширение: {item.get('extension')}"
+                    ),
+                    "filename": item.get("filename", ""),
+                    "path": item.get("path", ""),
+                    "full_path": item.get("full_path", ""),
+                    "size_mb": item.get("size_mb"),
+                    "modified": item.get("modified"),
+                    "extension": item.get("extension", ""),
+                    "chunk_index": None,
+                    "rank_reason": item.get("rank_reason", "BM25 совпадение в имени/пути"),
+                    "retrieval_source": "bm25",
+                }
+            )
+        return out
+
     def _lexical_catalog_search(
         self,
         *,
@@ -785,8 +870,11 @@ class RAGSearcher:
             reverse=True,
         )
         folder_cap = max(3, min(5, limit // 2))
+        chunk_cap = max(1, int(config.get("rank_max_chunks_per_document", 3) or 3))
         balanced: List[Dict[str, Any]] = []
         deferred_folders: List[Dict[str, Any]] = []
+        deferred_chunks: List[Dict[str, Any]] = []
+        chunks_by_path: Dict[str, int] = {}
         folder_count = 0
         for item in ranked:
             if item.get("type") == "folder_metadata" and folder_count >= folder_cap:
@@ -794,12 +882,74 @@ class RAGSearcher:
                 continue
             if item.get("type") == "folder_metadata":
                 folder_count += 1
+            chunk_index = item.get("chunk_index")
+            if item.get("type") not in {"file_metadata", "folder_metadata"} and chunk_index is not None:
+                path_key = str(item.get("full_path") or item.get("path") or "")
+                path_count = chunks_by_path.get(path_key, 0)
+                if path_key and path_count >= chunk_cap:
+                    deferred_chunks.append(item)
+                    continue
+                if path_key:
+                    chunks_by_path[path_key] = path_count + 1
             balanced.append(item)
             if len(balanced) >= limit:
                 break
         if len(balanced) < limit:
-            balanced.extend(deferred_folders[: limit - len(balanced)])
+            deferred = [*deferred_folders, *deferred_chunks]
+            balanced.extend(deferred[: limit - len(balanced)])
         return balanced[:limit]
+
+    def _rerank_results(self, query: str, results: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+        if not results:
+            return []
+        config = getattr(self, "config", {}) or {}
+        if not bool(config.get("retrieval_reranker_enabled", False)):
+            return results[:limit]
+        model = self.reranker
+        if model is None:
+            return results[:limit]
+
+        candidates = results[: max(limit, int(config.get("retrieval_reranker_top_n", limit) or limit))]
+        pairs = [(query, self._rerank_text(item)) for item in candidates]
+        try:
+            raw_scores = list(model.predict(pairs))
+        except Exception as exc:
+            logger.warning("Reranker failed, using fused ranking: %s", exc)
+            return results[:limit]
+
+        if not raw_scores:
+            return results[:limit]
+        lo = min(float(score) for score in raw_scores)
+        hi = max(float(score) for score in raw_scores)
+        span = max(hi - lo, 1e-9)
+        weight = max(0.0, min(1.0, float(config.get("retrieval_reranker_weight", 0.65) or 0.65)))
+        reranked: List[Dict[str, Any]] = []
+        for item, raw_score in zip(candidates, raw_scores):
+            reranker_score = (float(raw_score) - lo) / span
+            base_score = float(item.get("rank_score", item.get("score") or 0) or 0)
+            updated = dict(item)
+            updated["reranker_score"] = round(float(raw_score), 6)
+            updated["rank_score"] = round((1.0 - weight) * base_score + weight * reranker_score, 6)
+            updated["retrieval_reranked"] = True
+            reranked.append(updated)
+
+        reranked.sort(
+            key=lambda item: (
+                float(item.get("rank_score") or 0),
+                float(item.get("reranker_score") or 0),
+                float(item.get("score") or 0),
+            ),
+            reverse=True,
+        )
+        return reranked[:limit]
+
+    def _rerank_text(self, item: Dict[str, Any]) -> str:
+        parts = [
+            str(item.get("filename") or ""),
+            str(item.get("path") or ""),
+            str(item.get("text") or ""),
+        ]
+        return "\n".join(part for part in parts if part).strip()[:4000]
 
     def _content_chunks_for_paths(self, paths: List[str], max_chunks: int = 100) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []

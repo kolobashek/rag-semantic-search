@@ -429,12 +429,12 @@ Codex:
 - [x] Добавить retrieval v2 feature flag.
 - [x] Вынести retrieval pipeline в `src/rag_catalog/core/retrieval/`.
 - [x] Добавить RRF fusion поверх dense + текущего lexical.
-- [ ] Добавить BM25/sparse слой или Qdrant sparse vector path.
-- [ ] Добавить reranker stage для top-N результатов.
-- [ ] Подготовить migration path для новых embedding models (`bge-m3`, `multilingual-e5-*`) через версионированные Qdrant collections.
-- [ ] Улучшить chunking: paragraph/sentence-aware минимум, затем structural chunking для DOCX/PDF/XLSX.
+- [x] Добавить BM25/sparse слой или Qdrant sparse vector path. Реализован локальный BM25 metadata-channel для retrieval v2; Qdrant sparse path остается возможным upgrade.
+- [x] Добавить reranker stage для top-N результатов. Реализован feature-flagged CrossEncoder reranker (`retrieval_reranker_*`) поверх retrieval v2 candidates.
+- [x] Подготовить migration path для новых embedding models (`bge-m3`, `multilingual-e5-*`) через версионированные Qdrant collections. Добавлен opt-in `embedding_collection_versioning`/`embedding_collection_suffix`.
+- [x] Улучшить chunking: paragraph/sentence-aware минимум, затем structural chunking для DOCX/PDF/XLSX. Минимум закрыт: `_chunk_text` теперь предпочитает границы абзацев/предложений; structural chunking остается отдельным upgrade.
 - [ ] Добавить parent-child retrieval и provenance: page/sheet/row/section.
-- [ ] Добавить grouping/diversity: лимит чанков на документ и MMR-подобную диверсификацию.
+- [x] Добавить grouping/diversity: лимит чанков на документ и MMR-подобную диверсификацию. Добавлен configurable cap `rank_max_chunks_per_document`; MMR остается возможным upgrade.
 
 Claude:
 - [x] Добавить UI для eval results: сравнение пайплайнов, топ провалов, latency.

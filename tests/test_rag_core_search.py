@@ -48,6 +48,11 @@ class _FakeQdrant:
         return SimpleNamespace(points=[])
 
 
+class _FakeReranker:
+    def predict(self, pairs):
+        return [10.0 if "target" in text else 1.0 for _query, text in pairs]
+
+
 def _make_searcher(*, connected: bool, embed_mode: str = "ok", qdrant_mode: str = "ok") -> RAGSearcher:
     s = RAGSearcher.__new__(RAGSearcher)
     s.connected = connected
@@ -182,6 +187,50 @@ def test_search_retrieval_v2_uses_rrf_fusion() -> None:
     assert out[0]["fusion"] == "rrf"
 
 
+def test_bm25_catalog_search_returns_metadata_channel(tmp_path: Path) -> None:
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    exact = catalog / "Карточка предприятия ООО ТСК.docx"
+    other = catalog / "Акт сверки.docx"
+    exact.write_text("x", encoding="utf-8")
+    other.write_text("x", encoding="utf-8")
+
+    s = _make_searcher(connected=True)
+    s.config = {"catalog_path": str(catalog), "retrieval_bm25_enabled": True}
+
+    out = s._bm25_catalog_search(
+        query="карточка предприятия тск",
+        limit=5,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert out[0]["filename"] == exact.name
+    assert out[0]["type"] == "file_metadata"
+    assert out[0]["retrieval_source"] == "bm25"
+
+
+def test_rerank_results_reorders_top_candidates_with_cross_encoder_scores() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+        "retrieval_reranker_weight": 1.0,
+        "retrieval_reranker_top_n": 3,
+    }
+    s._reranker = _FakeReranker()
+    results = [
+        {"filename": "first.docx", "text": "generic", "score": 0.99, "rank_score": 0.99},
+        {"filename": "target.docx", "text": "target answer", "score": 0.50, "rank_score": 0.50},
+    ]
+
+    out = s._rerank_results("target", results, limit=2)
+
+    assert out[0]["filename"] == "target.docx"
+    assert out[0]["retrieval_reranked"] is True
+    assert out[0]["reranker_score"] == 10.0
+
+
 def test_refresh_fs_cache_uses_state_db_with_ancestor_and_empty_folders(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog"
     qdrant = tmp_path / "qdrant"
@@ -269,6 +318,35 @@ def test_merge_ranked_results_applies_recency_boost() -> None:
     )
     assert out[0]["filename"] == "fresh.pdf"
     assert float(out[0]["rank_score"]) > float(out[1]["rank_score"])
+
+
+def test_merge_ranked_results_limits_chunks_per_document() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {"rank_max_chunks_per_document": 2}
+    same_doc = [
+        {
+            "type": "content",
+            "filename": "same.docx",
+            "full_path": r"O:\same.docx",
+            "path": "same.docx",
+            "chunk_index": idx,
+            "score": 0.99 - idx * 0.01,
+        }
+        for idx in range(4)
+    ]
+    other_doc = {
+        "type": "content",
+        "filename": "other.docx",
+        "full_path": r"O:\other.docx",
+        "path": "other.docx",
+        "chunk_index": 0,
+        "score": 0.50,
+    }
+
+    out = s._merge_ranked_results([], [*same_doc, other_doc], limit=3, query="same")
+
+    assert [item["filename"] for item in out].count("same.docx") == 2
+    assert any(item["filename"] == "other.docx" for item in out)
 
 
 def test_answer_fact_question_handles_search_error() -> None:

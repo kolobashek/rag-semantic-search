@@ -37,6 +37,7 @@ from ._platform_compat import apply_windows_platform_workarounds
 
 apply_windows_platform_workarounds()
 
+from .embedding_collections import resolve_embedding_collection_name
 from .index_state_db import IndexStateDB
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB
@@ -298,6 +299,12 @@ def main() -> int:
         help="Число повторов scroll-запросов к Qdrant при временных ошибках/таймаутах",
     )
     args = parser.parse_args()
+    args.collection = resolve_embedding_collection_name(
+        args.collection,
+        str(cfg.get("embedding_model") or ""),
+        enabled=bool(cfg.get("embedding_collection_versioning", False)),
+        suffix=str(cfg.get("embedding_collection_suffix") or ""),
+    )
     workers_effective = _effective_workers(int(args.workers or 0))
 
     # ── Инициализация телеметрии ─────────────────────────────────────────────

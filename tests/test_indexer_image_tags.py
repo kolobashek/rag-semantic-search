@@ -540,6 +540,17 @@ class TestChunkText:
         assert chunks[0] == "0123456789"
         assert chunks[1] == "abcdefghij"
 
+    def test_semantic_chunking_prefers_paragraph_boundary(self):
+        """For realistic chunk sizes, chunking should avoid cutting paragraphs when possible."""
+        idx = self._make_indexer(180, 20)
+        first = "Первый абзац содержит важный контекст. " * 4
+        second = "Второй абзац должен начаться отдельным смысловым блоком. " * 3
+        chunks = idx._chunk_text(first + "\n\n" + second)
+
+        assert len(chunks) >= 2
+        assert chunks[0].endswith("\n")
+        assert "Второй абзац" not in chunks[0]
+
 
 # ═══════════════════════════ Многостраничный TIFF ═════════════════════════════
 

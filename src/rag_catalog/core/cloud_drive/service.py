@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from ..embedding_collections import resolve_collection_name_from_config
 from .models import CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
 from .registry import CloudDriveRegistryDB
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
@@ -802,7 +803,7 @@ class CloudDriveService:
             catalog_path=str(index_root),
             qdrant_db_path=str(index_config.get('qdrant_db_path') or ''),
             embedding_model=str(index_config.get('embedding_model') or 'sentence-transformers/all-MiniLM-L6-v2'),
-            collection_name=str(index_config.get('collection_name') or index_config.get('qdrant_collection') or 'catalog'),
+            collection_name=resolve_collection_name_from_config(index_config),
             vector_size=int(index_config.get('vector_size') or 384),
             chunk_size=int(index_config.get('chunk_size') or 500),
             chunk_overlap=int(index_config.get('chunk_overlap') or 100),
@@ -841,7 +842,7 @@ class CloudDriveService:
             return 0
         qdrant_db_path = str(index_config.get('qdrant_db_path') or '').strip()
         qdrant_url = str(index_config.get('qdrant_url') or '').strip()
-        collection_name = str(index_config.get('collection_name') or index_config.get('qdrant_collection') or 'catalog')
+        collection_name = resolve_collection_name_from_config(index_config)
         if not qdrant_db_path and not qdrant_url:
             return 0
         try:
