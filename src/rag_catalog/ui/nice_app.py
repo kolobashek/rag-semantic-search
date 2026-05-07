@@ -4260,6 +4260,76 @@ def _build_page(initial_screen: str = "search") -> None:
                     ).props("unelevated dense")
             dlg.open()
 
+        async def _cd_move_dialog(node_path: str, node_name: str, is_folder: bool = False) -> None:
+            """Dialog to move a file or folder to another folder in Cloud Drive."""
+            # Load all available target folders from registry
+            try:
+                with svc.registry._connect() as _conn:
+                    _rows = _conn.execute(
+                        "SELECT * FROM cloud_folders ORDER BY path"
+                    ).fetchall()
+                all_folders = [svc.registry._folder_from_row(r) for r in _rows]
+            except Exception:
+                all_folders = []
+
+            # Exclude self (and descendants if it's a folder)
+            if is_folder:
+                candidates = [
+                    fo for fo in all_folders
+                    if fo.path != node_path and not fo.path.startswith(node_path + "/")
+                ]
+            else:
+                candidates = all_folders
+
+            selected_path: list = [page_state.explorer_cd_path or ""]
+
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-96"):
+                ui.label("Переместить в папку").classes("text-lg font-semibold")
+                ui.label(f"{'Папка' if is_folder else 'Файл'}: {node_name}").classes("text-sm")
+                ui.separator()
+
+                if not candidates:
+                    ui.label("Нет доступных папок.").classes("rag-meta text-sm")
+                else:
+                    folder_options = {
+                        fo.path: ("Cloud Drive (корень)" if fo.is_root else fo.path)
+                        for fo in candidates
+                    }
+                    sel = ui.select(
+                        options=folder_options,
+                        value=selected_path[0],
+                        label="Целевая папка",
+                    ).props("dense outlined emit-value map-options").classes("w-full")
+                    sel.on("update:model-value", lambda e: selected_path.__setitem__(0, e.args))
+
+                async def _do_move() -> None:
+                    dest = str(selected_path[0] or "").strip()
+                    if dest == (node_path.rsplit("/", 1)[0] if "/" in node_path else ""):
+                        ui.notify("Файл уже находится в этой папке.", type="info")
+                        dlg.close()
+                        return
+                    try:
+                        await run.io_bound(
+                            svc.move_node,
+                            source_path=node_path,
+                            dest_parent_path=dest,
+                            new_name=node_name,
+                        )
+                        dlg.close()
+                        _log_app_event(
+                            page_state, "cd_explorer", "move",
+                            details={"path": node_path, "dest": dest},
+                        )
+                        ui.notify(f"«{node_name}» перемещён.", type="positive")
+                        render()
+                    except Exception as exc:
+                        ui.notify(f"Ошибка перемещения: {exc}", type="negative")
+
+                with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                    ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                    ui.button("Переместить", icon="drive_file_move", on_click=_do_move).props("unelevated dense")
+            dlg.open()
+
         def _cd_open_file(file: CloudDriveFile) -> None:
             src = str(file.source_path or file.path or "")
             if src:
@@ -4493,6 +4563,11 @@ def _build_page(initial_screen: str = "search") -> None:
                                                     on_click=lambda fo=folder: _cd_rename_dialog(fo.path, fo.name),
                                                     auto_close=True,
                                                 )
+                                                ui.menu_item(
+                                                    "Переместить в…",
+                                                    on_click=lambda fo=folder: _cd_move_dialog(fo.path, fo.name, is_folder=True),
+                                                    auto_close=True,
+                                                )
                                                 ui.separator()
                                                 ui.menu_item(
                                                     "Удалить папку…",
@@ -4518,6 +4593,11 @@ def _build_page(initial_screen: str = "search") -> None:
                                                 ui.menu_item(
                                                     "Переименовать",
                                                     on_click=lambda fo=folder: _cd_rename_dialog(fo.path, fo.name),
+                                                    auto_close=True,
+                                                )
+                                                ui.menu_item(
+                                                    "Переместить в…",
+                                                    on_click=lambda fo=folder: _cd_move_dialog(fo.path, fo.name, is_folder=True),
                                                     auto_close=True,
                                                 )
                                                 ui.separator()
@@ -4559,6 +4639,11 @@ def _build_page(initial_screen: str = "search") -> None:
                                             ui.menu_item(
                                                 "Переименовать",
                                                 on_click=lambda fi=f: _cd_rename_dialog(fi.path, fi.name),
+                                                auto_close=True,
+                                            )
+                                            ui.menu_item(
+                                                "Переместить в…",
+                                                on_click=lambda fi=f: _cd_move_dialog(fi.path, fi.name, is_folder=False),
                                                 auto_close=True,
                                             )
                                             ui.separator()
@@ -4608,6 +4693,11 @@ def _build_page(initial_screen: str = "search") -> None:
                                                 on_click=lambda fi=f: _cd_rename_dialog(fi.path, fi.name),
                                                 auto_close=True,
                                             )
+                                            ui.menu_item(
+                                                "Переместить в…",
+                                                on_click=lambda fi=f: _cd_move_dialog(fi.path, fi.name, is_folder=False),
+                                                auto_close=True,
+                                            )
                                             ui.separator()
                                             ui.menu_item(
                                                 "Удалить файл…",
@@ -4621,6 +4711,40 @@ def _build_page(initial_screen: str = "search") -> None:
                         ui.button("Назад", on_click=lambda: (setattr(page_state, "explorer_page", max(0, page_state.explorer_page - 1)), render())).props("outline")
                         ui.label(f"Стр. {page_state.explorer_page + 1} / {(total_files + page_size - 1) // page_size}").classes("rag-meta")
                         ui.button("Вперёд", on_click=lambda: (setattr(page_state, "explorer_page", page_state.explorer_page + 1), render())).props("outline")
+
+                # ── Drop zone ─────────────────────────────────────────────────
+                with ui.element("div").classes("w-full mt-3"):
+                    async def _handle_drop_upload(e: "Any") -> None:
+                        filename = str(getattr(e, "name", "") or "").strip()
+                        content = getattr(e, "content", None)
+                        if not filename or content is None:
+                            return
+                        import tempfile as _tempfile
+                        _suffix = Path(filename).suffix
+                        with _tempfile.NamedTemporaryFile(delete=False, suffix=_suffix) as _tmp:
+                            _tmp.write(content.read())
+                            _tmp_path = _tmp.name
+                        try:
+                            await run.io_bound(
+                                svc.upload_file,
+                                parent_path=page_state.explorer_cd_path or "",
+                                filename=filename,
+                                source_path=_tmp_path,
+                                mime_type="",
+                            )
+                            ui.notify(f"Загружен: «{filename}»", type="positive")
+                            render()
+                        except Exception as _exc:
+                            ui.notify(f"Ошибка загрузки «{filename}»: {_exc}", type="negative")
+                        finally:
+                            Path(_tmp_path).unlink(missing_ok=True)
+
+                    ui.upload(
+                        multiple=True,
+                        on_upload=_handle_drop_upload,
+                        auto_upload=True,
+                        label="Перетащите файлы сюда для загрузки",
+                    ).props("flat bordered").classes("w-full cd-drop-zone")
 
     def render_explorer_screen() -> None:  # noqa: PLR0912,PLR0915
         # ── Cloud Drive registry mode ─────────────────────────────────────
