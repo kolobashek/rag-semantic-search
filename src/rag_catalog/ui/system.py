@@ -553,7 +553,9 @@ def _recover_background_tasks(
     recovered_index_now = False
     live_index = _find_live_running_index_run(telemetry)
     active_index = telemetry.get_active_index_run() if hasattr(telemetry, "get_active_index_run") else None
-    if not live_index and active_index:
+    active_index_pid = _safe_int((active_index or {}).get("worker_pid"), 0)
+    active_index_pid_dead = bool(active_index and active_index_pid > 0 and not _is_process_alive(active_index_pid))
+    if active_index and (not live_index or (active_index_pid_dead and live_index.get("_process_scan_only"))):
         recovery_stage = _resolve_index_recovery_stage(telemetry, active_index)
         telemetry.finalize_running_index_runs(status="cancelled", note=recovery_note)
         _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr)
@@ -573,11 +575,13 @@ def _recover_background_tasks(
 
     live_ocr = _find_live_running_ocr_run(telemetry)
     active_ocr = telemetry.get_active_ocr_run() if hasattr(telemetry, "get_active_ocr_run") else None
+    active_ocr_pid = _safe_int((active_ocr or {}).get("worker_pid"), 0)
+    active_ocr_pid_dead = bool(active_ocr and active_ocr_pid > 0 and not _is_process_alive(active_ocr_pid))
     if recovered_index_now:
         if active_ocr and hasattr(telemetry, "finalize_running_ocr_runs"):
             telemetry.finalize_running_ocr_runs(status="cancelled", note=recovery_note)
         return
-    if not live_ocr and active_ocr:
+    if active_ocr and (not live_ocr or (active_ocr_pid_dead and live_ocr.get("_process_scan_only"))):
         if hasattr(telemetry, "finalize_running_ocr_runs"):
             telemetry.finalize_running_ocr_runs(status="cancelled", note=recovery_note)
         _launch_ocr(cfg, min_text_len=ocr_min_text_len, workers=workers)
