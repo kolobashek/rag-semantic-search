@@ -411,7 +411,7 @@ Claude:
 
 Codex:
 - [x] Убрать production-риск `admin/admin`: forced password rotation, explicit bootstrap admin или запрет default admin без dev-mode.
-- [ ] Убрать `auth_token` из query-параметров API: принимать session cookie и/или `Authorization: Bearer`.
+- [x] Перевести Cloud Drive API на session cookie / `Authorization: Bearer`; `auth_token` оставлен как legacy fallback до чистки внешних клиентов.
 - [ ] Добавить folder/file ACL hooks в Cloud Drive API и search filters.
 - [x] Добавить audit trail для Cloud Drive операций: view/download/upload/delete/move/rename/search.
 - [x] Добавить CI quality gate: `pytest`, `py_compile`, launcher smoke, docker smoke.

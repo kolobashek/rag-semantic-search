@@ -831,6 +831,8 @@ def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:
     user = cloud_api._require_cloud_drive_api_user(cfg, auth_token=token)
 
     assert user["username"] == "user"
+    header_user = cloud_api._require_cloud_drive_api_user(cfg, authorization=f"Bearer {token}")
+    assert header_user["username"] == "user"
 
 
 def test_cloud_drive_api_admin_guard_rejects_non_admin(tmp_path) -> None:
