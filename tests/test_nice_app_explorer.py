@@ -481,6 +481,7 @@ def test_cloud_drive_file_statuses_api_returns_latest_job_by_file(monkeypatch, t
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
         "cloud_drive_storage": "local",
         "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "telemetry_db_path": str(tmp_path / "telemetry.db"),
     }
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
@@ -674,6 +675,7 @@ def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
         "cloud_drive_storage": "local",
         "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "telemetry_db_path": str(tmp_path / "telemetry.db"),
     }
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
@@ -708,6 +710,14 @@ def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
     assert moved["path"] == "Archive"
     assert deleted["node_type"] == "folder"
     assert service.registry.get_folder_by_path("Archive") is None
+    events = TelemetryDB(cfg["telemetry_db_path"]).fetch_dicts(
+        "SELECT username, feature, action, ok FROM app_events ORDER BY id"
+    )
+    assert [(row["username"], row["feature"], row["action"], row["ok"]) for row in events] == [
+        ("user", "cloud_drive", "rename", 1),
+        ("user", "cloud_drive", "move", 1),
+        ("user", "cloud_drive", "delete", 1),
+    ]
 
 
 def test_cloud_drive_reindex_api_queues_job(monkeypatch, tmp_path) -> None:

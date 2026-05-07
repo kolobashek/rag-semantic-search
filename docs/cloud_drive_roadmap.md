@@ -413,7 +413,7 @@ Codex:
 - [ ] Убрать production-риск `admin/admin`: forced password rotation, explicit bootstrap admin или запрет default admin без dev-mode.
 - [ ] Убрать `auth_token` из query-параметров API: принимать session cookie и/или `Authorization: Bearer`.
 - [ ] Добавить folder/file ACL hooks в Cloud Drive API и search filters.
-- [ ] Добавить audit trail для Cloud Drive операций: view/download/upload/delete/move/rename/search.
+- [x] Добавить audit trail для Cloud Drive операций: view/download/upload/delete/move/rename/search.
 - [ ] Добавить CI quality gate: `pytest`, `py_compile`, launcher smoke, docker smoke.
 - [ ] Подключить `ruff` и постепенно включать правила без массового churn.
 - [ ] Зафиксировать dependency lock / reproducible install path.
