@@ -185,6 +185,11 @@ class CloudDriveRegistryDB:
                 assert row is not None
                 return self._folder_from_row(row)
 
+    def get_root_folder(self) -> Optional[CloudDriveFolder]:
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM cloud_folders WHERE is_root=1 LIMIT 1').fetchone()
+            return self._folder_from_row(row) if row else None
+
     def upsert_folder(self, *, path: str, name: str, parent_id: Optional[str], depth: int, source_path: str = '', is_root: bool = False) -> CloudDriveFolder:
         clean_path = self._normalize_path(path)
         now = _utc_now()
@@ -264,6 +269,13 @@ class CloudDriveRegistryDB:
         with self._connect() as conn:
             row = conn.execute('SELECT * FROM cloud_files WHERE path=?', (self._normalize_path(path),)).fetchone()
             return self._file_from_row(row) if row else None
+
+    def get_node_by_path(self, path: str) -> CloudDriveFolder | CloudDriveFile | None:
+        clean_path = self._normalize_path(path)
+        folder = self.get_folder_by_path(clean_path)
+        if folder is not None:
+            return folder
+        return self.get_file_by_path(clean_path)
 
     def list_files_in_folder(self, folder_id: str) -> List[CloudDriveFile]:
         with self._connect() as conn:

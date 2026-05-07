@@ -57,6 +57,23 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert file_row is not None
     assert file_row.size_bytes == 5
 
+    root_node = service.get_node('')
+    assert root_node['node_type'] == 'folder'
+    assert root_node['is_root'] is True
+
+    folder_node = service.get_node('Folder A')
+    assert folder_node['node_type'] == 'folder'
+    assert folder_node['name'] == 'Folder A'
+
+    file_node = service.get_node('Folder A/hello.txt')
+    assert file_node['node_type'] == 'file'
+    assert file_node['size_bytes'] == 5
+
+    listing = service.list_directory('Folder A')
+    assert listing['folder']['path'] == 'Folder A'
+    assert listing['folders'] == []
+    assert [item['name'] for item in listing['files']] == ['hello.txt']
+
 
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))

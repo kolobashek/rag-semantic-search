@@ -55,6 +55,10 @@
 - bootstrap jobs получили SQL-поля `started_at/finished_at`, теперь жизненный цикл jobs наблюдаем не только через `payload`.
 - добавлен storage health-check contract для backend;
 - добавлен read-only API endpoint для health-check storage backend.
+- добавлены первые registry-backed file operations API endpoints:
+  - `GET /api/cloud-drive/node`
+  - `GET /api/cloud-drive/list`
+- Cloud Drive service получил read-only методы `get_node()` и `list_directory()` для explorer/API слоя.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -143,8 +147,8 @@
 #### 3. API слой
 
 - Вынести файловые операции в FastAPI endpoints:
-  - list folders/files;
-  - get node;
+  - [x] list folders/files;
+  - [x] get node;
   - upload;
   - download;
   - create folder;
@@ -202,15 +206,22 @@ _Коммит: f046509 (feat(ui): Cloud Drive admin UX polish — Sprint 1)_
 
 #### 2. Explorer on registry
 
-- Перевести экран проводника на чтение из Cloud Drive registry.
-- Пересобрать layout:
-  - дерево;
-  - breadcrumbs;
-  - список/плитка;
-  - свойства;
-  - фильтры.
-- Синхронизировать состояние между левым деревом, breadcrumbs и активным каталогом.
-- Убрать дубли текущего пути и сделать навигацию usable.
+- [x] Перевести экран проводника на чтение из Cloud Drive registry:
+  - `_cd_get_service()` — активирует registry-mode когда `cloud_drive_enabled`;
+  - `_cd_list_children()`, `_cd_breadcrumb_chain()` — data-helpers над registry API;
+  - `render_explorer_screen()` диспетчирует в `_render_cd_explorer()` или legacy os-walk.
+- [x] Пересобрать layout:
+  - [x] дерево (рекурсивный обход `list_child_folders`, active/ancestor state);
+  - [x] breadcrumbs (toolbar: вверх + цепочка папок + refresh);
+  - [x] список/таблица (Таблица и Список view modes);
+  - [x] свойства (панель: имя, path, кол-во папок/файлов, активные фильтры);
+  - [x] фильтры (по имени, расширению, сортировка по имени/размеру/дате, порядок).
+- [x] Синхронизировать состояние: `explorer_cd_path` как единый source of truth для tree/breadcrumbs/entries.
+- [x] Убрать дубли пути: навигация через folder.path из registry, не через filesystem.
+- [x] Empty states: registry empty (cloud_off), folder empty (folder_open), star-favorites.
+- [ ] Drag-and-drop upload (ждёт file operations API от Codex — Sprint 3).
+
+_Коммит: 6678ff5 (feat(ui): Cloud Drive registry-backed explorer — Sprint 2)_
 
 #### 3. User file workflows
 

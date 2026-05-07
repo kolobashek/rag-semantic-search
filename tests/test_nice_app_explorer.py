@@ -17,6 +17,8 @@ from rag_catalog.ui.nice_app import (
     _run_catalog_search,
     api_cloud_drive_bootstrap_jobs,
     api_cloud_drive_bootstrap_status,
+    api_cloud_drive_list,
+    api_cloud_drive_node,
     api_cloud_drive_storage_health,
 )
 import rag_catalog.ui.nice_app as nice_app
@@ -416,3 +418,41 @@ def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
     assert health["backend"] == "local"
     assert health["ok"] is True
     assert health["writable"] is True
+
+
+def test_cloud_drive_node_and_list_api(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    child = service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    service.registry.upsert_file(
+        folder_id=child.id,
+        path="Folder A/hello.txt",
+        name="hello.txt",
+        storage_key="Folder A/hello.txt",
+        mime_type="text/plain",
+        size_bytes=5,
+        checksum="abc",
+        source_path="O:/Обмен/Folder A/hello.txt",
+    )
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    root_node = api_cloud_drive_node()
+    folder_node = api_cloud_drive_node("Folder A")
+    listing = api_cloud_drive_list("Folder A")
+
+    assert root_node["node_type"] == "folder"
+    assert root_node["is_root"] is True
+    assert folder_node["name"] == "Folder A"
+    assert listing["folder"]["path"] == "Folder A"
+    assert [item["name"] for item in listing["files"]] == ["hello.txt"]

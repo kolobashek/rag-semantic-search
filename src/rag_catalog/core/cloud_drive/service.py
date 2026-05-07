@@ -65,6 +65,101 @@ class CloudDriveService:
             error=str(result.get('error') or ''),
         )
 
+    def get_node(self, path: str = '') -> dict:
+        clean_path = str(path or '').strip().replace('\\', '/').strip('/')
+        if not clean_path:
+            folder = self.registry.get_root_folder()
+            if folder is None:
+                raise RuntimeError('Cloud Drive registry ещё не инициализирован.')
+            return {
+                'node_type': 'folder',
+                'id': folder.id,
+                'name': folder.name,
+                'path': folder.path,
+                'source_path': folder.source_path,
+                'depth': folder.depth,
+                'is_root': folder.is_root,
+                'created_at': folder.created_at,
+                'updated_at': folder.updated_at,
+            }
+        node = self.registry.get_node_by_path(clean_path)
+        if node is None:
+            raise RuntimeError(f'Узел не найден: {clean_path}')
+        if hasattr(node, 'folder_id'):
+            return {
+                'node_type': 'file',
+                'id': node.id,
+                'folder_id': node.folder_id,
+                'name': node.name,
+                'path': node.path,
+                'storage_key': node.storage_key,
+                'mime_type': node.mime_type,
+                'size_bytes': node.size_bytes,
+                'checksum': node.checksum,
+                'source_path': node.source_path,
+                'current_version_id': node.current_version_id,
+                'created_at': node.created_at,
+                'updated_at': node.updated_at,
+                'deleted_at': node.deleted_at,
+            }
+        return {
+            'node_type': 'folder',
+            'id': node.id,
+            'name': node.name,
+            'path': node.path,
+            'source_path': node.source_path,
+            'depth': node.depth,
+            'is_root': node.is_root,
+            'created_at': node.created_at,
+            'updated_at': node.updated_at,
+        }
+
+    def list_directory(self, path: str = '') -> dict:
+        folder_data = self.get_node(path)
+        if folder_data['node_type'] != 'folder':
+            raise RuntimeError(f'Путь не является каталогом: {path}')
+        folder = self.registry.get_root_folder() if not folder_data['path'] else self.registry.get_folder_by_path(folder_data['path'])
+        if folder is None:
+            raise RuntimeError(f'Каталог не найден: {path}')
+        folders = self.registry.list_child_folders(folder.id)
+        files = self.registry.list_files_in_folder(folder.id)
+        return {
+            'folder': folder_data,
+            'folders': [
+                {
+                    'node_type': 'folder',
+                    'id': item.id,
+                    'name': item.name,
+                    'path': item.path,
+                    'source_path': item.source_path,
+                    'depth': item.depth,
+                    'is_root': item.is_root,
+                    'created_at': item.created_at,
+                    'updated_at': item.updated_at,
+                }
+                for item in folders
+            ],
+            'files': [
+                {
+                    'node_type': 'file',
+                    'id': item.id,
+                    'folder_id': item.folder_id,
+                    'name': item.name,
+                    'path': item.path,
+                    'storage_key': item.storage_key,
+                    'mime_type': item.mime_type,
+                    'size_bytes': item.size_bytes,
+                    'checksum': item.checksum,
+                    'source_path': item.source_path,
+                    'current_version_id': item.current_version_id,
+                    'created_at': item.created_at,
+                    'updated_at': item.updated_at,
+                    'deleted_at': item.deleted_at,
+                }
+                for item in files
+            ],
+        }
+
     def cancel_job(self, job_id: str) -> CloudDriveJob:
         job = self.registry.get_job(job_id)
         if job is None:
