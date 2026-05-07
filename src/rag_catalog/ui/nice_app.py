@@ -3728,6 +3728,76 @@ def _build_page(initial_screen: str = "search") -> None:
             elif preview:
                 ui.label(preview).classes("rag-meta")
 
+    def _render_cd_search_hints(query: str) -> None:
+        """Render a compact Cloud Drive registry section above main search results."""
+        cd_svc = _cd_get_service(state.cfg)
+        if cd_svc is None or not query:
+            return
+        try:
+            q = query.strip().lower()
+            root = cd_svc.registry.get_root_folder()
+            if root is None:
+                return
+            # Walk all folders at depth ≤ 3 looking for name matches
+            matched_folders: list = []
+            matched_files: list = []
+
+            def _walk_folders(parent_id: str, depth: int) -> None:
+                if depth > 3 or len(matched_folders) >= 5:
+                    return
+                for folder in cd_svc.registry.list_child_folders(parent_id):
+                    if q in folder.name.lower():
+                        matched_folders.append(folder)
+                    if depth < 3:
+                        _walk_folders(folder.id, depth + 1)
+
+            _walk_folders(root.id, 0)
+            # File name search in current folder context (root level only — fast)
+            for f in cd_svc.registry.list_files_in_folder(root.id):
+                if q in f.name.lower() and len(matched_files) < 5:
+                    matched_files.append(f)
+
+            if not matched_folders and not matched_files:
+                return
+
+            with ui.column().classes("rag-card w-full p-3 gap-2"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("cloud", size="16px").classes("text-indigo-400")
+                    ui.label("Cloud Drive").classes("font-semibold text-sm text-indigo-700")
+                    ui.label("— совпадения в реестре").classes("rag-meta text-xs")
+                if matched_folders:
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        for folder in matched_folders:
+                            def _go_folder(fp: str = folder.path) -> None:
+                                state.explorer_cd_path = fp
+                                state.screen = "explorer"
+                                render()
+                            with ui.element("div").classes(
+                                "rag-card p-2 gap-1 flex flex-row items-center cursor-pointer hover:bg-slate-50"
+                            ).on("click", _go_folder):
+                                ui.icon("folder", size="18px").classes("text-yellow-500")
+                                with ui.column().classes("gap-0"):
+                                    ui.label(folder.name).classes("text-sm font-medium leading-tight")
+                                    ui.label(folder.path or "/").classes("rag-path text-xs")
+                if matched_files:
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        for f in matched_files:
+                            def _go_file(fpath: str = str(f.source_path or f.path or ""), fname: str = f.name) -> None:
+                                p = Path(fpath) if fpath else None
+                                if p and p.exists() and p.is_file():
+                                    open_file_viewer(p)
+                                else:
+                                    ui.notify(f"Файл «{fname}» недоступен на диске.", type="warning")
+                            with ui.element("div").classes(
+                                "rag-card p-2 gap-1 flex flex-row items-center cursor-pointer hover:bg-slate-50"
+                            ).on("click", _go_file):
+                                ui.html(_file_icon_svg(f.name, "Файл"), sanitize=False)
+                                with ui.column().classes("gap-0"):
+                                    ui.label(f.name).classes("text-sm font-medium leading-tight")
+                                    ui.label(_cd_file_size(f.size_bytes)).classes("rag-path text-xs")
+        except Exception:
+            pass  # don't break search if registry lookup fails
+
     def render_search_screen() -> None:
         render_search_header()
         if state.search_error:
@@ -3737,6 +3807,9 @@ def _build_page(initial_screen: str = "search") -> None:
                 for label, query in SEARCH_PRESETS:
                     ui.button(label, on_click=choose_query_handler(query)).props("outline")
             return
+        # Cloud Drive registry quick-match hints (shown before semantic results)
+        _render_cd_search_hints(state.searched_query)
+
         # Заголовок с опциональной подсказкой о расширении запроса
         with ui.row().classes("w-full items-center gap-2 mt-2"):
             ui.label(f"Результаты по запросу: {state.searched_query}").classes("text-xl font-semibold")
