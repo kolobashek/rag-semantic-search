@@ -961,6 +961,12 @@ def _build_page(initial_screen: str = "search") -> None:
                             icon="cloud",
                             on_click=lambda pth=cloud_path: go_cloud_explorer(pth),
                         ).props("outline dense no-caps")
+                        if kind != "Каталог":
+                            _dl_url = f"/api/cloud-drive/download?path={quote(cloud_path, safe='')}"
+                            def _cd_download(url: str = _dl_url, pth: str = cloud_path) -> None:
+                                track_result_use("cloud_download")
+                                ui.navigate.to(url, new_tab=True)
+                            ui.button(icon="download", on_click=_cd_download).props("outline dense round").tooltip(f"Скачать из Cloud Drive: {cloud_path.rsplit('/', 1)[-1]}")
                     if full_path:
                         if kind == "Каталог":
                             ui.button("В проводник приложения", icon="folder_open", on_click=lambda p=full_path: go_explorer(p)).props("outline dense")
