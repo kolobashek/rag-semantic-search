@@ -173,19 +173,14 @@
 
 #### 1. Cloud Drive admin UX
 
-- [x] Довести секцию Cloud Drive в настройках:
-  - [x] нормальные подписи;
-  - [x] tooltips;
-  - [x] progress/status (live progress bar, phase label, file count);
-  - [x] кнопки refresh/cancel/retry;
-  - [x] журнал последних операций (history card, 8 последних jobs).
-- [x] Привести блок к brandbook/wireframe v2 (brandbook tokens, иконки Material).
-- [x] Добавить понятные empty/error/loading states.
-- [x] Добавить cloud_drive_db.py: SQLite persistence (config, jobs, stats).
-- [x] 15 unit-тестов cloud_drive_db (все проходят).
-- [x] Секция Cloud Drive добавлена в nav администратора.
-
-_Коммит: 19c0bcf (feat(cloud-drive): Cloud Drive admin UX — Sprint 1)_
+- Довести секцию Cloud Drive в настройках:
+  - нормальные подписи;
+  - tooltips;
+  - progress/status;
+  - кнопки refresh/cancel/retry;
+  - журнал последних операций.
+- Привести блок к brandbook/wireframe v2.
+- Добавить понятные empty/error/loading states.
 
 #### 2. Explorer on registry
 
@@ -260,10 +255,10 @@ Codex:
 - [x] stale bootstrap recovery.
 
 Claude:
-- [x] Cloud Drive admin UX (render_admin_cloud_drive, cloud_drive_db);
-- [x] live progress (progress bar, phase, file count, duration);
-- [x] error/empty/loading states (status badges, empty panel, error highlight);
-- [ ] cleanup настроек и терминологии.
+- Cloud Drive admin UX;
+- live progress;
+- error/empty/loading states;
+- cleanup настроек и терминологии.
 
 ### Sprint 2
 
