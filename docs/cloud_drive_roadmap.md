@@ -372,7 +372,7 @@ Claude:
 - [x] sync UX — scaffold: connected clients panel, empty states, status badge;
 - [x] admin sync settings — `render_admin_cloud_sync_settings()`: folder pairs, conflict policy, selective sync, conflict journal;
 - [x] user sync settings — `cloud_sync_user` section в панели настроек: статус клиента, список пар папок;
-- [ ] product polish для cloud workflows (ждёт sync backend от Codex).
+- [x] product polish для cloud workflows — drop zone CSS, search hints улучшены (parent path + "Show in Explorer"), context-menu delete highlight.
 
 ## Definition of Done
 
