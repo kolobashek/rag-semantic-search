@@ -181,14 +181,20 @@
 - [x] progress/status (live progress bar, file count, current path) — ✅ сделано Codex
 - [x] кнопки cancel/retry — ✅ сделано Codex
 - [x] журнал последних операций — ✅ сделано Codex
-- [ ] Привести блок к brandbook/wireframe v2:
-  - статус-бейджи вместо plain `rag-chip` текста;
-  - иконки статусов (schedule/sync/check_circle/error/cancel);
-  - карточки jobs с визуальной иерархией.
-- [ ] Добавить понятные empty/error/loading states:
-  - loading skeleton пока stats/jobs грузятся;
-  - empty state когда jobs история пуста (иконка + текст);
-  - error state когда CloudDriveService.from_config выбрасывает (нет cloud_drive_db_path).
+- [x] Привести блок к brandbook/wireframe v2:
+  - [x] статус-бейджи `cd-status-badge` (pending/running/done/error/cancelled) с иконкой;
+  - [x] иконки статусов (schedule/sync/check_circle/error/cancel);
+  - [x] карточки jobs `cd-jobs-card` с прогресс-баром, truncated path/error;
+  - [x] stats tiles с иконками folder/description/history/pending.
+- [x] Добавить понятные empty/error/loading states:
+  - [x] empty state stats (cloud_off + текст);
+  - [x] empty state bootstrap status (cloud_upload + текст);
+  - [x] empty state jobs history (history icon + текст);
+  - [x] error state jobs когда нет cloud_drive_db_path (settings icon);
+  - [x] error state jobs когда CloudDriveService.from_config выбрасывает.
+- [ ] cleanup настроек и терминологии (проверить после Sprint 2).
+
+_Коммит: f046509 (feat(ui): Cloud Drive admin UX polish — Sprint 1)_
 
 #### 2. Explorer on registry
 
@@ -263,8 +269,8 @@ Codex:
 - [x] stale bootstrap recovery.
 
 Claude:
-- [ ] brandbook/wireframe v2 для jobs history (статус-бейджи, иконки);
-- [ ] empty/error/loading states в Cloud Drive admin;
+- [x] brandbook/wireframe v2 для jobs history (статус-бейджи, иконки, карточки);
+- [x] empty/error/loading states в Cloud Drive admin;
 - [ ] cleanup настроек и терминологии.
 
 ### Sprint 2
