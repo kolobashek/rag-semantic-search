@@ -4178,6 +4178,88 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.button("Создать", icon="create_new_folder", on_click=_do_create).props("unelevated dense")
             dlg.open()
 
+        async def _cd_rename_dialog(node_path: str, node_name: str) -> None:
+            """Dialog to rename a file or folder in Cloud Drive."""
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-80"):
+                ui.label("Переименовать").classes("text-lg font-semibold")
+                ui.label(node_path).classes("rag-path text-xs")
+                name_input = ui.input(
+                    "Новое имя",
+                    value=node_name,
+                ).props("dense outlined autofocus").classes("w-full")
+
+                async def _do_rename() -> None:
+                    new_name = str(name_input.value or "").strip()
+                    if not new_name:
+                        ui.notify("Введите новое имя.", type="warning")
+                        return
+                    if new_name == node_name:
+                        dlg.close()
+                        return
+                    try:
+                        parent_path = node_path.rsplit("/", 1)[0] if "/" in node_path else ""
+                        await run.io_bound(
+                            svc.move_node,
+                            source_path=node_path,
+                            dest_parent_path=parent_path,
+                            new_name=new_name,
+                        )
+                        dlg.close()
+                        _log_app_event(
+                            page_state, "cd_explorer", "rename",
+                            details={"path": node_path, "new_name": new_name},
+                        )
+                        ui.notify(f"Переименовано в «{new_name}».", type="positive")
+                        render()
+                    except Exception as exc:
+                        ui.notify(f"Ошибка переименования: {exc}", type="negative")
+
+                name_input.on("keydown.enter", lambda _: _do_rename())
+                with ui.row().classes("w-full justify-end gap-2 mt-1"):
+                    ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                    ui.button("Сохранить", icon="drive_file_rename_outline", on_click=_do_rename).props("unelevated dense")
+            dlg.open()
+
+        async def _cd_delete_dialog(node_path: str, node_name: str, is_folder: bool = False) -> None:
+            """Confirmation dialog before deleting a file or folder."""
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-96"):
+                ui.label("Удалить?").classes("text-lg font-semibold text-red-700")
+                kind = "папку" if is_folder else "файл"
+                ui.label(f"{'Папка' if is_folder else 'Файл'}: {node_name}").classes("text-sm font-medium")
+                ui.label(node_path).classes("rag-path text-xs")
+                if is_folder:
+                    ui.label(
+                        "Все файлы и вложенные папки будут безвозвратно удалены."
+                    ).classes("text-xs text-red-600 mt-1")
+                else:
+                    ui.label("Файл и все его версии будут удалены безвозвратно.").classes("text-xs text-red-600 mt-1")
+
+                async def _do_delete() -> None:
+                    try:
+                        await run.io_bound(svc.delete_node, path=node_path)
+                        dlg.close()
+                        _log_app_event(
+                            page_state, "cd_explorer", "delete",
+                            details={"path": node_path, "is_folder": is_folder},
+                        )
+                        ui.notify(f"{'Папка' if is_folder else 'Файл'} «{node_name}» удалён.", type="positive")
+                        # If we deleted the current folder, navigate up
+                        if is_folder and page_state.explorer_cd_path == node_path:
+                            parent = node_path.rsplit("/", 1)[0] if "/" in node_path else ""
+                            page_state.explorer_cd_path = parent
+                        render()
+                    except Exception as exc:
+                        ui.notify(f"Ошибка удаления: {exc}", type="negative")
+
+                with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                    ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                    ui.button(
+                        f"Удалить {kind}", icon="delete_forever",
+                        on_click=_do_delete,
+                        color="negative",
+                    ).props("unelevated dense")
+            dlg.open()
+
         def _cd_open_file(file: CloudDriveFile) -> None:
             src = str(file.source_path or file.path or "")
             if src:
@@ -4403,6 +4485,20 @@ def _build_page(initial_screen: str = "search") -> None:
                                             color=None,
                                         ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
                                     render_star(Path(folder.source_path or folder.path), item_type="folder")
+                                    if not folder.is_root:
+                                        with ui.button(icon="more_vert", color=None).props("flat round dense") as _menu_btn:
+                                            with ui.menu():
+                                                ui.menu_item(
+                                                    "Переименовать",
+                                                    on_click=lambda fo=folder: _cd_rename_dialog(fo.path, fo.name),
+                                                    auto_close=True,
+                                                )
+                                                ui.separator()
+                                                ui.menu_item(
+                                                    "Удалить папку…",
+                                                    on_click=lambda fo=folder: _cd_delete_dialog(fo.path, fo.name, is_folder=True),
+                                                    auto_close=True,
+                                                ).classes("text-negative")
                     else:
                         with ui.column().classes("w-full gap-1"):
                             for folder in child_folders:
@@ -4416,6 +4512,20 @@ def _build_page(initial_screen: str = "search") -> None:
                                         ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
                                         ui.label(f"Папка · {folder.path}").classes("rag-meta text-xs truncate")
                                     render_star(Path(folder.source_path or folder.path), item_type="folder")
+                                    if not folder.is_root:
+                                        with ui.button(icon="more_vert", color=None).props("flat round dense"):
+                                            with ui.menu():
+                                                ui.menu_item(
+                                                    "Переименовать",
+                                                    on_click=lambda fo=folder: _cd_rename_dialog(fo.path, fo.name),
+                                                    auto_close=True,
+                                                )
+                                                ui.separator()
+                                                ui.menu_item(
+                                                    "Удалить папку…",
+                                                    on_click=lambda fo=folder: _cd_delete_dialog(fo.path, fo.name, is_folder=True),
+                                                    auto_close=True,
+                                                ).classes("text-negative")
 
                 # Files
                 if page_files:
@@ -4444,6 +4554,19 @@ def _build_page(initial_screen: str = "search") -> None:
                                             on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
+                                    with ui.button(icon="more_vert", color=None).props("flat round dense"):
+                                        with ui.menu():
+                                            ui.menu_item(
+                                                "Переименовать",
+                                                on_click=lambda fi=f: _cd_rename_dialog(fi.path, fi.name),
+                                                auto_close=True,
+                                            )
+                                            ui.separator()
+                                            ui.menu_item(
+                                                "Удалить файл…",
+                                                on_click=lambda fi=f: _cd_delete_dialog(fi.path, fi.name, is_folder=False),
+                                                auto_close=True,
+                                            ).classes("text-negative")
                     else:
                         with ui.column().classes("w-full gap-1"):
                             for f in page_files:
@@ -4478,6 +4601,19 @@ def _build_page(initial_screen: str = "search") -> None:
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
                                     render_star(Path(f.source_path or f.path or f.name), item_type="file")
+                                    with ui.button(icon="more_vert", color=None).props("flat round dense"):
+                                        with ui.menu():
+                                            ui.menu_item(
+                                                "Переименовать",
+                                                on_click=lambda fi=f: _cd_rename_dialog(fi.path, fi.name),
+                                                auto_close=True,
+                                            )
+                                            ui.separator()
+                                            ui.menu_item(
+                                                "Удалить файл…",
+                                                on_click=lambda fi=f: _cd_delete_dialog(fi.path, fi.name, is_folder=False),
+                                                auto_close=True,
+                                            ).classes("text-negative")
 
                 # Pagination
                 if total_files > page_size:
