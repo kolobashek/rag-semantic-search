@@ -22,6 +22,17 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from nicegui import app, events, run, ui
 
+from rag_catalog.core.cloud_drive_db import (
+    CloudDriveConfig,
+    CloudDriveDB,
+    BootstrapJob,
+    get_cloud_drive_db,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_CANCELLED,
+)
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -4874,6 +4885,272 @@ def _build_page(initial_screen: str = "search") -> None:
 
             ui.button("Сохранить пути", icon="save", on_click=save_paths).props("outline")
 
+    def render_admin_cloud_drive() -> None:  # noqa: PLR0912,PLR0915
+        """Cloud Drive admin section: config, bootstrap jobs, stats, history."""
+        import uuid as _uuid  # noqa: PLC0415
+
+        cd_db: CloudDriveDB = get_cloud_drive_db(state.cfg)
+        cd_cfg: CloudDriveConfig = cd_db.get_config()
+        cd_stats = cd_db.get_stats()
+
+        # ── Status badge helper ───────────────────────────────────────────
+        _status_colors = {
+            STATUS_PENDING:   ("Ожидание",   "text-yellow-600",  "schedule"),
+            STATUS_RUNNING:   ("Выполняется","text-blue-600",    "sync"),
+            STATUS_COMPLETED: ("Завершено",  "text-green-600",   "check_circle"),
+            STATUS_FAILED:    ("Ошибка",     "text-red-600",     "error"),
+            STATUS_CANCELLED: ("Отменено",   "text-gray-400",    "cancel"),
+        }
+
+        def _status_badge(status: str) -> None:
+            label_ru, color, icon_name = _status_colors.get(
+                status, (status, "text-gray-500", "help")
+            )
+            with ui.row().classes("items-center gap-1"):
+                ui.icon(icon_name, size="16px").classes(color)
+                ui.label(label_ru).classes(f"text-sm font-medium {color}")
+
+        def _fmt_dt(dt: Optional[datetime]) -> str:
+            if dt is None:
+                return "—"
+            return dt.strftime("%d.%m %H:%M")
+
+        def _fmt_dur(sec: Optional[float]) -> str:
+            if sec is None:
+                return ""
+            if sec < 60:
+                return f"{sec:.0f} с"
+            return f"{sec/60:.1f} мин"
+
+        def _fmt_size(b: int) -> str:
+            if b < 1024:
+                return f"{b} Б"
+            if b < 1024 ** 2:
+                return f"{b/1024:.1f} КБ"
+            if b < 1024 ** 3:
+                return f"{b/1024**2:.1f} МБ"
+            return f"{b/1024**3:.2f} ГБ"
+
+        # ── Section header ────────────────────────────────────────────────
+        with ui.column().classes("rag-card w-full p-4 gap-4"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("cloud", size="24px").classes("text-indigo-500")
+                ui.label("Cloud Drive").classes("text-xl font-semibold")
+                ui.space()
+                enabled_badge = ui.label(
+                    "Включён" if cd_cfg.enabled else "Выключен"
+                ).classes(
+                    "text-xs font-semibold px-2 py-0.5 rounded-full " +
+                    ("bg-green-100 text-green-700" if cd_cfg.enabled else "bg-gray-100 text-gray-500")
+                )
+
+            ui.label(
+                "Cloud Drive хранит централизованный реестр файлов и папок. "
+                "Bootstrap — первичное сканирование каталога-источника и импорт "
+                "всех файлов в реестр. После старта процесс работает в фоне."
+            ).classes("rag-meta")
+
+        # ── Config card ───────────────────────────────────────────────────
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Конфигурация").classes("text-base font-semibold")
+
+            enabled_switch = ui.switch(
+                "Cloud Drive включён",
+                value=cd_cfg.enabled,
+            ).tooltip("Включите, чтобы активировать реестр файлов и операции Cloud Drive.")
+
+            source_input = ui.input(
+                "Источник (каталог для импорта)",
+                value=cd_cfg.source_path,
+                placeholder=r"Например: O:\Обмен",
+            ).props("dense outlined").classes("w-full").tooltip(
+                "Папка, которую Cloud Drive будет сканировать при bootstrap. "
+                "Соответствует O:\\Обмен или другой общей папке."
+            )
+
+            storage_input = ui.input(
+                "Хранилище Cloud Drive",
+                value=cd_cfg.storage_path,
+                placeholder="Например: D:\\CloudDriveStorage",
+            ).props("dense outlined").classes("w-full").tooltip(
+                "Где Cloud Drive хранит файлы внутри системы. "
+                "Для первого этапа — локальная папка; в будущем S3/MinIO."
+            )
+
+            def save_cd_config() -> None:
+                new_cfg = CloudDriveConfig(
+                    enabled=bool(enabled_switch.value),
+                    source_path=str(source_input.value or "").strip(),
+                    storage_path=str(storage_input.value or "").strip(),
+                    auto_bootstrap=cd_cfg.auto_bootstrap,
+                )
+                src = new_cfg.source_path
+                if src and not Path(src).exists():
+                    ui.notify("Каталог-источник не найден. Проверьте путь.", type="warning")
+                cd_db.save_config(new_cfg)
+                _log_app_event(state, "cloud_drive", "save_config")
+                ui.notify("Конфигурация Cloud Drive сохранена.", type="positive")
+                render_section()
+
+            ui.button("Сохранить", icon="save", on_click=save_cd_config).props("outline")
+
+        # ── Bootstrap section ─────────────────────────────────────────────
+        active_job = cd_db.get_active_job()
+        jobs_history = cd_db.list_jobs(limit=8)
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("rocket_launch", size="20px").classes("text-indigo-500")
+                ui.label("Bootstrap").classes("text-base font-semibold")
+                ui.space()
+                ui.button(icon="refresh", on_click=render_section).props(
+                    "flat round dense"
+                ).tooltip("Обновить статус bootstrap")
+
+            ui.label(
+                "Bootstrap сканирует каталог-источник и регистрирует все файлы в реестре. "
+                "Это разовая операция; последующие изменения обрабатываются инкрементально."
+            ).classes("rag-meta")
+
+            # ── Active job progress ───────────────────────────────────────
+            if active_job is not None:
+                with ui.column().classes("w-full gap-2"):
+                    with ui.row().classes("w-full items-center gap-3"):
+                        _status_badge(active_job.status)
+                        if active_job.phase_label:
+                            ui.label(f"Фаза: {active_job.phase_label}").classes("rag-meta")
+                        ui.space()
+                        ui.label(f"ID: {active_job.job_id[:8]}…").classes("rag-meta font-mono")
+
+                    progress_bar = ui.linear_progress(
+                        value=active_job.progress_pct / 100,
+                        size="8px",
+                        show_value=False,
+                    ).classes("w-full").props("color=indigo")
+
+                    with ui.row().classes("w-full items-center gap-4"):
+                        if active_job.files_total > 0:
+                            ui.label(
+                                f"{active_job.files_done} / {active_job.files_total} файлов"
+                            ).classes("rag-meta")
+                        else:
+                            ui.label("Сканирование…").classes("rag-meta")
+                        ui.space()
+                        dur = active_job.duration_seconds
+                        if dur is not None:
+                            ui.label(f"Время: {_fmt_dur(dur)}").classes("rag-meta")
+
+                    if active_job.detail:
+                        ui.label(active_job.detail).classes("rag-meta text-xs truncate")
+
+                    if active_job.error:
+                        ui.label(f"Ошибка: {active_job.error}").classes(
+                            "text-red-600 text-sm bg-red-50 rounded p-2"
+                        )
+
+                    with ui.row().classes("gap-2"):
+                        def _do_cancel() -> None:
+                            count = cd_db.cancel_active_jobs()
+                            _log_app_event(state, "cloud_drive", "cancel_bootstrap",
+                                           details={"cancelled": count})
+                            ui.notify(
+                                f"Отменено задач: {count}." if count else "Активных задач нет.",
+                                type="info",
+                            )
+                            render_section()
+
+                        ui.button("Отменить", icon="stop_circle", on_click=_do_cancel).props(
+                            "outline color=red"
+                        ).tooltip("Остановить текущий bootstrap")
+
+            else:
+                # No active job
+                with ui.column().classes("w-full items-center gap-2 py-4"):
+                    if not cd_cfg.source_path:
+                        ui.icon("info", size="32px").classes("text-gray-300")
+                        ui.label("Укажите каталог-источник в конфигурации выше.").classes(
+                            "rag-meta text-center"
+                        )
+                    else:
+                        ui.icon("cloud_upload", size="32px").classes("text-indigo-200")
+                        ui.label("Bootstrap не запущен. Нажмите «Запустить», чтобы начать.").classes(
+                            "rag-meta text-center"
+                        )
+
+                    def _do_start_bootstrap() -> None:
+                        cfg_now = cd_db.get_config()
+                        if not cfg_now.source_path:
+                            ui.notify("Сначала укажите каталог-источник.", type="warning")
+                            return
+                        if not Path(cfg_now.source_path).exists():
+                            ui.notify("Каталог-источник не найден на диске.", type="negative")
+                            return
+                        job_id = _uuid.uuid4().hex
+                        cd_db.create_job(job_id)
+                        # Mark as running immediately so UI shows progress
+                        cd_db.update_job(job_id, status=STATUS_RUNNING, phase="scan",
+                                         detail=f"Сканирование: {cfg_now.source_path}")
+                        _log_app_event(state, "cloud_drive", "start_bootstrap",
+                                       details={"job_id": job_id, "source": cfg_now.source_path})
+                        ui.notify("Bootstrap запущен.", type="positive")
+                        render_section()
+
+                    def _do_retry() -> None:
+                        """Retry: cancel stale, start fresh."""
+                        cd_db.cancel_active_jobs()
+                        _do_start_bootstrap()
+
+                    with ui.row().classes("gap-2"):
+                        ui.button(
+                            "Запустить bootstrap", icon="rocket_launch", on_click=_do_start_bootstrap
+                        ).props("unelevated color=indigo").tooltip(
+                            "Запустить первичное сканирование и импорт всех файлов из источника."
+                        )
+                        if any(j.status in (STATUS_FAILED, STATUS_CANCELLED) for j in jobs_history):
+                            ui.button(
+                                "Повторить", icon="replay", on_click=_do_retry
+                            ).props("outline").tooltip("Сбросить ошибку и запустить заново.")
+
+        # ── Stats card ────────────────────────────────────────────────────
+        if cd_stats.total_files > 0 or cd_stats.total_folders > 0:
+            with ui.row().classes("w-full gap-3 flex-wrap"):
+                for icon_name, label_str, value_str in [
+                    ("description", "Файлов",  str(cd_stats.total_files)),
+                    ("folder",      "Папок",   str(cd_stats.total_folders)),
+                    ("storage",     "Объём",   _fmt_size(cd_stats.total_size_bytes)),
+                    ("schedule",    "Скан",    _fmt_dt(cd_stats.last_scanned_dt)),
+                ]:
+                    with ui.column().classes("rag-card p-3 gap-0 min-w-36 flex-1 items-center"):
+                        ui.icon(icon_name, size="20px").classes("text-indigo-400")
+                        ui.label(value_str).classes("text-lg font-semibold")
+                        ui.label(label_str).classes("rag-meta")
+
+        # ── History card ──────────────────────────────────────────────────
+        if jobs_history:
+            with ui.column().classes("rag-card w-full p-4 gap-2"):
+                ui.label("История операций").classes("text-base font-semibold")
+                with ui.column().classes("w-full gap-1"):
+                    for job in jobs_history:
+                        is_current = active_job and job.job_id == active_job.job_id
+                        bg = "background:#eef2ff;" if is_current else ""
+                        with ui.row().classes("w-full items-center gap-2 px-2 py-1 rounded").style(bg):
+                            _status_badge(job.status)
+                            if job.phase_label:
+                                ui.label(job.phase_label).classes("rag-meta text-xs")
+                            ui.label(_fmt_dt(job.created_dt)).classes("rag-meta font-mono text-xs")
+                            dur = job.duration_seconds
+                            if dur is not None:
+                                ui.label(_fmt_dur(dur)).classes("rag-meta text-xs")
+                            if job.error:
+                                ui.label(job.error).classes("rag-meta text-xs text-red-500 truncate flex-1")
+                            else:
+                                ui.space()
+                            ui.label(f"#{job.job_id[:6]}").classes("rag-meta font-mono text-xs")
+        else:
+            with ui.column().classes("rag-card w-full p-4 items-center gap-2"):
+                ui.icon("history", size="24px").classes("text-gray-200")
+                ui.label("История операций пуста.").classes("rag-meta text-center")
+
     def render_admin_llm_settings() -> None:
         def _fetch_ollama_models(ollama_url: str) -> List[str]:
             """Запросить список моделей из Ollama /api/tags. Возвращает [] при ошибке."""
@@ -5092,6 +5369,7 @@ def _build_page(initial_screen: str = "search") -> None:
         ]
         admin_sections: List[tuple] = [
             ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
+            ("cloud_drive",   "cloud",          "Cloud Drive",            ["cloud", "bootstrap", "реестр", "хранилище", "импорт"]),
             ("llm",           "smart_toy",      "Нейросеть",              ["ollama", "модель", "ai", "llm", "rag"]),
             ("aliases",       "travel_explore", "Синонимы поиска",        ["группы", "расширение", "запросы"]),
             ("indexing",      "build",          "Индексация",             ["индекс", "статус", "прогресс"]),
@@ -5280,6 +5558,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 elif sec == "paths":
                     render_admin_path_settings()
+                elif sec == "cloud_drive":
+                    render_admin_cloud_drive()
                 elif sec == "llm":
                     render_admin_llm_settings()
                 elif sec == "aliases":
