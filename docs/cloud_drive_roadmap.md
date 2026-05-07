@@ -374,6 +374,98 @@ Claude:
 - [x] user sync settings — `cloud_sync_user` section в панели настроек: статус клиента, список пар папок;
 - [x] product polish для cloud workflows — drop zone CSS, search hints улучшены (parent path + "Show in Explorer"), context-menu delete highlight.
 
+## External Review Backlog
+
+Этот блок собран из внешних ревью и используется как приоритетный вход в следующие спринты. Дубли с уже выполненными задачами не повторяются.
+
+### P0: первый рабочий релиз Cloud Drive
+
+Codex:
+- [ ] Закрыть end-to-end `Cloud Drive -> reindex job -> extract/OCR/chunk/embed -> Qdrant/lexical -> search`.
+- [ ] Сделать обработчик `reindex` jobs, а не только постановку задачи.
+- [ ] Связать `cloud_files.id` / `cloud_file_versions.id` с `index_state`, telemetry и Qdrant payload.
+- [ ] На upload/move/rename/delete автоматически ставить нужные reindex/cleanup jobs.
+- [ ] Добавить per-file job status API для indexing/OCR/preview/error.
+- [ ] Добавить retry/requeue для registry jobs.
+
+Claude:
+- [ ] Показать per-file indexing/OCR/preview/error status в проводнике и карточках поиска.
+- [ ] Доделать lazy semantic layer в Cloud Drive search после backend-интеграции.
+- [ ] Связать search results с version, preview и file actions.
+
+### P1: безопасность и эксплуатационная готовность
+
+Codex:
+- [ ] Убрать production-риск `admin/admin`: forced password rotation, explicit bootstrap admin или запрет default admin без dev-mode.
+- [ ] Убрать `auth_token` из query-параметров API: принимать session cookie и/или `Authorization: Bearer`.
+- [ ] Добавить folder/file ACL hooks в Cloud Drive API и search filters.
+- [ ] Добавить audit trail для Cloud Drive операций: view/download/upload/delete/move/rename/search.
+- [ ] Добавить CI quality gate: `pytest`, `py_compile`, launcher smoke, docker smoke.
+- [ ] Подключить `ruff` и постепенно включать правила без массового churn.
+- [ ] Зафиксировать dependency lock / reproducible install path.
+
+Claude:
+- [ ] Показать пользователю понятные состояния доступа: нет прав, сессия истекла, нужна смена пароля.
+- [ ] Добавить admin UX для audit/security событий.
+
+### P1: качество поиска и измеримость
+
+Codex:
+- [ ] Добавить offline relevance benchmark: golden queries, expected docs, `Recall@k`, `MRR`, `nDCG`, latency p50/p95.
+- [ ] Добавить retrieval v2 feature flag.
+- [ ] Вынести retrieval pipeline в `src/rag_catalog/core/retrieval/`.
+- [ ] Добавить RRF fusion поверх dense + текущего lexical.
+- [ ] Добавить BM25/sparse слой или Qdrant sparse vector path.
+- [ ] Добавить reranker stage для top-N результатов.
+- [ ] Подготовить migration path для новых embedding models (`bge-m3`, `multilingual-e5-*`) через версионированные Qdrant collections.
+- [ ] Улучшить chunking: paragraph/sentence-aware минимум, затем structural chunking для DOCX/PDF/XLSX.
+- [ ] Добавить parent-child retrieval и provenance: page/sheet/row/section.
+- [ ] Добавить grouping/diversity: лимит чанков на документ и MMR-подобную диверсификацию.
+
+Claude:
+- [ ] Добавить UI для eval results: сравнение пайплайнов, топ провалов, latency.
+- [ ] Обновить UX поиска под retrieval v2: source grouping, provenance, preview snippets.
+
+### P2: LLM/RAG assistant
+
+Codex:
+- [ ] Подключить `llm.expand_query()` в основной search pipeline через config flag и telemetry.
+- [ ] Добавить RAG answer mode backend: answer + citations + "не знаю" при слабых источниках.
+- [ ] Добавить verifier/gating для фактов: числа, даты, единицы измерения, конфликтующие источники.
+- [ ] Добавить Telegram assistant mode: question detection, answer with sources, follow-up context.
+
+Claude:
+- [ ] Добавить web-режим "Ответ по документам" с источниками и кликабельными цитатами.
+- [ ] Добавить действия "Пояснить по этому документу" и "Сводка по выбранным".
+
+### P2: архитектурная поддерживаемость
+
+Codex:
+- [ ] Разрезать `index_rag.py` на `indexing/`, `extractors/`, `chunking/`, `qdrant_writer`.
+- [ ] Вынести Cloud Drive API из `nice_app.py` в отдельный модуль.
+- [ ] Вынести auth helpers из `nice_app.py`.
+- [ ] Доделать миграцию root shims в тонкие entrypoints и убрать legacy-дубли.
+
+Claude:
+- [ ] Разрезать UI: layout, search view, explorer/cloud-drive view, analytics/admin views.
+- [ ] Привести analytics/telemetry UI к отдельному рабочему экрану для доменного улучшения поиска.
+
+### P2: Cloud Drive production storage and sync
+
+Codex:
+- [ ] Реализовать production S3/MinIO path: upload/download, presigned URLs, health, failure modes.
+- [ ] Добавить immutable storage keys и path-independent `doc_id`.
+- [ ] Добавить dedup by checksum.
+- [ ] Добавить soft delete/trash/restore.
+- [ ] Добавить file change feed / delta endpoints.
+- [ ] Добавить conflict model и selective sync backend.
+- [ ] Добавить cleanup job для удалённых/старых Qdrant points.
+
+Claude:
+- [ ] Добавить trash/restore UX.
+- [ ] Добавить sync conflict resolution UX.
+- [ ] Добавить saved searches, favorites и collections после стабилизации ACL/search.
+
 ## Definition of Done
 
 Cloud Drive можно считать первой рабочей версией, когда:
