@@ -208,6 +208,88 @@ def test_service_lists_cloud_drive_changes_for_sync_clients(tmp_path: Path) -> N
     assert delta['next_cursor'] >= cursor
 
 
+def test_cloud_drive_sync_clients_pairs_selective_and_conflicts(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+
+    client = service.register_sync_client(
+        username='User',
+        device_id='desktop-1',
+        display_name='Office PC',
+        platform='windows',
+        metadata={'version': '0.1'},
+    )
+    same_client = service.register_sync_client(
+        username='user',
+        device_id='desktop-1',
+        display_name='Office PC renamed',
+        platform='windows',
+        status='paused',
+    )
+
+    assert same_client['id'] == client['id']
+    assert same_client['username'] == 'user'
+    assert same_client['status'] == 'paused'
+    assert service.list_sync_clients(username='user')[0]['display_name'] == 'Office PC renamed'
+
+    pair = service.upsert_sync_pair(
+        client_id=client['id'],
+        local_path='D:/Sync/Folder A',
+        cloud_path='Folder A',
+        conflict_policy='newest_wins',
+    )
+    pairs = service.list_sync_pairs(username='user')
+
+    assert len(pairs) == 1
+    assert pairs[0]['id'] == pair['id']
+    assert pairs[0]['cloud_path'] == 'Folder A'
+    assert pairs[0]['conflict_policy'] == 'newest_wins'
+
+    selective = service.set_selective_sync_paths(
+        client_id=client['id'],
+        paths=['Folder A', 'Folder A'],
+        mode='include',
+    )
+    assert selective['count'] == 1
+    assert selective['paths'][0]['cloud_path'] == 'Folder A'
+    assert selective['paths'][0]['mode'] == 'include'
+
+    conflict = service.record_sync_conflict(
+        client_id=client['id'],
+        pair_id=pair['id'],
+        path='Folder A/hello.txt',
+        local_path='D:/Sync/Folder A/hello.txt',
+        cloud_path='Folder A/hello.txt',
+        conflict_type='both_modified',
+        local_version='local-1',
+        cloud_version='cloud-1',
+        details={'size_mismatch': True},
+    )
+    open_conflicts = service.list_sync_conflicts(username='user')
+
+    assert open_conflicts == [conflict]
+    assert conflict['status'] == 'open'
+    assert conflict['details']['size_mismatch'] is True
+
+    resolved = service.resolve_sync_conflict(
+        conflict['id'],
+        resolution='cloud_wins',
+        resolved_by='admin',
+    )
+
+    assert resolved['status'] == 'resolved'
+    assert resolved['resolution'] == 'cloud_wins'
+    assert resolved['resolved_by'] == 'admin'
+    assert service.list_sync_conflicts(username='user') == []
+    assert len(service.list_sync_conflicts(username='user', status='resolved')) == 1
+
+    assert service.delete_sync_pair(pair['id']) == {'ok': True}
+    assert service.list_sync_pairs(username='user') == []
+
+
 def test_service_reindex_job_passes_cloud_identity_to_indexer(tmp_path: Path, monkeypatch) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     storage = LocalStorageAdapter(str(tmp_path / 'storage'))
@@ -498,8 +580,13 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_jobs)").fetchall()}
         folder_columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_folders)").fetchall()}
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         version = conn.execute("SELECT schema_version FROM schema_meta WHERE db_kind='cloud_drive'").fetchone()[0]
     assert 'started_at' in columns
     assert 'finished_at' in columns
     assert 'deleted_at' in folder_columns
-    assert int(version) == 3
+    assert 'cloud_sync_clients' in tables
+    assert 'cloud_sync_pairs' in tables
+    assert 'cloud_sync_selective_paths' in tables
+    assert 'cloud_sync_conflicts' in tables
+    assert int(version) == 4

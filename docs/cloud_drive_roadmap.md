@@ -476,7 +476,7 @@ Codex:
 - [x] Добавить dedup by checksum: одинаковый контент переиспользует один storage object.
 - [x] Добавить soft delete/trash/restore backend: файлы/папки помечаются `deleted_at`, storage сохраняется, добавлены `restore_node()` и `/api/cloud-drive/restore`.
 - [x] Добавить file change feed / delta endpoints: `CloudDriveService.list_changes()` и `/api/cloud-drive/changes` с cursor `since` и ACL-фильтрацией.
-- [ ] Добавить conflict model и selective sync backend.
+- [x] Добавить conflict model и selective sync backend: registry schema v4, clients/pairs/selective paths/conflicts, service/API contracts и тесты.
 - [x] Добавить cleanup job для удалённых/старых Qdrant points.
 
 Claude:

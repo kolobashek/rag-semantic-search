@@ -188,6 +188,143 @@ class CloudDriveService:
             'changes': changes,
         }
 
+    def register_sync_client(
+        self,
+        *,
+        username: str,
+        device_id: str,
+        display_name: str = '',
+        platform: str = '',
+        status: str = 'online',
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> dict:
+        return self._sync_client_to_dict(
+            self.registry.register_sync_client(
+                username=username,
+                device_id=device_id,
+                display_name=display_name,
+                platform=platform,
+                status=status,
+                metadata=metadata or {},
+            )
+        )
+
+    def list_sync_clients(self, *, username: str = '', include_offline: bool = True, limit: int = 100) -> list[dict]:
+        return [
+            self._sync_client_to_dict(client)
+            for client in self.registry.list_sync_clients(
+                username=username,
+                include_offline=include_offline,
+                limit=limit,
+            )
+        ]
+
+    def upsert_sync_pair(
+        self,
+        *,
+        client_id: str,
+        local_path: str,
+        cloud_path: str = '',
+        conflict_policy: str = 'ask',
+        enabled: bool = True,
+    ) -> dict:
+        return self._sync_pair_to_dict(
+            self.registry.upsert_sync_pair(
+                client_id=client_id,
+                local_path=local_path,
+                cloud_path=cloud_path,
+                conflict_policy=conflict_policy,
+                enabled=enabled,
+            )
+        )
+
+    def list_sync_pairs(self, *, username: str = '', client_id: str = '', enabled_only: bool = False) -> list[dict]:
+        return [
+            self._sync_pair_to_dict(pair)
+            for pair in self.registry.list_sync_pairs(
+                username=username,
+                client_id=client_id,
+                enabled_only=enabled_only,
+            )
+        ]
+
+    def delete_sync_pair(self, pair_id: str, *, client_id: str = '') -> dict:
+        return {'ok': self.registry.delete_sync_pair(pair_id, client_id=client_id)}
+
+    def set_selective_sync_paths(
+        self,
+        *,
+        client_id: str,
+        paths: list[str],
+        mode: str = 'exclude',
+        replace: bool = True,
+    ) -> dict:
+        items = self.registry.set_selective_sync_paths(
+            client_id=client_id,
+            paths=paths,
+            mode=mode,
+            replace=replace,
+        )
+        return {'client_id': str(client_id), 'mode': str(mode or 'exclude'), 'paths': items, 'count': len(items)}
+
+    def list_selective_sync_paths(self, *, username: str = '', client_id: str = '') -> dict:
+        items = self.registry.list_selective_sync_paths(username=username, client_id=client_id)
+        return {'client_id': str(client_id or ''), 'paths': items, 'count': len(items)}
+
+    def record_sync_conflict(
+        self,
+        *,
+        client_id: str,
+        path: str,
+        conflict_type: str,
+        pair_id: str = '',
+        local_path: str = '',
+        cloud_path: str = '',
+        local_version: str = '',
+        cloud_version: str = '',
+        details: Optional[Dict[str, Any]] = None,
+    ) -> dict:
+        return self._sync_conflict_to_dict(
+            self.registry.record_sync_conflict(
+                client_id=client_id,
+                pair_id=pair_id,
+                path=path,
+                local_path=local_path,
+                cloud_path=cloud_path,
+                conflict_type=conflict_type,
+                local_version=local_version,
+                cloud_version=cloud_version,
+                details=details or {},
+            )
+        )
+
+    def list_sync_conflicts(
+        self,
+        *,
+        username: str = '',
+        client_id: str = '',
+        status: str = 'open',
+        limit: int = 100,
+    ) -> list[dict]:
+        return [
+            self._sync_conflict_to_dict(conflict)
+            for conflict in self.registry.list_sync_conflicts(
+                username=username,
+                client_id=client_id,
+                status=status,
+                limit=limit,
+            )
+        ]
+
+    def resolve_sync_conflict(self, conflict_id: str, *, resolution: str, resolved_by: str = '') -> dict:
+        return self._sync_conflict_to_dict(
+            self.registry.resolve_sync_conflict(
+                conflict_id,
+                resolution=resolution,
+                resolved_by=resolved_by,
+            )
+        )
+
     def create_folder(self, *, parent_path: str = '', name: str) -> dict:
         folder = self.registry.create_folder(parent_path=parent_path, name=name)
         return {
@@ -200,6 +337,57 @@ class CloudDriveService:
             'is_root': folder.is_root,
             'created_at': folder.created_at,
             'updated_at': folder.updated_at,
+        }
+
+    @staticmethod
+    def _sync_client_to_dict(client: Any) -> dict:
+        return {
+            'id': client.id,
+            'username': client.username,
+            'device_id': client.device_id,
+            'display_name': client.display_name,
+            'platform': client.platform,
+            'status': client.status,
+            'last_seen_at': client.last_seen_at,
+            'metadata': dict(client.metadata or {}),
+            'created_at': client.created_at,
+            'updated_at': client.updated_at,
+        }
+
+    @staticmethod
+    def _sync_pair_to_dict(pair: Any) -> dict:
+        return {
+            'id': pair.id,
+            'client_id': pair.client_id,
+            'username': pair.username,
+            'local_path': pair.local_path,
+            'cloud_path': pair.cloud_path,
+            'conflict_policy': pair.conflict_policy,
+            'enabled': bool(pair.enabled),
+            'created_at': pair.created_at,
+            'updated_at': pair.updated_at,
+        }
+
+    @staticmethod
+    def _sync_conflict_to_dict(conflict: Any) -> dict:
+        return {
+            'id': conflict.id,
+            'client_id': conflict.client_id,
+            'pair_id': conflict.pair_id,
+            'username': conflict.username,
+            'path': conflict.path,
+            'local_path': conflict.local_path,
+            'cloud_path': conflict.cloud_path,
+            'conflict_type': conflict.conflict_type,
+            'local_version': conflict.local_version,
+            'cloud_version': conflict.cloud_version,
+            'status': conflict.status,
+            'resolution': conflict.resolution,
+            'details': dict(conflict.details or {}),
+            'resolved_by': conflict.resolved_by,
+            'resolved_at': conflict.resolved_at,
+            'created_at': conflict.created_at,
+            'updated_at': conflict.updated_at,
         }
 
     def get_download_descriptor(self, path: str) -> dict:

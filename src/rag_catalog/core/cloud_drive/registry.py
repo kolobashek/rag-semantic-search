@@ -11,9 +11,17 @@ from typing import Any, Dict, List, Optional
 
 from rag_catalog.core.db_contract import ensure_schema_version
 
-from .models import CloudDriveFile, CloudDriveFolder, CloudDriveJob, CloudDriveStats
+from .models import (
+    CloudDriveFile,
+    CloudDriveFolder,
+    CloudDriveJob,
+    CloudDriveStats,
+    CloudDriveSyncClient,
+    CloudDriveSyncConflict,
+    CloudDriveSyncPair,
+)
 
-CLOUD_DRIVE_SCHEMA_VERSION = 3
+CLOUD_DRIVE_SCHEMA_VERSION = 4
 
 
 def _utc_now() -> str:
@@ -120,6 +128,67 @@ class CloudDriveRegistryDB:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS cloud_sync_clients (
+                        id TEXT PRIMARY KEY,
+                        username TEXT NOT NULL,
+                        device_id TEXT NOT NULL,
+                        display_name TEXT NOT NULL DEFAULT '',
+                        platform TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'offline',
+                        last_seen_at TEXT NOT NULL DEFAULT '',
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(username, device_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS cloud_sync_pairs (
+                        id TEXT PRIMARY KEY,
+                        client_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        local_path TEXT NOT NULL,
+                        cloud_path TEXT NOT NULL DEFAULT '',
+                        conflict_policy TEXT NOT NULL DEFAULT 'ask',
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(client_id) REFERENCES cloud_sync_clients(id),
+                        UNIQUE(client_id, local_path, cloud_path)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS cloud_sync_selective_paths (
+                        id TEXT PRIMARY KEY,
+                        client_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        cloud_path TEXT NOT NULL,
+                        mode TEXT NOT NULL DEFAULT 'exclude',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(client_id) REFERENCES cloud_sync_clients(id),
+                        UNIQUE(client_id, cloud_path)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS cloud_sync_conflicts (
+                        id TEXT PRIMARY KEY,
+                        client_id TEXT NOT NULL,
+                        pair_id TEXT NOT NULL DEFAULT '',
+                        username TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        local_path TEXT NOT NULL DEFAULT '',
+                        cloud_path TEXT NOT NULL DEFAULT '',
+                        conflict_type TEXT NOT NULL,
+                        local_version TEXT NOT NULL DEFAULT '',
+                        cloud_version TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'open',
+                        resolution TEXT NOT NULL DEFAULT '',
+                        details_json TEXT NOT NULL DEFAULT '{}',
+                        resolved_by TEXT NOT NULL DEFAULT '',
+                        resolved_at TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(client_id) REFERENCES cloud_sync_clients(id)
+                    );
                     '''
                 )
                 self._apply_migrations(conn, current_version=current_version)
@@ -137,6 +206,10 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_storage_key ON cloud_files(storage_key);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_sync_clients_username ON cloud_sync_clients(username, status, updated_at);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_sync_pairs_client ON cloud_sync_pairs(client_id, enabled, cloud_path);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_sync_selective_client ON cloud_sync_selective_paths(client_id, mode, cloud_path);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_sync_conflicts_status ON cloud_sync_conflicts(status, username, updated_at);
                     '''
                 )
 
@@ -802,6 +875,376 @@ class CloudDriveRegistryDB:
                 assert saved is not None
                 return self._job_from_row(saved)
 
+    def register_sync_client(
+        self,
+        *,
+        username: str,
+        device_id: str,
+        display_name: str = '',
+        platform: str = '',
+        status: str = 'online',
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> CloudDriveSyncClient:
+        clean_username = str(username or '').strip().lower()
+        clean_device = str(device_id or '').strip()
+        if not clean_username:
+            raise RuntimeError('Не задан username sync-клиента.')
+        if not clean_device:
+            raise RuntimeError('Не задан device_id sync-клиента.')
+        clean_status = str(status or 'online').strip().lower()
+        if clean_status not in {'online', 'offline', 'paused', 'error'}:
+            clean_status = 'online'
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    'SELECT id FROM cloud_sync_clients WHERE username=? AND device_id=?',
+                    (clean_username, clean_device),
+                ).fetchone()
+                client_id = str(row['id']) if row else str(uuid.uuid4())
+                conn.execute(
+                    '''
+                    INSERT INTO cloud_sync_clients (
+                        id, username, device_id, display_name, platform, status,
+                        last_seen_at, metadata_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(username, device_id) DO UPDATE SET
+                        display_name=excluded.display_name,
+                        platform=excluded.platform,
+                        status=excluded.status,
+                        last_seen_at=excluded.last_seen_at,
+                        metadata_json=excluded.metadata_json,
+                        updated_at=excluded.updated_at
+                    ''',
+                    (
+                        client_id,
+                        clean_username,
+                        clean_device,
+                        str(display_name or '').strip() or clean_device,
+                        str(platform or '').strip(),
+                        clean_status,
+                        now,
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                saved = conn.execute('SELECT * FROM cloud_sync_clients WHERE id=?', (client_id,)).fetchone()
+        assert saved is not None
+        return self._sync_client_from_row(saved)
+
+    def get_sync_client(self, client_id: str) -> Optional[CloudDriveSyncClient]:
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM cloud_sync_clients WHERE id=?', (str(client_id),)).fetchone()
+            return self._sync_client_from_row(row) if row else None
+
+    def list_sync_clients(self, *, username: str = '', include_offline: bool = True, limit: int = 100) -> List[CloudDriveSyncClient]:
+        clean_username = str(username or '').strip().lower()
+        max_rows = max(1, min(int(limit or 100), 1000))
+        with self._connect() as conn:
+            if clean_username and include_offline:
+                rows = conn.execute(
+                    'SELECT * FROM cloud_sync_clients WHERE username=? ORDER BY updated_at DESC LIMIT ?',
+                    (clean_username, max_rows),
+                ).fetchall()
+            elif clean_username:
+                rows = conn.execute(
+                    "SELECT * FROM cloud_sync_clients WHERE username=? AND status!='offline' ORDER BY updated_at DESC LIMIT ?",
+                    (clean_username, max_rows),
+                ).fetchall()
+            elif include_offline:
+                rows = conn.execute(
+                    'SELECT * FROM cloud_sync_clients ORDER BY updated_at DESC LIMIT ?',
+                    (max_rows,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM cloud_sync_clients WHERE status!='offline' ORDER BY updated_at DESC LIMIT ?",
+                    (max_rows,),
+                ).fetchall()
+        return [self._sync_client_from_row(row) for row in rows]
+
+    def upsert_sync_pair(
+        self,
+        *,
+        client_id: str,
+        local_path: str,
+        cloud_path: str = '',
+        conflict_policy: str = 'ask',
+        enabled: bool = True,
+    ) -> CloudDriveSyncPair:
+        client = self.get_sync_client(client_id)
+        if client is None:
+            raise RuntimeError(f'Sync-клиент не найден: {client_id}')
+        clean_local = str(local_path or '').strip()
+        if not clean_local:
+            raise RuntimeError('Не задан локальный путь sync-пары.')
+        clean_cloud = self._normalize_path(cloud_path)
+        if clean_cloud and self.get_folder_by_path(clean_cloud) is None:
+            raise RuntimeError(f'Cloud Drive каталог не найден: {clean_cloud}')
+        policy = str(conflict_policy or 'ask').strip().lower()
+        if policy not in {'ask', 'local_wins', 'cloud_wins', 'newest_wins'}:
+            policy = 'ask'
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    'SELECT id FROM cloud_sync_pairs WHERE client_id=? AND local_path=? AND cloud_path=?',
+                    (str(client_id), clean_local, clean_cloud),
+                ).fetchone()
+                pair_id = str(row['id']) if row else str(uuid.uuid4())
+                conn.execute(
+                    '''
+                    INSERT INTO cloud_sync_pairs (
+                        id, client_id, username, local_path, cloud_path, conflict_policy,
+                        enabled, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(client_id, local_path, cloud_path) DO UPDATE SET
+                        conflict_policy=excluded.conflict_policy,
+                        enabled=excluded.enabled,
+                        updated_at=excluded.updated_at
+                    ''',
+                    (
+                        pair_id,
+                        str(client_id),
+                        client.username,
+                        clean_local,
+                        clean_cloud,
+                        policy,
+                        1 if enabled else 0,
+                        now,
+                        now,
+                    ),
+                )
+                saved = conn.execute('SELECT * FROM cloud_sync_pairs WHERE id=?', (pair_id,)).fetchone()
+        assert saved is not None
+        return self._sync_pair_from_row(saved)
+
+    def list_sync_pairs(self, *, username: str = '', client_id: str = '', enabled_only: bool = False) -> List[CloudDriveSyncPair]:
+        clean_username = str(username or '').strip().lower()
+        clean_client = str(client_id or '').strip()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if clean_username:
+            clauses.append('username=?')
+            params.append(clean_username)
+        if clean_client:
+            clauses.append('client_id=?')
+            params.append(clean_client)
+        if enabled_only:
+            clauses.append('enabled=1')
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+        with self._connect() as conn:
+            rows = conn.execute(
+                f'SELECT * FROM cloud_sync_pairs {where} ORDER BY updated_at DESC',
+                params,
+            ).fetchall()
+        return [self._sync_pair_from_row(row) for row in rows]
+
+    def delete_sync_pair(self, pair_id: str, *, client_id: str = '') -> bool:
+        clean_id = str(pair_id or '').strip()
+        if not clean_id:
+            return False
+        clean_client = str(client_id or '').strip()
+        with self._lock:
+            with self._connect() as conn:
+                if clean_client:
+                    cur = conn.execute('DELETE FROM cloud_sync_pairs WHERE id=? AND client_id=?', (clean_id, clean_client))
+                else:
+                    cur = conn.execute('DELETE FROM cloud_sync_pairs WHERE id=?', (clean_id,))
+                conn.execute('UPDATE cloud_sync_conflicts SET pair_id="" WHERE pair_id=?', (clean_id,))
+                return int(cur.rowcount or 0) > 0
+
+    def set_selective_sync_paths(
+        self,
+        *,
+        client_id: str,
+        paths: List[str],
+        mode: str = 'exclude',
+        replace: bool = True,
+    ) -> List[Dict[str, str]]:
+        client = self.get_sync_client(client_id)
+        if client is None:
+            raise RuntimeError(f'Sync-клиент не найден: {client_id}')
+        clean_mode = str(mode or 'exclude').strip().lower()
+        if clean_mode not in {'include', 'exclude'}:
+            clean_mode = 'exclude'
+        clean_paths = list(dict.fromkeys(self._normalize_path(path) for path in paths if self._normalize_path(path)))
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                if replace:
+                    conn.execute('DELETE FROM cloud_sync_selective_paths WHERE client_id=?', (str(client_id),))
+                for cloud_path in clean_paths:
+                    row = conn.execute(
+                        'SELECT id FROM cloud_sync_selective_paths WHERE client_id=? AND cloud_path=?',
+                        (str(client_id), cloud_path),
+                    ).fetchone()
+                    path_id = str(row['id']) if row else str(uuid.uuid4())
+                    conn.execute(
+                        '''
+                        INSERT INTO cloud_sync_selective_paths (
+                            id, client_id, username, cloud_path, mode, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(client_id, cloud_path) DO UPDATE SET
+                            mode=excluded.mode,
+                            updated_at=excluded.updated_at
+                        ''',
+                        (path_id, str(client_id), client.username, cloud_path, clean_mode, now, now),
+                    )
+        return self.list_selective_sync_paths(client_id=client_id)
+
+    def list_selective_sync_paths(self, *, username: str = '', client_id: str = '') -> List[Dict[str, str]]:
+        clean_username = str(username or '').strip().lower()
+        clean_client = str(client_id or '').strip()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if clean_username:
+            clauses.append('username=?')
+            params.append(clean_username)
+        if clean_client:
+            clauses.append('client_id=?')
+            params.append(clean_client)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+        with self._connect() as conn:
+            rows = conn.execute(
+                f'SELECT id, client_id, username, cloud_path, mode, created_at, updated_at FROM cloud_sync_selective_paths {where} ORDER BY cloud_path',
+                params,
+            ).fetchall()
+        return [
+            {
+                'id': str(row['id']),
+                'client_id': str(row['client_id']),
+                'username': str(row['username']),
+                'cloud_path': str(row['cloud_path']),
+                'mode': str(row['mode']),
+                'created_at': str(row['created_at']),
+                'updated_at': str(row['updated_at']),
+            }
+            for row in rows
+        ]
+
+    def record_sync_conflict(
+        self,
+        *,
+        client_id: str,
+        path: str,
+        conflict_type: str,
+        pair_id: str = '',
+        local_path: str = '',
+        cloud_path: str = '',
+        local_version: str = '',
+        cloud_version: str = '',
+        details: Optional[Dict[str, Any]] = None,
+    ) -> CloudDriveSyncConflict:
+        client = self.get_sync_client(client_id)
+        if client is None:
+            raise RuntimeError(f'Sync-клиент не найден: {client_id}')
+        clean_path = self._normalize_path(path) or str(local_path or cloud_path or '').strip()
+        if not clean_path:
+            raise RuntimeError('Не задан путь sync-конфликта.')
+        clean_type = str(conflict_type or '').strip().lower() or 'unknown'
+        now = _utc_now()
+        conflict_id = str(uuid.uuid4())
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    '''
+                    INSERT INTO cloud_sync_conflicts (
+                        id, client_id, pair_id, username, path, local_path, cloud_path,
+                        conflict_type, local_version, cloud_version, status, resolution,
+                        details_json, resolved_by, resolved_at, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', '', ?, '', '', ?, ?)
+                    ''',
+                    (
+                        conflict_id,
+                        str(client_id),
+                        str(pair_id or ''),
+                        client.username,
+                        clean_path,
+                        str(local_path or '').strip(),
+                        self._normalize_path(cloud_path),
+                        clean_type,
+                        str(local_version or ''),
+                        str(cloud_version or ''),
+                        json.dumps(details or {}, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                saved = conn.execute('SELECT * FROM cloud_sync_conflicts WHERE id=?', (conflict_id,)).fetchone()
+        assert saved is not None
+        return self._sync_conflict_from_row(saved)
+
+    def list_sync_conflicts(
+        self,
+        *,
+        username: str = '',
+        client_id: str = '',
+        status: str = 'open',
+        limit: int = 100,
+    ) -> List[CloudDriveSyncConflict]:
+        clean_username = str(username or '').strip().lower()
+        clean_client = str(client_id or '').strip()
+        clean_status = str(status or '').strip().lower()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if clean_username:
+            clauses.append('username=?')
+            params.append(clean_username)
+        if clean_client:
+            clauses.append('client_id=?')
+            params.append(clean_client)
+        if clean_status and clean_status != 'all':
+            clauses.append('status=?')
+            params.append(clean_status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+        max_rows = max(1, min(int(limit or 100), 1000))
+        params.append(max_rows)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f'SELECT * FROM cloud_sync_conflicts {where} ORDER BY updated_at DESC LIMIT ?',
+                params,
+            ).fetchall()
+        return [self._sync_conflict_from_row(row) for row in rows]
+
+    def resolve_sync_conflict(
+        self,
+        conflict_id: str,
+        *,
+        resolution: str,
+        resolved_by: str = '',
+    ) -> CloudDriveSyncConflict:
+        clean_id = str(conflict_id or '').strip()
+        clean_resolution = str(resolution or '').strip().lower()
+        if clean_resolution not in {'local_wins', 'cloud_wins', 'newest_wins', 'manual', 'ignored'}:
+            raise RuntimeError('Недопустимое решение sync-конфликта.')
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute('SELECT * FROM cloud_sync_conflicts WHERE id=?', (clean_id,)).fetchone()
+                if row is None:
+                    raise RuntimeError(f'Sync-конфликт не найден: {clean_id}')
+                conn.execute(
+                    '''
+                    UPDATE cloud_sync_conflicts
+                    SET status='resolved',
+                        resolution=?,
+                        resolved_by=?,
+                        resolved_at=?,
+                        updated_at=?
+                    WHERE id=?
+                    ''',
+                    (clean_resolution, str(resolved_by or '').strip().lower(), now, now, clean_id),
+                )
+                saved = conn.execute('SELECT * FROM cloud_sync_conflicts WHERE id=?', (clean_id,)).fetchone()
+        assert saved is not None
+        return self._sync_conflict_from_row(saved)
+
     def stats(self) -> CloudDriveStats:
         with self._connect() as conn:
             folders = int(conn.execute('SELECT COUNT(*) FROM cloud_folders').fetchone()[0])
@@ -864,4 +1307,60 @@ class CloudDriveRegistryDB:
             started_at=str(row['started_at'] or ''),
             finished_at=str(row['finished_at'] or ''),
             progress=dict(payload.get('progress') or {}),
+        )
+
+    def _sync_client_from_row(self, row: sqlite3.Row) -> CloudDriveSyncClient:
+        try:
+            metadata = json.loads(str(row['metadata_json'] or '{}'))
+        except json.JSONDecodeError:
+            metadata = {}
+        return CloudDriveSyncClient(
+            id=str(row['id']),
+            username=str(row['username']),
+            device_id=str(row['device_id']),
+            display_name=str(row['display_name'] or ''),
+            platform=str(row['platform'] or ''),
+            status=str(row['status'] or 'offline'),
+            last_seen_at=str(row['last_seen_at'] or ''),
+            metadata=dict(metadata or {}),
+            created_at=str(row['created_at'] or ''),
+            updated_at=str(row['updated_at'] or ''),
+        )
+
+    def _sync_pair_from_row(self, row: sqlite3.Row) -> CloudDriveSyncPair:
+        return CloudDriveSyncPair(
+            id=str(row['id']),
+            client_id=str(row['client_id']),
+            username=str(row['username']),
+            local_path=str(row['local_path']),
+            cloud_path=str(row['cloud_path'] or ''),
+            conflict_policy=str(row['conflict_policy'] or 'ask'),
+            enabled=bool(int(row['enabled'] or 0)),
+            created_at=str(row['created_at'] or ''),
+            updated_at=str(row['updated_at'] or ''),
+        )
+
+    def _sync_conflict_from_row(self, row: sqlite3.Row) -> CloudDriveSyncConflict:
+        try:
+            details = json.loads(str(row['details_json'] or '{}'))
+        except json.JSONDecodeError:
+            details = {}
+        return CloudDriveSyncConflict(
+            id=str(row['id']),
+            client_id=str(row['client_id']),
+            pair_id=str(row['pair_id'] or ''),
+            username=str(row['username']),
+            path=str(row['path']),
+            local_path=str(row['local_path'] or ''),
+            cloud_path=str(row['cloud_path'] or ''),
+            conflict_type=str(row['conflict_type'] or 'unknown'),
+            local_version=str(row['local_version'] or ''),
+            cloud_version=str(row['cloud_version'] or ''),
+            status=str(row['status'] or 'open'),
+            resolution=str(row['resolution'] or ''),
+            details=dict(details or {}),
+            resolved_by=str(row['resolved_by'] or ''),
+            resolved_at=str(row['resolved_at'] or ''),
+            created_at=str(row['created_at'] or ''),
+            updated_at=str(row['updated_at'] or ''),
         )

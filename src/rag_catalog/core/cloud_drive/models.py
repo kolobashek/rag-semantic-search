@@ -68,3 +68,51 @@ class CloudDriveStorageHealth:
     writable: bool
     target: str = ""
     error: str = ""
+
+
+@dataclass(slots=True)
+class CloudDriveSyncClient:
+    id: str
+    username: str
+    device_id: str
+    display_name: str
+    platform: str = ""
+    status: str = "offline"
+    last_seen_at: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(slots=True)
+class CloudDriveSyncPair:
+    id: str
+    client_id: str
+    username: str
+    local_path: str
+    cloud_path: str
+    conflict_policy: str = "ask"
+    enabled: bool = True
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(slots=True)
+class CloudDriveSyncConflict:
+    id: str
+    client_id: str
+    pair_id: str
+    username: str
+    path: str
+    local_path: str
+    cloud_path: str
+    conflict_type: str
+    local_version: str = ""
+    cloud_version: str = ""
+    status: str = "open"
+    resolution: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+    resolved_by: str = ""
+    resolved_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""

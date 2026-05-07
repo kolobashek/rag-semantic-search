@@ -46,6 +46,16 @@ from rag_catalog.ui.api import (
     api_cloud_drive_node,
     api_cloud_drive_versions,
     api_cloud_drive_storage_health,
+    api_cloud_drive_sync_client_register,
+    api_cloud_drive_sync_clients,
+    api_cloud_drive_sync_conflict_record,
+    api_cloud_drive_sync_conflict_resolve,
+    api_cloud_drive_sync_conflicts,
+    api_cloud_drive_sync_pair_delete,
+    api_cloud_drive_sync_pair_upsert,
+    api_cloud_drive_sync_pairs,
+    api_cloud_drive_sync_selective,
+    api_cloud_drive_sync_selective_set,
 )
 import rag_catalog.ui.api as cloud_api
 import rag_catalog.ui.state as ui_state
@@ -452,6 +462,73 @@ def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
     assert health["backend"] == "local"
     assert health["ok"] is True
     assert health["writable"] is True
+
+
+def test_cloud_drive_sync_api_contracts(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "telemetry_db_path": str(tmp_path / "telemetry.db"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    service.registry.upsert_folder(path="Folder A", name="Folder A", parent_id=root.id, depth=1, source_path="")
+    user = {"username": "user", "role": "user", "status": "active"}
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: user)
+
+    client = api_cloud_drive_sync_client_register(
+        device_id="desktop-1",
+        display_name="Office PC",
+        platform="windows",
+        metadata_json='{"version":"0.1"}',
+    )
+    pair = api_cloud_drive_sync_pair_upsert(
+        client_id=client["id"],
+        local_path="D:/Sync/Folder A",
+        cloud_path="Folder A",
+        conflict_policy="cloud_wins",
+    )
+    selective = api_cloud_drive_sync_selective_set(
+        client_id=client["id"],
+        paths="Folder A",
+        mode="include",
+    )
+    conflict = api_cloud_drive_sync_conflict_record(
+        client_id=client["id"],
+        pair_id=pair["id"],
+        path="Folder A/hello.txt",
+        cloud_path="Folder A/hello.txt",
+        conflict_type="both_modified",
+        details_json='{"reason":"test"}',
+    )
+    resolved = api_cloud_drive_sync_conflict_resolve(conflict_id=conflict["id"], resolution="cloud_wins")
+
+    assert api_cloud_drive_sync_clients()[0]["id"] == client["id"]
+    assert api_cloud_drive_sync_pairs(client_id=client["id"])[0]["id"] == pair["id"]
+    assert selective["count"] == 1
+    assert api_cloud_drive_sync_selective(client_id=client["id"])["paths"][0]["cloud_path"] == "Folder A"
+    assert resolved["status"] == "resolved"
+    assert api_cloud_drive_sync_conflicts(status="resolved")[0]["id"] == conflict["id"]
+    assert api_cloud_drive_sync_pair_delete(pair_id=pair["id"], client_id=client["id"]) == {"ok": True}
+
+    events = TelemetryDB(cfg["telemetry_db_path"]).fetch_dicts(
+        "SELECT action, ok FROM app_events WHERE feature='cloud_drive' ORDER BY id"
+    )
+    assert [row["action"] for row in events] == [
+        "sync_client_register",
+        "sync_pair_upsert",
+        "sync_selective_set",
+        "sync_conflict_record",
+        "sync_conflict_resolve",
+        "sync_clients",
+        "sync_pairs",
+        "sync_selective",
+        "sync_conflicts",
+        "sync_pair_delete",
+    ]
+    assert all(row["ok"] == 1 for row in events)
 
 
 def test_cloud_drive_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> None:

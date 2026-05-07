@@ -10,6 +10,7 @@ Depends on: .state, .system, .helpers, core modules.
 from __future__ import annotations
 
 import mimetypes
+import json
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Dict, List
@@ -95,6 +96,19 @@ def _audit_cloud_drive_api_event(
 def _require_cloud_drive_path_access(cfg: Dict[str, Any], user: Dict[str, Any], path: str) -> None:
     if not _cd_acl_allows(cfg, user, path):
         raise HTTPException(status_code=403, detail="Нет доступа к этому пути Cloud Drive.")
+
+
+def _require_sync_client_access(service: CloudDriveService, user: Dict[str, Any], client_id: str, *, admin_ok: bool = True) -> None:
+    clean_client = str(client_id or "").strip()
+    if not clean_client:
+        raise HTTPException(status_code=400, detail="Не задан client_id.")
+    if admin_ok and str(user.get("role") or "") == "admin":
+        return
+    client = service.registry.get_sync_client(clean_client)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"Sync-клиент не найден: {clean_client}")
+    if str(client.username or "").lower() != str(user.get("username") or "").lower():
+        raise HTTPException(status_code=403, detail="Нет доступа к этому sync-клиенту.")
 
 
 # ─────────────────────────── job serializer ────────────────────────────────
@@ -252,6 +266,241 @@ def api_cloud_drive_changes(since: str = "", limit: int = 500, auth_token: str =
     result["changes"] = changes
     result["count"] = len(changes)
     _audit_cloud_drive_api_event(cfg, user, "changes", details={"since": since, "count": len(changes)})
+    return result
+
+
+@app.get("/api/cloud-drive/sync/clients")
+def api_cloud_drive_sync_clients(username: str = "", include_offline: bool = True, limit: int = 100, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    requested_username = str(username or "").strip().lower()
+    if str(user.get("role") or "") != "admin":
+        requested_username = str(user.get("username") or "").strip().lower()
+    clients = service.list_sync_clients(
+        username=requested_username,
+        include_offline=bool(include_offline),
+        limit=max(1, min(int(limit or 100), 1000)),
+    )
+    _audit_cloud_drive_api_event(cfg, user, "sync_clients", details={"username": requested_username, "count": len(clients)})
+    return clients
+
+
+@app.post("/api/cloud-drive/sync/clients")
+def api_cloud_drive_sync_client_register(
+    device_id: str = "",
+    display_name: str = "",
+    platform: str = "",
+    status: str = "online",
+    metadata_json: str = "{}",
+    auth_token: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    try:
+        metadata = json.loads(str(metadata_json or "{}"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="metadata_json должен быть JSON-объектом.")
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="metadata_json должен быть JSON-объектом.")
+    service = CloudDriveService.from_config(cfg)
+    try:
+        client = service.register_sync_client(
+            username=str(user.get("username") or ""),
+            device_id=device_id,
+            display_name=display_name,
+            platform=platform,
+            status=status,
+            metadata=metadata,
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "sync_client_register", ok=False, details={"device_id": device_id, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "sync_client_register", details={"client_id": client.get("id"), "device_id": device_id})
+    return client
+
+
+@app.get("/api/cloud-drive/sync/pairs")
+def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    if client_id:
+        _require_sync_client_access(service, user, client_id)
+    username = "" if str(user.get("role") or "") == "admin" else str(user.get("username") or "")
+    pairs = service.list_sync_pairs(username=username, client_id=client_id, enabled_only=bool(enabled_only))
+    _audit_cloud_drive_api_event(cfg, user, "sync_pairs", details={"client_id": client_id, "count": len(pairs)})
+    return pairs
+
+
+@app.post("/api/cloud-drive/sync/pairs")
+def api_cloud_drive_sync_pair_upsert(
+    client_id: str = "",
+    local_path: str = "",
+    cloud_path: str = "",
+    conflict_policy: str = "ask",
+    enabled: bool = True,
+    auth_token: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    _require_sync_client_access(service, user, client_id)
+    _require_cloud_drive_path_access(cfg, user, cloud_path)
+    try:
+        pair = service.upsert_sync_pair(
+            client_id=client_id,
+            local_path=local_path,
+            cloud_path=cloud_path,
+            conflict_policy=conflict_policy,
+            enabled=bool(enabled),
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "sync_pair_upsert", ok=False, details={"client_id": client_id, "cloud_path": cloud_path, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "sync_pair_upsert", details={"client_id": client_id, "pair_id": pair.get("id"), "cloud_path": cloud_path})
+    return pair
+
+
+@app.post("/api/cloud-drive/sync/pairs/delete")
+def api_cloud_drive_sync_pair_delete(pair_id: str = "", client_id: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    _require_sync_client_access(service, user, client_id)
+    result = service.delete_sync_pair(pair_id, client_id=client_id)
+    _audit_cloud_drive_api_event(cfg, user, "sync_pair_delete", details={"pair_id": pair_id, "client_id": client_id, "ok": result.get("ok")})
+    return result
+
+
+@app.get("/api/cloud-drive/sync/selective")
+def api_cloud_drive_sync_selective(client_id: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    if client_id:
+        _require_sync_client_access(service, user, client_id)
+    username = "" if str(user.get("role") or "") == "admin" else str(user.get("username") or "")
+    result = service.list_selective_sync_paths(username=username, client_id=client_id)
+    _audit_cloud_drive_api_event(cfg, user, "sync_selective", details={"client_id": client_id, "count": result.get("count")})
+    return result
+
+
+@app.post("/api/cloud-drive/sync/selective")
+def api_cloud_drive_sync_selective_set(
+    client_id: str = "",
+    paths: str = "",
+    mode: str = "exclude",
+    replace: bool = True,
+    auth_token: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    _require_sync_client_access(service, user, client_id)
+    path_values = [part.strip() for part in str(paths or "").split(",") if part.strip()]
+    for path in path_values:
+        _require_cloud_drive_path_access(cfg, user, path)
+    try:
+        result = service.set_selective_sync_paths(client_id=client_id, paths=path_values, mode=mode, replace=bool(replace))
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "sync_selective_set", ok=False, details={"client_id": client_id, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "sync_selective_set", details={"client_id": client_id, "count": result.get("count")})
+    return result
+
+
+@app.get("/api/cloud-drive/sync/conflicts")
+def api_cloud_drive_sync_conflicts(status: str = "open", client_id: str = "", limit: int = 100, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    if client_id:
+        _require_sync_client_access(service, user, client_id)
+    username = "" if str(user.get("role") or "") == "admin" else str(user.get("username") or "")
+    conflicts = service.list_sync_conflicts(
+        username=username,
+        client_id=client_id,
+        status=status,
+        limit=max(1, min(int(limit or 100), 1000)),
+    )
+    _audit_cloud_drive_api_event(cfg, user, "sync_conflicts", details={"status": status, "client_id": client_id, "count": len(conflicts)})
+    return conflicts
+
+
+@app.post("/api/cloud-drive/sync/conflicts")
+def api_cloud_drive_sync_conflict_record(
+    client_id: str = "",
+    path: str = "",
+    conflict_type: str = "",
+    pair_id: str = "",
+    local_path: str = "",
+    cloud_path: str = "",
+    local_version: str = "",
+    cloud_version: str = "",
+    details_json: str = "{}",
+    auth_token: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    _require_sync_client_access(service, user, client_id)
+    if cloud_path or path:
+        _require_cloud_drive_path_access(cfg, user, cloud_path or path)
+    try:
+        details = json.loads(str(details_json or "{}"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="details_json должен быть JSON-объектом.")
+    if not isinstance(details, dict):
+        raise HTTPException(status_code=400, detail="details_json должен быть JSON-объектом.")
+    try:
+        conflict = service.record_sync_conflict(
+            client_id=client_id,
+            pair_id=pair_id,
+            path=path,
+            local_path=local_path,
+            cloud_path=cloud_path,
+            conflict_type=conflict_type,
+            local_version=local_version,
+            cloud_version=cloud_version,
+            details=details,
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "sync_conflict_record", ok=False, details={"client_id": client_id, "path": path, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "sync_conflict_record", details={"client_id": client_id, "conflict_id": conflict.get("id"), "path": path})
+    return conflict
+
+
+@app.post("/api/cloud-drive/sync/conflicts/resolve")
+def api_cloud_drive_sync_conflict_resolve(
+    conflict_id: str = "",
+    resolution: str = "",
+    auth_token: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    existing = service.registry.list_sync_conflicts(status="all", limit=1000)
+    conflict = next((item for item in existing if item.id == str(conflict_id or "").strip()), None)
+    if conflict is None:
+        raise HTTPException(status_code=404, detail=f"Sync-конфликт не найден: {conflict_id}")
+    _require_sync_client_access(service, user, conflict.client_id)
+    try:
+        result = service.resolve_sync_conflict(
+            conflict_id,
+            resolution=resolution,
+            resolved_by=str(user.get("username") or ""),
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "sync_conflict_resolve", ok=False, details={"conflict_id": conflict_id, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "sync_conflict_resolve", details={"conflict_id": conflict_id, "resolution": resolution})
     return result
 
 
