@@ -466,6 +466,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
         return handler
 
+    # ── Search screen ─────────────────────────────────────────────────────────
+
     def render_suggestions(area: ui.column, typed: str) -> None:
         area.clear()
         username = _username(state)
@@ -1328,6 +1330,8 @@ def _build_page(initial_screen: str = "search") -> None:
             render()
 
         star.on("click.stop", toggle)
+
+    # ── Explorer / Cloud Drive screen ─────────────────────────────────────────
 
     def _render_cd_explorer(page_state: PageState, svc: "CloudDriveService") -> None:  # noqa: PLR0912,PLR0915
         """Registry-backed Cloud Drive explorer screen."""
@@ -2435,6 +2439,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
         render_entries()
 
+    # ── Index / indexing management screen ────────────────────────────────────
+
     def render_index_screen() -> None:  # noqa: C901
         if not _is_admin(state):
             render_access_denied(hint="Управление индексом и расписание индексации доступны только администраторам.")
@@ -3061,6 +3067,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 for ext, count in list(stats["by_ext"].items())[:12]:
                     ui.label(f"{ext}: {count}").classes("rag-meta")
 
+    # ── Auth / login / access denied screens ──────────────────────────────────
+
     def render_access_denied(
         message: str = "Этот раздел доступен только администраторам.",
         *,
@@ -3248,6 +3256,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 _stop_managed_timer(state.tg_login_timer)
                 state.tg_login_timer = ui.timer(2.0, poll_tg_login)
+
+    # ── Admin / settings screens ──────────────────────────────────────────────
 
     def render_admin_users(auth_db: UserAuthDB) -> None:
         with ui.column().classes("rag-card w-full p-4 gap-4"):
@@ -4977,6 +4987,8 @@ def _build_page(initial_screen: str = "search") -> None:
             bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
             if bot_link:
                 ui.link("Открыть бота", bot_link, new_tab=True)
+
+    # ── Analytics / stats screen ──────────────────────────────────────────────
 
     def render_stats_screen() -> None:
         if str((state.current_user or {}).get("role") or "") != "admin":
