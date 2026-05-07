@@ -583,22 +583,22 @@ class RAGIndexer:
 
     # ── Qdrant vector deletion ─────────────────────────────────────────
 
-    def _delete_file_vectors(self, filepath: Path) -> None:
-        """Удалить все векторы в Qdrant, связанные с данным файлом."""
+    def _delete_file_vectors(self, filepath: Path, *, payload_match: Optional[Dict[str, Any]] = None) -> None:
+        """Удалить все векторы в Qdrant, связанные с данным файлом или payload identity."""
+        must = []
+        if payload_match:
+            for key, value in payload_match.items():
+                if value not in (None, ""):
+                    must.append(FieldCondition(key=str(key), match=MatchValue(value=value)))
+        if not must:
+            must.append(FieldCondition(key="full_path", match=MatchValue(value=str(filepath))))
         try:
             self.qdrant.delete(
                 collection_name=self.collection_name,
                 wait=False,
                 timeout=self.qdrant_timeout_sec,
                 points_selector=FilterSelector(
-                    filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="full_path",
-                                match=MatchValue(value=str(filepath)),
-                            )
-                        ]
-                    )
+                    filter=Filter(must=must)
                 ),
             )
             logger.debug("Удалены старые векторы для: %s", filepath)
@@ -910,25 +910,36 @@ class RAGIndexer:
             )
             self._points_buffer = []
 
-    def _index_metadata(self, filepath: Path, relative_path: Path) -> None:
+    def _index_metadata(
+        self,
+        filepath: Path,
+        relative_path: Path,
+        *,
+        state_key: Optional[str] = None,
+        payload_extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         stat = filepath.stat()
         text = (
             f"Файл: {filepath.name} | Путь: {relative_path} | Расширение: {filepath.suffix}"
         )
         vector = self.embedder.encode(text, normalize_embeddings=True).tolist()
+        payload: Dict[str, Any] = {
+            "type": "file_metadata",
+            "text": text,
+            "filename": filepath.name,
+            "extension": filepath.suffix.lower(),
+            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "path": str(relative_path),
+            "full_path": str(filepath),
+            "state_key": str(state_key or filepath),
+        }
+        if payload_extra:
+            payload.update(payload_extra)
         point = PointStruct(
             id=str(uuid.uuid4()),
             vector=vector,
-            payload={
-                "type": "file_metadata",
-                "text": text,
-                "filename": filepath.name,
-                "extension": filepath.suffix.lower(),
-                "size_mb": round(stat.st_size / (1024 * 1024), 2),
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                "path": str(relative_path),
-                "full_path": str(filepath),
-            },
+            payload=payload,
         )
         self._add_points([point])
 
@@ -938,6 +949,9 @@ class RAGIndexer:
         relative_path: Path,
         file_type: str,
         full_text: str,
+        *,
+        state_key: Optional[str] = None,
+        payload_extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not full_text.strip():
             return
@@ -954,31 +968,41 @@ class RAGIndexer:
             chunks, normalize_embeddings=True, batch_size=64, show_progress_bar=False
         )
         ext = filepath.suffix.lower()
-        points = [
-            PointStruct(
-                id=str(uuid.uuid4()),
-                vector=v.tolist(),
-                payload={
-                    "type": f"{file_type}_content",
-                    "text": chunk,
-                    "filename": filepath.name,
-                    "extension": ext,
-                    "path": str(relative_path),
-                    "full_path": str(filepath),
-                    "chunk_index": idx,
-                },
-            )
-            for idx, (v, chunk) in enumerate(zip(vectors, chunks))
-        ]
+        points = []
+        for idx, (v, chunk) in enumerate(zip(vectors, chunks)):
+            payload: Dict[str, Any] = {
+                "type": f"{file_type}_content",
+                "text": chunk,
+                "filename": filepath.name,
+                "extension": ext,
+                "path": str(relative_path),
+                "full_path": str(filepath),
+                "chunk_index": idx,
+                "state_key": str(state_key or filepath),
+            }
+            if payload_extra:
+                payload.update(payload_extra)
+            points.append(PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=payload))
         self._add_points(points)
 
     # ── single file ────────────────────────────────────────────────────
 
-    def process_file(self, filepath: Path) -> None:
+    def process_file(
+        self,
+        filepath: Path,
+        *,
+        logical_path: Optional[str] = None,
+        state_key: Optional[str] = None,
+        payload_extra: Optional[Dict[str, Any]] = None,
+        fingerprint_override: str = "",
+        delete_payload_match: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Обработать один файл: извлечь текст, нарезать, проиндексировать."""
-        relative_path = filepath.relative_to(self.catalog_path)
+        relative_path = Path(logical_path) if logical_path else filepath.relative_to(self.catalog_path)
         fingerprint, mtime = self._get_file_fingerprint(filepath)
-        file_key = str(filepath)
+        if fingerprint_override:
+            fingerprint = fingerprint_override
+        file_key = str(state_key or filepath)
 
         existing_entry = self._get_state_entry(file_key)
         if existing_entry:
@@ -986,10 +1010,10 @@ class RAGIndexer:
                 logger.debug("Файл не изменился, пропуск: %s", filepath)
                 return
             logger.info("Файл изменился, удаляю старые векторы: %s", filepath)
-            self._delete_file_vectors(filepath)
+            self._delete_file_vectors(filepath, payload_match=delete_payload_match)
 
         logger.info("Индексирование: %s", filepath)
-        self._index_metadata(filepath, relative_path)
+        self._index_metadata(filepath, relative_path, state_key=file_key, payload_extra=payload_extra)
 
         ext = filepath.suffix.lower()
         full_text = ""
@@ -1013,7 +1037,7 @@ class RAGIndexer:
 
         stage = "metadata"
         if full_text:
-            self._index_content(filepath, relative_path, file_type, full_text)
+            self._index_content(filepath, relative_path, file_type, full_text, state_key=file_key, payload_extra=payload_extra)
             stage = "content"
         else:
             logger.warning("Файл %s: контент пуст, сохраняю только metadata stage", filepath.name)
@@ -1030,6 +1054,7 @@ class RAGIndexer:
                 "stage": stage,
                 "size_bytes": size_bytes,
                 "extension": filepath.suffix.lower(),
+                **(payload_extra or {}),
             }
         )
         self._save_state()

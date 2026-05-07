@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .models import CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
 from .registry import CloudDriveRegistryDB
@@ -423,11 +423,18 @@ class CloudDriveService:
 
         try:
             if job.job_type == 'cleanup':
+                deleted_points = 0
+                if index_config:
+                    deleted_points = self._delete_index_vectors(
+                        index_config=index_config,
+                        payload_match=self._cleanup_payload_match(job),
+                    )
                 progress.update(
                     {
                         'status': 'done',
                         'action': 'cleanup',
                         'path': str((job.payload or {}).get('path') or ''),
+                        'deleted_points': int(deleted_points),
                         'finished_at': datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -447,7 +454,11 @@ class CloudDriveService:
             indexed = False
             points_added = 0
             if index_config:
-                indexed, points_added = self._run_indexer_for_file(target_path=target_path, index_config=index_config)
+                indexed, points_added = self._run_indexer_for_file(
+                    target_path=target_path,
+                    file_row=file_row,
+                    index_config=index_config,
+                )
 
             progress.update(
                 {
@@ -727,18 +738,42 @@ class CloudDriveService:
             raise RuntimeError(f'Файл job не найден: {job.file_id or (job.payload or {}).get("path") or ""}')
         return file_row
 
-    def _run_indexer_for_file(self, *, target_path: Path, index_config: Dict[str, object]) -> tuple[bool, int]:
+    def _cloud_state_key(self, file_row) -> str:
+        return f"cloud:{file_row.id}"
+
+    def _cloud_payload(self, file_row) -> Dict[str, Any]:
+        return {
+            'cloud_file_id': file_row.id,
+            'cloud_version_id': file_row.current_version_id,
+            'cloud_path': file_row.path,
+            'storage_key': file_row.storage_key,
+            'source_path': file_row.source_path,
+            'source': 'cloud_drive',
+        }
+
+    def _cleanup_payload_match(self, job: CloudDriveJob) -> Dict[str, Any]:
+        if job.file_id:
+            return {'cloud_file_id': job.file_id}
+        path = str((job.payload or {}).get('path') or '').strip()
+        return {'cloud_path': path} if path else {}
+
+    def _run_indexer_for_file(self, *, target_path: Path, file_row, index_config: Dict[str, object]) -> tuple[bool, int]:
+        if not str(index_config.get('qdrant_db_path') or '').strip() and not str(index_config.get('qdrant_url') or '').strip():
+            return False, 0
         catalog_root = Path(str(index_config.get('catalog_path') or ''))
-        if not str(catalog_root).strip():
-            return False, 0
-        try:
-            target_path.resolve().relative_to(catalog_root.resolve())
-        except Exception:
-            return False, 0
+        logical_path = file_row.path
+        index_root = target_path.parent
+        if str(catalog_root).strip() and catalog_root.exists():
+            try:
+                target_path.resolve().relative_to(catalog_root.resolve())
+                index_root = catalog_root
+                logical_path = None
+            except Exception:
+                index_root = target_path.parent
         from rag_catalog.core.index_rag import RAGIndexer
 
         indexer = RAGIndexer(
-            catalog_path=str(catalog_root),
+            catalog_path=str(index_root),
             qdrant_db_path=str(index_config.get('qdrant_db_path') or ''),
             embedding_model=str(index_config.get('embedding_model') or 'sentence-transformers/all-MiniLM-L6-v2'),
             collection_name=str(index_config.get('collection_name') or index_config.get('qdrant_collection') or 'catalog'),
@@ -762,6 +797,51 @@ class CloudDriveService:
             qdrant_timeout_sec=int(index_config.get('qdrant_timeout_sec') or 60),
         )
         before = int(indexer.point_count)
-        indexer.process_file(target_path)
+        payload_extra = self._cloud_payload(file_row)
+        indexer._delete_file_vectors(target_path, payload_match={'cloud_file_id': file_row.id})
+        indexer.process_file(
+            target_path,
+            logical_path=logical_path,
+            state_key=self._cloud_state_key(file_row),
+            payload_extra=payload_extra,
+            fingerprint_override=str(file_row.checksum or ''),
+            delete_payload_match={'cloud_file_id': file_row.id},
+        )
         indexer._flush_buffer()
         return True, max(0, int(indexer.point_count) - before)
+
+    def _delete_index_vectors(self, *, index_config: Dict[str, object], payload_match: Dict[str, Any]) -> int:
+        if not payload_match:
+            return 0
+        qdrant_db_path = str(index_config.get('qdrant_db_path') or '').strip()
+        qdrant_url = str(index_config.get('qdrant_url') or '').strip()
+        collection_name = str(index_config.get('collection_name') or index_config.get('qdrant_collection') or 'catalog')
+        if not qdrant_db_path and not qdrant_url:
+            return 0
+        try:
+            from qdrant_client import QdrantClient
+            from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
+
+            client = QdrantClient(
+                url=qdrant_url,
+                timeout=int(index_config.get('qdrant_timeout_sec') or 60),
+            ) if qdrant_url else QdrantClient(
+                path=qdrant_db_path,
+                timeout=int(index_config.get('qdrant_timeout_sec') or 60),
+            )
+            conditions = [
+                FieldCondition(key=str(key), match=MatchValue(value=value))
+                for key, value in payload_match.items()
+                if value not in (None, '')
+            ]
+            if not conditions:
+                return 0
+            client.delete(
+                collection_name=collection_name,
+                wait=False,
+                timeout=int(index_config.get('qdrant_timeout_sec') or 60),
+                points_selector=FilterSelector(filter=Filter(must=conditions)),
+            )
+            return -1
+        except Exception:
+            return 0

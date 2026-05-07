@@ -373,6 +373,10 @@ class RAGSearcher:
                     "modified": payload.get("modified"),
                     "extension": payload.get("extension", ""),
                     "chunk_index": payload.get("chunk_index"),
+                    "cloud_file_id": payload.get("cloud_file_id", ""),
+                    "cloud_version_id": payload.get("cloud_version_id", ""),
+                    "cloud_path": payload.get("cloud_path", ""),
+                    "storage_key": payload.get("storage_key", ""),
                 }
             )
         if title_only:
@@ -829,6 +833,10 @@ class RAGSearcher:
                     "modified": payload.get("modified"),
                     "extension": payload.get("extension", ""),
                     "chunk_index": payload.get("chunk_index"),
+                    "cloud_file_id": payload.get("cloud_file_id", ""),
+                    "cloud_version_id": payload.get("cloud_version_id", ""),
+                    "cloud_path": payload.get("cloud_path", ""),
+                    "storage_key": payload.get("storage_key", ""),
                     "rank_reason": "content by exact entity path",
                 })
         return out

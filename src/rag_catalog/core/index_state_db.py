@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _utc_now() -> str:
@@ -71,6 +71,27 @@ class IndexStateDB:
                       ON state_entries(updated_at);
                     CREATE INDEX IF NOT EXISTS idx_state_entries_extension
                       ON state_entries(extension);
+                    """
+                )
+                existing_cols = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(state_entries)").fetchall()
+                }
+                optional_columns = {
+                    "cloud_file_id": "TEXT NOT NULL DEFAULT ''",
+                    "cloud_version_id": "TEXT NOT NULL DEFAULT ''",
+                    "cloud_path": "TEXT NOT NULL DEFAULT ''",
+                    "storage_key": "TEXT NOT NULL DEFAULT ''",
+                }
+                for name, ddl in optional_columns.items():
+                    if name not in existing_cols:
+                        conn.execute(f"ALTER TABLE state_entries ADD COLUMN {name} {ddl}")
+                conn.executescript(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_state_entries_cloud_file
+                      ON state_entries(cloud_file_id);
+                    CREATE INDEX IF NOT EXISTS idx_state_entries_cloud_version
+                      ON state_entries(cloud_version_id);
                     """
                 )
                 ensure_schema_version(
@@ -160,7 +181,8 @@ class IndexStateDB:
             with self._connect() as conn:
                 cur = conn.execute(
                     """
-                    SELECT full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at
+                    SELECT full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
+                           cloud_file_id, cloud_version_id, cloud_path, storage_key
                     FROM state_entries
                     ORDER BY full_path
                     """
@@ -185,7 +207,25 @@ class IndexStateDB:
             except (TypeError, ValueError):
                 size_bytes = 0
             extension = str(entry.get("extension") or Path(full_path).suffix.lower() or "")
-            rows.append((full_path, fingerprint, mtime, stage, size_bytes, extension, now))
+            cloud_file_id = str(entry.get("cloud_file_id") or "")
+            cloud_version_id = str(entry.get("cloud_version_id") or "")
+            cloud_path = str(entry.get("cloud_path") or "")
+            storage_key = str(entry.get("storage_key") or "")
+            rows.append(
+                (
+                    full_path,
+                    fingerprint,
+                    mtime,
+                    stage,
+                    size_bytes,
+                    extension,
+                    now,
+                    cloud_file_id,
+                    cloud_version_id,
+                    cloud_path,
+                    storage_key,
+                )
+            )
         if not rows:
             return
         with self._lock:
@@ -193,15 +233,20 @@ class IndexStateDB:
                 conn.executemany(
                     """
                     INSERT INTO state_entries (
-                        full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
+                        cloud_file_id, cloud_version_id, cloud_path, storage_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(full_path) DO UPDATE SET
                         fingerprint=excluded.fingerprint,
                         mtime=excluded.mtime,
                         stage=excluded.stage,
                         size_bytes=excluded.size_bytes,
                         extension=excluded.extension,
-                        updated_at=excluded.updated_at
+                        updated_at=excluded.updated_at,
+                        cloud_file_id=excluded.cloud_file_id,
+                        cloud_version_id=excluded.cloud_version_id,
+                        cloud_path=excluded.cloud_path,
+                        storage_key=excluded.storage_key
                     """,
                     rows,
                 )

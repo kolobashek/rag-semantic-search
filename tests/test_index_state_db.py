@@ -39,6 +39,34 @@ def test_state_db_upsert_get_delete_and_count(tmp_path: Path) -> None:
     assert db.count() == 1
 
 
+def test_state_db_persists_cloud_drive_identity(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many(
+        [
+            {
+                "full_path": "cloud:file-1",
+                "fingerprint": "sha256:abc",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 5,
+                "extension": ".txt",
+                "cloud_file_id": "file-1",
+                "cloud_version_id": "version-1",
+                "cloud_path": "Folder A/hello.txt",
+                "storage_key": "Folder A/hello.txt",
+            }
+        ]
+    )
+
+    row = db.get_entry("cloud:file-1")
+
+    assert row is not None
+    assert row["cloud_file_id"] == "file-1"
+    assert row["cloud_version_id"] == "version-1"
+    assert row["cloud_path"] == "Folder A/hello.txt"
+    assert row["storage_key"] == "Folder A/hello.txt"
+
+
 def test_state_db_stats_aggregates_by_extension(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     db.upsert_many(

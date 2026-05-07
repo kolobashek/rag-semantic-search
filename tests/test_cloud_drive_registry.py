@@ -171,6 +171,62 @@ def test_service_auto_queues_and_runs_reindex_jobs(tmp_path: Path) -> None:
     assert service.run_reindex_job(cleanup_job.id).status == 'completed'
 
 
+def test_service_reindex_job_passes_cloud_identity_to_indexer(tmp_path: Path, monkeypatch) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    source = tmp_path / 'hello.txt'
+    source.write_text('hello', encoding='utf-8')
+    uploaded = service.upload_file(
+        parent_path='Folder A',
+        filename='hello.txt',
+        source_path=str(source),
+        mime_type='text/plain',
+    )
+    job = registry.get_latest_job(job_type='reindex')
+    assert job is not None
+    calls: dict[str, object] = {}
+
+    class _FakeIndexer:
+        def __init__(self, **kwargs):
+            self.point_count = 0
+            calls['init'] = kwargs
+
+        def _delete_file_vectors(self, filepath, *, payload_match=None):
+            calls['delete'] = {'filepath': filepath, 'payload_match': payload_match}
+
+        def process_file(self, filepath, **kwargs):
+            calls['process'] = {'filepath': filepath, 'kwargs': kwargs}
+            self.point_count = 3
+
+        def _flush_buffer(self):
+            calls['flushed'] = True
+
+    import rag_catalog.core.index_rag as index_rag
+
+    monkeypatch.setattr(index_rag, 'RAGIndexer', _FakeIndexer)
+    completed = service.run_reindex_job(
+        job.id,
+        index_config={
+            'catalog_path': str(tmp_path / 'catalog'),
+            'qdrant_db_path': str(tmp_path / 'qdrant'),
+            'collection_name': 'catalog',
+        },
+    )
+
+    assert completed.status == 'completed'
+    assert completed.progress['indexed'] is True
+    assert completed.progress['points_added'] == 3
+    assert calls['delete']['payload_match'] == {'cloud_file_id': uploaded['id']}  # type: ignore[index]
+    process_kwargs = calls['process']['kwargs']  # type: ignore[index]
+    assert process_kwargs['logical_path'] == 'Folder A/hello.txt'
+    assert process_kwargs['state_key'] == f"cloud:{uploaded['id']}"
+    assert process_kwargs['payload_extra']['cloud_file_id'] == uploaded['id']
+    assert process_kwargs['payload_extra']['cloud_path'] == 'Folder A/hello.txt'
+
+
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     job = registry.queue_job(job_type='bootstrap', payload={'catalog_root': 'O:/Обмен', 'progress': {'status': 'pending'}})

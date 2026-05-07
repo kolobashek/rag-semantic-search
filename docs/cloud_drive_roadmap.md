@@ -92,7 +92,9 @@
   - `POST /api/cloud-drive/job-run`
 - Cloud Drive service получил `run_reindex_job()` для `reindex/cleanup` jobs.
 - `upload/move/rename/delete` автоматически ставят `reindex` и/или `cleanup` jobs для затронутых файлов.
-- Reindex handler уже может вызвать текущий `RAGIndexer` для файлов, которые физически находятся внутри `catalog_path`; storage-only файлы пока завершают job без индексации и ждут storage-aware indexer.
+- Reindex handler вызывает текущий `RAGIndexer` для файлов из `catalog_path` и local Cloud Drive storage.
+- Qdrant payload и `index_state.db` получили Cloud Drive identity: `cloud_file_id`, `cloud_version_id`, `cloud_path`, `storage_key`.
+- `cleanup` jobs удаляют Qdrant points по Cloud Drive identity.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -351,7 +353,7 @@ Codex:
 - [x] versions backend + API;
 - [x] create folder backend + API;
 - [x] delete/move/rename backend (POST /api/cloud-drive/move, /rename, /delete);
-- [ ] search/index registry integration: queue + job lifecycle готовы; полный storage-aware indexing в Qdrant остаётся P0.
+- [x] search/index registry integration: queue + job lifecycle + local storage-aware indexing готовы.
 
 Claude:
 - [x] upload UI (диалог + toolbar кнопка + empty state shortcut);
@@ -386,13 +388,14 @@ Claude:
 ### P0: первый рабочий релиз Cloud Drive
 
 Codex:
-- [ ] Закрыть end-to-end `Cloud Drive -> reindex job -> extract/OCR/chunk/embed -> Qdrant/lexical -> search`.
+- [x] Закрыть local end-to-end `Cloud Drive -> reindex job -> extract/OCR/chunk/embed -> Qdrant/search payload`.
 - [x] Сделать обработчик `reindex` jobs, а не только постановку задачи.
-- [ ] Связать `cloud_files.id` / `cloud_file_versions.id` с `index_state`, telemetry и Qdrant payload.
+- [ ] Связать `cloud_files.id` / `cloud_file_versions.id` с telemetry; `index_state` и Qdrant payload уже связаны.
 - [x] На upload/move/rename/delete автоматически ставить нужные reindex/cleanup jobs.
-- [ ] Сделать storage-aware indexing для файлов, загруженных в Cloud Drive storage вне `catalog_path`.
+- [x] Сделать local storage-aware indexing для файлов, загруженных в Cloud Drive storage вне `catalog_path`.
 - [ ] Добавить per-file job status API для indexing/OCR/preview/error.
 - [ ] Добавить retry/requeue для registry jobs.
+- [x] Добавить cleanup job для удалённых/старых Qdrant points.
 
 Claude:
 - [ ] Показать per-file indexing/OCR/preview/error status в проводнике и карточках поиска.
