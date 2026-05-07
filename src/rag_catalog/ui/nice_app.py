@@ -6584,6 +6584,238 @@ def _build_page(initial_screen: str = "search") -> None:
             _stop_managed_timer(state.cloud_drive_timer)
             state.cloud_drive_timer = ui.timer(3.0, lambda: (render_bootstrap_status(), render_bootstrap_jobs()))
 
+    def render_admin_cloud_sync_settings() -> None:  # noqa: PLR0912,PLR0915
+        """Sprint 4: Sync client admin settings — folder pairs, policies, connected clients."""
+        cd_enabled = bool(state.cfg.get("cloud_drive_enabled"))
+
+        with ui.column().classes("rag-card w-full p-4 gap-3"):
+            ui.label("Sync клиент").classes("text-xl font-semibold")
+            ui.label(
+                "Управление desktop sync-клиентами: отслеживание подключённых устройств, "
+                "настройка пар папок и политики разрешения конфликтов."
+            ).classes("rag-meta")
+
+            if not cd_enabled:
+                with ui.element("div").classes("cd-empty-state w-full py-6"):
+                    ui.icon("cloud_off", size="32px").classes("opacity-30")
+                    ui.label("Cloud Drive не включён — активируйте его в настройках Cloud Drive.").classes("text-center")
+                    ui.button(
+                        "Перейти в Cloud Drive",
+                        icon="cloud",
+                        on_click=lambda: (setattr(state, "settings_section", "cloud_drive"), render()),
+                        color=None,
+                    ).props("outline dense")
+                return
+
+            ui.separator()
+
+            # ── Подключённые клиенты ──────────────────────────────────────
+            with ui.expansion("Подключённые клиенты", icon="computer", value=True).classes("w-full"):
+                with ui.element("div").classes("cd-empty-state w-full py-4"):
+                    ui.icon("sync_disabled", size="28px").classes("opacity-30")
+                    ui.label("Нет подключённых sync-клиентов.").classes("text-center")
+                    ui.label(
+                        "Desktop sync-агент будет доступен в следующем релизе. "
+                        "Клиент подключается автоматически по токену пользователя."
+                    ).classes("text-center rag-meta text-xs")
+
+            ui.separator()
+
+            # ── Пары папок ────────────────────────────────────────────────
+            sync_pairs_raw = state.cfg.get("cloud_sync_folder_pairs") or []
+            if not isinstance(sync_pairs_raw, list):
+                sync_pairs_raw = []
+            sync_pairs: list = [dict(p) for p in sync_pairs_raw if isinstance(p, dict)]
+
+            pairs_dirty = [False]
+            pairs_container = ui.column().classes("w-full gap-2")
+
+            def _save_sync_pairs() -> None:
+                cfg_copy = dict(state.cfg)
+                cfg_copy["cloud_sync_folder_pairs"] = sync_pairs
+                try:
+                    save_config(cfg_copy)
+                    state.cfg = cfg_copy
+                    ui.notify("Пары папок сохранены.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Ошибка сохранения: {exc}", type="negative")
+                pairs_dirty[0] = False
+                render()
+
+            def _render_pairs() -> None:
+                pairs_container.clear()
+                with pairs_container:
+                    if not sync_pairs:
+                        with ui.element("div").classes("cd-empty-state w-full py-3"):
+                            ui.icon("folder_copy", size="24px").classes("opacity-30")
+                            ui.label("Нет настроенных пар для синхронизации.").classes("text-center")
+                    else:
+                        for idx, pair in enumerate(sync_pairs):
+                            with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                ui.icon("folder_copy", size="20px").classes("text-indigo-400")
+                                with ui.column().classes("flex-1 gap-0"):
+                                    ui.label(str(pair.get("local_path") or "(не задано)")).classes("text-sm font-medium")
+                                    cd_target = str(pair.get("cd_path") or "/")
+                                    ui.label(f"→ Cloud Drive: {cd_target}").classes("rag-meta text-xs")
+                                policy = str(pair.get("conflict_policy") or "ask")
+                                policy_labels = {"ask": "Спрашивать", "server_wins": "Сервер приоритетнее", "local_wins": "Локальная приоритетнее"}
+                                ui.badge(policy_labels.get(policy, policy), color="grey-4").classes("text-xs")
+                                ui.button(
+                                    icon="delete",
+                                    color=None,
+                                    on_click=lambda i=idx: (sync_pairs.pop(i), _render_pairs()),
+                                ).props("flat round dense").tooltip("Удалить пару").classes("text-negative")
+
+            _render_pairs()
+
+            # Add pair dialog
+            async def _add_pair_dialog() -> None:
+                with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-[480px]"):
+                    ui.label("Добавить пару синхронизации").classes("text-lg font-semibold")
+                    local_input = ui.input(
+                        "Локальная папка",
+                        placeholder="C:\\Users\\Иван\\Documents\\Рабочие",
+                    ).props("dense outlined").classes("w-full")
+                    local_input.tooltip("Путь к локальной папке на компьютере пользователя (заполняется sync-агентом).")
+
+                    # Cloud Drive folder picker
+                    try:
+                        _cd_svc = _cd_get_service(state.cfg)
+                        if _cd_svc is not None:
+                            with _cd_svc.registry._connect() as _c:
+                                _frows = _c.execute("SELECT * FROM cloud_folders ORDER BY path").fetchall()
+                            _cd_folders = {fo.path: (fo.path or "Корень") for fo in [_cd_svc.registry._folder_from_row(r) for r in _frows]}
+                        else:
+                            _cd_folders = {"/": "Корень"}
+                    except Exception:
+                        _cd_folders = {"/": "Корень"}
+
+                    cd_sel = ui.select(
+                        options=_cd_folders,
+                        value=list(_cd_folders.keys())[0] if _cd_folders else "",
+                        label="Папка в Cloud Drive",
+                    ).props("dense outlined emit-value map-options").classes("w-full")
+
+                    conflict_sel = ui.select(
+                        options={
+                            "ask": "Спрашивать при конфликте",
+                            "server_wins": "Сервер приоритетнее",
+                            "local_wins": "Локальная версия приоритетнее",
+                        },
+                        value="ask",
+                        label="Политика конфликтов",
+                    ).props("dense outlined emit-value map-options").classes("w-full")
+
+                    def _do_add() -> None:
+                        lp = str(local_input.value or "").strip()
+                        cdp = str(cd_sel.value or "").strip() or "/"
+                        pol = str(conflict_sel.value or "ask")
+                        if not lp:
+                            ui.notify("Укажите локальную папку.", type="warning")
+                            return
+                        sync_pairs.append({"local_path": lp, "cd_path": cdp, "conflict_policy": pol})
+                        dlg.close()
+                        _render_pairs()
+
+                    with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                        ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                        ui.button("Добавить", icon="add", on_click=_do_add).props("unelevated dense")
+                dlg.open()
+
+            with ui.row().classes("w-full gap-2 mt-1"):
+                ui.button("Добавить пару", icon="add_link", on_click=_add_pair_dialog).props("outline dense")
+                ui.button("Сохранить", icon="save", on_click=_save_sync_pairs).props("unelevated dense")
+
+            ui.separator()
+
+            # ── Глобальная политика конфликтов ────────────────────────────
+            with ui.expansion("Глобальная политика конфликтов", icon="merge", value=False).classes("w-full"):
+                ui.label(
+                    "Эти настройки применяются по умолчанию ко всем парам папок, "
+                    "если для них не задана индивидуальная политика."
+                ).classes("rag-meta text-xs")
+                global_policy = str(state.cfg.get("cloud_sync_conflict_policy") or "ask")
+                policy_sel = ui.select(
+                    options={
+                        "ask": "Всегда спрашивать пользователя",
+                        "server_wins": "Серверная версия приоритетнее",
+                        "local_wins": "Локальная версия приоритетнее",
+                        "newest_wins": "Более новая версия приоритетнее (по времени модификации)",
+                    },
+                    value=global_policy,
+                    label="Политика конфликтов",
+                ).props("dense outlined emit-value map-options").classes("w-full max-w-sm")
+
+                def _save_conflict_policy() -> None:
+                    cfg_copy = dict(state.cfg)
+                    cfg_copy["cloud_sync_conflict_policy"] = str(policy_sel.value or "ask")
+                    try:
+                        save_config(cfg_copy)
+                        state.cfg = cfg_copy
+                        ui.notify("Политика конфликтов сохранена.", type="positive")
+                    except Exception as exc:
+                        ui.notify(f"Ошибка: {exc}", type="negative")
+
+                ui.button("Сохранить политику", icon="save", on_click=_save_conflict_policy).props("outline dense").classes("mt-1")
+
+            ui.separator()
+
+            # ── Выборочная синхронизация ──────────────────────────────────
+            with ui.expansion("Выборочная синхронизация (Selective Sync)", icon="checklist", value=False).classes("w-full"):
+                ui.label(
+                    "Укажите, какие папки Cloud Drive включать в синхронизацию. "
+                    "Остальные папки будут доступны только через web-интерфейс."
+                ).classes("rag-meta text-xs")
+
+                try:
+                    _cd_svc2 = _cd_get_service(state.cfg)
+                    if _cd_svc2 is not None:
+                        with _cd_svc2.registry._connect() as _c2:
+                            _frows2 = _c2.execute(
+                                "SELECT * FROM cloud_folders WHERE depth <= 2 AND is_root=0 ORDER BY path"
+                            ).fetchall()
+                        _top_folders = [_cd_svc2.registry._folder_from_row(r) for r in _frows2]
+                    else:
+                        _top_folders = []
+                except Exception:
+                    _top_folders = []
+
+                excluded_raw = state.cfg.get("cloud_sync_excluded_paths") or []
+                excluded_set: set = set(excluded_raw if isinstance(excluded_raw, list) else [])
+
+                if not _top_folders:
+                    with ui.element("div").classes("cd-empty-state w-full py-3"):
+                        ui.icon("folder_off", size="24px").classes("opacity-30")
+                        ui.label("Нет папок в реестре. Запустите импорт в Cloud Drive.").classes("text-center")
+                else:
+                    checkboxes: Dict[str, Any] = {}
+                    with ui.column().classes("w-full gap-1"):
+                        for _fo in _top_folders:
+                            _cb = ui.checkbox(_fo.path, value=(_fo.path not in excluded_set))
+                            checkboxes[_fo.path] = _cb
+
+                    def _save_selective_sync() -> None:
+                        new_excluded = [p for p, cb in checkboxes.items() if not cb.value]
+                        cfg_copy = dict(state.cfg)
+                        cfg_copy["cloud_sync_excluded_paths"] = new_excluded
+                        try:
+                            save_config(cfg_copy)
+                            state.cfg = cfg_copy
+                            ui.notify("Выборочная синхронизация сохранена.", type="positive")
+                        except Exception as exc:
+                            ui.notify(f"Ошибка: {exc}", type="negative")
+
+                    ui.button("Сохранить", icon="save", on_click=_save_selective_sync).props("outline dense").classes("mt-1")
+
+            ui.separator()
+
+            # ── История конфликтов ────────────────────────────────────────
+            with ui.expansion("Журнал конфликтов", icon="history_toggle_off", value=False).classes("w-full"):
+                with ui.element("div").classes("cd-empty-state w-full py-3"):
+                    ui.icon("history_toggle_off", size="24px").classes("opacity-30")
+                    ui.label("Конфликтов не зафиксировано.").classes("text-center")
+                    ui.label("История конфликтов появится после подключения sync-клиента.").classes("text-center rag-meta text-xs")
+
     def render_admin_llm_settings() -> None:
         def _fetch_ollama_models(ollama_url: str) -> List[str]:
             """Запросить список моделей из Ollama /api/tags. Возвращает [] при ошибке."""
@@ -6878,6 +7110,7 @@ def _build_page(initial_screen: str = "search") -> None:
         admin_sections: List[tuple] = [
             ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
             ("cloud_drive",   "cloud",          "Cloud Drive",            ["cloud", "registry", "bootstrap", "storage", "s3"]),
+            ("cloud_sync",    "sync_alt",       "Sync клиент",            ["sync", "синхронизация", "клиент", "desktop", "папка"]),
             ("llm",           "smart_toy",      "Нейросеть",              ["ollama", "модель", "ai", "llm", "rag"]),
             ("aliases",       "travel_explore", "Синонимы поиска",        ["группы", "расширение", "запросы"]),
             ("indexing",      "build",          "Индексация",             ["индекс", "статус", "прогресс"]),
@@ -7107,6 +7340,8 @@ def _build_page(initial_screen: str = "search") -> None:
                     render_admin_path_settings()
                 elif sec == "cloud_drive":
                     render_admin_cloud_drive_settings()
+                elif sec == "cloud_sync":
+                    render_admin_cloud_sync_settings()
                 elif sec == "llm":
                     render_admin_llm_settings()
                 elif sec == "aliases":
