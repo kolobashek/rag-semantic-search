@@ -1583,6 +1583,33 @@ def _cd_file_size(size_bytes: int) -> str:
     return f"{size_bytes / 1024 ** 3:.2f} ГБ"
 
 
+def _cd_search_by_name(
+    registry: "Any",
+    query: str,
+    *,
+    max_folders: int = 5,
+    max_files: int = 5,
+) -> "tuple[list, list]":
+    """Search cloud_folders and cloud_files by name substring via SQL LIKE."""
+    import sqlite3  # noqa: PLC0415
+    pattern = f"%{query.lower()}%"
+    try:
+        with registry._connect() as conn:
+            folder_rows = conn.execute(
+                "SELECT * FROM cloud_folders WHERE lower(name) LIKE ? AND is_root=0 LIMIT ?",
+                (pattern, max_folders),
+            ).fetchall()
+            file_rows = conn.execute(
+                "SELECT * FROM cloud_files WHERE lower(name) LIKE ? AND deleted_at IS NULL LIMIT ?",
+                (pattern, max_files),
+            ).fetchall()
+        folders = [registry._folder_from_row(r) for r in folder_rows]
+        files = [registry._file_from_row(r) for r in file_rows]
+        return folders, files
+    except Exception:
+        return [], []
+
+
 def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
     state_file = Path(str(cfg.get("qdrant_db_path") or "")) / "index_state.db"
     out: Dict[str, Any] = {
@@ -3734,28 +3761,13 @@ def _build_page(initial_screen: str = "search") -> None:
         if cd_svc is None or not query:
             return
         try:
-            q = query.strip().lower()
+            q = query.strip()
+            if not q:
+                return
             root = cd_svc.registry.get_root_folder()
             if root is None:
                 return
-            # Walk all folders at depth ≤ 3 looking for name matches
-            matched_folders: list = []
-            matched_files: list = []
-
-            def _walk_folders(parent_id: str, depth: int) -> None:
-                if depth > 3 or len(matched_folders) >= 5:
-                    return
-                for folder in cd_svc.registry.list_child_folders(parent_id):
-                    if q in folder.name.lower():
-                        matched_folders.append(folder)
-                    if depth < 3:
-                        _walk_folders(folder.id, depth + 1)
-
-            _walk_folders(root.id, 0)
-            # File name search in current folder context (root level only — fast)
-            for f in cd_svc.registry.list_files_in_folder(root.id):
-                if q in f.name.lower() and len(matched_files) < 5:
-                    matched_files.append(f)
+            matched_folders, matched_files = _cd_search_by_name(cd_svc.registry, q)
 
             if not matched_folders and not matched_files:
                 return
