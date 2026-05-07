@@ -51,6 +51,7 @@ from .helpers import (
     _format_duration_seconds,
     _format_file_size,
     _format_relative_time,
+    _highlight_query_terms,
     _is_admin,
     _is_system_file,
     _load_user_state,
@@ -746,7 +747,9 @@ def _build_page(initial_screen: str = "search") -> None:
         name = str(result.get("filename") or "Без имени")
         path = str(result.get("path") or "")
         full_path = str(result.get("full_path") or "")
-        score = float(result.get("score") or 0)
+        score = float(result.get("rank_score") or result.get("score") or 0)
+        chunk_index = result.get("chunk_index")
+        is_rrf = str(result.get("fusion") or "") == "rrf"
         kind = _result_kind(result)
         text = _clean_text(result.get("text") or "")
         preview = text[:280] + ("..." if len(text) > 280 else "")
@@ -909,7 +912,14 @@ def _build_page(initial_screen: str = "search") -> None:
                             v_label = ui.label(f"v {cloud_version_id[:8]}").classes("rag-chip")
                             v_label.tooltip(f"Cloud Drive version_id: {cloud_version_id}")
                         render_cloud_job_badge()
-                    ui.label(f"{kind} · {score:.3f}").classes("rag-chip")
+                    chip_text = kind
+                    if chunk_index is not None:
+                        chip_text += f" · фр.{chunk_index}"
+                    chip_text += f" · {score:.3f}"
+                    ui.label(chip_text).classes("rag-chip")
+                    if is_rrf:
+                        rrf_badge = ui.label("RRF").classes("rag-chip text-xs bg-indigo-50 text-indigo-600 dark:bg-indigo-900 dark:text-indigo-300")
+                        rrf_badge.tooltip("Результат получен методом Reciprocal Rank Fusion")
 
             with ui.row().classes("w-full items-center justify-between gap-2"):
                 with ui.row().classes("rag-actions items-center"):
@@ -983,7 +993,8 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.label("Показаны первые элементы. Полный список доступен в проводнике приложения.").classes("rag-meta")
             else:
                 if preview:
-                    ui.label(preview).classes("rag-meta")
+                    _hl = _highlight_query_terms(preview, state.searched_query or "")
+                    ui.html(f'<span class="rag-meta">{_hl}</span>', sanitize=False)
                 # Inline explain result
                 if is_explaining:
                     if state.doc_explain_loading:
@@ -1223,9 +1234,27 @@ def _build_page(initial_screen: str = "search") -> None:
                     cloud_result_jobs = _cd_file_jobs_map(svc.registry, list(dict.fromkeys(cloud_file_ids)))
             except Exception:
                 cloud_result_jobs = {}
+        # Group chunks from the same source document
+        _seen_keys: Dict[str, int] = {}
+        _grouped: List[tuple[Any, List[Any]]] = []  # (primary_result, [extra_results])
+        for _r in to_show:
+            _key = str(_r.get("cloud_file_id") or _r.get("full_path") or _r.get("path") or id(_r))
+            if _key in _seen_keys:
+                _grouped[_seen_keys[_key]][1].append(_r)
+            else:
+                _seen_keys[_key] = len(_grouped)
+                _grouped.append((_r, []))
+
         with ui.column().classes("w-full gap-3"):
-            for idx, result in enumerate(to_show, 1):
-                render_result(result, idx, cloud_result_jobs)
+            for idx, (primary, extras) in enumerate(_grouped, 1):
+                render_result(primary, idx, cloud_result_jobs)
+                if extras:
+                    with ui.expansion(f"{len(extras)} дополн. фрагм.", icon="unfold_more").classes(
+                        "w-full border border-slate-200 dark:border-slate-700 rounded-lg -mt-2 mb-1 text-xs text-slate-500"
+                    ):
+                        with ui.column().classes("w-full gap-3 pt-1"):
+                            for extra in extras:
+                                render_result(extra, idx, cloud_result_jobs)
 
         # Кнопка «Загрузить ещё»
         remaining = len(visible) - state.displayed_count

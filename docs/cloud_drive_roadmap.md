@@ -438,7 +438,7 @@ Codex:
 
 Claude:
 - [x] Добавить UI для eval results: сравнение пайплайнов, топ провалов, latency.
-- [ ] Обновить UX поиска под retrieval v2: source grouping, provenance, preview snippets.
+- [x] Обновить UX поиска под retrieval v2: source grouping, provenance, preview snippets.
 
 ### P2: LLM/RAG assistant
 

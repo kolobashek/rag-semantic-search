@@ -755,6 +755,25 @@ def _cd_acl_allows(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) 
     return False
 
 
+# ─────────────────────────── search helpers ─────────────────────────────────
+
+_STOP_WORDS = frozenset(["и", "в", "на", "с", "по", "для", "из", "к", "от", "за", "о", "а", "но", "не"])
+
+
+def _highlight_query_terms(text: str, query: str) -> str:
+    """Return HTML-escaped text with query terms wrapped in <mark> tags."""
+    if not text or not query:
+        return html.escape(text or "")
+    terms = [t for t in re.split(r"\s+", query.strip()) if len(t) >= 2 and t.lower() not in _STOP_WORDS]
+    if not terms:
+        return html.escape(text)
+    escaped = html.escape(text)
+    for term in terms:
+        pattern = re.compile(re.escape(html.escape(term)), re.IGNORECASE)
+        escaped = pattern.sub(lambda m: f'<mark class="rag-highlight">{m.group(0)}</mark>', escaped)
+    return escaped
+
+
 # ─────────────────────────── index stats / telemetry ────────────────────────
 
 def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:

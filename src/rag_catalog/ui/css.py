@@ -321,6 +321,16 @@ def _install_css() -> None:
           border-color: rgba(59, 130, 246, 0.3);
         }
         .rag-meta { color: var(--rag-muted); font-size: 12px; }
+        .rag-meta mark.rag-highlight {
+          background: rgba(250, 204, 21, 0.35);
+          color: inherit;
+          border-radius: 2px;
+          padding: 0 1px;
+          font-weight: 600;
+        }
+        .dark .rag-meta mark.rag-highlight {
+          background: rgba(250, 204, 21, 0.2);
+        }
         .rag-chip {
           display: inline-flex;
           align-items: center;
