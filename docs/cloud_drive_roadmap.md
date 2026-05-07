@@ -65,6 +65,9 @@
 - добавлен registry-backed endpoint скачивания файла:
   - `GET /api/cloud-drive/download`
 - Cloud Drive service получил `get_download_descriptor()` для local storage backend.
+- добавлен registry-backed endpoint загрузки файла:
+  - `POST /api/cloud-drive/upload`
+- Cloud Drive service получил `upload_file()` для импорта одного файла в существующий каталог registry.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -156,7 +159,7 @@
   - [x] list folders/files;
   - [x] get node;
   - [x] create folder;
-  - upload;
+  - [x] upload;
   - [x] download;
   - rename/move/delete;
   - versions;

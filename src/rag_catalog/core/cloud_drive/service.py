@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -191,6 +192,56 @@ class CloudDriveService:
             'size_bytes': node.size_bytes,
             'storage_key': node.storage_key,
             'path': node.path,
+        }
+
+    def upload_file(
+        self,
+        *,
+        parent_path: str = '',
+        filename: str,
+        source_path: str,
+        mime_type: str = '',
+    ) -> dict:
+        clean_name = str(filename or '').strip().strip('/\\')
+        if not clean_name:
+            raise RuntimeError('Не задано имя файла.')
+        clean_parent = str(parent_path or '').strip().replace('\\', '/').strip('/')
+        parent = self.registry.get_root_folder() if not clean_parent else self.registry.get_folder_by_path(clean_parent)
+        if parent is None:
+            raise RuntimeError(f'Родительский каталог не найден: {clean_parent or "/"}')
+        source = Path(source_path)
+        if not source.exists() or not source.is_file():
+            raise RuntimeError(f'Временный файл не найден: {source}')
+        target_path = f'{clean_parent}/{clean_name}' if clean_parent else clean_name
+        storage_key = target_path
+        actual_mime = str(mime_type or '').strip() or guess_mime_type(source)
+        checksum = compute_file_checksum(source)
+        self.storage.put_file(source, storage_key)
+        file_row = self.registry.upsert_file(
+            folder_id=parent.id,
+            path=target_path,
+            name=clean_name,
+            storage_key=storage_key,
+            mime_type=actual_mime,
+            size_bytes=int(source.stat().st_size),
+            checksum=checksum,
+            source_path=str(Path(parent.source_path) / clean_name) if parent.source_path else '',
+        )
+        return {
+            'node_type': 'file',
+            'id': file_row.id,
+            'folder_id': file_row.folder_id,
+            'name': file_row.name,
+            'path': file_row.path,
+            'storage_key': file_row.storage_key,
+            'mime_type': file_row.mime_type,
+            'size_bytes': file_row.size_bytes,
+            'checksum': file_row.checksum,
+            'source_path': file_row.source_path,
+            'current_version_id': file_row.current_version_id,
+            'created_at': file_row.created_at,
+            'updated_at': file_row.updated_at,
+            'deleted_at': file_row.deleted_at,
         }
 
     def cancel_job(self, job_id: str) -> CloudDriveJob:

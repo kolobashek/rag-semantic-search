@@ -11,6 +11,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import psutil
-from fastapi import HTTPException
+from fastapi import File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from nicegui import app, events, run, ui
 
@@ -735,6 +736,34 @@ def api_cloud_drive_download(path: str) -> FileResponse:
         media_type=str(descriptor["mime_type"]),
         filename=str(descriptor["filename"]),
     )
+
+
+@app.post("/api/cloud-drive/upload")
+async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(...)) -> Dict[str, Any]:
+    if file is None or not str(file.filename or "").strip():
+        raise HTTPException(status_code=400, detail="Не передан файл для загрузки.")
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    suffix = Path(str(file.filename or "")).suffix
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
+        return service.upload_file(
+            parent_path=parent_path,
+            filename=str(file.filename or "").strip(),
+            source_path=tmp_path,
+            mime_type=str(file.content_type or "").strip(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
@@ -4043,6 +4072,9 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 # Files
                 if page_files:
+                    def _cd_download_url(file_path: str) -> str:
+                        return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
+
                     if page_state.explorer_view == "Список":
                         with ui.column().classes("rag-explorer-list w-full"):
                             for f in page_files:
@@ -4054,6 +4086,12 @@ def _build_page(initial_screen: str = "search") -> None:
                                             on_click=lambda fi=f: _cd_open_file(fi),
                                             color=None,
                                         ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                    if f.storage_key:
+                                        ui.button(
+                                            icon="download",
+                                            on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
+                                            color=None,
+                                        ).props("flat round dense").tooltip("Скачать файл")
                     else:
                         with ui.column().classes("w-full gap-1"):
                             for f in page_files:
@@ -4072,9 +4110,16 @@ def _build_page(initial_screen: str = "search") -> None:
                                     src = str(f.source_path or f.path or "")
                                     if src:
                                         ui.button(
-                                            "ОС", icon="open_in_new",
+                                            icon="open_in_new",
                                             on_click=lambda p=src: _open_os_path(str(Path(p).parent)),
-                                        ).props("flat dense").tooltip("Открыть папку в Проводнике")
+                                            color=None,
+                                        ).props("flat round dense").tooltip("Открыть папку в Проводнике")
+                                    if f.storage_key:
+                                        ui.button(
+                                            icon="download",
+                                            on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
+                                            color=None,
+                                        ).props("flat round dense").tooltip("Скачать файл")
                                     render_star(Path(f.source_path or f.path or f.name), item_type="file")
 
                 # Pagination

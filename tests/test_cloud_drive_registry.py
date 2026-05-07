@@ -84,6 +84,19 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert descriptor['filename'] == 'hello.txt'
     assert Path(descriptor['file_path']).exists()
 
+    upload_source = tmp_path / 'new.txt'
+    upload_source.write_text('new-content', encoding='utf-8')
+    uploaded = service.upload_file(
+        parent_path='Folder A',
+        filename='new.txt',
+        source_path=str(upload_source),
+        mime_type='text/plain',
+    )
+    assert uploaded['node_type'] == 'file'
+    assert uploaded['path'] == 'Folder A/new.txt'
+    assert registry.get_file_by_path('Folder A/new.txt') is not None
+    assert (storage_root / 'Folder A' / 'new.txt').exists()
+
 
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))

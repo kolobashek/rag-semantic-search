@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
+from tempfile import SpooledTemporaryFile
 
 from rag_catalog.ui.nice_app import (
     PageState,
@@ -19,6 +21,7 @@ from rag_catalog.ui.nice_app import (
     api_cloud_drive_bootstrap_status,
     api_cloud_drive_create_folder,
     api_cloud_drive_download,
+    api_cloud_drive_upload,
     api_cloud_drive_list,
     api_cloud_drive_node,
     api_cloud_drive_storage_health,
@@ -27,6 +30,7 @@ import rag_catalog.ui.nice_app as nice_app
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.cloud_drive.service import CloudDriveService
+from starlette.datastructures import UploadFile
 
 
 @dataclass
@@ -518,3 +522,33 @@ def test_cloud_drive_download_api(monkeypatch, tmp_path) -> None:
 
     assert response.path.endswith("hello.txt")
     assert response.filename == "hello.txt"
+
+
+def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    buffer = SpooledTemporaryFile()
+    buffer.write(b"hello")
+    buffer.seek(0)
+    upload = UploadFile(file=buffer, filename="hello.txt", headers={"content-type": "text/plain"})
+
+    import asyncio
+    result = asyncio.run(api_cloud_drive_upload(parent_path="Folder A", file=upload))
+
+    assert result["node_type"] == "file"
+    assert result["path"] == "Folder A/hello.txt"
+    assert service.registry.get_file_by_path("Folder A/hello.txt") is not None
