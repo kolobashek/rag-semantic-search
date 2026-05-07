@@ -504,6 +504,7 @@ class PageState:
     explorer_desc: bool = False
     explorer_view: str = "Таблица"
     explorer_page: int = 0
+    explorer_cd_path: str = ""   # current path inside Cloud Drive registry (empty = root)
     auth_db: Optional[UserAuthDB] = None
     current_user: Optional[Dict[str, Any]] = None
     auth_token: str = ""
@@ -687,6 +688,26 @@ def api_cloud_drive_storage_health() -> Dict[str, Any]:
         "target": health.target,
         "error": health.error,
     }
+
+
+@app.get("/api/cloud-drive/node")
+def api_cloud_drive_node(path: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    try:
+        return service.get_node(path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/cloud-drive/list")
+def api_cloud_drive_list(path: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    try:
+        return service.list_directory(path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
@@ -1434,6 +1455,66 @@ def _safe_explorer_path(state: PageState) -> Path:
             return candidate
     state.explorer_path = str(root)
     return root
+
+
+# ── Cloud Drive explorer helpers ──────────────────────────────────────────────
+
+def _cd_get_service(cfg: Dict[str, Any]) -> Optional["CloudDriveService"]:
+    """Return CloudDriveService if Cloud Drive is enabled and configured; None otherwise."""
+    try:
+        if not cfg.get("cloud_drive_enabled") or not str(cfg.get("cloud_drive_db_path") or "").strip():
+            return None
+        return CloudDriveService.from_config(cfg)
+    except Exception:
+        return None
+
+
+def _cd_list_children(
+    service: "CloudDriveService", cd_path: str
+) -> "tuple[list, list]":
+    """Return (child_folders, child_files) for a registry path (empty = root)."""
+    from rag_catalog.core.cloud_drive.models import CloudDriveFolder, CloudDriveFile  # noqa: PLC0415
+    try:
+        if cd_path:
+            folder = service.registry.get_folder_by_path(cd_path)
+        else:
+            folder = service.registry.get_root_folder()
+        if folder is None:
+            return [], []
+        folders = service.registry.list_child_folders(folder.id)
+        files = service.registry.list_files_in_folder(folder.id)
+        return folders, files
+    except Exception:
+        return [], []
+
+
+def _cd_breadcrumb_chain(service: "CloudDriveService", cd_path: str) -> "list":
+    """Return list of CloudDriveFolder from root down to cd_path."""
+    if not cd_path:
+        root = service.registry.get_root_folder()
+        return [root] if root else []
+    # Build from path segments
+    parts: list = []
+    segments = cd_path.replace("\\", "/").split("/")
+    built = ""
+    for seg in segments:
+        if not seg:
+            continue
+        built = (built + "/" + seg).lstrip("/")
+        folder = service.registry.get_folder_by_path(built)
+        if folder is not None:
+            parts.append(folder)
+    return parts
+
+
+def _cd_file_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} Б"
+    if size_bytes < 1024 ** 2:
+        return f"{size_bytes / 1024:.1f} КБ"
+    if size_bytes < 1024 ** 3:
+        return f"{size_bytes / 1024 ** 2:.1f} МБ"
+    return f"{size_bytes / 1024 ** 3:.2f} ГБ"
 
 
 def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -3686,7 +3767,261 @@ def _build_page(initial_screen: str = "search") -> None:
                 icon="expand_more",
             ).props("outline no-caps").classes("w-full mt-1")
 
-    def render_explorer_screen() -> None:
+    def _render_cd_explorer(page_state: PageState, svc: "CloudDriveService") -> None:  # noqa: PLR0912,PLR0915
+        """Registry-backed Cloud Drive explorer screen."""
+        from rag_catalog.core.cloud_drive.models import CloudDriveFolder, CloudDriveFile  # noqa: PLC0415
+
+        def _cd_open_folder(cd_path: str) -> None:
+            page_state.explorer_cd_path = cd_path
+            page_state.explorer_page = 0
+            _log_app_event(page_state, "cd_explorer", "open_folder", details={"cd_path": cd_path})
+            render()
+
+        def _cd_open_file(file: CloudDriveFile) -> None:
+            src = str(file.source_path or file.path or "")
+            if src:
+                p = Path(src)
+                if p.exists() and p.is_file():
+                    _log_app_event(page_state, "cd_explorer", "open_file", details={"path": src})
+                    open_file_viewer(p)
+                    return
+            ui.notify("Исходный файл недоступен на диске.", type="warning")
+
+        # ── Layout skeleton ───────────────────────────────────────────────
+        with ui.row().classes("rag-explorer-v2-layout w-full gap-3 items-start"):
+            tree_col = ui.column().classes("rag-explorer-tree rag-card p-3 gap-2")
+            main_col = ui.column().classes("rag-explorer-files rag-card p-3 gap-3")
+            details_col = ui.column().classes("rag-explorer-details rag-card p-3 gap-3")
+
+        cd_path = page_state.explorer_cd_path or ""
+        child_folders, child_files = _cd_list_children(svc, cd_path)
+        breadcrumbs = _cd_breadcrumb_chain(svc, cd_path)
+        root_folder = svc.registry.get_root_folder()
+
+        # filter & sort
+        name_q = page_state.explorer_filter.strip().lower()
+        ext_q = page_state.explorer_ext if page_state.explorer_ext != "Все" else ""
+        if name_q:
+            child_folders = [f for f in child_folders if name_q in f.name.lower()]
+            child_files   = [f for f in child_files   if name_q in f.name.lower()]
+        if ext_q:
+            child_files = [f for f in child_files if f.name.lower().endswith(ext_q.lower())]
+
+        sort_key = page_state.explorer_sort
+        rev = page_state.explorer_desc
+        if sort_key == "По имени":
+            child_folders.sort(key=lambda x: x.name.lower(), reverse=rev)
+            child_files.sort(key=lambda x: x.name.lower(), reverse=rev)
+        elif sort_key == "По размеру":
+            child_files.sort(key=lambda x: x.size_bytes, reverse=rev)
+        elif sort_key == "По дате":
+            child_files.sort(key=lambda x: x.updated_at, reverse=rev)
+
+        # pagination of files
+        total_files = len(child_files)
+        page_size = PAGE_SIZE
+        page_state.explorer_page = max(0, min(page_state.explorer_page, max(0, (total_files - 1) // page_size)))
+        page_files = child_files[page_state.explorer_page * page_size : (page_state.explorer_page + 1) * page_size]
+
+        # ── Tree column ───────────────────────────────────────────────────
+        with tree_col:
+            ui.label("ДЕРЕВО").classes("rag-section-label")
+            if root_folder is None:
+                with ui.element("div").classes("cd-empty-state"):
+                    ui.icon("cloud_off", size="24px").classes("opacity-30")
+                    ui.label("Registry пуст. Запустите bootstrap в настройках Cloud Drive.").classes("text-center text-xs")
+            else:
+                def _render_tree_node_cd(folder: CloudDriveFolder, depth: int) -> None:
+                    is_current = folder.path == cd_path or (not cd_path and folder.is_root)
+                    icon = "folder_open" if is_current else "folder"
+                    label = "Корень" if folder.is_root else folder.name
+                    btn = ui.button(
+                        label, icon=icon,
+                        on_click=lambda p=folder.path: _cd_open_folder(p),
+                        color=None,
+                    ).props("flat align=left no-caps dense").classes(
+                        "rag-nav-button rag-tree-button w-full" + (" active" if is_current else "")
+                    ).style(f"padding-left: {depth * 12}px")
+                    btn.tooltip(folder.path)
+                    if is_current or (not cd_path and folder.is_root):
+                        for child in svc.registry.list_child_folders(folder.id):
+                            _render_tree_node_cd(child, depth + 1)
+
+                _render_tree_node_cd(root_folder, 0)
+
+        # ── Details column ────────────────────────────────────────────────
+        with details_col:
+            ui.label("Фильтры").classes("text-lg font-semibold")
+            with ui.row().classes("w-full gap-2 flex-wrap"):
+                ui.label(f"Тип: {page_state.explorer_ext}").classes(
+                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_ext != "Все" else "")
+                )
+                ui.label(f"Вид: {page_state.explorer_view}").classes("rag-chip rag-filter-chip")
+                ui.label(f"{page_state.explorer_sort}").classes(
+                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_sort != "По имени" else "")
+                )
+            ui.separator()
+            ui.label("Свойства").classes("text-lg font-semibold")
+            if breadcrumbs:
+                current_node = breadcrumbs[-1]
+                ui.label(current_node.name or "Корень").classes("font-semibold truncate")
+                ui.label(current_node.path or "/").classes("rag-path text-xs")
+            else:
+                ui.label("Корень").classes("font-semibold")
+            ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes("rag-meta")
+
+        # ── Main column ───────────────────────────────────────────────────
+        with main_col:
+            # Breadcrumbs toolbar
+            with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
+                parent_path = breadcrumbs[-2].path if len(breadcrumbs) >= 2 else ""
+                up_btn = ui.button(
+                    icon="arrow_upward",
+                    on_click=lambda: _cd_open_folder(parent_path),
+                    color=None,
+                ).props("flat round dense")
+                if not cd_path or root_folder is None or (root_folder and cd_path == root_folder.path):
+                    up_btn.disable()
+                with ui.row().classes("rag-breadcrumbs flex-1 min-w-0 items-center gap-1 no-wrap"):
+                    for idx, folder in enumerate(breadcrumbs):
+                        label = "Корень" if folder.is_root else folder.name
+                        ui.button(
+                            label,
+                            on_click=lambda p=folder.path: _cd_open_folder(p),
+                            color=None,
+                        ).props("flat dense no-caps").tooltip(folder.path)
+                        if idx < len(breadcrumbs) - 1:
+                            ui.icon("chevron_right").classes("text-slate-400")
+                ui.button(icon="refresh", on_click=lambda: render(), color=None).props("flat round dense").tooltip("Обновить")
+
+            # Filter / view toolbar
+            with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
+                fi = ui.input(
+                    placeholder="Фильтр по имени",
+                    value=page_state.explorer_filter,
+                ).props("dense outlined clearable debounce=0").classes("min-w-48 flex-1")
+
+                def _apply_cd_filter(event: Any = None) -> None:
+                    _apply_explorer_filter_input(page_state, event, fi.value)
+                    render()
+
+                fi.on_value_change(_apply_cd_filter)
+
+                ui.select(
+                    ["Все", ".docx", ".xlsx", ".xls", ".pdf"],
+                    value=page_state.explorer_ext,
+                    on_change=lambda e: (setattr(page_state, "explorer_ext", e.value), setattr(page_state, "explorer_page", 0), render()),
+                ).props("dense outlined").classes("w-36")
+                ui.select(
+                    ["Таблица", "Список"],
+                    value=page_state.explorer_view if page_state.explorer_view in ("Таблица", "Список") else "Таблица",
+                    on_change=lambda e: (setattr(page_state, "explorer_view", e.value), render()),
+                ).props("dense outlined").classes("w-36")
+                ui.select(
+                    ["По имени", "По размеру", "По дате"],
+                    value=page_state.explorer_sort,
+                    on_change=lambda e: (setattr(page_state, "explorer_sort", e.value), render()),
+                ).props("dense outlined").classes("w-40")
+                ui.select(
+                    ["По возрастанию", "По убыванию"],
+                    value="По убыванию" if page_state.explorer_desc else "По возрастанию",
+                    on_change=lambda e: (setattr(page_state, "explorer_desc", e.value == "По убыванию"), render()),
+                ).props("dense outlined").classes("w-44")
+
+            # Entry stats bar
+            with ui.row().classes("w-full items-center gap-2 px-1"):
+                ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes("rag-path flex-1")
+                ui.label("Cloud Drive").classes("cd-status-badge cd-status-running text-xs")
+
+            # Empty state
+            if root_folder is None:
+                with ui.element("div").classes("cd-empty-state w-full"):
+                    ui.icon("cloud_off", size="32px").classes("opacity-20")
+                    ui.label("Registry пуст — запустите bootstrap в Настройки → Cloud Drive.").classes("text-center")
+            elif not child_folders and not child_files:
+                with ui.element("div").classes("cd-empty-state w-full"):
+                    ui.icon("folder_open", size="32px").classes("opacity-20")
+                    ui.label("Папка пуста или элементы не соответствуют фильтру.").classes("text-center")
+            else:
+                # Folders first
+                if child_folders:
+                    if page_state.explorer_view == "Список":
+                        with ui.column().classes("rag-explorer-list w-full"):
+                            for folder in child_folders:
+                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                    ui.icon("folder", size="24px").classes("text-yellow-500")
+                                    with ui.column().classes("flex-1 gap-0"):
+                                        ui.button(
+                                            folder.name,
+                                            on_click=lambda p=folder.path: _cd_open_folder(p),
+                                            color=None,
+                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                    render_star(Path(folder.source_path or folder.path), item_type="folder")
+                    else:
+                        with ui.column().classes("w-full gap-1"):
+                            for folder in child_folders:
+                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                    ui.icon("folder", size="24px").classes("text-yellow-500")
+                                    with ui.column().classes("flex-1 gap-0"):
+                                        ui.button(
+                                            folder.name,
+                                            on_click=lambda p=folder.path: _cd_open_folder(p),
+                                            color=None,
+                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                        ui.label(f"Папка · {folder.path}").classes("rag-meta text-xs truncate")
+                                    render_star(Path(folder.source_path or folder.path), item_type="folder")
+
+                # Files
+                if page_files:
+                    if page_state.explorer_view == "Список":
+                        with ui.column().classes("rag-explorer-list w-full"):
+                            for f in page_files:
+                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                    ui.html(_file_icon_svg(f.name, "Файл"), sanitize=False)
+                                    with ui.column().classes("flex-1 gap-0"):
+                                        ui.button(
+                                            f.name,
+                                            on_click=lambda fi=f: _cd_open_file(fi),
+                                            color=None,
+                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                    else:
+                        with ui.column().classes("w-full gap-1"):
+                            for f in page_files:
+                                ext = Path(f.name).suffix or "без расширения"
+                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                    ui.html(_file_icon_svg(f.name, "Файл"), sanitize=False)
+                                    with ui.column().classes("flex-1 gap-0"):
+                                        ui.button(
+                                            f.name,
+                                            on_click=lambda fi=f: _cd_open_file(fi),
+                                            color=None,
+                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                        ui.label(
+                                            f"{ext} · {_cd_file_size(f.size_bytes)} · {f.updated_at[:10] if f.updated_at else ''}".strip(" ·")
+                                        ).classes("rag-meta text-xs")
+                                    src = str(f.source_path or f.path or "")
+                                    if src:
+                                        ui.button(
+                                            "ОС", icon="open_in_new",
+                                            on_click=lambda p=src: _open_os_path(str(Path(p).parent)),
+                                        ).props("flat dense").tooltip("Открыть папку в Проводнике")
+                                    render_star(Path(f.source_path or f.path or f.name), item_type="file")
+
+                # Pagination
+                if total_files > page_size:
+                    with ui.row().classes("items-center gap-2 mt-2"):
+                        ui.button("Назад", on_click=lambda: (setattr(page_state, "explorer_page", max(0, page_state.explorer_page - 1)), render())).props("outline")
+                        ui.label(f"Стр. {page_state.explorer_page + 1} / {(total_files + page_size - 1) // page_size}").classes("rag-meta")
+                        ui.button("Вперёд", on_click=lambda: (setattr(page_state, "explorer_page", page_state.explorer_page + 1), render())).props("outline")
+
+    def render_explorer_screen() -> None:  # noqa: PLR0912,PLR0915
+        # ── Cloud Drive registry mode ─────────────────────────────────────
+        _cd_svc = _cd_get_service(state.cfg)
+        if _cd_svc is not None:
+            _render_cd_explorer(state, _cd_svc)
+            return
+
+        # ── Legacy os-walk mode ───────────────────────────────────────────
         root = Path(str(state.cfg.get("catalog_path") or ""))
         if not root.exists():
             ui.label(f"Каталог не найден: {root}").classes("text-red-700 rag-card p-4")
