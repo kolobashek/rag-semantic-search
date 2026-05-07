@@ -4114,24 +4114,38 @@ def _build_page(initial_screen: str = "search") -> None:
 
         # ── Details column ────────────────────────────────────────────────
         with details_col:
-            ui.label("Фильтры").classes("text-lg font-semibold")
-            with ui.row().classes("w-full gap-2 flex-wrap"):
-                ui.label(f"Тип: {page_state.explorer_ext}").classes(
-                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_ext != "Все" else "")
-                )
-                ui.label(f"Вид: {page_state.explorer_view}").classes("rag-chip rag-filter-chip")
-                ui.label(f"{page_state.explorer_sort}").classes(
-                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_sort != "По имени" else "")
-                )
-            ui.separator()
-            ui.label("Свойства").classes("text-lg font-semibold")
+            ui.label("Свойства").classes("font-semibold text-sm")
             if breadcrumbs:
                 current_node = breadcrumbs[-1]
                 ui.label(current_node.name or "Корень").classes("font-semibold truncate")
                 ui.label(current_node.path or "/").classes("rag-path text-xs")
             else:
                 ui.label("Корень").classes("font-semibold")
-            ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes("rag-meta")
+            total_size = sum(f.size_bytes for f in child_files)
+            ui.label(f"Папок: {len(child_folders)}").classes("rag-meta text-xs")
+            ui.label(f"Файлов: {total_files}").classes("rag-meta text-xs")
+            if total_size:
+                ui.label(f"Размер: {_cd_file_size(total_size)}").classes("rag-meta text-xs")
+            ui.separator()
+            ui.label("Действия").classes("font-semibold text-sm")
+            ui.button(
+                "Новая папка", icon="create_new_folder",
+                on_click=_cd_new_folder_dialog, color=None,
+            ).props("flat dense no-caps align=left").classes("w-full")
+            ui.button(
+                "Загрузить файлы", icon="upload_file",
+                on_click=_cd_upload_dialog, color=None,
+            ).props("flat dense no-caps align=left").classes("w-full")
+            ui.separator()
+            ui.label("Фильтры").classes("font-semibold text-sm")
+            with ui.column().classes("w-full gap-1"):
+                ui.label(f"Тип: {page_state.explorer_ext}").classes(
+                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_ext != "Все" else "")
+                )
+                ui.label(f"Вид: {page_state.explorer_view}").classes("rag-chip rag-filter-chip")
+                ui.label(f"Сорт.: {page_state.explorer_sort}").classes(
+                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_sort != "По имени" else "")
+                )
 
         # ── Main column ───────────────────────────────────────────────────
         with main_col:
