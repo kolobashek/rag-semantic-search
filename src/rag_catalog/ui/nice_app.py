@@ -1005,6 +1005,12 @@ def _build_page(initial_screen: str = "search") -> None:
                             _explain_label = "Скрыть" if (is_explaining and state.doc_explain_text) else "Пояснить"
                             ui.button(_explain_label, icon="psychology", on_click=_explain_click).props("flat dense no-caps").classes("text-indigo-600")
                 with ui.row().classes("items-center justify-end gap-1"):
+                    _copy_src = cloud_path or full_path or path
+                    if _copy_src:
+                        ui.button(icon="content_copy", on_click=lambda cp=_copy_src: (
+                            ui.run_javascript(f"navigator.clipboard && navigator.clipboard.writeText({json.dumps(cp)})"),
+                            ui.notify("Путь скопирован.", type="positive"),
+                        ), color=None).props("flat round dense").tooltip("Скопировать путь")
                     bad = ui.button(icon="thumb_down", on_click=lambda: rate_result(-3), color=None).props("flat round dense")
                     bad.classes("rag-feedback-btn")
                     bad.tooltip("Не то")
