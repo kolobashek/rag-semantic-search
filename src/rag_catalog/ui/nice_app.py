@@ -142,6 +142,24 @@ def _write_cloud_bootstrap_state(payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _read_cloud_bootstrap_status(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        service = CloudDriveService.from_config(cfg)
+        job = service.get_latest_bootstrap_job()
+        if job is not None:
+            progress = dict(job.progress or {})
+            progress.setdefault("status", job.status)
+            progress["job_id"] = job.id
+            progress["job_status"] = job.status
+            progress["last_error"] = job.last_error
+            progress["created_at"] = job.created_at
+            progress["updated_at"] = job.updated_at
+            return progress
+    except Exception:
+        pass
+    return _read_cloud_bootstrap_state()
+
+
 def _read_runtime_marker(kind: str) -> Optional[Dict[str, Any]]:
     path = _runtime_marker_path(kind)
     if not path.exists():
@@ -5141,11 +5159,18 @@ def _build_page(initial_screen: str = "search") -> None:
                         ui.label(f"Корень registry: {root_path}").classes("rag-path")
 
             def render_bootstrap_status() -> None:
-                bootstrap_state = _read_cloud_bootstrap_state()
+                bootstrap_state = _read_cloud_bootstrap_status(build_cloud_config())
                 bootstrap_box.clear()
                 with bootstrap_box:
                     ui.label("Статус импорта").classes("font-semibold")
-                    status = str(bootstrap_state.get("status") or "idle")
+                    raw_status = str(bootstrap_state.get("status") or bootstrap_state.get("job_status") or "idle")
+                    status = {
+                        "pending": "pending",
+                        "running": "running",
+                        "completed": "done",
+                        "failed": "error",
+                        "cancelled": "error",
+                    }.get(raw_status, raw_status)
                     if status == "idle":
                         ui.label("Импорт не запущен.").classes("rag-meta")
                         return
@@ -5233,59 +5258,12 @@ def _build_page(initial_screen: str = "search") -> None:
                 except Exception as exc:
                     ui.notify(f"Не удалось прочитать stats: {exc}", type="negative")
 
-            def _count_catalog_files(catalog_root: Path, limit_value: int) -> int:
-                total = 0
-                for _dirpath, _dirnames, filenames in os.walk(catalog_root):
-                    total += len(filenames)
-                    if limit_value > 0 and total >= limit_value:
-                        return limit_value
-                return total
-
-            def _run_bootstrap_background(cfg: Dict[str, Any], *, import_files: bool, limit_value: int, catalog: str) -> None:
-                root_path = Path(catalog)
-                total_files = _count_catalog_files(root_path, limit_value)
-                _write_cloud_bootstrap_state(
-                    {
-                        "status": "running",
-                        "started_at": datetime.now(timezone.utc).isoformat(),
-                        "finished_at": "",
-                        "error": "",
-                        "catalog": catalog,
-                        "import_files": bool(import_files),
-                        "limit_value": int(limit_value),
-                        "total_files": int(total_files),
-                        "imported_files": 0,
-                        "imported_folders": 0,
-                        "current_path": catalog,
-                        "thread_id": threading.get_ident(),
-                    }
-                )
+            def _run_bootstrap_background(cfg: Dict[str, Any], *, job_id: str) -> None:
                 try:
                     service = CloudDriveService.from_config(cfg)
-                    stats_obj = service.bootstrap_from_catalog(
-                        catalog,
-                        max_files=None if limit_value <= 0 else limit_value,
-                        import_files=import_files,
-                        progress_callback=lambda payload: _write_cloud_bootstrap_state(payload),
-                    )
-                    _write_cloud_bootstrap_state(
-                        {
-                            "status": "done",
-                            "finished_at": datetime.now(timezone.utc).isoformat(),
-                            "folders": getattr(stats_obj, "folders", 0),
-                            "files": getattr(stats_obj, "files", 0),
-                            "versions": getattr(stats_obj, "versions", 0),
-                            "pending_jobs": getattr(stats_obj, "pending_jobs", 0),
-                        }
-                    )
-                except Exception as exc:
-                    _write_cloud_bootstrap_state(
-                        {
-                            "status": "error",
-                            "finished_at": datetime.now(timezone.utc).isoformat(),
-                            "error": str(exc),
-                        }
-                    )
+                    service.run_bootstrap_job(job_id)
+                except Exception:
+                    pass
 
             async def bootstrap_registry(*, import_files: bool) -> None:
                 catalog = str(catalog_input.value or "").strip()
@@ -5298,14 +5276,20 @@ def _build_page(initial_screen: str = "search") -> None:
                 limit_value = int(bootstrap_limit.value or 0)
                 try:
                     cfg = persist_cloud_values(current_cloud_values())
-                    current_state = _read_cloud_bootstrap_state()
-                    if str(current_state.get("status") or "") == "running":
+                    current_state = _read_cloud_bootstrap_status(cfg)
+                    if str(current_state.get("job_status") or current_state.get("status") or "") in {"running", "pending"}:
                         ui.notify("Bootstrap уже выполняется.", type="warning")
                         render_bootstrap_status()
                         return
+                    service = CloudDriveService.from_config(cfg)
+                    job = service.create_bootstrap_job(
+                        catalog_root=catalog,
+                        max_files=None if limit_value <= 0 else limit_value,
+                        import_files=import_files,
+                    )
                     thread = threading.Thread(
                         target=_run_bootstrap_background,
-                        kwargs={"cfg": cfg, "import_files": import_files, "limit_value": limit_value, "catalog": catalog},
+                        kwargs={"cfg": cfg, "job_id": job.id},
                         name="cloud-drive-bootstrap",
                         daemon=True,
                     )

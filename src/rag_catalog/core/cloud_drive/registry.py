@@ -256,7 +256,71 @@ class CloudDriveRegistryDB:
                     ''',
                     (job_id, job_type, status, file_id, version_id, payload_json, now, now),
                 )
-        return CloudDriveJob(id=job_id, job_type=job_type, status=status, file_id=file_id, version_id=version_id, payload=payload or {}, created_at=now, updated_at=now)
+        return CloudDriveJob(
+            id=job_id,
+            job_type=job_type,
+            status=status,
+            file_id=file_id,
+            version_id=version_id,
+            payload=payload or {},
+            progress=dict((payload or {}).get('progress') or {}),
+            created_at=now,
+            updated_at=now,
+        )
+
+    def get_job(self, job_id: str) -> Optional[CloudDriveJob]:
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM cloud_jobs WHERE id=?', (str(job_id),)).fetchone()
+            return self._job_from_row(row) if row else None
+
+    def get_latest_job(self, *, job_type: str) -> Optional[CloudDriveJob]:
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT * FROM cloud_jobs WHERE job_type=? ORDER BY created_at DESC LIMIT 1',
+                (str(job_type),),
+            ).fetchone()
+            return self._job_from_row(row) if row else None
+
+    def update_job(
+        self,
+        job_id: str,
+        *,
+        status: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        last_error: Optional[str] = None,
+        attempts: Optional[int] = None,
+    ) -> CloudDriveJob:
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute('SELECT * FROM cloud_jobs WHERE id=?', (str(job_id),)).fetchone()
+                if row is None:
+                    raise RuntimeError(f'Job не найден: {job_id}')
+                current_payload = json.loads(str(row['payload_json'] or '{}'))
+                if payload:
+                    current_payload.update(payload)
+                conn.execute(
+                    '''
+                    UPDATE cloud_jobs
+                    SET status=?,
+                        payload_json=?,
+                        last_error=?,
+                        attempts=?,
+                        updated_at=?
+                    WHERE id=?
+                    ''',
+                    (
+                        str(status or row['status']),
+                        json.dumps(current_payload, ensure_ascii=False),
+                        str(last_error if last_error is not None else row['last_error'] or ''),
+                        int(attempts if attempts is not None else row['attempts'] or 0),
+                        now,
+                        str(job_id),
+                    ),
+                )
+                saved = conn.execute('SELECT * FROM cloud_jobs WHERE id=?', (str(job_id),)).fetchone()
+                assert saved is not None
+                return self._job_from_row(saved)
 
     def stats(self) -> CloudDriveStats:
         with self._connect() as conn:
@@ -301,4 +365,20 @@ class CloudDriveRegistryDB:
             created_at=str(row['created_at'] or ''),
             updated_at=str(row['updated_at'] or ''),
             deleted_at=str(row['deleted_at'] or ''),
+        )
+
+    def _job_from_row(self, row: sqlite3.Row) -> CloudDriveJob:
+        payload = json.loads(str(row['payload_json'] or '{}'))
+        return CloudDriveJob(
+            id=str(row['id']),
+            job_type=str(row['job_type']),
+            status=str(row['status']),
+            file_id=str(row['file_id'] or ''),
+            version_id=str(row['version_id'] or ''),
+            payload=payload,
+            attempts=int(row['attempts'] or 0),
+            last_error=str(row['last_error'] or ''),
+            created_at=str(row['created_at'] or ''),
+            updated_at=str(row['updated_at'] or ''),
+            progress=dict(payload.get('progress') or {}),
         )

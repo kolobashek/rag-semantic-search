@@ -55,3 +55,47 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     file_row = registry.get_file_by_path('Folder A/hello.txt')
     assert file_row is not None
     assert file_row.size_bytes == 5
+
+
+def test_registry_job_lifecycle(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    job = registry.queue_job(job_type='bootstrap', payload={'catalog_root': 'O:/Обмен', 'progress': {'status': 'pending'}})
+
+    fetched = registry.get_job(job.id)
+    assert fetched is not None
+    assert fetched.status == 'pending'
+    assert fetched.progress['status'] == 'pending'
+
+    updated = registry.update_job(
+        job.id,
+        status='running',
+        payload={'progress': {'status': 'running', 'imported_files': 10}},
+    )
+    assert updated.status == 'running'
+    assert updated.progress['imported_files'] == 10
+
+    latest = registry.get_latest_job(job_type='bootstrap')
+    assert latest is not None
+    assert latest.id == job.id
+
+
+def test_service_bootstrap_job(tmp_path: Path) -> None:
+    catalog = tmp_path / 'catalog'
+    (catalog / 'Folder A').mkdir(parents=True)
+    (catalog / 'Folder A' / 'hello.txt').write_text('hello', encoding='utf-8')
+    (catalog / 'root.pdf').write_bytes(b'%PDF-1.4\n')
+
+    storage_root = tmp_path / 'storage'
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(storage_root))
+    service = CloudDriveService(registry=registry, storage=storage)
+
+    job = service.create_bootstrap_job(catalog_root=str(catalog), import_files=True)
+    stats = service.run_bootstrap_job(job.id)
+
+    assert stats.files == 2
+    saved = registry.get_job(job.id)
+    assert saved is not None
+    assert saved.status == 'completed'
+    assert saved.progress['status'] == 'done'
+    assert saved.progress['imported_files'] == 2

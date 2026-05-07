@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from .models import CloudDriveStats
+from .models import CloudDriveJob, CloudDriveStats
 from .registry import CloudDriveRegistryDB
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
 
@@ -22,6 +23,105 @@ class CloudDriveService:
             registry=CloudDriveRegistryDB(db_path),
             storage=resolve_storage_adapter(config),
         )
+
+    def create_bootstrap_job(self, *, catalog_root: str, max_files: Optional[int] = None, import_files: bool = False) -> CloudDriveJob:
+        return self.registry.queue_job(
+            job_type='bootstrap',
+            status='pending',
+            payload={
+                'catalog_root': str(catalog_root),
+                'max_files': max_files,
+                'import_files': bool(import_files),
+                'progress': {
+                    'status': 'pending',
+                    'catalog': str(catalog_root),
+                    'import_files': bool(import_files),
+                    'limit_value': int(max_files or 0),
+                    'total_files': 0,
+                    'imported_files': 0,
+                    'imported_folders': 0,
+                    'current_path': '',
+                },
+            },
+        )
+
+    def get_latest_bootstrap_job(self) -> Optional[CloudDriveJob]:
+        return self.registry.get_latest_job(job_type='bootstrap')
+
+    def run_bootstrap_job(self, job_id: str) -> CloudDriveStats:
+        job = self.registry.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f'Job не найден: {job_id}')
+        payload = dict(job.payload)
+        catalog_root = str(payload.get('catalog_root') or '').strip()
+        if not catalog_root:
+            raise RuntimeError('В bootstrap job не задан catalog_root.')
+        max_files_raw = payload.get('max_files')
+        max_files = int(max_files_raw) if max_files_raw not in (None, '') else None
+        import_files = bool(payload.get('import_files'))
+        total_files = self._count_catalog_files(Path(catalog_root), int(max_files or 0))
+        self.registry.update_job(
+            job_id,
+            status='running',
+            payload={
+                'progress': {
+                    'status': 'running',
+                    'catalog': catalog_root,
+                    'import_files': import_files,
+                    'limit_value': int(max_files or 0),
+                    'total_files': int(total_files),
+                    'imported_files': 0,
+                    'imported_folders': 0,
+                    'current_path': catalog_root,
+                    'started_at': datetime.now(timezone.utc).isoformat(),
+                },
+            },
+        )
+
+        def on_progress(progress_payload: Dict[str, object]) -> None:
+            current_job = self.registry.get_job(job_id)
+            progress = dict(current_job.progress if current_job else {})
+            progress.update(progress_payload)
+            progress['status'] = 'running'
+            self.registry.update_job(job_id, status='running', payload={'progress': progress})
+
+        try:
+            stats = self.bootstrap_from_catalog(
+                catalog_root,
+                max_files=max_files,
+                import_files=import_files,
+                progress_callback=on_progress,
+            )
+            current_job = self.registry.get_job(job_id)
+            progress = dict(current_job.progress if current_job else {})
+            progress.update(
+                {
+                    'status': 'done',
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self.registry.update_job(job_id, status='completed', payload={'progress': progress})
+            return stats
+        except Exception as exc:
+            current_job = self.registry.get_job(job_id)
+            progress = dict(current_job.progress if current_job else {})
+            progress.update(
+                {
+                    'status': 'error',
+                    'error': str(exc),
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self.registry.update_job(job_id, status='failed', payload={'progress': progress}, last_error=str(exc))
+            raise
+
+    def _count_catalog_files(self, catalog_root: Path, limit_value: int) -> int:
+        total = 0
+        for _dirpath, _dirnames, filenames in __import__('os').walk(catalog_root):
+            total += len(filenames)
+            if limit_value > 0 and total >= limit_value:
+                return limit_value
+        return total
 
     def bootstrap_from_catalog(
         self,

@@ -24,6 +24,8 @@
 
 ### Этап 1. Stabilize Foundation
 
+Статус: `in progress`
+
 Цель:
 - закрепить текущий registry/storage foundation;
 - убрать "немые" фоновые операции;
@@ -33,6 +35,25 @@
 - Cloud Drive bootstrap прозрачен в UI;
 - scheduler работает как серверный фон;
 - базовые ошибки и статусы видны в системе.
+
+Выполнено:
+- добавлен Cloud Drive registry/storage foundation;
+- добавлен CLI bootstrap/init/stats;
+- добавлен admin UI для Cloud Drive;
+- добавлены tooltips и нормальные имена полей;
+- bootstrap вынесен в фоновое выполнение;
+- добавлен live progress в UI;
+- scheduler перенесён из page timer в серверный фон;
+- scheduler переведён на локальное время сервера;
+- bootstrap переведён на `cloud_jobs` job-модель;
+- статус bootstrap читается из registry job, а не только из runtime JSON.
+
+Осталось в этапе:
+- `cancel/retry` для bootstrap job;
+- список jobs и история последних операций;
+- recovery для `stale/running` bootstrap jobs;
+- status API для jobs;
+- добить остаточные runtime fallback до чистой job-модели.
 
 ### Этап 2. Registry-backed Explorer
 
@@ -95,12 +116,12 @@
 
 #### 1. Runtime и foundation hardening
 
-- Довести bootstrap state до полноценной job-модели в `cloud_jobs`.
-- Добавить отдельные статусы `pending/running/completed/failed/cancelled`.
-- Привязать bootstrap/import/reindex к `job_id`, а не только к runtime JSON.
-- Добавить cancellable long-running jobs.
-- Убрать остаточные page-bound timer зависимости.
-- Нормализовать scheduler по локальному времени/таймзоне и покрыть тестами.
+- [x] Довести bootstrap state до полноценной job-модели в `cloud_jobs`.
+- [ ] Добавить отдельные статусы `pending/running/completed/failed/cancelled`.
+- [x] Привязать bootstrap/import/reindex к `job_id`, а не только к runtime JSON.
+- [ ] Добавить cancellable long-running jobs.
+- [x] Убрать остаточные page-bound timer зависимости.
+- [x] Нормализовать scheduler по локальному времени/таймзоне и покрыть тестами.
 
 #### 2. Registry model и storage contracts
 
@@ -225,10 +246,10 @@
 ### Sprint 1
 
 Codex:
-- job model для bootstrap/import;
-- scheduler hardening;
-- registry migrations;
-- bootstrap status API.
+- [x] job model для bootstrap/import;
+- [x] scheduler hardening;
+- [ ] registry migrations;
+- [ ] bootstrap status API.
 
 Claude:
 - Cloud Drive admin UX;
@@ -282,4 +303,3 @@ Cloud Drive можно считать первой рабочей версией
 - все долгие операции имеют observable status и recoverable execution;
 - API покрывает web и Telegram-интеграции;
 - локальная файловая шара становится только источником миграции/совместимости.
-
