@@ -5096,6 +5096,77 @@ def _build_page(initial_screen: str = "search") -> None:
                                 ui.label(str(row["username"])).classes("flex-1 text-sm truncate")
                                 ui.label(str(row["count"])).classes("rag-chip text-xs")
 
+                # ── Cloud Drive usage section ─────────────────────────
+                if bool(state.cfg.get("cloud_drive_enabled")):
+                    cd_search_stats = _db_query_dicts(
+                        telemetry_path,
+                        """
+                        SELECT
+                          COUNT(*) AS total,
+                          SUM(CASE WHEN json_extract(details_json, '$.cloud_results') > 0 THEN 1 ELSE 0 END) AS with_cloud,
+                          COUNT(DISTINCT username) AS users
+                        FROM app_events
+                        WHERE feature='search' AND action='search'
+                        """,
+                    )
+                    cd_top_files = _db_query_dicts(
+                        telemetry_path,
+                        """
+                        SELECT
+                          json_extract(details_json, '$.cloud_path') AS path,
+                          COUNT(*) AS hits
+                        FROM app_events
+                        WHERE feature='search' AND action='result_use'
+                          AND json_extract(details_json, '$.source') = 'cloud_drive'
+                          AND json_extract(details_json, '$.cloud_path') IS NOT NULL
+                          AND json_extract(details_json, '$.cloud_path') <> ''
+                        GROUP BY path
+                        ORDER BY hits DESC
+                        LIMIT 10
+                        """,
+                    )
+                    cd_ops = _db_query_dicts(
+                        telemetry_path,
+                        """
+                        SELECT action, COUNT(*) AS cnt
+                        FROM app_events
+                        WHERE feature='cloud_drive'
+                        GROUP BY action
+                        ORDER BY cnt DESC
+                        """,
+                    )
+                    cds = cd_search_stats[0] if cd_search_stats else {}
+                    cd_total = int(cds.get("total") or 0)
+                    cd_with_cloud = int(cds.get("with_cloud") or 0)
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.icon("cloud", size="20px").classes("text-blue-500")
+                            ui.label("Cloud Drive — аналитика").classes("font-semibold")
+                        with ui.row().classes("w-full gap-3"):
+                            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                                ui.icon("cloud_search").classes("text-2xl text-blue-500")
+                                ui.label(str(cd_with_cloud)).classes("text-xl font-semibold")
+                                ui.label("Поисков с Cloud Drive").classes("rag-meta text-xs")
+                            with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                                pct = round(100 * cd_with_cloud / max(cd_total, 1))
+                                c = "text-positive" if pct >= 30 else "text-warning" if pct >= 5 else "rag-meta"
+                                ui.icon("percent").classes(f"text-2xl {c}")
+                                ui.label(f"{pct}%").classes(f"text-xl font-semibold {c}")
+                                ui.label("Доля Cloud Drive").classes("rag-meta text-xs")
+                        if cd_top_files:
+                            ui.label("Топ Cloud Drive файлов").classes("font-semibold text-sm mt-1")
+                            for row in cd_top_files:
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.icon("cloud", size="14px").classes("text-blue-400 shrink-0")
+                                    pth = str(row.get("path") or "")
+                                    ui.label(pth.rsplit("/", 1)[-1] if "/" in pth else pth).classes("flex-1 text-sm truncate")
+                                    ui.label(str(row.get("hits") or "")).classes("rag-chip text-xs shrink-0")
+                        if cd_ops:
+                            ui.label("Операции Cloud Drive").classes("font-semibold text-sm mt-1")
+                            with ui.row().classes("w-full gap-2 flex-wrap"):
+                                for row in cd_ops:
+                                    ui.label(f"{row.get('action')}: {row.get('cnt')}").classes("rag-chip text-xs")
+
             # ── Качество поиска ────────────────────────────────────────
             with ui.tab_panel(tab_quality):
                 zero_queries = _db_query_dicts(
