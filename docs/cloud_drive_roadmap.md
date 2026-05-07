@@ -288,11 +288,13 @@ _Коммит: 487abb8 (feat(ui): Cloud Drive search hints — registry name mat
 #### 5. Клиентская логика sync/scenarios
 
 - Спроектировать UX для будущего desktop sync client:
-  - что видит пользователь;
-  - как настраивает локальную папку;
-  - как отображаются конфликты;
-  - как работает выборочная синхронизация.
-- Подготовить UI admin/user flows для этого ещё до реализации клиента.
+  - [x] что видит пользователь — статус клиента (connected/disconnected), список пар папок;
+  - [x] как настраивает локальную папку — диалог добавления пары (local path + Cloud Drive picker + conflict policy);
+  - [x] как отображаются конфликты — журнал конфликтов в admin settings (placeholder для backend);
+  - [x] как работает выборочная синхронизация — checkbox list всех top-level папок реестра.
+- [x] Подготовить UI admin/user flows для этого ещё до реализации клиента.
+
+_Коммиты: 63bc6f2 (feat(ui): Cloud Drive Sync client admin settings), d2435c1 (feat(ui): Cloud Sync user settings section)_
 
 ## Зависимости между работами
 
@@ -367,9 +369,10 @@ Codex:
 - audit/conflict contracts.
 
 Claude:
-- sync UX;
-- admin/user sync settings;
-- product polish для cloud workflows.
+- [x] sync UX — scaffold: connected clients panel, empty states, status badge;
+- [x] admin sync settings — `render_admin_cloud_sync_settings()`: folder pairs, conflict policy, selective sync, conflict journal;
+- [x] user sync settings — `cloud_sync_user` section в панели настроек: статус клиента, список пар папок;
+- [ ] product polish для cloud workflows (ждёт sync backend от Codex).
 
 ## Definition of Done
 
