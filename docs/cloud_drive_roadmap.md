@@ -249,7 +249,7 @@ _Коммиты: f046509 (feat(ui): Cloud Drive admin UX polish — Sprint 1), 9
 - [x] Синхронизировать состояние: `explorer_cd_path` как единый source of truth для tree/breadcrumbs/entries.
 - [x] Убрать дубли пути: навигация через folder.path из registry, не через filesystem.
 - [x] Empty states: registry empty (cloud_off), folder empty (folder_open), star-favorites.
-- [ ] Drag-and-drop upload (ждёт file operations API от Codex — Sprint 3).
+- [x] Drag-and-drop upload — постоянная зона в основном контенте проводника (ui.upload, flat bordered).
 
 _Коммит: 6678ff5 (feat(ui): Cloud Drive registry-backed explorer — Sprint 2)_
 
@@ -343,7 +343,7 @@ Codex:
 - [x] download backend + API;
 - [x] versions backend + API;
 - [x] create folder backend + API;
-- [ ] delete/move/rename backend;
+- [x] delete/move/rename backend (POST /api/cloud-drive/move, /rename, /delete);
 - [ ] search/index registry integration.
 
 Claude:
@@ -355,6 +355,8 @@ Claude:
 - [x] header breadcrumbs: синхронизированы с текущим cd_path;
 - [x] search quick-match: SQL LIKE по реестру над семантическими результатами;
 - [x] file actions UI (rename/move/delete) — контекстное меню на каждой строке файла/папки;
+- [x] move-to-folder dialog — список всех папок реестра, ui.select picker, вызов svc.move_node();
+- [x] drag-and-drop upload — постоянная зона в нижней части проводника, авто-загрузка через tempfile;
 - [ ] search UX adaptation (ждёт Codex search/index integration).
 
 ### Sprint 4
