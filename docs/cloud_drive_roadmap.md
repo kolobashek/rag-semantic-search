@@ -275,10 +275,10 @@ _Коммит: 6678ff5 (feat(ui): Cloud Drive registry-backed explorer — Sprin
   - [x] скачивания — кнопка download на файлах с storage_key → `/api/cloud-drive/download`;
   - [ ] предпросмотра — ждёт backend (index/OCR pipeline).
 - Визуальный статус фоновых задач по файлу:
-  - [ ] indexing;
-  - [ ] OCR;
-  - [ ] preview;
-  - [ ] ошибки.
+  - [x] indexing;
+  - [x] OCR;
+  - [x] preview;
+  - [x] ошибки.
 
 _Коммит: f73fb36 (feat(ui): Cloud Drive Sprint 3 — upload, versions, download UI)_
 

@@ -1632,6 +1632,9 @@ def _build_page(initial_screen: str = "search") -> None:
             details_col = ui.column().classes("rag-explorer-details rag-card p-3 gap-3")
 
         cd_path = page_state.explorer_cd_path or ""
+        _is_trash_view = cd_path == "__trash__"
+        if _is_trash_view:
+            cd_path = ""  # don't pass __trash__ to backend helpers
         child_folders, child_files = _cd_list_children(svc, cd_path)
         breadcrumbs = _cd_breadcrumb_chain(svc, cd_path)
         root_folder = svc.registry.get_root_folder()
@@ -1740,6 +1743,18 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 _render_tree_node_cd(root_folder, 0)
 
+            # Корзина (scaffold — soft delete pending backend)
+            ui.separator().classes("my-1")
+            _is_trash = page_state.explorer_cd_path == "__trash__"
+            trash_btn = ui.button(
+                "Корзина", icon="delete_outline",
+                on_click=lambda: _cd_open_folder("__trash__"),
+                color=None,
+            ).props("flat align=left no-caps dense").classes(
+                "rag-nav-button rag-tree-button w-full" + (" active" if _is_trash else "")
+            )
+            trash_btn.tooltip("Удалённые файлы (функция в разработке)")
+
         # ── Details column ────────────────────────────────────────────────
         with details_col:
             ui.label("Свойства").classes("font-semibold text-sm")
@@ -1777,6 +1792,17 @@ def _build_page(initial_screen: str = "search") -> None:
 
         # ── Main column ───────────────────────────────────────────────────
         with main_col:
+            if _is_trash_view:
+                with ui.column().classes("w-full items-center justify-center py-12 gap-4"):
+                    ui.icon("delete_outline", size="56px").classes("text-slate-300 dark:text-slate-600")
+                    ui.label("Корзина").classes("text-xl font-semibold text-slate-500")
+                    ui.label("Soft delete ещё не реализован в backend.").classes("rag-meta text-sm")
+                    ui.label("Когда функция будет готова, здесь появятся удалённые файлы с возможностью восстановления.").classes(
+                        "rag-meta text-xs text-center max-w-sm"
+                    )
+                    ui.button("В корневую папку", icon="arrow_back", on_click=lambda: _cd_open_folder("")).props("flat no-caps")
+                return
+
             # Breadcrumbs toolbar
             with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
                 parent_path = breadcrumbs[-2].path if len(breadcrumbs) >= 2 else ""
