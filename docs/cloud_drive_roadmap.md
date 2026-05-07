@@ -448,7 +448,7 @@ Codex:
 
 Claude:
 - [ ] Разрезать UI: layout, search view, explorer/cloud-drive view, analytics/admin views.
-- [ ] Привести analytics/telemetry UI к отдельному рабочему экрану для доменного улучшения поиска.
+- [x] Привести analytics/telemetry UI к отдельному рабочему экрану для доменного улучшения поиска.
 
 ### P2: Cloud Drive production storage and sync
 

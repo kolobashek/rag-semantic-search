@@ -7719,11 +7719,8 @@ def _build_page(initial_screen: str = "search") -> None:
             return
         telemetry_path = _telemetry_db_path(state.cfg)
         auth_db = _get_auth_db(state)
-        ui.label("Аналитика").classes("text-2xl font-semibold")
-        with ui.row().classes("rag-analytics-tabs w-full gap-2 flex-wrap"):
-            for label in ["Обзор", "Запросы", "Пользователи", "Производительность", "Аудит", "Ошибки"]:
-                ui.button(label).props("outline dense no-caps" if label != "Обзор" else "unelevated dense no-caps")
 
+        # ── KPI (всегда видны над табами) ──────────────────────────────
         overview = _db_query_dicts(
             telemetry_path,
             """
@@ -7731,232 +7728,407 @@ def _build_page(initial_screen: str = "search") -> None:
               COUNT(*) AS searches,
               COALESCE(AVG(duration_ms), 0) AS avg_ms,
               SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS errors,
-              COUNT(DISTINCT COALESCE(NULLIF(username, ''), source, 'unknown')) AS users
+              COUNT(DISTINCT COALESCE(NULLIF(username, ''), source, 'unknown')) AS users,
+              SUM(CASE WHEN results_count = 0 THEN 1 ELSE 0 END) AS zero_results
             FROM search_logs
             """,
         )
         overview_row = overview[0] if overview else {}
 
-        def render_kpi(label: str, value: str, icon: str) -> None:
+        def render_kpi(label: str, value: str, icon: str, color: str = "") -> None:
             with ui.column().classes("rag-card rag-kpi p-4 gap-2"):
                 with ui.row().classes("items-center gap-2"):
-                    ui.icon(icon).classes("text-xl")
+                    ui.icon(icon).classes(f"text-xl {color}".strip())
                     ui.label(label).classes("rag-meta")
-                ui.label(value).classes("rag-kpi-value")
-                ui.element("div").classes("rag-mini-bar")
+                ui.label(value).classes(f"rag-kpi-value {color}".strip())
 
         with ui.row().classes("w-full gap-3"):
             render_kpi("Запросов", str(int(overview_row.get("searches") or 0)), "search")
             render_kpi("Средняя задержка", f"{int(float(overview_row.get('avg_ms') or 0))} мс", "speed")
             render_kpi("Пользователей", str(int(overview_row.get("users") or 0)), "group")
-            render_kpi("Ошибок", str(int(overview_row.get("errors") or 0)), "error")
+            zero = int(overview_row.get("zero_results") or 0)
+            render_kpi("Нулевых результатов", str(zero), "search_off", "text-negative" if zero else "")
+            errors = int(overview_row.get("errors") or 0)
+            render_kpi("Ошибок", str(errors), "error", "text-negative" if errors else "")
 
-        with ui.row().classes("w-full gap-3 items-stretch"):
-            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                ui.label("AI summary").classes("text-xl font-semibold")
-                ui.label(
-                    "Сводка формируется из телеметрии: пики запросов, ошибки, медленные операции и Telegram/Web источники. "
-                    "Подключение генерации отчета оставлено как следующий слой поверх текущей таблицы событий."
-                ).classes("rag-meta")
-            with ui.column().classes("rag-card p-4 gap-2 min-w-56"):
-                ui.label("Экспорт").classes("text-xl font-semibold")
-                ui.button("CSV", icon="table_view", on_click=lambda: ui.notify("CSV экспорт будет подключен к текущим фильтрам.", type="warning")).props("outline")
-                ui.button("PDF", icon="picture_as_pdf", on_click=lambda: ui.notify("PDF экспорт будет подключен после шаблона отчета.", type="warning")).props("outline")
+        # ── Табы ───────────────────────────────────────────────────────
+        with ui.tabs().classes("w-full").props("align=left dense") as tabs:
+            tab_overview = ui.tab("Обзор", icon="bar_chart")
+            tab_quality = ui.tab("Качество поиска", icon="thumbs_up_down")
+            tab_synonyms = ui.tab("Синонимы", icon="auto_awesome")
+            tab_queries = ui.tab("Запросы", icon="manage_search")
+            tab_audit = ui.tab("Аудит", icon="security")
 
-        searches_by_day = _db_query_dicts(
-            telemetry_path,
-            """
-            SELECT substr(ts, 1, 10) AS day, COUNT(*) AS count
-            FROM search_logs
-            GROUP BY substr(ts, 1, 10)
-            ORDER BY day
-            LIMIT 30
-            """,
-        )
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Поиски по дням").classes("text-xl font-semibold")
-            ui.echart({
-                "tooltip": {"trigger": "axis"},
-                "xAxis": {"type": "category", "data": [row["day"] for row in searches_by_day]},
-                "yAxis": {"type": "value"},
-                "series": [{"type": "bar", "data": [row["count"] for row in searches_by_day], "name": "Поиски"}],
-            }).classes("w-full h-72")
+        with ui.tab_panels(tabs, value=tab_overview).classes("w-full"):
 
-        top_queries = _db_query_dicts(
-            telemetry_path,
-            """
-            SELECT query, COUNT(*) AS count
-            FROM search_logs
-            WHERE query <> ''
-            GROUP BY lower(query)
-            ORDER BY count DESC
-            LIMIT 20
-            """,
-        )
-        top_users = _db_query_dicts(
-            telemetry_path,
-            """
-            SELECT COALESCE(NULLIF(username, ''), source, 'unknown') AS username, COUNT(*) AS count
-            FROM search_logs
-            GROUP BY COALESCE(NULLIF(username, ''), source, 'unknown')
-            ORDER BY count DESC
-            LIMIT 20
-            """,
-        )
-        top_features = _db_query_dicts(
-            telemetry_path,
-            """
-            SELECT feature || ':' || action AS name, COUNT(*) AS count
-            FROM app_events
-            GROUP BY feature, action
-            ORDER BY count DESC
-            LIMIT 20
-            """,
-        )
-        auth_events = auth_db.list_auth_events(limit=50)
+            # ── Обзор ─────────────────────────────────────────────────
+            with ui.tab_panel(tab_overview):
+                searches_by_day = _db_query_dicts(
+                    telemetry_path,
+                    """
+                    SELECT substr(ts, 1, 10) AS day, COUNT(*) AS count,
+                           SUM(CASE WHEN results_count = 0 THEN 1 ELSE 0 END) AS zero_count
+                    FROM search_logs
+                    GROUP BY substr(ts, 1, 10)
+                    ORDER BY day
+                    LIMIT 30
+                    """,
+                )
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    ui.label("Поиски по дням").classes("font-semibold")
+                    ui.echart({
+                        "tooltip": {"trigger": "axis"},
+                        "legend": {"data": ["Поиски", "Нулевые результаты"]},
+                        "xAxis": {"type": "category", "data": [row["day"] for row in searches_by_day]},
+                        "yAxis": {"type": "value"},
+                        "series": [
+                            {"type": "bar", "data": [row["count"] for row in searches_by_day], "name": "Поиски"},
+                            {"type": "line", "data": [row["zero_count"] for row in searches_by_day], "name": "Нулевые результаты", "itemStyle": {"color": "#ef4444"}},
+                        ],
+                    }).classes("w-full h-64")
 
-        with ui.row().classes("w-full gap-3 items-start"):
-            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                ui.label("Топ запросов").classes("text-xl font-semibold")
-                for row in top_queries:
-                    ui.label(f"{row['query']}: {row['count']}").classes("rag-meta")
-            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                ui.label("Топ пользователей").classes("text-xl font-semibold")
-                for row in top_users:
-                    ui.label(f"{row['username']}: {row['count']}").classes("rag-meta")
-            with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                ui.label("Функции").classes("text-xl font-semibold")
-                for row in top_features:
-                    ui.label(f"{row['name']}: {row['count']}").classes("rag-meta")
+                top_queries = _db_query_dicts(
+                    telemetry_path,
+                    """
+                    SELECT query, COUNT(*) AS count,
+                           ROUND(AVG(results_count), 1) AS avg_results,
+                           ROUND(AVG(duration_ms)) AS avg_ms
+                    FROM search_logs
+                    WHERE query <> ''
+                    GROUP BY lower(query)
+                    ORDER BY count DESC
+                    LIMIT 20
+                    """,
+                )
+                top_users = _db_query_dicts(
+                    telemetry_path,
+                    """
+                    SELECT COALESCE(NULLIF(username, ''), source, 'unknown') AS username,
+                           COUNT(*) AS count,
+                           ROUND(AVG(results_count), 1) AS avg_results
+                    FROM search_logs
+                    GROUP BY COALESCE(NULLIF(username, ''), source, 'unknown')
+                    ORDER BY count DESC
+                    LIMIT 15
+                    """,
+                )
+                with ui.row().classes("w-full gap-3 items-start"):
+                    with ui.column().classes("rag-card flex-1 p-4 gap-1"):
+                        ui.label("Топ запросов").classes("font-semibold mb-1")
+                        for row in top_queries:
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.label(str(row["query"])).classes("flex-1 text-sm truncate")
+                                ui.label(str(row["count"])).classes("rag-chip text-xs")
+                                avg_r = float(row.get("avg_results") or 0)
+                                color = "text-negative" if avg_r < 1 else "rag-meta"
+                                ui.label(f"~{avg_r:.0f} рез.").classes(f"text-xs {color}")
+                    with ui.column().classes("rag-card flex-1 p-4 gap-1"):
+                        ui.label("Активность пользователей").classes("font-semibold mb-1")
+                        for row in top_users:
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.icon("person", size="16px").classes("rag-meta")
+                                ui.label(str(row["username"])).classes("flex-1 text-sm truncate")
+                                ui.label(str(row["count"])).classes("rag-chip text-xs")
 
-        with ui.expansion("История запросов", value=True).classes("rag-group-panel w-full"):
-            with ui.column().classes("w-full gap-2 p-3"):
-                with ui.row().classes("w-full gap-2"):
-                    search_source_filter = ui.select(
-                        ["Все", "Telegram", "Web/прочее"],
-                        value="Все",
-                        label="Источник",
-                    ).props("dense outlined").classes("w-44")
-                    search_user_filter = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
-                    search_query_filter = ui.input("Запрос").props("dense outlined clearable").classes("flex-1")
-                    search_ok_filter = ui.select(
-                        ["Все", "OK", "Ошибки"],
-                        value="Все",
-                        label="OK",
-                    ).props("dense outlined").classes("w-32")
+            # ── Качество поиска ────────────────────────────────────────
+            with ui.tab_panel(tab_quality):
+                zero_queries = _db_query_dicts(
+                    telemetry_path,
+                    """
+                    SELECT query, COUNT(*) AS count, MAX(ts) AS last_seen
+                    FROM search_logs
+                    WHERE results_count = 0 AND query <> ''
+                    GROUP BY lower(query)
+                    ORDER BY count DESC
+                    LIMIT 30
+                    """,
+                )
+                neg_feedback = _db_query_dicts(
+                    telemetry_path,
+                    """
+                    SELECT query, SUM(feedback) AS score, COUNT(*) AS hits
+                    FROM search_feedback
+                    WHERE feedback < 0 AND query <> ''
+                    GROUP BY lower(query)
+                    ORDER BY score ASC
+                    LIMIT 20
+                    """,
+                )
+                pos_docs = _db_query_dicts(
+                    telemetry_path,
+                    """
+                    SELECT result_title, result_path,
+                           SUM(feedback) AS score, COUNT(*) AS hits,
+                           COUNT(DISTINCT lower(query)) AS distinct_queries
+                    FROM search_feedback
+                    WHERE feedback > 0 AND result_path <> ''
+                    GROUP BY result_path
+                    ORDER BY score DESC
+                    LIMIT 20
+                    """,
+                )
+                query_health = _db_query_dicts(
+                    telemetry_path,
+                    """
+                    SELECT
+                      ROUND(100.0 * SUM(CASE WHEN results_count = 0 THEN 1 ELSE 0 END) / MAX(COUNT(*), 1), 1) AS zero_pct,
+                      ROUND(AVG(results_count), 1) AS avg_results,
+                      ROUND(AVG(duration_ms)) AS avg_ms,
+                      COUNT(*) AS total
+                    FROM search_logs
+                    WHERE ts >= datetime('now', '-7 days')
+                    """,
+                )
+                qh = query_health[0] if query_health else {}
+                zero_pct = float(qh.get("zero_pct") or 0)
+                avg_res = float(qh.get("avg_results") or 0)
+                avg_ms_val = int(float(qh.get("avg_ms") or 0))
 
-                search_table = ui.table(
-                    rows=[],
-                    columns=[
-                        {"name": "ts", "label": "Время", "field": "ts"},
-                        {"name": "source", "label": "Источник", "field": "source"},
-                        {"name": "username", "label": "Пользователь", "field": "username"},
-                        {"name": "query", "label": "Запрос", "field": "query"},
-                        {"name": "results_count", "label": "Результаты", "field": "results_count"},
-                        {"name": "duration_ms", "label": "мс", "field": "duration_ms"},
-                        {"name": "error", "label": "Ошибка", "field": "error"},
-                    ],
-                    pagination=10,
-                ).classes("w-full")
+                # Health summary tiles (last 7 days)
+                with ui.row().classes("w-full gap-3 mb-2"):
+                    with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                        c = "text-negative" if zero_pct > 20 else ("text-warning" if zero_pct > 10 else "text-positive")
+                        ui.icon("search_off").classes(f"text-2xl {c}")
+                        ui.label(f"{zero_pct:.1f}%").classes(f"text-xl font-semibold {c}")
+                        ui.label("Нулевых рез. (7д)").classes("rag-meta text-xs")
+                    with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                        c2 = "text-positive" if avg_res >= 5 else ("text-warning" if avg_res >= 1 else "text-negative")
+                        ui.icon("format_list_numbered").classes(f"text-2xl {c2}")
+                        ui.label(f"{avg_res:.1f}").classes(f"text-xl font-semibold {c2}")
+                        ui.label("Среднее рез. (7д)").classes("rag-meta text-xs")
+                    with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                        c3 = "text-negative" if avg_ms_val > 3000 else ("text-warning" if avg_ms_val > 1000 else "text-positive")
+                        ui.icon("speed").classes(f"text-2xl {c3}")
+                        ui.label(f"{avg_ms_val} мс").classes(f"text-xl font-semibold {c3}")
+                        ui.label("Латентность (7д)").classes("rag-meta text-xs")
 
-                def refresh_search_table() -> None:
-                    # Каждый вызов делает свежий запрос к БД — данные не устаревают
-                    rows = _db_query_dicts(
-                        telemetry_path,
-                        """
-                        SELECT ts, source, username, query, results_count, duration_ms, ok, error
-                        FROM search_logs
-                        ORDER BY id DESC
-                        LIMIT 500
-                        """,
-                    )
-                    source_mode = str(search_source_filter.value or "Все")
-                    if source_mode == "Telegram":
-                        rows = [row for row in rows if str(row.get("source") or "").startswith("telegram_bot:")]
-                    elif source_mode == "Web/прочее":
-                        rows = [row for row in rows if not str(row.get("source") or "").startswith("telegram_bot:")]
+                with ui.row().classes("w-full gap-3 items-start"):
+                    # Zero-result queries
+                    with ui.column().classes("rag-card flex-1 p-4 gap-1"):
+                        with ui.row().classes("items-center gap-2 mb-1"):
+                            ui.icon("search_off").classes("text-negative")
+                            ui.label("Нулевые результаты").classes("font-semibold")
+                        if zero_queries:
+                            for row in zero_queries:
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.label(str(row["query"])).classes("flex-1 text-sm truncate")
+                                    ui.label(f"×{row['count']}").classes("rag-chip text-xs bg-red-50 text-red-600")
+                        else:
+                            with ui.row().classes("items-center gap-2"):
+                                ui.icon("check_circle").classes("text-positive")
+                                ui.label("Нет запросов без результатов.").classes("rag-meta")
 
-                    user_needle = str(search_user_filter.value or "").strip().lower()
-                    if user_needle:
-                        rows = [row for row in rows if user_needle in str(row.get("username") or "").lower()]
+                    # Negative feedback
+                    with ui.column().classes("rag-card flex-1 p-4 gap-1"):
+                        with ui.row().classes("items-center gap-2 mb-1"):
+                            ui.icon("thumb_down").classes("text-negative")
+                            ui.label("Отрицательный фидбек").classes("font-semibold")
+                        if neg_feedback:
+                            for row in neg_feedback:
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.label(str(row["query"])).classes("flex-1 text-sm truncate")
+                                    ui.label(f"{int(row['score'])}").classes("rag-chip text-xs bg-red-50 text-red-600")
+                        else:
+                            with ui.row().classes("items-center gap-2"):
+                                ui.icon("check_circle").classes("text-positive")
+                                ui.label("Нет отрицательного фидбека.").classes("rag-meta")
 
-                    query_needle = str(search_query_filter.value or "").strip().lower()
-                    if query_needle:
-                        rows = [row for row in rows if query_needle in str(row.get("query") or "").lower()]
+                # Positive documents
+                with ui.column().classes("rag-card w-full p-4 gap-2 mt-0"):
+                    with ui.row().classes("items-center gap-2 mb-1"):
+                        ui.icon("thumb_up").classes("text-positive")
+                        ui.label("Документы с положительным фидбеком").classes("font-semibold")
+                    if pos_docs:
+                        ui.table(
+                            rows=[{
+                                "title": str(r.get("result_title") or r.get("result_path") or ""),
+                                "score": str(int(r.get("score") or 0)),
+                                "hits": str(int(r.get("hits") or 0)),
+                                "queries": str(int(r.get("distinct_queries") or 0)),
+                            } for r in pos_docs],
+                            columns=[
+                                {"name": "title", "label": "Документ", "field": "title", "align": "left"},
+                                {"name": "score", "label": "Балл", "field": "score"},
+                                {"name": "hits", "label": "Оценок", "field": "hits"},
+                                {"name": "queries", "label": "Запросов", "field": "queries"},
+                            ],
+                            pagination=10,
+                        ).classes("w-full")
+                    else:
+                        ui.label("Нет данных об оценках.").classes("rag-meta")
 
-                    ok_mode = str(search_ok_filter.value or "Все")
-                    if ok_mode == "OK":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 1]
-                    elif ok_mode == "Ошибки":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 0]
+            # ── Синонимы ───────────────────────────────────────────────
+            with ui.tab_panel(tab_synonyms):
+                tdb = _get_telemetry(state)
+                alias_groups = tdb.list_search_alias_groups() if tdb else []
+                candidates = tdb.suggest_search_alias_candidates(limit=30) if tdb else []
 
-                    search_table.rows = rows
-                    search_table.update()
+                with ui.row().classes("w-full gap-3 items-start"):
+                    # Existing alias groups
+                    with ui.column().classes("rag-card flex-1 p-4 gap-2"):
+                        ui.label(f"Группы синонимов ({len(alias_groups)})").classes("font-semibold")
+                        if alias_groups:
+                            for grp in alias_groups[:20]:
+                                aliases = grp.get("aliases") or []
+                                active = [a for a in aliases if str(a.get("status") or "") == "active"]
+                                with ui.column().classes("rag-card p-2 gap-1 w-full"):
+                                    with ui.row().classes("items-center gap-2"):
+                                        ui.icon("auto_awesome", size="16px").classes("text-indigo-400")
+                                        ui.label(str(grp.get("label") or grp.get("key") or "")).classes("font-medium text-sm")
+                                    if active:
+                                        with ui.row().classes("flex-wrap gap-1"):
+                                            for a in active[:8]:
+                                                ui.label(str(a.get("alias") or "")).classes("rag-chip text-xs")
+                        else:
+                            ui.label("Нет настроенных групп синонимов.").classes("rag-meta")
 
-                search_source_filter.on_value_change(lambda e: refresh_search_table())
-                search_user_filter.on_value_change(lambda e: refresh_search_table())
-                search_query_filter.on_value_change(lambda e: refresh_search_table())
-                search_ok_filter.on_value_change(lambda e: refresh_search_table())
-                refresh_search_table()
+                    # Candidates from feedback
+                    with ui.column().classes("rag-card flex-1 p-4 gap-2"):
+                        ui.label("Кандидаты в синонимы").classes("font-semibold")
+                        ui.label(
+                            "Фразы из документов, которые часто открывали по похожим запросам — "
+                            "кандидаты на добавление как синоним."
+                        ).classes("rag-meta text-xs mb-1")
+                        if candidates:
+                            for cand in candidates[:20]:
+                                q = str(cand.get("query") or "")
+                                phrase = str(cand.get("candidate") or "")
+                                title = str(cand.get("title") or "")
+                                score = int(cand.get("score") or 0)
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    with ui.column().classes("flex-1 gap-0"):
+                                        with ui.row().classes("items-center gap-1"):
+                                            ui.label(q).classes("text-xs rag-meta")
+                                            ui.icon("arrow_forward", size="12px").classes("rag-meta")
+                                            ui.label(phrase).classes("text-sm font-medium")
+                                        if title:
+                                            ui.label(title).classes("rag-path text-xs truncate")
+                                    ui.label(f"+{score}").classes("rag-chip text-xs bg-green-50 text-green-700")
+                        else:
+                            ui.label("Недостаточно данных для предложений.").classes("rag-meta")
 
-        with ui.expansion("История входов", value=False).classes("rag-group-panel w-full"):
-            with ui.column().classes("w-full gap-2 p-3"):
-                with ui.row().classes("w-full gap-2"):
-                    auth_source_filter = ui.select(
-                        ["Все", "Telegram", "Web/прочее"],
-                        value="Все",
-                        label="Источник",
-                    ).props("dense outlined").classes("w-44")
-                    auth_user_filter = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
-                    auth_event_filter = ui.input("Событие").props("dense outlined clearable").classes("flex-1")
-                    auth_ok_filter = ui.select(
-                        ["Все", "OK", "Ошибки"],
-                        value="Все",
-                        label="OK",
-                    ).props("dense outlined").classes("w-32")
+            # ── Запросы ────────────────────────────────────────────────
+            with ui.tab_panel(tab_queries):
+                with ui.column().classes("w-full gap-2"):
+                    with ui.row().classes("w-full gap-2"):
+                        search_source_filter = ui.select(
+                            ["Все", "Telegram", "Web/прочее"],
+                            value="Все",
+                            label="Источник",
+                        ).props("dense outlined").classes("w-44")
+                        search_user_filter = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
+                        search_query_filter = ui.input("Запрос").props("dense outlined clearable").classes("flex-1")
+                        search_ok_filter = ui.select(
+                            ["Все", "OK", "Ошибки"],
+                            value="Все",
+                            label="OK",
+                        ).props("dense outlined").classes("w-32")
 
-                auth_table = ui.table(
-                    rows=[],
-                    columns=[
-                        {"name": "ts", "label": "Время", "field": "ts"},
-                        {"name": "username", "label": "Пользователь", "field": "username"},
-                        {"name": "event_type", "label": "Событие", "field": "event_type"},
-                        {"name": "ok", "label": "OK", "field": "ok"},
-                        {"name": "error", "label": "Ошибка", "field": "error"},
-                    ],
-                    pagination=10,
-                ).classes("w-full")
+                    search_table = ui.table(
+                        rows=[],
+                        columns=[
+                            {"name": "ts", "label": "Время", "field": "ts", "sortable": True},
+                            {"name": "source", "label": "Источник", "field": "source"},
+                            {"name": "username", "label": "Пользователь", "field": "username"},
+                            {"name": "query", "label": "Запрос", "field": "query", "align": "left"},
+                            {"name": "results_count", "label": "Рез.", "field": "results_count"},
+                            {"name": "duration_ms", "label": "мс", "field": "duration_ms"},
+                            {"name": "error", "label": "Ошибка", "field": "error"},
+                        ],
+                        pagination=15,
+                    ).classes("w-full")
 
-                def refresh_auth_table() -> None:
-                    rows = auth_events
-                    source_mode = str(auth_source_filter.value or "Все")
-                    if source_mode == "Telegram":
-                        rows = [row for row in rows if str(row.get("event_type") or "").startswith("telegram_")]
-                    elif source_mode == "Web/прочее":
-                        rows = [row for row in rows if not str(row.get("event_type") or "").startswith("telegram_")]
+                    def refresh_search_table() -> None:
+                        rows = _db_query_dicts(
+                            telemetry_path,
+                            """
+                            SELECT ts, source, username, query, results_count, duration_ms, ok, error
+                            FROM search_logs
+                            ORDER BY id DESC
+                            LIMIT 500
+                            """,
+                        )
+                        source_mode = str(search_source_filter.value or "Все")
+                        if source_mode == "Telegram":
+                            rows = [r for r in rows if str(r.get("source") or "").startswith("telegram_bot:")]
+                        elif source_mode == "Web/прочее":
+                            rows = [r for r in rows if not str(r.get("source") or "").startswith("telegram_bot:")]
+                        user_needle = str(search_user_filter.value or "").strip().lower()
+                        if user_needle:
+                            rows = [r for r in rows if user_needle in str(r.get("username") or "").lower()]
+                        query_needle = str(search_query_filter.value or "").strip().lower()
+                        if query_needle:
+                            rows = [r for r in rows if query_needle in str(r.get("query") or "").lower()]
+                        ok_mode = str(search_ok_filter.value or "Все")
+                        if ok_mode == "OK":
+                            rows = [r for r in rows if int(r.get("ok") or 0) == 1]
+                        elif ok_mode == "Ошибки":
+                            rows = [r for r in rows if int(r.get("ok") or 0) == 0]
+                        search_table.rows = rows
+                        search_table.update()
 
-                    user_needle = str(auth_user_filter.value or "").strip().lower()
-                    if user_needle:
-                        rows = [row for row in rows if user_needle in str(row.get("username") or "").lower()]
+                    search_source_filter.on_value_change(lambda e: refresh_search_table())
+                    search_user_filter.on_value_change(lambda e: refresh_search_table())
+                    search_query_filter.on_value_change(lambda e: refresh_search_table())
+                    search_ok_filter.on_value_change(lambda e: refresh_search_table())
+                    refresh_search_table()
 
-                    event_needle = str(auth_event_filter.value or "").strip().lower()
-                    if event_needle:
-                        rows = [row for row in rows if event_needle in str(row.get("event_type") or "").lower()]
+            # ── Аудит ──────────────────────────────────────────────────
+            with ui.tab_panel(tab_audit):
+                auth_events = auth_db.list_auth_events(limit=200)
+                with ui.column().classes("w-full gap-2"):
+                    with ui.row().classes("w-full gap-2"):
+                        auth_source_filter = ui.select(
+                            ["Все", "Telegram", "Web/прочее"],
+                            value="Все",
+                            label="Источник",
+                        ).props("dense outlined").classes("w-44")
+                        auth_user_filter = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
+                        auth_event_filter = ui.input("Событие").props("dense outlined clearable").classes("flex-1")
+                        auth_ok_filter = ui.select(
+                            ["Все", "OK", "Ошибки"],
+                            value="Все",
+                            label="OK",
+                        ).props("dense outlined").classes("w-32")
 
-                    ok_mode = str(auth_ok_filter.value or "Все")
-                    if ok_mode == "OK":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 1]
-                    elif ok_mode == "Ошибки":
-                        rows = [row for row in rows if int(row.get("ok") or 0) == 0]
+                    auth_table = ui.table(
+                        rows=[],
+                        columns=[
+                            {"name": "ts", "label": "Время", "field": "ts", "sortable": True},
+                            {"name": "username", "label": "Пользователь", "field": "username"},
+                            {"name": "event_type", "label": "Событие", "field": "event_type"},
+                            {"name": "ok", "label": "OK", "field": "ok"},
+                            {"name": "error", "label": "Ошибка", "field": "error"},
+                        ],
+                        pagination=15,
+                    ).classes("w-full")
 
-                    auth_table.rows = rows
-                    auth_table.update()
+                    def refresh_auth_table() -> None:
+                        rows = list(auth_events)
+                        source_mode = str(auth_source_filter.value or "Все")
+                        if source_mode == "Telegram":
+                            rows = [r for r in rows if str(r.get("event_type") or "").startswith("telegram_")]
+                        elif source_mode == "Web/прочее":
+                            rows = [r for r in rows if not str(r.get("event_type") or "").startswith("telegram_")]
+                        user_needle = str(auth_user_filter.value or "").strip().lower()
+                        if user_needle:
+                            rows = [r for r in rows if user_needle in str(r.get("username") or "").lower()]
+                        event_needle = str(auth_event_filter.value or "").strip().lower()
+                        if event_needle:
+                            rows = [r for r in rows if event_needle in str(r.get("event_type") or "").lower()]
+                        ok_mode = str(auth_ok_filter.value or "Все")
+                        if ok_mode == "OK":
+                            rows = [r for r in rows if int(r.get("ok") or 0) == 1]
+                        elif ok_mode == "Ошибки":
+                            rows = [r for r in rows if int(r.get("ok") or 0) == 0]
+                        auth_table.rows = rows
+                        auth_table.update()
 
-                auth_source_filter.on_value_change(lambda e: refresh_auth_table())
-                auth_user_filter.on_value_change(lambda e: refresh_auth_table())
-                auth_event_filter.on_value_change(lambda e: refresh_auth_table())
-                auth_ok_filter.on_value_change(lambda e: refresh_auth_table())
-                refresh_auth_table()
+                    auth_source_filter.on_value_change(lambda e: refresh_auth_table())
+                    auth_user_filter.on_value_change(lambda e: refresh_auth_table())
+                    auth_event_filter.on_value_change(lambda e: refresh_auth_table())
+                    auth_ok_filter.on_value_change(lambda e: refresh_auth_table())
+                    refresh_auth_table()
 
     def render() -> None:
         page_root.classes(remove="search")
