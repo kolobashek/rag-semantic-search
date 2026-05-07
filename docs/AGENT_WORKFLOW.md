@@ -1,68 +1,75 @@
 # Agent Workflow
 
-## Worktree Layout
+> Это вспомогательный документ. Авторитетный источник правил — `AGENTS.md` в корне проекта.
+> При расхождении приоритет у `AGENTS.md`.
 
-| Location | Owner | Purpose |
+## Модель ветвления
+
+`main` — единственная рабочая ветка. Небольшие валидированные этапы коммитятся напрямую в `main`.
+
+Отдельная ветка (`claude/<task>` или `codex/<task>`) нужна **только** для:
+- рискованных или долгосрочных изменений;
+- работы, которая конфликтует с параллельными изменениями другого агента.
+
+Не держите параллельные архитектурные эксперименты после принятия решения — архивируйте или удаляйте ветку.
+
+## Worktree-расположение
+
+| Путь | Владелец | Назначение |
 |---|---|---|
-| `D:\...\Semantic search\` | Integration | Stable copy, tests, builds, releases |
-| `.claude\worktrees\*` | Claude | Claude's working branches |
-| `.codex\worktrees\*` | Codex | Codex's working branches |
+| `D:\...\Semantic search\` | Интеграция | Основная копия; тесты, сборки, релизы |
+| `.claude\worktrees\*` | Claude | Ветки Claude (только для долгих/рискованных задач) |
+| `.codex\worktrees\*` | Codex | Ветки Codex (только для долгих/рискованных задач) |
 
-Both agent directories are in `.gitignore` — they are never committed.
+Обе папки агентов перечислены в `.gitignore` и никогда не коммитятся.
 
-## Rules
-
-- Agents do **not** edit each other's worktrees.
-- Agents do **not** commit directly to `main` (except deliberate integration merges approved by the user).
-- Every agent commits to its own branch: `claude/<task>` or `codex/<task>`.
-- Integration happens through `git merge` or `git cherry-pick` into `main`.
-- The main working directory is used for integration, running tests, building, and verifying — not for parallel development.
-
-## Starting a Session
+## Начало сессии
 
 ```powershell
 git fetch --all
+git status --short
 git log --oneline --graph --all --decorate -20
-git status
 ```
 
-Create a fresh worktree from latest main:
+Если работа долгая/рискованная — создайте worktree:
 
 ```powershell
 # Claude
 git worktree add ".claude\worktrees\<task-name>" -b claude/<task-name>
-
 # Codex
 git worktree add ".codex\worktrees\<task-name>" -b codex/<task-name>
 ```
 
-## Finishing a Session
+Для коротких этапов — работайте прямо в основном рабочем каталоге.
+
+## Завершение этапа
 
 ```powershell
-python -m pytest -q tests/    # run tests
+python -m pytest -q tests/   # тесты для затронутой области
 git add <files>
 git commit -m "..."
-git push origin <branch>
+git push origin main          # или origin <branch>
 ```
 
-Then open a PR or ask the user to merge.
-
-## Seeing Each Other's Changes
+## Синхронизация между агентами
 
 ```powershell
 git fetch --all
 git log --oneline --all -20
 
-# Take a specific commit
+# Взять конкретный коммит
 git cherry-pick <sha>
 
-# Merge a branch
+# Смержить ветку
 git merge codex/<task-name>
 git merge claude/<task-name>
 ```
 
-## Why Not Work in the Same Directory
+## Ключевые правила
 
-- Simultaneous edits produce a shared dirty state — impossible to tell whose change is whose.
-- No clean per-agent commit trail.
-- Risk of one agent overwriting the other's uncommitted work.
+- Не редактируйте worktree другого агента.
+- Перед началом проверяйте `git status` и `git fetch`.
+- При наличии stash сразу документируйте причину и удаляйте после завершения.
+- Не смешивайте runtime-данные, сгенерированные БД и изменения исходного кода в одном коммите.
+- `docs/cloud_drive_roadmap.md` — source of truth по задачам Cloud Drive; обновляйте после каждого этапа.
+- `WORKLOG.md` — для значимых передач между агентами и операционных заметок.

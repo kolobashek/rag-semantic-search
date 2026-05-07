@@ -59,3 +59,14 @@ Status: in progress according to docs/cloud_drive_roadmap.md
 Validation: focused Cloud Drive tests per stage; launcher restart smoke after backend/API changes
 Notes: remaining P0 is end-to-end Cloud Drive reindex -> index/search pipeline
 ```
+
+```text
+Date: 2026-05-07
+Agent: Claude
+Branch: main
+Task: docs actualization — ИНСТРУКЦИЯ.md и docs/AGENT_WORKFLOW.md
+Status: completed
+Validation: n/a (doc-only)
+Notes: ИНСТРУКЦИЯ.md переписана под текущий стек (NiceGUI launcher, data/, staged indexing, Cloud Drive).
+       docs/AGENT_WORKFLOW.md приведён в соответствие с AGENTS.md (модель direct-to-main).
+```
