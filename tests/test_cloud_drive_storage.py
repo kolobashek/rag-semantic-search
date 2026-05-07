@@ -74,3 +74,48 @@ def test_cloud_drive_upload_uses_content_addressed_dedup_storage(tmp_path: Path)
     assert first["storage_key"].startswith("objects/sha256/")
     stored_files = [path for path in storage_root.rglob("*") if path.is_file()]
     assert len(stored_files) == 1
+
+
+class _FakePresignedStorage:
+    def __init__(self) -> None:
+        self.keys: set[str] = set()
+
+    def put_file(self, source_path: Path, storage_key: str) -> None:
+        self.keys.add(storage_key)
+
+    def exists(self, storage_key: str) -> bool:
+        return storage_key in self.keys
+
+    def move(self, old_storage_key: str, new_storage_key: str) -> None:
+        self.keys.remove(old_storage_key)
+        self.keys.add(new_storage_key)
+
+    def delete(self, storage_key: str) -> None:
+        self.keys.discard(storage_key)
+
+    def resolve_path(self, storage_key: str) -> str:
+        return f"s3://bucket/{storage_key}"
+
+    def presigned_download_url(self, storage_key: str, *, expires_in: int = 3600) -> str:
+        return f"https://storage.example/{storage_key}?expires={expires_in}"
+
+    def healthcheck(self) -> dict:
+        return {"backend": "s3", "ok": True, "writable": True, "target": "s3://bucket", "error": ""}
+
+
+def test_cloud_drive_download_descriptor_supports_presigned_storage(tmp_path: Path) -> None:
+    storage = _FakePresignedStorage()
+    service = CloudDriveService(
+        registry=CloudDriveRegistryDB(str(tmp_path / "registry.db")),
+        storage=storage,
+    )
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"pdf")
+
+    service.upload_file(parent_path="", filename="report.pdf", source_path=str(source), mime_type="application/pdf")
+    descriptor = service.get_download_descriptor("report.pdf")
+
+    assert descriptor["mode"] == "redirect_url"
+    assert descriptor["url"].startswith("https://storage.example/objects/sha256/")
+    assert descriptor["filename"] == "report.pdf"

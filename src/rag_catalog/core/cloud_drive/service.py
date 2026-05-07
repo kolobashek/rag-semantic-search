@@ -197,6 +197,19 @@ class CloudDriveService:
         node = self.registry.get_file_by_path(str(path or '').strip().replace('\\', '/').strip('/'))
         if node is None:
             raise RuntimeError(f'Файл не найден: {path}')
+        presign = getattr(self.storage, 'presigned_download_url', None)
+        if callable(presign):
+            if not self.storage.exists(node.storage_key):
+                raise RuntimeError(f'Файл отсутствует в storage backend: {node.storage_key}')
+            return {
+                'mode': 'redirect_url',
+                'url': str(presign(node.storage_key, expires_in=3600)),
+                'filename': node.name,
+                'mime_type': node.mime_type or mimetypes.guess_type(node.name)[0] or 'application/octet-stream',
+                'size_bytes': node.size_bytes,
+                'storage_key': node.storage_key,
+                'path': node.path,
+            }
         storage_path = Path(self.storage.resolve_path(node.storage_key))
         if not storage_path.exists() or not storage_path.is_file():
             raise RuntimeError(f'Файл отсутствует в storage backend: {node.storage_key}')

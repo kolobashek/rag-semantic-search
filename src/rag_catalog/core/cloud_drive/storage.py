@@ -117,6 +117,15 @@ class S3StorageAdapter:
             return f's3://{self.bucket}/{storage_key}'
         return f'{prefix}/{self.bucket}/{storage_key}'
 
+    def presigned_download_url(self, storage_key: str, *, expires_in: int = 3600) -> str:
+        return str(
+            self._client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": storage_key},
+                ExpiresIn=max(60, int(expires_in or 3600)),
+            )
+        )
+
     def healthcheck(self) -> dict:
         probe_key = f".healthcheck/{uuid.uuid4().hex}"
         try:

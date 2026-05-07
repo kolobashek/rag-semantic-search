@@ -471,7 +471,7 @@ Claude:
 ### P2: Cloud Drive production storage and sync
 
 Codex:
-- [ ] Реализовать production S3/MinIO path: upload/download, presigned URLs, health, failure modes.
+- [x] Реализовать production S3/MinIO path: upload/download через adapter, presigned download URLs, healthcheck и понятные ошибки отсутствующих объектов.
 - [x] Добавить immutable storage keys и path-independent `doc_id`: новые upload/bootstrap объекты получают content-addressed `objects/sha256/...`, rename/move меняют registry path без перемещения storage object.
 - [x] Добавить dedup by checksum: одинаковый контент переиспользует один storage object.
 - [x] Добавить soft delete/trash/restore backend: файлы/папки помечаются `deleted_at`, storage сохраняется, добавлены `restore_node()` и `/api/cloud-drive/restore`.

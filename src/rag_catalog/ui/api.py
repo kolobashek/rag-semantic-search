@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List
 
 from fastapi import File, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from nicegui import app
 
 from rag_catalog.core.cloud_drive import CloudDriveService
@@ -255,7 +255,7 @@ def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", auth_to
 
 
 @app.get("/api/cloud-drive/download")
-def api_cloud_drive_download(path: str, auth_token: str = "", authorization: AuthHeader = "") -> FileResponse:
+def api_cloud_drive_download(path: str, auth_token: str = "", authorization: AuthHeader = ""):
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
     _require_cloud_drive_path_access(cfg, user, path)
@@ -266,8 +266,11 @@ def api_cloud_drive_download(path: str, auth_token: str = "", authorization: Aut
         _audit_cloud_drive_api_event(cfg, user, "download", ok=False, details={"path": path, "error": str(exc)})
         raise HTTPException(status_code=404, detail=str(exc))
     if descriptor.get("mode") != "local_file":
+        if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
+            _audit_cloud_drive_api_event(cfg, user, "download", details={"path": path, "filename": descriptor.get("filename"), "mode": "redirect_url"})
+            return RedirectResponse(str(descriptor["url"]))
         _audit_cloud_drive_api_event(cfg, user, "download", ok=False, details={"path": path, "mode": descriptor.get("mode")})
-        raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает direct download.")
+        raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает download.")
     _audit_cloud_drive_api_event(cfg, user, "download", details={"path": path, "filename": descriptor.get("filename")})
     return FileResponse(
         path=str(descriptor["file_path"]),
