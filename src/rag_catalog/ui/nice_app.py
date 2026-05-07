@@ -1232,6 +1232,17 @@ def _build_page(initial_screen: str = "search") -> None:
                 with ui.column().classes("gap-1 items-center"):
                     for hint in hints:
                         ui.label(f"• {hint}").classes("rag-meta text-sm")
+                if q and _is_admin(state):
+                    ui.separator().classes("w-full my-1")
+                    ui.button(
+                        "Добавить синоним для этого запроса",
+                        icon="auto_awesome",
+                        on_click=lambda: (
+                            setattr(state, "settings_section", "aliases"),
+                            set_screen("settings"),
+                        ),
+                        color=None,
+                    ).props("flat dense no-caps").classes("rag-meta text-xs")
             return
 
         # Все результаты — плоский список, отсортированный по релевантности
