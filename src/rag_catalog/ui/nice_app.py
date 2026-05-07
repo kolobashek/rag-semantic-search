@@ -1362,7 +1362,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 render()
 
             ui.button(
-                f"Загрузить ещё  ({remaining_groups})",
+                f"Загрузить ещё ({remaining_groups})",
                 on_click=load_more,
                 icon="expand_more",
             ).props("outline no-caps").classes("w-full mt-1")
@@ -3356,6 +3356,11 @@ def _build_page(initial_screen: str = "search") -> None:
                     with ui.tab_panel(tab_login).classes("w-full gap-3"):
                         username_input = ui.input("Логин").props("dense outlined").classes("w-full")
                         password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                        username_input.on("keyup.enter", lambda _: ui.run_javascript(
+                            "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
+                            "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
+                            "if(i>=0&&ins[i+1])ins[i+1].focus();"
+                        ))
                         password_input.on("keyup.enter", lambda _: login())
                         ui.button("Войти", icon="login", on_click=login).props("unelevated")
                         ui.separator()
@@ -5927,6 +5932,22 @@ def _build_page(initial_screen: str = "search") -> None:
                 render_search_screen()
 
     render()
+
+    def _setup_keyboard_shortcuts() -> None:
+        ui.run_javascript(
+            "if(!window._ragKbInit){"
+            "window._ragKbInit=true;"
+            "document.addEventListener('keydown',function(e){"
+            "if((e.ctrlKey||e.metaKey)&&e.key==='k'){"
+            "e.preventDefault();"
+            "const inp=document.querySelector('.rag-search-box .q-field__native');"
+            "if(inp){inp.focus();inp.select();}"
+            "}"
+            "});"
+            "}"
+        )
+
+    ui.timer(0.0, _setup_keyboard_shortcuts, once=True)
 
 
 @ui.page("/")
