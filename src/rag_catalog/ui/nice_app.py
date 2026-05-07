@@ -2513,6 +2513,43 @@ def _install_css() -> None:
           box-shadow: var(--rag-shadow);
           backdrop-filter: blur(12px);
         }
+        .cd-status-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 2px 10px 2px 6px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 600;
+          line-height: 1.6;
+        }
+        .cd-status-pending  { background: #fef9c3; color: #854d0e; }
+        .cd-status-running  { background: #dbeafe; color: #1d4ed8; }
+        .cd-status-done     { background: #dcfce7; color: #166534; }
+        .cd-status-error    { background: #fee2e2; color: #991b1b; }
+        .cd-status-cancelled{ background: #f3f4f6; color: #6b7280; }
+        .dark .cd-status-pending  { background: #422006; color: #fbbf24; }
+        .dark .cd-status-running  { background: #1e3a5f; color: #93c5fd; }
+        .dark .cd-status-done     { background: #14532d; color: #86efac; }
+        .dark .cd-status-error    { background: #450a0a; color: #fca5a5; }
+        .dark .cd-status-cancelled{ background: #1f2937; color: #9ca3af; }
+        .cd-jobs-card {
+          border: 1px solid var(--rag-border);
+          border-radius: 10px;
+          padding: 10px 12px;
+          background: var(--rag-surface);
+          transition: box-shadow 0.15s;
+        }
+        .cd-jobs-card:hover { box-shadow: var(--rag-shadow); }
+        .cd-empty-state {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 6px;
+          padding: 24px 16px;
+          color: var(--rag-muted);
+          font-size: 13px;
+        }
         .rag-suggest-item {
           min-width: 0;
           overflow: hidden;
@@ -5157,42 +5194,63 @@ def _build_page(initial_screen: str = "search") -> None:
                 stats_ref["value"] = stats_obj
                 status_box.clear()
                 with status_box:
-                    ui.label(title).classes("font-semibold")
+                    ui.label(title).classes("font-semibold text-sm")
                     if not stats_obj:
-                        ui.label("Статистика пока недоступна.").classes("rag-meta")
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("cloud_off", size="28px").classes("opacity-30")
+                            ui.label("Registry ещё не инициализирован — нажмите «Init registry».").classes("text-center")
                         return
                     with ui.row().classes("w-full gap-2 flex-wrap"):
-                        ui.label(f"Папок: {int(getattr(stats_obj, 'folders', 0)):,}".replace(",", " ")).classes("rag-chip")
-                        ui.label(f"Файлов: {int(getattr(stats_obj, 'files', 0)):,}".replace(",", " ")).classes("rag-chip")
-                        ui.label(f"Версий: {int(getattr(stats_obj, 'versions', 0)):,}".replace(",", " ")).classes("rag-chip")
-                        ui.label(f"Jobs: {int(getattr(stats_obj, 'pending_jobs', 0)):,}".replace(",", " ")).classes("rag-chip")
+                        for icon_name, lbl, val in [
+                            ("folder",      "Папок",  f"{int(getattr(stats_obj, 'folders', 0)):,}".replace(",", " ")),
+                            ("description", "Файлов", f"{int(getattr(stats_obj, 'files', 0)):,}".replace(",", " ")),
+                            ("history",     "Версий", f"{int(getattr(stats_obj, 'versions', 0)):,}".replace(",", " ")),
+                            ("pending",     "Jobs",   f"{int(getattr(stats_obj, 'pending_jobs', 0)):,}".replace(",", " ")),
+                        ]:
+                            with ui.column().classes("rag-card p-2 gap-0 items-center min-w-20 flex-1"):
+                                ui.icon(icon_name, size="18px").classes("text-indigo-400")
+                                ui.label(val).classes("text-base font-semibold leading-tight")
+                                ui.label(lbl).classes("rag-meta text-xs")
                     root_path = str(getattr(stats_obj, "root_path", "") or "")
                     if root_path:
-                        ui.label(f"Корень registry: {root_path}").classes("rag-path")
+                        ui.label(f"Корень: {root_path}").classes("rag-path text-xs")
+
+            _CD_STATUS_META = {
+                "pending":   ("schedule",     "cd-status-pending",   "Ожидание"),
+                "running":   ("sync",         "cd-status-running",   "Выполняется"),
+                "done":      ("check_circle", "cd-status-done",      "Завершён"),
+                "error":     ("error",        "cd-status-error",     "Ошибка"),
+                "stale":     ("warning",      "cd-status-error",     "Состояние устарело"),
+                "cancelled": ("cancel",       "cd-status-cancelled", "Отменён"),
+            }
+
+            def _cd_status_badge(status: str) -> None:
+                icon_name, css_cls, label_ru = _CD_STATUS_META.get(
+                    status, ("help", "cd-status-cancelled", status)
+                )
+                with ui.element("span").classes(f"cd-status-badge {css_cls}"):
+                    ui.icon(icon_name, size="14px")
+                    ui.label(label_ru)
 
             def render_bootstrap_status() -> None:
                 bootstrap_state = _read_cloud_bootstrap_status(build_cloud_config())
                 bootstrap_box.clear()
                 with bootstrap_box:
-                    ui.label("Статус импорта").classes("font-semibold")
+                    ui.label("Статус импорта").classes("font-semibold text-sm")
                     raw_status = str(bootstrap_state.get("status") or bootstrap_state.get("job_status") or "idle")
                     status = {
                         "pending": "pending",
                         "running": "running",
                         "completed": "done",
                         "failed": "error",
-                        "cancelled": "error",
+                        "cancelled": "cancelled",
                     }.get(raw_status, raw_status)
                     if status == "idle":
-                        ui.label("Импорт не запущен.").classes("rag-meta")
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("cloud_upload", size="24px").classes("opacity-30")
+                            ui.label("Импорт не запущен. Нажмите «Bootstrap» ниже.").classes("text-center")
                         return
-                    status_label = {
-                        "running": "Выполняется",
-                        "done": "Завершён",
-                        "error": "Ошибка",
-                        "stale": "Состояние устарело",
-                    }.get(status, status)
-                    ui.label(status_label).classes("rag-chip")
+                    _cd_status_badge(status)
                     imported_files = _safe_int(bootstrap_state.get("imported_files"), 0)
                     imported_folders = _safe_int(bootstrap_state.get("imported_folders"), 0)
                     total_files = _safe_int(bootstrap_state.get("total_files"), 0)
@@ -5220,51 +5278,70 @@ def _build_page(initial_screen: str = "search") -> None:
 
             def render_bootstrap_jobs() -> None:
                 jobs_box.clear()
+                cfg_now = build_cloud_config()
+                if not str(cfg_now.get("cloud_drive_db_path") or "").strip():
+                    with jobs_box:
+                        ui.label("Последние задачи").classes("font-semibold text-sm")
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("settings", size="24px").classes("opacity-30")
+                            ui.label("Сохраните настройки Cloud Drive, чтобы видеть историю задач.").classes("text-center")
+                    return
                 try:
-                    service = CloudDriveService.from_config(build_cloud_config())
+                    service = CloudDriveService.from_config(cfg_now)
                     jobs = service.list_bootstrap_jobs(limit=8)
                 except Exception as exc:
                     with jobs_box:
-                        ui.label("Последние задачи").classes("font-semibold")
-                        ui.label(f"Не удалось прочитать jobs: {exc}").classes("text-negative text-sm")
+                        ui.label("Последние задачи").classes("font-semibold text-sm")
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("error_outline", size="24px").classes("text-red-400 opacity-70")
+                            ui.label(f"Не удалось прочитать jobs: {exc}").classes("text-center text-red-600 text-xs")
                     return
                 with jobs_box:
-                    ui.label("Последние задачи").classes("font-semibold")
+                    ui.label("Последние задачи").classes("font-semibold text-sm")
                     if not jobs:
-                        ui.label("История jobs пока пуста.").classes("rag-meta")
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("history", size="24px").classes("opacity-30")
+                            ui.label("История задач пуста. Запустите bootstrap, чтобы начать.").classes("text-center")
                         return
                     for job in jobs:
                         progress = dict(job.progress or {})
                         raw_status = str(job.status or progress.get("status") or "")
-                        with ui.card().classes("w-full p-3 gap-2"):
-                            with ui.row().classes("w-full items-center justify-between gap-2"):
-                                ui.label(job.id[:8]).classes("font-mono text-sm")
-                                ui.label(raw_status).classes("rag-chip")
-                            current_path = str(progress.get("current_path") or progress.get("catalog") or "").strip()
-                            if current_path:
-                                ui.label(current_path).classes("rag-path")
-                            imported_files = _safe_int(progress.get("imported_files"), 0)
-                            total_files = _safe_int(progress.get("total_files"), 0)
+                        norm_status = {
+                            "pending": "pending", "running": "running",
+                            "completed": "done", "failed": "error", "cancelled": "cancelled",
+                        }.get(raw_status, raw_status)
+                        imported_files = _safe_int(progress.get("imported_files"), 0)
+                        total_files = _safe_int(progress.get("total_files"), 0)
+                        current_path = str(progress.get("current_path") or progress.get("catalog") or "").strip()
+                        error_text = str(job.last_error or progress.get("error") or "").strip()
+                        with ui.element("div").classes("cd-jobs-card w-full"):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                _cd_status_badge(norm_status)
+                                ui.space()
+                                ui.label(job.id[:8]).classes("font-mono text-xs rag-meta")
                             if total_files > 0:
-                                ui.label(f"Файлы: {imported_files:,} / {total_files:,}".replace(",", " ")).classes("rag-meta")
-                            else:
-                                ui.label(f"Файлы: {imported_files:,}".replace(",", " ")).classes("rag-meta")
-                            error_text = str(job.last_error or progress.get("error") or "").strip()
-                            if error_text:
-                                ui.label(error_text).classes("text-negative text-sm")
-                            with ui.row().classes("gap-2"):
+                                ratio = max(0.0, min(1.0, imported_files / total_files))
+                                ui.linear_progress(value=ratio, size="4px", show_value=False).classes("w-full my-1").props("color=indigo")
+                                ui.label(
+                                    f"{imported_files:,} / {total_files:,} файлов ({round(ratio * 100)}%)".replace(",", " ")
+                                ).classes("rag-meta text-xs")
+                            elif imported_files:
+                                ui.label(f"{imported_files:,} файлов".replace(",", " ")).classes("rag-meta text-xs")
+                            if current_path:
+                                ui.label(current_path).classes("rag-path text-xs truncate")
+                            if error_text and norm_status in ("error", "cancelled"):
+                                ui.label(error_text).classes("text-red-600 text-xs mt-1 truncate")
+                            with ui.row().classes("gap-1 mt-1"):
                                 if raw_status in {"running", "pending"}:
                                     ui.button(
-                                        "Отменить",
-                                        icon="close",
+                                        "Отменить", icon="close",
                                         on_click=lambda _e=None, job_id=job.id: cancel_bootstrap_job(job_id),
-                                    ).props("outline dense")
+                                    ).props("outline dense size=sm")
                                 if raw_status in {"failed", "cancelled", "completed"}:
                                     ui.button(
-                                        "Повторить",
-                                        icon="refresh",
+                                        "Повторить", icon="replay",
                                         on_click=lambda _e=None, job_id=job.id: retry_bootstrap_job(job_id),
-                                    ).props("outline dense")
+                                    ).props("outline dense size=sm")
 
             def build_cloud_config() -> Dict[str, Any]:
                 values = current_cloud_values()
