@@ -415,7 +415,7 @@ Codex:
 - [ ] Добавить folder/file ACL hooks в Cloud Drive API и search filters.
 - [x] Добавить audit trail для Cloud Drive операций: view/download/upload/delete/move/rename/search.
 - [x] Добавить CI quality gate: `pytest`, `py_compile`, launcher smoke, docker smoke.
-- [ ] Подключить `ruff` и постепенно включать правила без массового churn.
+- [x] Подключить `ruff` и постепенно включать правила без массового churn.
 - [ ] Зафиксировать dependency lock / reproducible install path.
 
 Claude:

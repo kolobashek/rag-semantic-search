@@ -28,6 +28,7 @@ jobs:
           python -m pip install -e . --no-deps
           python -m pip install `
             pytest `
+            ruff `
             numpy `
             nicegui `
             fastapi `
@@ -49,6 +50,10 @@ jobs:
         run: |
           $files = Get-ChildItem src -Recurse -Filter *.py | ForEach-Object { $_.FullName }
           python -m py_compile $files
+
+      - name: Lint package
+        shell: pwsh
+        run: python -m ruff check src
 
       - name: Launcher smoke
         shell: pwsh
