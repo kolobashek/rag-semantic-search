@@ -335,6 +335,7 @@ class CloudDriveService:
             'is_root': folder.is_root,
             'created_at': folder.created_at,
             'updated_at': folder.updated_at,
+            'deleted_at': folder.deleted_at,
         }
 
     def delete_node(self, path: str) -> dict:
@@ -358,7 +359,33 @@ class CloudDriveService:
             'id': folder.id,
             'path': folder.path,
             'deleted': True,
+            'deleted_at': folder.deleted_at,
         }
+
+    def restore_node(self, path: str) -> dict:
+        clean_path = str(path or '').strip().replace('\\', '/').strip('/')
+        file_row = self.registry.get_file_by_path(clean_path)
+        if file_row is not None and file_row.deleted_at:
+            restored = self.registry.restore_file(clean_path)
+            self._queue_reindex_file(restored, reason='restore')
+            return {
+                'node_type': 'file',
+                'id': restored.id,
+                'path': restored.path,
+                'deleted_at': restored.deleted_at,
+            }
+        folder = self.registry.get_folder_by_path(clean_path, include_deleted=True)
+        if folder is not None and folder.deleted_at:
+            restored_folder = self.registry.restore_folder(clean_path)
+            for child in self.registry.list_files_under_path(restored_folder.path):
+                self._queue_reindex_file(child, reason='restore_folder')
+            return {
+                'node_type': 'folder',
+                'id': restored_folder.id,
+                'path': restored_folder.path,
+                'deleted_at': restored_folder.deleted_at,
+            }
+        raise RuntimeError(f'Удалённый узел не найден: {path}')
 
     def cancel_job(self, job_id: str) -> CloudDriveJob:
         job = self.registry.get_job(job_id)

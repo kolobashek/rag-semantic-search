@@ -15,6 +15,7 @@ class CloudDriveFolder:
     is_root: bool = False
     created_at: str = ""
     updated_at: str = ""
+    deleted_at: str = ""
 
 
 @dataclass(slots=True)

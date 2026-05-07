@@ -13,7 +13,7 @@ from rag_catalog.core.db_contract import ensure_schema_version
 
 from .models import CloudDriveFile, CloudDriveFolder, CloudDriveJob, CloudDriveStats
 
-CLOUD_DRIVE_SCHEMA_VERSION = 2
+CLOUD_DRIVE_SCHEMA_VERSION = 3
 
 
 def _utc_now() -> str:
@@ -63,6 +63,7 @@ class CloudDriveRegistryDB:
                         is_root INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
+                        deleted_at TEXT NOT NULL DEFAULT '',
                         FOREIGN KEY(parent_id) REFERENCES cloud_folders(id)
                     );
 
@@ -164,13 +165,15 @@ class CloudDriveRegistryDB:
             conn.execute("ALTER TABLE cloud_jobs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
         if current_version <= 1 and not self._has_column(conn, "cloud_jobs", "finished_at"):
             conn.execute("ALTER TABLE cloud_jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
+        if current_version <= 2 and not self._has_column(conn, "cloud_folders", "deleted_at"):
+            conn.execute("ALTER TABLE cloud_folders ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''")
 
     def ensure_root_folder(self, *, root_name: str, source_path: str = '') -> CloudDriveFolder:
         clean_name = str(root_name or '').strip() or 'root'
         now = _utc_now()
         with self._lock:
             with self._connect() as conn:
-                row = conn.execute('SELECT * FROM cloud_folders WHERE is_root=1 LIMIT 1').fetchone()
+                row = conn.execute("SELECT * FROM cloud_folders WHERE is_root=1 AND deleted_at='' LIMIT 1").fetchone()
                 if row is not None:
                     return self._folder_from_row(row)
                 folder_id = str(uuid.uuid4())
@@ -187,7 +190,7 @@ class CloudDriveRegistryDB:
 
     def get_root_folder(self) -> Optional[CloudDriveFolder]:
         with self._connect() as conn:
-            row = conn.execute('SELECT * FROM cloud_folders WHERE is_root=1 LIMIT 1').fetchone()
+            row = conn.execute("SELECT * FROM cloud_folders WHERE is_root=1 AND deleted_at='' LIMIT 1").fetchone()
             return self._folder_from_row(row) if row else None
 
     def create_folder(self, *, parent_path: str = '', name: str) -> CloudDriveFolder:
@@ -232,7 +235,8 @@ class CloudDriveRegistryDB:
                         depth=excluded.depth,
                         source_path=excluded.source_path,
                         is_root=excluded.is_root,
-                        updated_at=excluded.updated_at
+                        updated_at=excluded.updated_at,
+                        deleted_at=''
                     ''',
                     (folder_id, parent_id, name, clean_path, int(depth), source_path, 1 if is_root else 0, now, now),
                 )
@@ -240,17 +244,20 @@ class CloudDriveRegistryDB:
                 assert saved is not None
                 return self._folder_from_row(saved)
 
-    def get_folder_by_path(self, path: str) -> Optional[CloudDriveFolder]:
+    def get_folder_by_path(self, path: str, *, include_deleted: bool = False) -> Optional[CloudDriveFolder]:
         with self._connect() as conn:
-            row = conn.execute('SELECT * FROM cloud_folders WHERE path=?', (self._normalize_path(path),)).fetchone()
+            if include_deleted:
+                row = conn.execute('SELECT * FROM cloud_folders WHERE path=?', (self._normalize_path(path),)).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM cloud_folders WHERE path=? AND deleted_at=''", (self._normalize_path(path),)).fetchone()
             return self._folder_from_row(row) if row else None
 
     def list_child_folders(self, parent_id: Optional[str]) -> List[CloudDriveFolder]:
         with self._connect() as conn:
             if parent_id is None:
-                rows = conn.execute('SELECT * FROM cloud_folders WHERE parent_id IS NULL ORDER BY name').fetchall()
+                rows = conn.execute("SELECT * FROM cloud_folders WHERE parent_id IS NULL AND deleted_at='' ORDER BY name").fetchall()
             else:
-                rows = conn.execute('SELECT * FROM cloud_folders WHERE parent_id=? ORDER BY name', (parent_id,)).fetchall()
+                rows = conn.execute("SELECT * FROM cloud_folders WHERE parent_id=? AND deleted_at='' ORDER BY name", (parent_id,)).fetchall()
             return [self._folder_from_row(row) for row in rows]
 
     def upsert_file(self, *, folder_id: str, path: str, name: str, storage_key: str, mime_type: str, size_bytes: int, checksum: str = '', source_path: str = '') -> CloudDriveFile:
@@ -559,9 +566,64 @@ class CloudDriveRegistryDB:
                         f"DELETE FROM cloud_file_versions WHERE file_id IN ({placeholders})",
                         file_ids,
                     )
-                conn.execute("DELETE FROM cloud_files WHERE path LIKE ? OR path=?", (f"{clean_path}/%", clean_path))
-                conn.execute("DELETE FROM cloud_folders WHERE path LIKE ? OR path=?", (f"{clean_path}/%", clean_path))
-        return folder
+                now = _utc_now()
+                conn.execute(
+                    "UPDATE cloud_files SET deleted_at=?, updated_at=? WHERE path LIKE ? OR path=?",
+                    (now, now, f"{clean_path}/%", clean_path),
+                )
+                conn.execute(
+                    "UPDATE cloud_folders SET deleted_at=?, updated_at=? WHERE path LIKE ? OR path=?",
+                    (now, now, f"{clean_path}/%", clean_path),
+                )
+                saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
+        assert saved is not None
+        return self._folder_from_row(saved)
+
+    def restore_file(self, path: str) -> CloudDriveFile:
+        clean_path = self._normalize_path(path)
+        file_row = self.get_file_by_path(clean_path)
+        if file_row is None:
+            raise RuntimeError(f'Файл не найден: {clean_path}')
+        parent_path = clean_path.rsplit('/', 1)[0] if '/' in clean_path else ''
+        parent = self.get_root_folder() if not parent_path else self.get_folder_by_path(parent_path)
+        if parent is None:
+            raise RuntimeError(f'Родительский каталог не найден или удалён: {parent_path or "/"}')
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE cloud_files SET deleted_at='', updated_at=? WHERE id=?",
+                    (now, file_row.id),
+                )
+                saved = conn.execute('SELECT * FROM cloud_files WHERE id=?', (file_row.id,)).fetchone()
+        assert saved is not None
+        return self._file_from_row(saved)
+
+    def restore_folder(self, path: str) -> CloudDriveFolder:
+        clean_path = self._normalize_path(path)
+        folder = self.get_folder_by_path(clean_path, include_deleted=True)
+        if folder is None:
+            raise RuntimeError(f'Каталог не найден: {clean_path}')
+        if folder.is_root:
+            raise RuntimeError('Корневой каталог нельзя восстанавливать.')
+        parent_path = clean_path.rsplit('/', 1)[0] if '/' in clean_path else ''
+        parent = self.get_root_folder() if not parent_path else self.get_folder_by_path(parent_path)
+        if parent is None:
+            raise RuntimeError(f'Родительский каталог не найден или удалён: {parent_path or "/"}')
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE cloud_folders SET deleted_at='', updated_at=? WHERE path LIKE ? OR path=?",
+                    (now, f"{clean_path}/%", clean_path),
+                )
+                conn.execute(
+                    "UPDATE cloud_files SET deleted_at='', updated_at=? WHERE path LIKE ? OR path=?",
+                    (now, f"{clean_path}/%", clean_path),
+                )
+                saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
+        assert saved is not None
+        return self._folder_from_row(saved)
 
     def queue_job(self, *, job_type: str, status: str = 'pending', file_id: str = '', version_id: str = '', payload: Optional[Dict[str, Any]] = None) -> CloudDriveJob:
         now = _utc_now()
@@ -728,6 +790,7 @@ class CloudDriveRegistryDB:
             is_root=bool(int(row['is_root'] or 0)),
             created_at=str(row['created_at'] or ''),
             updated_at=str(row['updated_at'] or ''),
+            deleted_at=str(row['deleted_at'] or '') if 'deleted_at' in row.keys() else '',
         )
 
     def _file_from_row(self, row: sqlite3.Row) -> CloudDriveFile:

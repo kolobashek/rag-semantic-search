@@ -375,6 +375,21 @@ def api_cloud_drive_delete(path: str = "", auth_token: str = "", authorization: 
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/cloud-drive/restore")
+def api_cloud_drive_restore(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    _require_cloud_drive_path_access(cfg, user, path)
+    service = CloudDriveService.from_config(cfg)
+    try:
+        result = service.restore_node(path)
+        _audit_cloud_drive_api_event(cfg, user, "restore", details={"path": path, "result": result})
+        return result
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "restore", ok=False, details={"path": path, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/cloud-drive/reindex")
 def api_cloud_drive_reindex(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()

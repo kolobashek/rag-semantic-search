@@ -474,7 +474,7 @@ Codex:
 - [ ] Реализовать production S3/MinIO path: upload/download, presigned URLs, health, failure modes.
 - [x] Добавить immutable storage keys и path-independent `doc_id`: новые upload/bootstrap объекты получают content-addressed `objects/sha256/...`, rename/move меняют registry path без перемещения storage object.
 - [x] Добавить dedup by checksum: одинаковый контент переиспользует один storage object.
-- [ ] Добавить soft delete/trash/restore.
+- [x] Добавить soft delete/trash/restore backend: файлы/папки помечаются `deleted_at`, storage сохраняется, добавлены `restore_node()` и `/api/cloud-drive/restore`.
 - [ ] Добавить file change feed / delta endpoints.
 - [ ] Добавить conflict model и selective sync backend.
 - [ ] Добавить cleanup job для удалённых/старых Qdrant points.

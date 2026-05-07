@@ -138,7 +138,15 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     deleted_folder = service.delete_node('Archive')
     assert deleted_folder['node_type'] == 'folder'
     assert registry.get_folder_by_path('Archive') is None
-    assert registry.get_file_by_path('Archive/hello.txt') is None
+    deleted_child = registry.get_file_by_path('Archive/hello.txt')
+    assert deleted_child is not None
+    assert deleted_child.deleted_at != ''
+
+    restored_folder = service.restore_node('Archive')
+    assert restored_folder['node_type'] == 'folder'
+    assert restored_folder['deleted_at'] == ''
+    assert registry.get_folder_by_path('Archive') is not None
+    assert registry.get_file_by_path('Archive/hello.txt').deleted_at == ''
 
 
 def test_service_auto_queues_and_runs_reindex_jobs(tmp_path: Path) -> None:
@@ -466,7 +474,9 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
     assert fetched is not None
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_jobs)").fetchall()}
+        folder_columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_folders)").fetchall()}
         version = conn.execute("SELECT schema_version FROM schema_meta WHERE db_kind='cloud_drive'").fetchone()[0]
     assert 'started_at' in columns
     assert 'finished_at' in columns
-    assert int(version) == 2
+    assert 'deleted_at' in folder_columns
+    assert int(version) == 3
