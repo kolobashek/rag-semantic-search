@@ -563,7 +563,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 async def submit_click() -> None:
                     await run_search(str(search_input.value or ""))
 
-                ui.button(icon="search", on_click=submit_click, color="primary").props("unelevated round")
+                ui.button(icon="search", on_click=submit_click, color="primary").props("unelevated round").tooltip("Поиск (Ctrl+K для фокуса)")
 
             def handle_input(_: events.GenericEventArguments | None = None) -> None:
                 state.query = str(search_input.value or "")
@@ -1698,6 +1698,15 @@ def _build_page(initial_screen: str = "search") -> None:
                     return
             ui.notify("Исходный файл недоступен на диске.", type="warning")
 
+        async def _cd_reindex_file(file_path: str) -> None:
+            try:
+                job = await run.io_bound(svc.enqueue_reindex, file_path)
+                ui.notify(f"Переиндексация запущена (job {str(job.id or '')[:8]})", type="positive")
+                _log_app_event(page_state, "cd_explorer", "reindex_file", details={"path": file_path})
+            except Exception as exc:
+                ui.notify(f"Ошибка: {exc}", type="negative")
+            render()
+
         # ── Layout skeleton ───────────────────────────────────────────────
         with ui.row().classes("rag-explorer-v2-layout w-full gap-3 items-start"):
             tree_col = ui.column().classes("rag-explorer-tree rag-card p-3 gap-2")
@@ -2075,6 +2084,13 @@ def _build_page(initial_screen: str = "search") -> None:
                                                 on_click=lambda fi=f: _cd_move_dialog(fi.path, fi.name, is_folder=False),
                                                 auto_close=True,
                                             )
+                                            if _is_admin(state):
+                                                ui.separator()
+                                                ui.menu_item(
+                                                    "Переиндексировать",
+                                                    on_click=lambda fi=f: _cd_reindex_file(fi.path),
+                                                    auto_close=True,
+                                                )
                                             ui.separator()
                                             ui.menu_item(
                                                 "Удалить файл…",
@@ -2128,6 +2144,13 @@ def _build_page(initial_screen: str = "search") -> None:
                                                 on_click=lambda fi=f: _cd_move_dialog(fi.path, fi.name, is_folder=False),
                                                 auto_close=True,
                                             )
+                                            if _is_admin(state):
+                                                ui.separator()
+                                                ui.menu_item(
+                                                    "Переиндексировать",
+                                                    on_click=lambda fi=f: _cd_reindex_file(fi.path),
+                                                    auto_close=True,
+                                                )
                                             ui.separator()
                                             ui.menu_item(
                                                 "Удалить файл…",
