@@ -57,6 +57,15 @@ class CloudDriveService:
     def list_bootstrap_jobs(self, *, limit: int = 20) -> list[CloudDriveJob]:
         return self.registry.list_jobs(job_type='bootstrap', limit=limit)
 
+    def get_job(self, job_id: str) -> Optional[CloudDriveJob]:
+        return self.registry.get_job(job_id)
+
+    def get_latest_job(self, *, job_type: str) -> Optional[CloudDriveJob]:
+        return self.registry.get_latest_job(job_type=job_type)
+
+    def list_jobs(self, *, job_type: str = '', limit: int = 20) -> list[CloudDriveJob]:
+        return self.registry.list_jobs(job_type=(job_type or None), limit=limit)
+
     def get_storage_health(self) -> CloudDriveStorageHealth:
         result = dict(self.storage.healthcheck())
         return CloudDriveStorageHealth(
@@ -584,11 +593,11 @@ class CloudDriveService:
         emit_progress('done', current_path=str(root), done=True)
         return self.registry.stats()
 
-    def enqueue_reindex(self, path: str) -> None:
+    def enqueue_reindex(self, path: str) -> CloudDriveJob:
         file_row = self.registry.get_file_by_path(path)
         if file_row is None:
             raise RuntimeError(f'Файл не найден в registry: {path}')
-        self.registry.queue_job(
+        return self.registry.queue_job(
             job_type='reindex',
             file_id=file_row.id,
             version_id=file_row.current_version_id,

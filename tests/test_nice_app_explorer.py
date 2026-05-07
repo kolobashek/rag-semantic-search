@@ -4,6 +4,9 @@ import io
 from dataclasses import dataclass
 from tempfile import SpooledTemporaryFile
 
+import pytest
+from fastapi import HTTPException
+
 from rag_catalog.ui.nice_app import (
     PageState,
     _apply_explorer_filter_input,
@@ -22,7 +25,11 @@ from rag_catalog.ui.nice_app import (
     api_cloud_drive_create_folder,
     api_cloud_drive_download,
     api_cloud_drive_delete,
+    api_cloud_drive_job,
+    api_cloud_drive_job_latest,
+    api_cloud_drive_jobs,
     api_cloud_drive_move,
+    api_cloud_drive_reindex,
     api_cloud_drive_rename,
     api_cloud_drive_upload,
     api_cloud_drive_list,
@@ -34,6 +41,7 @@ import rag_catalog.ui.nice_app as nice_app
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.cloud_drive.service import CloudDriveService
+from rag_catalog.core.user_auth_db import UserAuthDB
 from starlette.datastructures import UploadFile
 
 
@@ -358,6 +366,7 @@ def test_cloud_drive_bootstrap_status_api_reads_current_status(monkeypatch) -> N
     expected = {"status": "running", "files_imported": 12}
 
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
     monkeypatch.setattr(nice_app, "_read_cloud_bootstrap_status", lambda current_cfg: expected if current_cfg == cfg else {})
 
     assert api_cloud_drive_bootstrap_status() == expected
@@ -370,6 +379,7 @@ def test_cloud_drive_bootstrap_status_returns_idle_without_jobs(monkeypatch, tmp
         "cloud_drive_storage_root": str(tmp_path / "storage"),
     }
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
 
     status = api_cloud_drive_bootstrap_status()
 
@@ -404,6 +414,7 @@ def test_cloud_drive_bootstrap_jobs_api_returns_serialized_jobs(monkeypatch, tmp
         "load_config",
         lambda: dict(cfg),
     )
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
 
     jobs = api_cloud_drive_bootstrap_jobs(limit=1)
 
@@ -422,12 +433,36 @@ def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
         "cloud_drive_storage_root": str(tmp_path / "storage"),
     }
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
 
     health = api_cloud_drive_storage_health()
 
     assert health["backend"] == "local"
     assert health["ok"] is True
     assert health["writable"] is True
+
+
+def test_cloud_drive_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    bootstrap = service.registry.queue_job(job_type="bootstrap", status="running", payload={"progress": {"step": 1}})
+    reindex = service.registry.queue_job(job_type="reindex", status="pending", payload={"scope": "file"})
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+
+    jobs = api_cloud_drive_jobs(limit=10)
+    latest = api_cloud_drive_job_latest(job_type="bootstrap")
+    fetched = api_cloud_drive_job(job_id=reindex.id)
+
+    assert len(jobs) == 2
+    assert latest["id"] == bootstrap.id
+    assert latest["started_at"] != ""
+    assert fetched["id"] == reindex.id
+    assert fetched["job_type"] == "reindex"
 
 
 def test_cloud_drive_node_and_list_api(monkeypatch, tmp_path) -> None:
@@ -456,6 +491,7 @@ def test_cloud_drive_node_and_list_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A/hello.txt",
     )
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
 
     root_node = api_cloud_drive_node()
     folder_node = api_cloud_drive_node("Folder A")
@@ -484,6 +520,7 @@ def test_cloud_drive_create_folder_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A",
     )
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
 
     created = api_cloud_drive_create_folder(parent_path="Folder A", name="Nested")
 
@@ -521,6 +558,7 @@ def test_cloud_drive_download_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A/hello.txt",
     )
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
 
     response = api_cloud_drive_download("Folder A/hello.txt")
 
@@ -551,6 +589,7 @@ def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:
     upload = UploadFile(file=buffer, filename="hello.txt", headers={"content-type": "text/plain"})
 
     import asyncio
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
     result = asyncio.run(api_cloud_drive_upload(parent_path="Folder A", file=upload))
 
     assert result["node_type"] == "file"
@@ -580,6 +619,7 @@ def test_cloud_drive_versions_api(monkeypatch, tmp_path) -> None:
     service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain")
     service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file2), mime_type="text/plain")
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
 
     versions = api_cloud_drive_versions("Folder A/hello.txt")
 
@@ -617,6 +657,7 @@ def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A/hello.txt",
     )
     monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
 
     renamed = api_cloud_drive_rename(path="Folder A/hello.txt", new_name="renamed.txt")
     moved = api_cloud_drive_move(source_path="Folder A", dest_parent_path="", new_name="Archive")
@@ -626,3 +667,65 @@ def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
     assert moved["path"] == "Archive"
     assert deleted["node_type"] == "folder"
     assert service.registry.get_folder_by_path("Archive") is None
+
+
+def test_cloud_drive_reindex_api_queues_job(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    folder = service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    source_file = tmp_path / "hello.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    created = service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain")
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(nice_app, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+
+    job = api_cloud_drive_reindex(path="Folder A/hello.txt")
+
+    assert job["job_type"] == "reindex"
+    assert job["status"] == "pending"
+    assert job["file_id"] == created["id"]
+
+
+def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "users_db_path": str(tmp_path / "users.db"),
+    }
+    auth_db = UserAuthDB(cfg["users_db_path"])
+    assert auth_db.admin_create_user(username="user", password="8215", role="user", status="active")
+    token = auth_db.create_session(username="user")
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    user = nice_app._require_cloud_drive_api_user(cfg, auth_token=token)
+
+    assert user["username"] == "user"
+
+
+def test_cloud_drive_api_admin_guard_rejects_non_admin(tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "users_db_path": str(tmp_path / "users.db"),
+    }
+    auth_db = UserAuthDB(cfg["users_db_path"])
+    assert auth_db.admin_create_user(username="user", password="8215", role="user", status="active")
+    token = auth_db.create_session(username="user")
+
+    with pytest.raises(HTTPException) as exc:
+        nice_app._require_cloud_drive_api_user(cfg, auth_token=token, admin_only=True)
+
+    assert exc.value.status_code == 403

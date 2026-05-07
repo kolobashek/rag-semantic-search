@@ -76,6 +76,18 @@
   - `POST /api/cloud-drive/rename`
   - `POST /api/cloud-drive/delete`
 - Cloud Drive service и registry получили операции `move_node()` / `delete_node()` с обновлением storage key для local storage.
+- добавлены базовые session-based auth/authorization hooks для Cloud Drive API:
+  - read endpoints требуют валидную пользовательскую сессию;
+  - write endpoints требуют валидную пользовательскую сессию;
+  - admin endpoints (`bootstrap-status`, `bootstrap-jobs`, `storage-health`) требуют роль `admin`.
+- добавлены общие admin endpoints для `cloud_jobs`:
+  - `GET /api/cloud-drive/jobs`
+  - `GET /api/cloud-drive/job`
+  - `GET /api/cloud-drive/job-latest`
+- Cloud Drive service получил общие методы `get_job()` / `get_latest_job()` / `list_jobs()` для API и дальнейшей интеграции UI.
+- добавлен первый registry-to-index bridge endpoint:
+  - `POST /api/cloud-drive/reindex`
+- Cloud Drive service получил `enqueue_reindex()` c возвратом `reindex` job для file/version сущности.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -171,8 +183,8 @@
   - [x] download;
   - [x] rename/move/delete;
   - [x] versions;
-  - jobs/status.
-- Подготовить auth/authorization hooks для API.
+  - [x] jobs/status.
+- [x] Подготовить базовые auth/authorization hooks для API.
 - [x] Добавить endpoint bootstrap status / job status.
 
 #### 4. Search/index integration
@@ -182,6 +194,7 @@
   - version_id;
   - source_path/storage_key;
   - index state per version.
+- [x] Добавить первый registry-driven `reindex` job endpoint для file/version сущностей.
 - Перестроить pipeline:
   - import -> extract -> OCR -> chunk -> embeddings -> Qdrant/lexical.
 - Связать cloud registry с `index_state`/telemetry.
