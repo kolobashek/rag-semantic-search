@@ -527,8 +527,12 @@ def _build_page(initial_screen: str = "search") -> None:
                     with ui.column().classes(col_cls):
                         ui.label("Часто ищут").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
                         for item in popular:
-                            btn = ui.button(item, icon="trending_up", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button rag-suggest-item w-full")
-                            btn.tooltip(item)
+                            with ui.row().classes("w-full items-center gap-1"):
+                                btn = ui.button(item, icon="trending_up", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button rag-suggest-item flex-1")
+                                btn.tooltip(item)
+                                if item.lower() in cloud_qs:
+                                    ci = ui.icon("cloud", size="14px").classes("text-blue-400 shrink-0")
+                                    ci.tooltip("Этот запрос ранее возвращал Cloud Drive документы")
 
     def render_search_box() -> None:
         with ui.column().classes("rag-search-shell w-full max-w-5xl"):
@@ -2059,9 +2063,9 @@ def _build_page(initial_screen: str = "search") -> None:
                                     if src:
                                         ui.button(
                                             icon="open_in_new",
-                                            on_click=lambda p=src: _open_os_path(str(Path(p).parent)),
+                                            on_click=lambda p=src: _select_in_os_explorer(p),
                                             color=None,
-                                        ).props("flat round dense").tooltip("Открыть папку в Проводнике")
+                                        ).props("flat round dense").tooltip("Выделить файл в Проводнике Windows")
                                     ui.button(
                                         icon="history",
                                         on_click=lambda fi=f: _cd_versions_dialog(fi),
@@ -2328,6 +2332,9 @@ def _build_page(initial_screen: str = "search") -> None:
                 current_details = _safe_explorer_path(state)
                 ui.label(current_details.name or str(current_details)).classes("font-semibold truncate")
                 ui.label(str(current_details)).classes("rag-path")
+                with ui.row().classes("w-full gap-1 mt-1"):
+                    ui.button(icon="content_copy", on_click=lambda p=current_details: copy_path(p), color=None).props("flat round dense").tooltip("Скопировать путь")
+                    ui.button(icon="open_in_new", on_click=lambda p=current_details: _open_os_path(str(p)), color=None).props("flat round dense").tooltip("Открыть в Проводнике Windows")
 
         def render_entries() -> None:
             entries_area.clear()
@@ -5715,6 +5722,11 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.label("Cloud Drive — журнал операций").classes("font-semibold text-sm")
                     tdb = _get_telemetry(state)
                     cd_events_raw = tdb.list_app_events(feature="cloud_drive", limit=200) if tdb else []
+
+                    with ui.row().classes("w-full gap-2"):
+                        cd_action_filter = ui.input("Операция").props("dense outlined clearable").classes("w-48")
+                        cd_user_filter2 = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
+
                     cd_events_table = ui.table(
                         rows=cd_events_raw,
                         columns=[
@@ -5725,9 +5737,6 @@ def _build_page(initial_screen: str = "search") -> None:
                         ],
                         pagination=15,
                     ).classes("w-full")
-
-                    cd_action_filter = ui.input("Операция").props("dense outlined clearable").classes("w-48")
-                    cd_user_filter2 = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
 
                     def refresh_cd_audit() -> None:
                         rows = list(cd_events_raw)
