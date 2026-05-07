@@ -281,6 +281,25 @@ def _dedupe_queries(values: List[str], limit: int = 12) -> List[str]:
     return out
 
 
+def _cloud_query_set(cfg: Dict[str, Any], username: str = "") -> "set[str]":
+    """Return set of lowercase query strings that previously returned ≥1 Cloud Drive result for this user."""
+    try:
+        from rag_catalog.core.telemetry_db import TelemetryDB
+        path = _telemetry_db_path(cfg)
+        telemetry = TelemetryDB(str(path))
+        events = telemetry.list_app_events(feature="search", action="search", username=username or None, limit=200)
+        out: set[str] = set()
+        for ev in events:
+            details = ev.get("details") or {}
+            if int(details.get("cloud_results") or 0) > 0:
+                q = str(details.get("query_original") or details.get("query") or "").strip().lower()
+                if q:
+                    out.add(q)
+        return out
+    except Exception:
+        return set()
+
+
 def _my_recent_queries(cfg: Dict[str, Any], username: str = "", limit: int = 12) -> List[str]:
     rows = _db_query_dicts(
         _telemetry_db_path(cfg),

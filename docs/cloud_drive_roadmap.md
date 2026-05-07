@@ -292,7 +292,7 @@ _Коммит: f73fb36 (feat(ui): Cloud Drive Sprint 3 — upload, versions, dow
 - [x] Клик по папке → переход в explorer на эту папку.
 - [x] Клик по файлу → открытие viewer (если файл на диске).
 - [ ] Визуально связать результаты поиска с версией, preview и действиями — ждёт Codex.
-- [ ] История запросов под новую Cloud Drive модель.
+- [x] История запросов под новую Cloud Drive модель.
 
 _Коммит: 487abb8 (feat(ui): Cloud Drive search hints — registry name matching in search)_
 

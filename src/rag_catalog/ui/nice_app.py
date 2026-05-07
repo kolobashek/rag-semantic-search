@@ -39,6 +39,7 @@ from .helpers import (
     _cd_list_children,
     _cd_search_by_name,
     _clean_text,
+    _cloud_query_set,
     _count_exact_name_matches,
     _db_query_dicts,
     _dedupe_queries,
@@ -468,6 +469,7 @@ def _build_page(initial_screen: str = "search") -> None:
         username = _username(state)
         personal = _dedupe_queries([*state.history, *_my_recent_queries(state.cfg, username, limit=12)], limit=12)
         popular = _popular_queries(state.cfg, exclude_username=username, limit=10)
+        cloud_qs = _cloud_query_set(state.cfg, username) if bool(state.cfg.get("cloud_drive_enabled")) else set()
 
         needle = typed.strip().lower()
         if needle:
@@ -488,8 +490,12 @@ def _build_page(initial_screen: str = "search") -> None:
                     with ui.column().classes(col_cls):
                         ui.label("Моя история").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
                         for item in personal:
-                            btn = ui.button(item, icon="history", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button rag-suggest-item w-full")
-                            btn.tooltip(item)
+                            with ui.row().classes("w-full items-center gap-1"):
+                                btn = ui.button(item, icon="history", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button rag-suggest-item flex-1")
+                                btn.tooltip(item)
+                                if item.lower() in cloud_qs:
+                                    ci = ui.icon("cloud", size="14px").classes("text-blue-400 shrink-0")
+                                    ci.tooltip("Этот запрос ранее возвращал Cloud Drive документы")
                 # Правая колонка — часто ищут
                 if popular:
                     col_cls = "flex-1 gap-1 min-w-0" + (" pl-3" if personal else "")
