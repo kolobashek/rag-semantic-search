@@ -462,7 +462,7 @@ Codex:
   - [x] Вынести stage runner в `src/rag_catalog/core/indexing/stage_runner.py`.
 - [x] Вынести Cloud Drive API из `nice_app.py` в отдельный модуль: endpoint'ы находятся в `src/rag_catalog/ui/api.py`, `nice_app.py` только импортирует модуль регистрации routes.
 - [x] Вынести auth/session helpers из `nice_app.py`: session restore/touch/login/logout вынесены в `src/rag_catalog/ui/auth_session.py`; login screens остаются UI-слоем.
-- [ ] Доделать миграцию root shims в тонкие entrypoints и убрать legacy-дубли.
+- [x] Доделать миграцию root shims в тонкие entrypoints: все корневые совместимые entrypoints используют общий `_entrypoint_shim.py`; legacy `rag_search_fixed.py` оставлен как deprecation shim для старых команд и тестов.
 
 Claude:
 - [x] Разрезать UI: nice_app.py 6085→1820 lines; extracted explorer_view, settings_view, stats_view, index_view.
