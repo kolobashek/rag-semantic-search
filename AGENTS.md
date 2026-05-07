@@ -1,35 +1,79 @@
 # Agent Workflow
 
-This repository is used by multiple coding agents. Follow these rules for the whole repo unless a deeper `AGENTS.md` overrides them.
+This repository is shared by Codex, Claude, and the user. These rules apply to the whole repo unless a deeper `AGENTS.md` overrides them.
 
-## Branch discipline
+## Operating Model
 
-- Never work directly on `main`.
-- Claude uses branches named `claude/<task>`.
-- Codex uses branches named `codex/<task>`.
-- Start every task from the current `main` unless the user explicitly asks otherwise.
-- Merge into `main` only after the task is validated and the user asks to sync or merge.
+- `main` is the canonical working line for this project.
+- Small validated stages may be committed directly to `main` in the primary catalog.
+- Use a separate `codex/<task>` or `claude/<task>` branch only for risky, long-running, or conflicting work.
+- Do not keep parallel architecture experiments alive after a decision is made; archive or delete them.
+- `docs/cloud_drive_roadmap.md` is the source of truth for Cloud Drive task ownership and remaining work.
 
-## Worktree discipline
+## Agent Ownership
 
-- Prefer one worktree per active branch.
-- Do not reuse a worktree that is already attached to another branch if that risks hidden local state.
-- If `main` is checked out in the primary catalog, do not force-switch it for task work; use a separate worktree branch instead.
+- Codex owns backend/system work by default:
+  - data model and migrations;
+  - storage contracts;
+  - API endpoints;
+  - auth, jobs, recovery, launcher;
+  - index/search/OCR integration;
+  - tests and CI.
+- Claude owns product/UI work by default:
+  - NiceGUI screens and workflows;
+  - explorer/search UX;
+  - admin/user settings;
+  - visual states and copy;
+  - client-side sync UX.
+- If an agent touches the other agent's area, keep the change narrow and update the roadmap/handoff notes.
 
-## Logging and handoff
+## Commit Discipline
 
-- Update `WORKLOG.md` when you start or finish a significant task.
-- Record: agent, branch, base commit, short task summary, current status.
-- If you stash local changes during sync, record the stash name in `WORKLOG.md`.
+- Commit after each coherent stage.
+- Push `main` after a successful stage unless the user explicitly asks to keep changes local.
+- Keep commits focused; do not mix runtime data, generated DBs, and source changes.
+- Do not commit `data/`, `runtime/`, logs, tokens, local DB WAL/SHM files, or machine-specific caches.
+- Update `docs/cloud_drive_roadmap.md` after every Cloud Drive stage.
+- Update `README.md` only for user-facing operational changes, not for every internal refactor.
 
-## Git hygiene
+## Sync Discipline
 
-- Keep commits focused and readable.
-- Do not rewrite another agent's history unless the user explicitly requests it.
-- Prefer merge or cherry-pick over manual file copying between branches.
-- Before syncing the primary catalog, inspect `git status`, `git branch --all`, and a short graph log.
+- Before starting work, run at least:
+  - `git status --short`
+  - `git fetch`
+  - compare local `main` with `origin/main` when needed.
+- Prefer fast-forward/pull only when the worktree is clean or the pending changes are understood.
+- Never overwrite another agent's uncommitted work.
+- If a stash is created, immediately record why it exists and remove or archive it before ending the cleanup.
 
 ## Validation
 
-- Run the most relevant tests for the changed area before merging.
-- If full test suite is feasible, prefer running it before syncing `main`.
+- Run focused tests for the changed area before each commit.
+- For Cloud Drive API/backend changes, prefer targeted tests in:
+  - `tests/test_cloud_drive_registry.py`
+  - `tests/test_cloud_drive_storage.py`
+  - `tests/test_cloud_drive_cli.py`
+  - `tests/test_nice_app_explorer.py`
+- Run `py_compile` for changed Python entrypoints/modules.
+- If full `pytest` has known unrelated failures, state that explicitly and run the relevant focused subset.
+
+## Launcher and Runtime
+
+- Use the launcher for local stack control:
+  - `python -m rag_catalog.cli.launcher status`
+  - `python -m rag_catalog.cli.launcher restart`
+- The primary catalog is `D:\Docs\Claude\Projects\Semantic search`.
+- Runtime artifacts are local state, not source:
+  - `data/`
+  - `runtime/`
+  - `logs/`
+
+## Handoff Notes
+
+- Use `WORKLOG.md` for significant handoffs, migrations, branch cleanup, or operational state that is not obvious from commits.
+- Record only facts that help the next agent continue:
+  - current branch/commit;
+  - active service state;
+  - known test failures;
+  - pending blockers;
+  - archived branches/stashes.

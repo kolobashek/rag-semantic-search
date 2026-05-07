@@ -1,27 +1,31 @@
 # Worklog
 
-## Current branch policy
-
-- `main`: stable and sync-ready only
-- `claude/<task>`: Claude task branches
-- `codex/<task>`: Codex task branches
-
-## Active state
+## Current Operating Mode
 
 - Primary catalog: `D:\Docs\Claude\Projects\Semantic search`
-- Current branch in primary catalog: `main`
-- Current synced commit on `main`: `223112d`
+- Canonical branch: `main`
+- Current collaboration model: short validated stages committed and pushed directly to `main`
+- Cloud Drive source of truth: `docs/cloud_drive_roadmap.md`
 
-## Recent sync
+## Agent Ownership
 
-- Date: `2026-05-06`
-- Synced source branch: `codex/sync-main`
-- Result: `main` fast-forwarded/reset to `223112d`
-- Preserved local state before sync: `stash@{0}` message `pre-sync`
+- Codex: backend, APIs, data model, jobs, storage contracts, auth, launcher, tests, CI, index/search/OCR integration.
+- Claude: NiceGUI UX, explorer/search screens, admin/user settings, product flows, client-side sync UX.
 
-## Update template
+## Runtime State
 
-Copy and append this block for future work:
+- Runtime DBs live under `data/`.
+- Launcher/runtime state lives under `runtime/`.
+- These folders are intentionally not committed.
+
+## Archived State
+
+- Old `pre-sync` stash was archived into branch `archive/pre-sync-stash` and removed from `git stash`.
+- `main.lock.bak` was removed because its commit is already contained in `main`.
+
+## Update Template
+
+Append this block only for significant handoffs, migrations, or operational state:
 
 ```text
 Date:
@@ -34,28 +38,24 @@ Validation:
 Notes:
 ```
 
-## Recent work
+## Recent Operational Notes
 
 ```text
 Date: 2026-05-06
 Agent: Codex
 Branch: main
-Base commit: 006830e
-Task: unify config resolution across worktrees and add SQLite schema compatibility guard
-Status: implemented locally
-Validation: py_compile; pytest tests/test_db_contract.py tests/test_telemetry_db.py tests/test_index_state_db.py
-Notes: nested .claude/.codex worktrees now reuse nearest ancestor config.json; telemetry/user_auth/index_state DBs now reject newer schema with explicit error
+Task: move runtime SQLite/state from O:\qdrant_db to project data directory
+Status: completed
+Validation: launcher restart; /index smoke; state totals verified after copy
+Notes: app still uses O:\Обмен as catalog source, but telemetry/users/index_state DBs are local under data/
 ```
 
 ```text
-Date: 2026-05-06
-Agent: Codex
+Date: 2026-05-07
+Agent: Codex + Claude
 Branch: main
-Base commit: 006830e
-Task: make launcher detect already running shared-instance services across worktrees
-Status: implemented locally
-Validation: py_compile; pytest tests/test_launcher.py; launcher status/start smoke
-Notes: launcher now stores PID state in shared runtime derived from config paths; bot uses process discovery fallback and status reports discovered running instance
+Task: Cloud Drive foundation, API, admin UI, explorer UI, file actions, jobs/status, auth hooks
+Status: in progress according to docs/cloud_drive_roadmap.md
+Validation: focused Cloud Drive tests per stage; launcher restart smoke after backend/API changes
+Notes: remaining P0 is end-to-end Cloud Drive reindex -> index/search pipeline
 ```
-
-- 2026-05-06: SQLite/state migrated to D:\Docs\Claude\Projects\Semantic search\data ("rag_telemetry.db", "rag_users.db", "index_state.db"). Config switched off O:\qdrant_db. State bootstrapped from D:\qdrant_state\index_state.json because O: was unavailable; current local state snapshot contains 4299 entries.
