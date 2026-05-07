@@ -32,6 +32,7 @@ from .helpers import (
     PAGE_SIZE,
     _apply_explorer_filter_input,
     _cd_breadcrumb_chain,
+    _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
     _cd_list_children,
@@ -1474,6 +1475,31 @@ def _build_page(initial_screen: str = "search") -> None:
         page_state.explorer_page = max(0, min(page_state.explorer_page, max(0, (total_files - 1) // page_size)))
         page_files = child_files[page_state.explorer_page * page_size : (page_state.explorer_page + 1) * page_size]
 
+        # Per-file job status map (single DB query for the current page)
+        _page_file_ids = [f.id for f in page_files]
+        _file_jobs = _cd_file_jobs_map(svc.registry, _page_file_ids)
+
+        _JOB_ICON = {"pending": "hourglass_empty", "running": "sync", "completed": "check_circle", "failed": "error_outline"}
+        _JOB_CSS  = {"pending": "cd-status-pending", "running": "cd-status-running", "completed": "cd-status-done", "failed": "cd-status-error"}
+        _JOB_TIP  = {"pending": "В очереди на индексацию", "running": "Индексируется…", "completed": "Проиндексировано", "failed": "Ошибка индексации"}
+
+        def _render_file_status(file_id: str) -> None:
+            job = _file_jobs.get(file_id)
+            if not job:
+                return
+            status = job.get("status", "")
+            if status not in _JOB_ICON or status == "completed":
+                return
+            tip = _JOB_TIP[status]
+            if status == "failed" and job.get("last_error"):
+                tip = f"Ошибка: {job['last_error'][:80]}"
+            label_text = {"pending": "В очереди", "running": "Индексируется", "failed": "Ошибка"}.get(status, "")
+            with ui.element("span").classes(f"cd-status-badge {_JOB_CSS[status]}"):
+                ui.icon(_JOB_ICON[status], size="14px")
+                if label_text:
+                    ui.label(label_text)
+                ui.tooltip(tip)
+
         # ── Tree column ───────────────────────────────────────────────────
         with tree_col:
             ui.label("ДЕРЕВО").classes("rag-section-label")
@@ -1718,6 +1744,7 @@ def _build_page(initial_screen: str = "search") -> None:
                                             on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
+                                    _render_file_status(f.id)
                                     with ui.button(icon="more_vert", color=None).props("flat round dense"):
                                         with ui.menu():
                                             ui.menu_item(
@@ -1770,6 +1797,7 @@ def _build_page(initial_screen: str = "search") -> None:
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
                                     render_star(Path(f.source_path or f.path or f.name), item_type="file")
+                                    _render_file_status(f.id)
                                     with ui.button(icon="more_vert", color=None).props("flat round dense"):
                                         with ui.menu():
                                             ui.menu_item(
