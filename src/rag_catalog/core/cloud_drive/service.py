@@ -392,6 +392,32 @@ class CloudDriveService:
             import_files=bool(payload.get('import_files')),
         )
 
+    def retry_job(self, job_id: str) -> CloudDriveJob:
+        job = self.registry.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f'Job не найден: {job_id}')
+        if job.job_type == 'bootstrap':
+            return self.retry_bootstrap_job(job_id)
+        if job.job_type not in {'reindex', 'cleanup'}:
+            raise RuntimeError(f'Retry не поддержан для job_type={job.job_type}')
+        payload = dict(job.payload or {})
+        progress = dict(payload.get('progress') or {})
+        progress.update(
+            {
+                'status': 'pending',
+                'retried_from_job_id': job.id,
+                'queued_at': datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        payload['progress'] = progress
+        payload['retried_from_job_id'] = job.id
+        return self.registry.queue_job(
+            job_type=job.job_type,
+            file_id=job.file_id,
+            version_id=job.version_id,
+            payload=payload,
+        )
+
     def recover_bootstrap_jobs(self) -> int:
         recovered = 0
         for job in self.list_bootstrap_jobs(limit=100):

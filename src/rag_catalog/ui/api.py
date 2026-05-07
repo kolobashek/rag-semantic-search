@@ -318,3 +318,15 @@ def api_cloud_drive_job_run(job_id: str, auth_token: str = "") -> Dict[str, Any]
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _serialize_cloud_drive_job(job)
+
+
+@app.post("/api/cloud-drive/job-retry")
+def api_cloud_drive_job_retry(job_id: str, auth_token: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    _require_cloud_drive_api_user(cfg, auth_token=auth_token, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    try:
+        job = service.retry_job(job_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _serialize_cloud_drive_job(job)

@@ -35,6 +35,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_file_statuses,
     api_cloud_drive_job_latest,
     api_cloud_drive_job_run,
+    api_cloud_drive_job_retry,
     api_cloud_drive_jobs,
     api_cloud_drive_move,
     api_cloud_drive_reindex,
@@ -766,6 +767,43 @@ def test_cloud_drive_job_run_api_processes_reindex_job(monkeypatch, tmp_path) ->
     assert result["status"] == "completed"
     assert result["progress"]["status"] == "done"
     assert result["progress"]["indexed"] is False
+
+
+def test_cloud_drive_job_retry_api_requeues_failed_reindex(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    folder = service.registry.upsert_folder(path="Folder A", name="Folder A", parent_id=root.id, depth=1, source_path="")
+    file_row = service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Folder A/hello.txt",
+        name="hello.txt",
+        storage_key="Folder A/hello.txt",
+        mime_type="text/plain",
+        size_bytes=5,
+        checksum="abc",
+        source_path="",
+    )
+    failed = service.registry.queue_job(
+        job_type="reindex",
+        status="failed",
+        file_id=file_row.id,
+        version_id=file_row.current_version_id,
+        payload={"path": file_row.path, "progress": {"status": "failed"}},
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+
+    retried = api_cloud_drive_job_retry(job_id=failed.id)
+
+    assert retried["job_type"] == "reindex"
+    assert retried["status"] == "pending"
+    assert retried["file_id"] == file_row.id
+    assert retried["payload"]["retried_from_job_id"] == failed.id
 
 
 def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:

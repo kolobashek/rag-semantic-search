@@ -97,6 +97,8 @@
 - `cleanup` jobs удаляют Qdrant points по Cloud Drive identity.
 - добавлен API статусов по файлам:
   - `GET /api/cloud-drive/file-statuses`
+- добавлен retry/requeue API для registry jobs:
+  - `POST /api/cloud-drive/job-retry`
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -396,7 +398,7 @@ Codex:
 - [x] На upload/move/rename/delete автоматически ставить нужные reindex/cleanup jobs.
 - [x] Сделать local storage-aware indexing для файлов, загруженных в Cloud Drive storage вне `catalog_path`.
 - [x] Добавить per-file job status API для indexing/OCR/preview/error.
-- [ ] Добавить retry/requeue для registry jobs.
+- [x] Добавить retry/requeue для registry jobs.
 - [x] Добавить cleanup job для удалённых/старых Qdrant points.
 
 Claude:

@@ -227,6 +227,28 @@ def test_service_reindex_job_passes_cloud_identity_to_indexer(tmp_path: Path, mo
     assert process_kwargs['payload_extra']['cloud_path'] == 'Folder A/hello.txt'
 
 
+def test_service_retry_job_requeues_reindex(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    job = registry.queue_job(
+        job_type='reindex',
+        status='failed',
+        file_id='file-1',
+        version_id='version-1',
+        payload={'path': 'Folder A/hello.txt', 'progress': {'status': 'failed'}},
+    )
+
+    retried = service.retry_job(job.id)
+
+    assert retried.id != job.id
+    assert retried.status == 'pending'
+    assert retried.file_id == 'file-1'
+    assert retried.version_id == 'version-1'
+    assert retried.payload['retried_from_job_id'] == job.id
+    assert retried.progress['status'] == 'pending'
+
+
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     job = registry.queue_job(job_type='bootstrap', payload={'catalog_root': 'O:/Обмен', 'progress': {'status': 'pending'}})
