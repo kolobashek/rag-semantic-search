@@ -235,6 +235,7 @@ class CloudDriveService:
             checksum=checksum,
             source_path=str(Path(parent.source_path) / clean_name) if parent.source_path else '',
         )
+        self._queue_reindex_file(file_row, reason='upload')
         return {
             'node_type': 'file',
             'id': file_row.id,
@@ -286,6 +287,9 @@ class CloudDriveService:
                 dest_parent_path=dest_parent_path,
                 new_name=new_name,
             )
+            if file_row.path != source_node.path:
+                self._queue_cleanup_file(source_node, reason='move', path=source_node.path)
+            self._queue_reindex_file(file_row, reason='move')
             return {
                 'node_type': 'file',
                 'id': file_row.id,
@@ -316,6 +320,12 @@ class CloudDriveService:
             dest_parent_path=dest_parent_path,
             new_name=new_name,
         )
+        if new_prefix != old_prefix:
+            for child in self.registry.list_files_under_path(folder.path):
+                suffix = child.path[len(folder.path):].lstrip('/')
+                old_path = f'{old_prefix}/{suffix}' if suffix else old_prefix
+                self._queue_cleanup_file(child, reason='move_folder', path=old_path)
+                self._queue_reindex_file(child, reason='move_folder')
         return {
             'node_type': 'folder',
             'id': folder.id,
@@ -335,6 +345,7 @@ class CloudDriveService:
         if hasattr(source_node, 'folder_id'):
             if self.storage.exists(source_node.storage_key):
                 self.storage.delete(source_node.storage_key)
+            self._queue_cleanup_file(source_node, reason='delete', path=source_node.path)
             file_row = self.registry.delete_file(path)
             return {
                 'node_type': 'file',
@@ -345,6 +356,7 @@ class CloudDriveService:
         for child in self.registry.list_files_under_path(source_node.path):
             if self.storage.exists(child.storage_key):
                 self.storage.delete(child.storage_key)
+            self._queue_cleanup_file(child, reason='delete_folder', path=child.path)
         folder = self.registry.delete_folder(path)
         return {
             'node_type': 'folder',
@@ -392,6 +404,77 @@ class CloudDriveService:
             self.registry.update_job(job.id, status='failed', payload={'progress': progress}, last_error='server_restart_recovery')
             recovered += 1
         return recovered
+
+    def run_reindex_job(self, job_id: str, *, index_config: Optional[Dict[str, object]] = None) -> CloudDriveJob:
+        job = self.registry.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f'Job не найден: {job_id}')
+        if job.job_type not in {'reindex', 'cleanup'}:
+            raise RuntimeError(f'run_reindex_job поддерживает только reindex/cleanup jobs: {job.job_type}')
+
+        progress = dict(job.progress or {})
+        progress.update(
+            {
+                'status': 'running',
+                'started_at': datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self.registry.update_job(job.id, status='running', payload={'progress': progress})
+
+        try:
+            if job.job_type == 'cleanup':
+                progress.update(
+                    {
+                        'status': 'done',
+                        'action': 'cleanup',
+                        'path': str((job.payload or {}).get('path') or ''),
+                        'finished_at': datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                return self.registry.update_job(job.id, status='completed', payload={'progress': progress})
+
+            file_row = self._resolve_job_file(job)
+            if file_row.deleted_at:
+                raise RuntimeError(f'Файл удалён и не может быть переиндексирован: {file_row.path}')
+            source_path = Path(file_row.source_path) if file_row.source_path else Path()
+            storage_path = Path(self.storage.resolve_path(file_row.storage_key))
+            source_exists = bool(source_path and source_path.exists() and source_path.is_file())
+            storage_exists = storage_path.exists() and storage_path.is_file()
+            target_path = source_path if source_exists else storage_path if storage_exists else Path()
+            if not target_path:
+                raise RuntimeError(f'Файл отсутствует в source_path и storage: {file_row.path}')
+
+            indexed = False
+            points_added = 0
+            if index_config:
+                indexed, points_added = self._run_indexer_for_file(target_path=target_path, index_config=index_config)
+
+            progress.update(
+                {
+                    'status': 'done',
+                    'action': 'reindex',
+                    'path': file_row.path,
+                    'file_id': file_row.id,
+                    'version_id': file_row.current_version_id,
+                    'source_path': str(source_path) if source_path else '',
+                    'storage_key': file_row.storage_key,
+                    'storage_path': str(storage_path),
+                    'indexed': bool(indexed),
+                    'points_added': int(points_added),
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            return self.registry.update_job(job.id, status='completed', payload={'progress': progress})
+        except Exception as exc:
+            progress.update(
+                {
+                    'status': 'failed',
+                    'error': str(exc),
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self.registry.update_job(job.id, status='failed', payload={'progress': progress}, last_error=str(exc))
+            raise
 
     def run_bootstrap_job(self, job_id: str) -> CloudDriveStats:
         job = self.registry.get_job(job_id)
@@ -596,9 +679,89 @@ class CloudDriveService:
         file_row = self.registry.get_file_by_path(path)
         if file_row is None:
             raise RuntimeError(f'Файл не найден в registry: {path}')
+        return self._queue_reindex_file(file_row, reason='manual')
+
+    def _queue_reindex_file(self, file_row, *, reason: str) -> CloudDriveJob:
         return self.registry.queue_job(
             job_type='reindex',
             file_id=file_row.id,
             version_id=file_row.current_version_id,
-            payload={'path': file_row.path},
+            payload={
+                'path': file_row.path,
+                'storage_key': file_row.storage_key,
+                'source_path': file_row.source_path,
+                'reason': reason,
+                'progress': {
+                    'status': 'pending',
+                    'action': 'reindex',
+                    'path': file_row.path,
+                    'reason': reason,
+                },
+            },
         )
+
+    def _queue_cleanup_file(self, file_row, *, reason: str, path: str) -> CloudDriveJob:
+        return self.registry.queue_job(
+            job_type='cleanup',
+            file_id=file_row.id,
+            version_id=file_row.current_version_id,
+            payload={
+                'path': path,
+                'storage_key': file_row.storage_key,
+                'source_path': file_row.source_path,
+                'reason': reason,
+                'progress': {
+                    'status': 'pending',
+                    'action': 'cleanup',
+                    'path': path,
+                    'reason': reason,
+                },
+            },
+        )
+
+    def _resolve_job_file(self, job: CloudDriveJob):
+        file_row = self.registry.get_file_by_id(job.file_id) if job.file_id else None
+        if file_row is None:
+            file_row = self.registry.get_file_by_path(str((job.payload or {}).get('path') or ''))
+        if file_row is None:
+            raise RuntimeError(f'Файл job не найден: {job.file_id or (job.payload or {}).get("path") or ""}')
+        return file_row
+
+    def _run_indexer_for_file(self, *, target_path: Path, index_config: Dict[str, object]) -> tuple[bool, int]:
+        catalog_root = Path(str(index_config.get('catalog_path') or ''))
+        if not str(catalog_root).strip():
+            return False, 0
+        try:
+            target_path.resolve().relative_to(catalog_root.resolve())
+        except Exception:
+            return False, 0
+        from rag_catalog.core.index_rag import RAGIndexer
+
+        indexer = RAGIndexer(
+            catalog_path=str(catalog_root),
+            qdrant_db_path=str(index_config.get('qdrant_db_path') or ''),
+            embedding_model=str(index_config.get('embedding_model') or 'sentence-transformers/all-MiniLM-L6-v2'),
+            collection_name=str(index_config.get('collection_name') or index_config.get('qdrant_collection') or 'catalog'),
+            vector_size=int(index_config.get('vector_size') or 384),
+            chunk_size=int(index_config.get('chunk_size') or 500),
+            chunk_overlap=int(index_config.get('chunk_overlap') or 100),
+            batch_size=int(index_config.get('batch_size') or index_config.get('index_batch_size') or 64),
+            recreate_collection=False,
+            skip_ocr=bool(index_config.get('skip_ocr_in_index') or index_config.get('index_skip_ocr')),
+            max_chunks_per_file=int(index_config.get('index_max_chunks') or 0),
+            read_workers=1,
+            use_onnx=bool(index_config.get('use_onnx') or False),
+            qdrant_url=str(index_config.get('qdrant_url') or ''),
+            telemetry_db_path=str(index_config.get('telemetry_db_path') or ''),
+            small_office_mb=float(index_config.get('small_office_mb') or 20.0),
+            small_pdf_mb=float(index_config.get('small_pdf_mb') or 50.0),
+            synonym_map=dict(index_config.get('synonym_map') or {}),
+            ollama_url=str(index_config.get('ollama_url') or 'http://localhost:11434'),
+            ocr_tesseract_cmd=str(index_config.get('ocr_tesseract_cmd') or ''),
+            ocr_poppler_bin=str(index_config.get('ocr_poppler_bin') or ''),
+            qdrant_timeout_sec=int(index_config.get('qdrant_timeout_sec') or 60),
+        )
+        before = int(indexer.point_count)
+        indexer.process_file(target_path)
+        indexer._flush_buffer()
+        return True, max(0, int(indexer.point_count) - before)

@@ -295,6 +295,11 @@ class CloudDriveRegistryDB:
             row = conn.execute('SELECT * FROM cloud_files WHERE path=?', (self._normalize_path(path),)).fetchone()
             return self._file_from_row(row) if row else None
 
+    def get_file_by_id(self, file_id: str) -> Optional[CloudDriveFile]:
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM cloud_files WHERE id=?', (str(file_id),)).fetchone()
+            return self._file_from_row(row) if row else None
+
     def get_node_by_path(self, path: str) -> CloudDriveFolder | CloudDriveFile | None:
         clean_path = self._normalize_path(path)
         folder = self.get_folder_by_path(clean_path)

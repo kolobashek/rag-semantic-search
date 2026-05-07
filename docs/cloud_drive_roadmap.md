@@ -88,6 +88,11 @@
 - добавлен первый registry-to-index bridge endpoint:
   - `POST /api/cloud-drive/reindex`
 - Cloud Drive service получил `enqueue_reindex()` c возвратом `reindex` job для file/version сущности.
+- добавлен обработчик lifecycle для registry jobs:
+  - `POST /api/cloud-drive/job-run`
+- Cloud Drive service получил `run_reindex_job()` для `reindex/cleanup` jobs.
+- `upload/move/rename/delete` автоматически ставят `reindex` и/или `cleanup` jobs для затронутых файлов.
+- Reindex handler уже может вызвать текущий `RAGIndexer` для файлов, которые физически находятся внутри `catalog_path`; storage-only файлы пока завершают job без индексации и ждут storage-aware indexer.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -346,7 +351,7 @@ Codex:
 - [x] versions backend + API;
 - [x] create folder backend + API;
 - [x] delete/move/rename backend (POST /api/cloud-drive/move, /rename, /delete);
-- [ ] search/index registry integration.
+- [ ] search/index registry integration: queue + job lifecycle готовы; полный storage-aware indexing в Qdrant остаётся P0.
 
 Claude:
 - [x] upload UI (диалог + toolbar кнопка + empty state shortcut);
@@ -382,9 +387,10 @@ Claude:
 
 Codex:
 - [ ] Закрыть end-to-end `Cloud Drive -> reindex job -> extract/OCR/chunk/embed -> Qdrant/lexical -> search`.
-- [ ] Сделать обработчик `reindex` jobs, а не только постановку задачи.
+- [x] Сделать обработчик `reindex` jobs, а не только постановку задачи.
 - [ ] Связать `cloud_files.id` / `cloud_file_versions.id` с `index_state`, telemetry и Qdrant payload.
-- [ ] На upload/move/rename/delete автоматически ставить нужные reindex/cleanup jobs.
+- [x] На upload/move/rename/delete автоматически ставить нужные reindex/cleanup jobs.
+- [ ] Сделать storage-aware indexing для файлов, загруженных в Cloud Drive storage вне `catalog_path`.
 - [ ] Добавить per-file job status API для indexing/OCR/preview/error.
 - [ ] Добавить retry/requeue для registry jobs.
 

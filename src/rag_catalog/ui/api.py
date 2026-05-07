@@ -291,3 +291,15 @@ def api_cloud_drive_reindex(path: str = "", auth_token: str = "") -> Dict[str, A
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _serialize_cloud_drive_job(job)
+
+
+@app.post("/api/cloud-drive/job-run")
+def api_cloud_drive_job_run(job_id: str, auth_token: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    _require_cloud_drive_api_user(cfg, auth_token=auth_token, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    try:
+        job = service.run_reindex_job(job_id, index_config=cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _serialize_cloud_drive_job(job)

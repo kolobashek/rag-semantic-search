@@ -135,6 +135,42 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert registry.get_file_by_path('Archive/hello.txt') is None
 
 
+def test_service_auto_queues_and_runs_reindex_jobs(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    source = tmp_path / 'hello.txt'
+    source.write_text('hello', encoding='utf-8')
+
+    uploaded = service.upload_file(
+        parent_path='Folder A',
+        filename='hello.txt',
+        source_path=str(source),
+        mime_type='text/plain',
+    )
+    reindex_job = registry.get_latest_job(job_type='reindex')
+
+    assert reindex_job is not None
+    assert reindex_job.file_id == uploaded['id']
+    assert reindex_job.progress['status'] == 'pending'
+
+    completed = service.run_reindex_job(reindex_job.id)
+
+    assert completed.status == 'completed'
+    assert completed.progress['status'] == 'done'
+    assert completed.progress['path'] == 'Folder A/hello.txt'
+
+    service.delete_node('Folder A/hello.txt')
+    cleanup_job = registry.get_latest_job(job_type='cleanup')
+
+    assert cleanup_job is not None
+    assert cleanup_job.progress['action'] == 'cleanup'
+    assert cleanup_job.progress['path'] == 'Folder A/hello.txt'
+    assert service.run_reindex_job(cleanup_job.id).status == 'completed'
+
+
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     job = registry.queue_job(job_type='bootstrap', payload={'catalog_root': 'O:/Обмен', 'progress': {'status': 'pending'}})
