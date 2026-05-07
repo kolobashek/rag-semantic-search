@@ -372,6 +372,44 @@ def test_merge_ranked_results_limits_chunks_per_document() -> None:
     assert any(item["filename"] == "other.docx" for item in out)
 
 
+def test_answer_documents_returns_no_answer_without_text_sources() -> None:
+    s = _make_searcher(connected=True)
+    s.search = lambda *args, **kwargs: [  # type: ignore[method-assign]
+        {"filename": "meta.docx", "text": "", "full_path": r"O:\meta.docx"}
+    ]
+
+    out = s.answer_documents("что написано?")
+
+    assert out["ok"] is False
+    assert out["error"] == "no_text_sources"
+    assert "не нашёл" in out["answer"]
+
+
+def test_answer_documents_generates_answer_with_sources(monkeypatch) -> None:
+    from rag_catalog.core import llm
+
+    s = _make_searcher(connected=True)
+    s.config = {"llm_rag_model": "fake", "ollama_url": "http://ollama.test", "llm_answer_top_k": 2}
+    s.search = lambda *args, **kwargs: [  # type: ignore[method-assign]
+        {
+            "filename": "source.docx",
+            "path": "source.docx",
+            "full_path": r"O:\source.docx",
+            "text": "Подтвержденный фрагмент документа",
+            "score": 0.91,
+            "chunk_index": 0,
+        }
+    ]
+    monkeypatch.setattr(llm, "rag_answer", lambda query, results, **kwargs: "Ответ на основе источника")
+
+    out = s.answer_documents("что известно?")
+
+    assert out["ok"] is True
+    assert out["answer"] == "Ответ на основе источника"
+    assert out["sources"][0]["filename"] == "source.docx"
+    assert out["sources"][0]["excerpt"].startswith("Подтвержденный")
+
+
 def test_answer_fact_question_handles_search_error() -> None:
     s = _make_searcher(connected=True)
 

@@ -91,6 +91,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "llm_search_expand_enabled": False,  # расширять запрос внутри core search pipeline
     "llm_expand_model": "phi3:mini", # модель для расширения запроса
     "llm_rag_model": "qwen3:8b",     # модель для RAG Q&A
+    "llm_answer_top_k": 5,
     # Ранжирование результатов поиска
     "rank_feedback_step": 0.02,      # шаг буста/штрафа за +1/-1 feedback
     "rank_feedback_cap": 0.18,       # максимум абсолютного влияния feedback
@@ -1038,6 +1039,113 @@ class RAGSearcher:
         except Exception as exc:
             logger.error("Не удалось получить статистику: %s", exc)
             return {}
+
+    def answer_documents(
+        self,
+        question: str,
+        *,
+        limit: int = 20,
+        source: str = "rag_answer",
+        username: str = "",
+    ) -> Dict[str, Any]:
+        """Generate a RAG answer with explicit source citations.
+
+        This is a structured backend wrapper around `llm.rag_answer()` for UI,
+        CLI and Telegram. It keeps the "не знаю" behavior deterministic when no
+        textual context is available.
+        """
+        started = time.perf_counter()
+        q = (question or "").strip()
+        if not q:
+            return {"ok": False, "answer": "Пустой вопрос.", "sources": [], "error": "empty_question"}
+        if not self.connected:
+            return {"ok": False, "answer": "Нет подключения к Qdrant.", "sources": [], "error": "not_connected"}
+
+        try:
+            results = self.search(
+                q,
+                limit=limit,
+                file_type=None,
+                content_only=True,
+                query_original=q,
+                source=f"{source}:search",
+                username=username,
+            )
+        except Exception as exc:
+            return {"ok": False, "answer": f"Ошибка поиска: {exc}", "sources": [], "error": f"search_error: {exc}"}
+
+        sources = self._rag_sources(results, max_sources=int(self.config.get("llm_answer_top_k", 5) or 5))
+        if not sources:
+            answer = "В документах не нашёл подтверждённого ответа."
+            self._log_rag_answer(q, answer, False, started, "no_text_sources")
+            return {"ok": False, "answer": answer, "sources": [], "results": results, "error": "no_text_sources"}
+
+        try:
+            from .llm import rag_answer  # noqa: PLC0415
+
+            answer = rag_answer(
+                q,
+                results,
+                model=str(self.config.get("llm_rag_model") or "qwen3:8b"),
+                ollama_url=str(self.config.get("ollama_url") or "http://localhost:11434"),
+                top_k=int(self.config.get("llm_answer_top_k", 5) or 5),
+                timeout=int(self.config.get("llm_rag_timeout_sec", 90) or 90),
+            )
+        except Exception as exc:
+            answer = f"Ошибка генерации: {exc}"
+            self._log_rag_answer(q, answer, False, started, f"rag_answer_error: {exc}")
+            return {"ok": False, "answer": answer, "sources": sources, "results": results, "error": f"rag_answer_error: {exc}"}
+
+        ok = bool(answer and "нет данных для ответа" not in answer.lower())
+        self._log_rag_answer(q, answer, ok, started, "" if ok else "weak_answer")
+        return {
+            "ok": ok,
+            "question": q,
+            "answer": answer or "Модель не дала ответа.",
+            "sources": sources,
+            "results": results,
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    def _rag_sources(self, results: List[Dict[str, Any]], *, max_sources: int = 5) -> List[Dict[str, Any]]:
+        sources: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in results:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            key = str(item.get("full_path") or item.get("path") or item.get("filename") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            sources.append(
+                {
+                    "filename": item.get("filename", ""),
+                    "path": item.get("path", ""),
+                    "full_path": item.get("full_path", ""),
+                    "chunk_index": item.get("chunk_index"),
+                    "score": item.get("rank_score", item.get("score")),
+                    "excerpt": text[:500],
+                }
+            )
+            if len(sources) >= max_sources:
+                break
+        return sources
+
+    def _log_rag_answer(self, question: str, answer: str, ok: bool, started: float, error: str) -> None:
+        try:
+            self.telemetry.log_fact(
+                source="rag_answer",
+                question=question,
+                ok=ok,
+                answer=answer,
+                source_type="rag",
+                value_kg=None,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                error=error,
+            )
+        except Exception:
+            logger.debug("Failed to log rag answer telemetry", exc_info=True)
 
     def answer_fact_question(self, question: str, limit: int = 20) -> Dict[str, Any]:
         """
