@@ -367,6 +367,44 @@ class CloudDriveRegistryDB:
             ).fetchall()
             return [self._file_from_row(row) for row in rows]
 
+    def list_changes(self, *, since: str = '', limit: int = 500) -> List[Dict[str, Any]]:
+        """Return changed file/folder registry rows ordered by update time."""
+        clean_since = str(since or '').strip()
+        max_rows = max(1, min(int(limit or 500), 5000))
+        where = "WHERE updated_at > ?" if clean_since else ""
+        params: tuple[Any, ...] = (clean_since,) if clean_since else ()
+        with self._connect() as conn:
+            folder_rows = conn.execute(
+                f"""
+                SELECT 'folder' AS node_type, id, path, name, updated_at, deleted_at, '' AS current_version_id
+                FROM cloud_folders
+                {where}
+                """,
+                params,
+            ).fetchall()
+            file_rows = conn.execute(
+                f"""
+                SELECT 'file' AS node_type, id, path, name, updated_at, deleted_at, current_version_id
+                FROM cloud_files
+                {where}
+                """,
+                params,
+            ).fetchall()
+        rows = [*folder_rows, *file_rows]
+        rows.sort(key=lambda row: (str(row['updated_at'] or ''), str(row['node_type']), str(row['path'] or '')))
+        return [
+            {
+                'node_type': str(row['node_type']),
+                'id': str(row['id']),
+                'path': str(row['path'] or ''),
+                'name': str(row['name'] or ''),
+                'updated_at': str(row['updated_at'] or ''),
+                'deleted_at': str(row['deleted_at'] or ''),
+                'current_version_id': str(row['current_version_id'] or ''),
+            }
+            for row in rows[-max_rows:]
+        ]
+
     def rename_move_file(self, *, source_path: str, dest_parent_path: str = '', new_name: str = '') -> CloudDriveFile:
         clean_source = self._normalize_path(source_path)
         file_row = self.get_file_by_path(clean_source)

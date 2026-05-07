@@ -239,6 +239,22 @@ def api_cloud_drive_list(path: str = "", auth_token: str = "", authorization: Au
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@app.get("/api/cloud-drive/changes")
+def api_cloud_drive_changes(since: str = "", limit: int = 500, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    result = service.list_changes(since=since, limit=max(1, min(int(limit or 500), 5000)))
+    changes = [
+        item for item in result.get("changes", [])
+        if _cd_acl_allows(cfg, user, str(item.get("path") or ""))
+    ]
+    result["changes"] = changes
+    result["count"] = len(changes)
+    _audit_cloud_drive_api_event(cfg, user, "changes", details={"since": since, "count": len(changes)})
+    return result
+
+
 @app.post("/api/cloud-drive/folders")
 def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()

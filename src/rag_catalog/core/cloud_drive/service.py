@@ -179,6 +179,15 @@ class CloudDriveService:
             ],
         }
 
+    def list_changes(self, *, since: str = '', limit: int = 500) -> dict:
+        changes = self.registry.list_changes(since=since, limit=limit)
+        next_cursor = changes[-1]['updated_at'] if changes else str(since or '')
+        return {
+            'since': str(since or ''),
+            'next_cursor': next_cursor,
+            'changes': changes,
+        }
+
     def create_folder(self, *, parent_path: str = '', name: str) -> dict:
         folder = self.registry.create_folder(parent_path=parent_path, name=name)
         return {

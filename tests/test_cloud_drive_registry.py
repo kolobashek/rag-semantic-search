@@ -185,6 +185,29 @@ def test_service_auto_queues_and_runs_reindex_jobs(tmp_path: Path) -> None:
     assert service.run_reindex_job(cleanup_job.id).status == 'completed'
 
 
+def test_service_lists_cloud_drive_changes_for_sync_clients(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    source = tmp_path / 'hello.txt'
+    source.write_text('hello', encoding='utf-8')
+    service.upload_file(parent_path='Folder A', filename='hello.txt', source_path=str(source), mime_type='text/plain')
+
+    initial = service.list_changes()
+    paths = {item['path'] for item in initial['changes']}
+    assert 'Folder A' in paths
+    assert 'Folder A/hello.txt' in paths
+    cursor = initial['next_cursor']
+
+    service.delete_node('Folder A/hello.txt')
+    delta = service.list_changes(since=cursor)
+
+    assert any(item['path'] == 'Folder A/hello.txt' and item['deleted_at'] for item in delta['changes'])
+    assert delta['next_cursor'] >= cursor
+
+
 def test_service_reindex_job_passes_cloud_identity_to_indexer(tmp_path: Path, monkeypatch) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     storage = LocalStorageAdapter(str(tmp_path / 'storage'))
