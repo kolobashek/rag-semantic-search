@@ -41,6 +41,7 @@ from qdrant_client.models import (
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
+from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
 from .index_state_db import IndexStateDB
 from .ocr_runtime import apply_tesseract_runtime, resolve_ocr_runtime
@@ -875,64 +876,11 @@ class RAGIndexer:
     # ── chunking ───────────────────────────────────────────────────────
 
     def _chunk_text(self, text: str) -> List[str]:
-        """Разбить текст на перекрывающиеся чанки.
-
-        Гарантирует прогресс: step = max(1, chunk_size - chunk_overlap).
-        Защищает от бесконечного цикла если chunk_overlap >= chunk_size.
-        Для реальных chunk_size старается завершать чанк на границе абзаца
-        или предложения, чтобы не резать смысловой блок посередине.
-        """
-        if not text:
-            return []
-        # Tiny chunks are used by regression tests and edge-case guards; keep the
-        # exact legacy sliding-window behavior there.
-        if self.chunk_size < 120:
-            step = max(1, self.chunk_size - self.chunk_overlap)
-            chunks: List[str] = []
-            start = 0
-            while start < len(text):
-                chunk = text[start : start + self.chunk_size]
-                if chunks and len(chunk) <= self.chunk_overlap:
-                    break
-                chunks.append(chunk)
-                if start + self.chunk_size >= len(text):
-                    break
-                start += step
-            return chunks
-
-        step = max(1, self.chunk_size - self.chunk_overlap)
-        chunks: List[str] = []
-        start = 0
-        while start < len(text):
-            max_end = min(len(text), start + self.chunk_size)
-            end = self._semantic_chunk_end(text, start, max_end)
-            chunk = text[start:end]
-            # Don't emit a tiny tail chunk that is fully covered by the previous overlap.
-            if chunks and len(chunk) <= self.chunk_overlap:
-                break
-            chunks.append(chunk)
-            if end >= len(text):
-                break
-            start = max(start + 1, end - self.chunk_overlap, start + step if end <= start else start + 1)
-        return chunks
+        """Разбить текст на перекрывающиеся чанки."""
+        return chunk_text(text, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
 
     def _semantic_chunk_end(self, text: str, start: int, max_end: int) -> int:
-        if max_end >= len(text):
-            return len(text)
-        min_end = start + max(1, int(self.chunk_size * 0.60))
-        if min_end >= max_end:
-            return max_end
-        window = text[min_end:max_end]
-        boundary_offsets = [
-            window.rfind("\n\n"),
-            window.rfind("\n"),
-            max(window.rfind(". "), window.rfind("! "), window.rfind("? "), window.rfind("… ")),
-            max(window.rfind(".\n"), window.rfind("!\n"), window.rfind("?\n"), window.rfind("…\n")),
-        ]
-        best = max(boundary_offsets)
-        if best < 0:
-            return max_end
-        return min(max_end, min_end + best + 1)
+        return semantic_chunk_end(text, start=start, max_end=max_end, chunk_size=self.chunk_size)
 
     def _doc_id(self, state_key: str, relative_path: Path, payload_extra: Optional[Dict[str, Any]] = None) -> str:
         if payload_extra:
