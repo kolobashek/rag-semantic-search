@@ -115,33 +115,6 @@ def _runtime_marker_path(kind: str) -> Path:
     return _RUNTIME_DIR / f"{kind}_active.json"
 
 
-def _cloud_bootstrap_state_path() -> Path:
-    _RUNTIME_DIR.mkdir(exist_ok=True)
-    return _RUNTIME_DIR / "cloud_bootstrap_state.json"
-
-
-def _read_cloud_bootstrap_state() -> Dict[str, Any]:
-    path = _cloud_bootstrap_state_path()
-    if not path.exists():
-        return {"status": "idle"}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"status": "unknown", "error": "state_parse_failed"}
-    if data.get("status") == "running":
-        thread_id = _safe_int(data.get("thread_id"), 0)
-        if thread_id > 0 and not any(thread.ident == thread_id and thread.is_alive() for thread in threading.enumerate()):
-            data["status"] = "stale"
-    return data
-
-
-def _write_cloud_bootstrap_state(payload: Dict[str, Any]) -> None:
-    path = _cloud_bootstrap_state_path()
-    merged = dict(_read_cloud_bootstrap_state())
-    merged.update(payload)
-    path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def _read_cloud_bootstrap_status(cfg: Dict[str, Any]) -> Dict[str, Any]:
     try:
         service = CloudDriveService.from_config(cfg)
@@ -155,9 +128,9 @@ def _read_cloud_bootstrap_status(cfg: Dict[str, Any]) -> Dict[str, Any]:
             progress["created_at"] = job.created_at
             progress["updated_at"] = job.updated_at
             return progress
-    except Exception:
-        pass
-    return _read_cloud_bootstrap_state()
+        return {"status": "idle", "job_status": "idle"}
+    except Exception as exc:
+        return {"status": "unavailable", "job_status": "unavailable", "error": str(exc)}
 
 
 def _recover_cloud_drive_jobs(cfg: Dict[str, Any]) -> None:

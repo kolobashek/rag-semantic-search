@@ -350,6 +350,20 @@ def test_cloud_drive_bootstrap_status_api_reads_current_status(monkeypatch) -> N
     assert api_cloud_drive_bootstrap_status() == expected
 
 
+def test_cloud_drive_bootstrap_status_returns_idle_without_jobs(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    status = api_cloud_drive_bootstrap_status()
+
+    assert status["status"] == "idle"
+    assert status["job_status"] == "idle"
+
+
 def test_cloud_drive_bootstrap_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> None:
     cfg = {
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),

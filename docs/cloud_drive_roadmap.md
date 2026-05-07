@@ -53,7 +53,7 @@
 - добавлены read-only API endpoints для bootstrap status и списка bootstrap jobs.
 
 Осталось в этапе:
-- добить остаточные runtime fallback до чистой job-модели.
+- cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
 
 ### Этап 2. Registry-backed Explorer
 
@@ -122,6 +122,7 @@
 - [x] Добавить cancellable long-running jobs.
 - [x] Убрать остаточные page-bound timer зависимости.
 - [x] Нормализовать scheduler по локальному времени/таймзоне и покрыть тестами.
+- [x] Убрать runtime fallback из bootstrap status чтения; source of truth = `cloud_jobs`.
 
 #### 2. Registry model и storage contracts
 
