@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from .models import CloudDriveStats
 from .registry import CloudDriveRegistryDB
@@ -23,13 +23,42 @@ class CloudDriveService:
             storage=resolve_storage_adapter(config),
         )
 
-    def bootstrap_from_catalog(self, catalog_root: str, *, max_files: Optional[int] = None, import_files: bool = False) -> CloudDriveStats:
+    def bootstrap_from_catalog(
+        self,
+        catalog_root: str,
+        *,
+        max_files: Optional[int] = None,
+        import_files: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, object]], None]] = None,
+    ) -> CloudDriveStats:
         root = Path(catalog_root)
         if not root.exists() or not root.is_dir():
             raise RuntimeError(f'Каталог не найден: {root}')
         root_folder = self.registry.ensure_root_folder(root_name=root.name or 'root', source_path=str(root))
         imported = 0
+        imported_folders = 1
         folder_cache: Dict[Path, str] = {root: root_folder.id}
+        progress_seq = 0
+
+        def emit_progress(kind: str, *, current_path: str = '', done: bool = False) -> None:
+            nonlocal progress_seq
+            if progress_callback is None:
+                return
+            progress_seq += 1
+            progress_callback(
+                {
+                    'kind': kind,
+                    'done': done,
+                    'imported_files': imported,
+                    'imported_folders': imported_folders,
+                    'current_path': current_path,
+                    'import_files': import_files,
+                    'max_files': max_files,
+                    'sequence': progress_seq,
+                }
+            )
+
+        emit_progress('start', current_path=str(root))
 
         for dirpath, dirnames, filenames in __import__('os').walk(root):
             base = Path(dirpath)
@@ -47,6 +76,9 @@ class CloudDriveService:
                 )
                 base_id = base_folder.id
                 folder_cache[base] = base_id
+                imported_folders += 1
+                if imported_folders % 25 == 0:
+                    emit_progress('folder', current_path=str(base))
 
             for dirname in sorted(dirnames):
                 child = base / dirname
@@ -59,6 +91,9 @@ class CloudDriveService:
                     source_path=str(child),
                 )
                 folder_cache[child] = folder.id
+                imported_folders += 1
+                if imported_folders % 25 == 0:
+                    emit_progress('folder', current_path=str(child))
 
             for filename in sorted(filenames):
                 file_path = base / filename
@@ -78,8 +113,12 @@ class CloudDriveService:
                     source_path=str(file_path),
                 )
                 imported += 1
+                if imported == 1 or imported % 25 == 0:
+                    emit_progress('file', current_path=str(file_path))
                 if max_files is not None and imported >= max_files:
+                    emit_progress('done', current_path=str(file_path), done=True)
                     return self.registry.stats()
+        emit_progress('done', current_path=str(root), done=True)
         return self.registry.stats()
 
     def enqueue_reindex(self, path: str) -> None:

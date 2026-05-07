@@ -59,6 +59,8 @@ _FAILED_RESTART_WINDOW_SEC = 15 * 60
 _FAILED_RESTART_HISTORY: Dict[str, List[float]] = {"index": [], "ocr": []}
 _FAILED_RESTART_RESTARTED_IDS: Dict[str, set[str]] = {"index": set(), "ocr": set()}
 _RUNTIME_DIR = PROJECT_ROOT / "runtime"
+_GLOBAL_SCHEDULER_STARTED = False
+_CLOUD_BOOTSTRAP_LOCK = threading.Lock()
 
 
 def _open_log(log_path: "Path", label: str) -> "Any":
@@ -111,6 +113,33 @@ def _find_module_process_pids(module_name: str) -> List[int]:
 def _runtime_marker_path(kind: str) -> Path:
     _RUNTIME_DIR.mkdir(exist_ok=True)
     return _RUNTIME_DIR / f"{kind}_active.json"
+
+
+def _cloud_bootstrap_state_path() -> Path:
+    _RUNTIME_DIR.mkdir(exist_ok=True)
+    return _RUNTIME_DIR / "cloud_bootstrap_state.json"
+
+
+def _read_cloud_bootstrap_state() -> Dict[str, Any]:
+    path = _cloud_bootstrap_state_path()
+    if not path.exists():
+        return {"status": "idle"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"status": "unknown", "error": "state_parse_failed"}
+    if data.get("status") == "running":
+        thread_id = _safe_int(data.get("thread_id"), 0)
+        if thread_id > 0 and not any(thread.ident == thread_id and thread.is_alive() for thread in threading.enumerate()):
+            data["status"] = "stale"
+    return data
+
+
+def _write_cloud_bootstrap_state(payload: Dict[str, Any]) -> None:
+    path = _cloud_bootstrap_state_path()
+    merged = dict(_read_cloud_bootstrap_state())
+    merged.update(payload)
+    path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _read_runtime_marker(kind: str) -> Optional[Dict[str, Any]]:
@@ -320,27 +349,30 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optiona
 
 
 def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Вернуть расписания, которые должны запуститься прямо сейчас (±1 мин)."""
-    now = datetime.now(timezone.utc)
+    """Вернуть расписания, которые должны запуститься по локальному времени сервера."""
+    now = datetime.now().astimezone()
     due = []
     for sched in schedules:
         if not int(sched.get("enabled") or 0):
             continue
+        cadence = str(sched.get("cadence") or "daily")
         sched_time = str(sched.get("time") or "03:00")
         try:
             hh, mm = int(sched_time[:2]), int(sched_time[3:5])
         except (ValueError, IndexError):
-            continue
-        cadence = str(sched.get("cadence") or "daily")
+            hh, mm = 3, 0
         days = sched.get("days") or []
         day_name = now.strftime("%a")  # "Mon", "Tue", ...
         if cadence == "weekly" and day_name not in days:
             continue
         if cadence == "daily" and days and day_name not in days:
             continue
-        # Проверяем совпадение часа и минуты (±1 мин)
-        if now.hour != hh or abs(now.minute - mm) > 1:
-            continue
+        if cadence == "hourly":
+            if abs(now.minute - 0) > 1:
+                continue
+        else:
+            if now.hour != hh or abs(now.minute - mm) > 1:
+                continue
         # Не запускать дважды в одну минуту
         last_run = str(sched.get("last_run_at") or "")
         if last_run:
@@ -352,6 +384,47 @@ def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 pass
         due.append(sched)
     return due
+
+
+def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
+    tdb = TelemetryDB(str(_telemetry_db_path(cfg)))
+    if not hasattr(tdb, "list_index_schedules"):
+        return
+    schedules = tdb.list_index_schedules()
+    due = _schedules_due(schedules)
+    if not due:
+        return
+    cfg_settings = tdb.get_index_settings() if hasattr(tdb, "get_index_settings") else {}
+    for sched in due:
+        try:
+            _launch_indexer(
+                cfg,
+                stage=str(sched.get("stage") or "all"),
+                workers=int(cfg_settings.get("workers") or cfg.get("index_read_workers") or 4),
+                max_chunks=int(cfg_settings.get("max_chunks") or cfg.get("index_max_chunks") or 2000),
+                skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
+            )
+        except RuntimeError:
+            continue
+        tdb.touch_index_schedule(id=str(sched["id"]))
+
+
+def _start_global_scheduler(cfg: Dict[str, Any]) -> None:
+    global _GLOBAL_SCHEDULER_STARTED
+    if _GLOBAL_SCHEDULER_STARTED:
+        return
+    _GLOBAL_SCHEDULER_STARTED = True
+
+    def _loop() -> None:
+        while True:
+            try:
+                _run_scheduler_tick(cfg)
+            except Exception as exc:
+                print(f"[nice_app] scheduler loop skipped: {exc}", file=sys.stderr)
+            time.sleep(60.0)
+
+    thread = threading.Thread(target=_loop, name="rag-scheduler", daemon=True)
+    thread.start()
 
 SEARCH_PRESETS = [
     ("Договоры", "договор поставки"),
@@ -442,6 +515,7 @@ class PageState:
     tg_login_timer: Optional[Any] = None
     activity_timer: Optional[Any] = None
     scheduler_timer: Optional[Any] = None
+    cloud_drive_timer: Optional[Any] = None
 
 
 def _file_url(full_path: str) -> str:
@@ -2839,46 +2913,8 @@ def _build_page(initial_screen: str = "search") -> None:
     if state.auth_token and state.current_user:
         state.activity_timer = ui.timer(3600.0, touch_activity)
 
-    # ── Встроенный планировщик ────────────────────────────────────────
-    def _tick_scheduler() -> None:
-        """Каждую минуту проверяет расписание и запускает индексатор при совпадении."""
-        if not _is_admin(state):
-            return
-        tdb = _get_telemetry(state)
-        if not hasattr(tdb, "list_index_schedules"):
-            return
-        try:
-            schedules = tdb.list_index_schedules()
-            due = _schedules_due(schedules)
-            cfg_settings = tdb.get_index_settings() if hasattr(tdb, "get_index_settings") else {}
-            for sched in due:
-                try:
-                    pid = _launch_indexer(
-                        state.cfg,
-                        stage=str(sched.get("stage") or "all"),
-                        workers=int(cfg_settings.get("workers") or state.cfg.get("index_read_workers") or 4),
-                        max_chunks=int(cfg_settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000),
-                        skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
-                    )
-                except RuntimeError as exc:
-                    _log_app_event(
-                        state,
-                        "index",
-                        "schedule_skip",
-                        ok=False,
-                        details={"sched_id": sched.get("id"), "reason": str(exc)},
-                    )
-                    continue
-                tdb.touch_index_schedule(id=str(sched["id"]))
-                _log_app_event(state, "index", "schedule_run",
-                               details={"sched_id": sched["id"], "stage": sched.get("stage"), "pid": pid})
-        except Exception:
-            pass
-
     _stop_managed_timer(state.scheduler_timer)
     state.scheduler_timer = None
-    if _is_admin(state):
-        state.scheduler_timer = ui.timer(60.0, _tick_scheduler)
 
     def do_logout() -> None:
         auth_db = _get_auth_db(state)
@@ -5036,13 +5072,29 @@ def _build_page(initial_screen: str = "search") -> None:
             ).classes("rag-meta")
 
             enabled_input = ui.checkbox("Включить Cloud Drive", value=initial_cloud["cloud_drive_enabled"])
-            db_input = ui.input("Путь к registry БД", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("w-full")
-            storage_kind = ui.select({"local": "Local storage", "s3": "S3 / MinIO"}, value=initial_cloud["cloud_drive_storage"], label="Storage backend").props("dense outlined").classes("w-full max-w-sm")
-            storage_root_input = ui.input("Корень local storage", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("w-full")
-            catalog_input = ui.input("Каталог для bootstrap", value=initial_cloud["catalog_path"]).props("dense outlined").classes("w-full")
-            bootstrap_limit = ui.number("Ограничить импорт файлами (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full max-w-sm")
+            enabled_input.tooltip("Включает registry и storage-слой Cloud Drive. Техническое имя: cloud_drive_enabled.")
+
+            db_input = ui.input("База реестра Cloud Drive", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("w-full")
+            db_input.tooltip("SQLite-база с реестром папок, файлов, версий и фоновых задач. Техническое имя: cloud_drive_db_path (раньше: 'Путь к registry БД').")
+
+            storage_kind = ui.select(
+                {"local": "Local storage", "s3": "S3 / MinIO"},
+                value=initial_cloud["cloud_drive_storage"],
+                label="Хранилище файлов",
+            ).props("dense outlined").classes("w-full max-w-sm")
+            storage_kind.tooltip("Куда складывается физическое содержимое файлов. Техническое имя: cloud_drive_storage, программный термин: storage backend.")
+
+            storage_root_input = ui.input("Папка хранения файлов", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("w-full")
+            storage_root_input.tooltip("Корневая папка для local storage backend. Техническое имя: cloud_drive_storage_root (раньше: 'Корень local storage').")
+
+            catalog_input = ui.input("Источник импорта", value=initial_cloud["catalog_path"]).props("dense outlined").classes("w-full")
+            catalog_input.tooltip("Каталог, из которого bootstrap читает дерево папок и файлов для первого наполнения registry. Техническое имя: catalog_path, программный термин: bootstrap source (раньше: 'Каталог для bootstrap').")
+
+            bootstrap_limit = ui.number("Лимит импорта файлов (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full max-w-sm")
+            bootstrap_limit.tooltip("Ограничивает bootstrap по количеству файлов для тестового запуска. 0 отключает лимит. Программный термин: max_files.")
 
             status_box = ui.column().classes("w-full gap-1")
+            bootstrap_box = ui.column().classes("w-full gap-1")
             action_row = ui.row().classes("rag-dirty-actions")
             action_row.set_visibility(False)
 
@@ -5088,26 +5140,71 @@ def _build_page(initial_screen: str = "search") -> None:
                     if root_path:
                         ui.label(f"Корень registry: {root_path}").classes("rag-path")
 
+            def render_bootstrap_status() -> None:
+                bootstrap_state = _read_cloud_bootstrap_state()
+                bootstrap_box.clear()
+                with bootstrap_box:
+                    ui.label("Статус импорта").classes("font-semibold")
+                    status = str(bootstrap_state.get("status") or "idle")
+                    if status == "idle":
+                        ui.label("Импорт не запущен.").classes("rag-meta")
+                        return
+                    status_label = {
+                        "running": "Выполняется",
+                        "done": "Завершён",
+                        "error": "Ошибка",
+                        "stale": "Состояние устарело",
+                    }.get(status, status)
+                    ui.label(status_label).classes("rag-chip")
+                    imported_files = _safe_int(bootstrap_state.get("imported_files"), 0)
+                    imported_folders = _safe_int(bootstrap_state.get("imported_folders"), 0)
+                    total_files = _safe_int(bootstrap_state.get("total_files"), 0)
+                    if total_files > 0:
+                        ratio = max(0.0, min(1.0, imported_files / total_files))
+                        ui.linear_progress(value=ratio).classes("w-full")
+                        ui.label(
+                            f"Файлы: {imported_files:,} / {total_files:,} ({round(ratio * 100)}%)".replace(",", " ")
+                        ).classes("rag-meta")
+                    else:
+                        ui.label(f"Файлы: {imported_files:,}".replace(",", " ")).classes("rag-meta")
+                    ui.label(f"Папки: {imported_folders:,}".replace(",", " ")).classes("rag-meta")
+                    current_path = str(bootstrap_state.get("current_path") or "").strip()
+                    if current_path:
+                        ui.label(f"Текущий путь: {current_path}").classes("rag-path")
+                    error_text = str(bootstrap_state.get("error") or "").strip()
+                    if error_text:
+                        ui.label(error_text).classes("text-negative text-sm")
+                    started_at = str(bootstrap_state.get("started_at") or "").strip()
+                    finished_at = str(bootstrap_state.get("finished_at") or "").strip()
+                    if started_at:
+                        ui.label(f"Старт: {started_at[:19].replace('T', ' ')}").classes("rag-meta")
+                    if finished_at:
+                        ui.label(f"Финиш: {finished_at[:19].replace('T', ' ')}").classes("rag-meta")
+
             def build_cloud_config() -> Dict[str, Any]:
                 values = current_cloud_values()
                 cfg = dict(state.cfg)
                 cfg.update(values)
                 return cfg
 
+            def persist_cloud_values(values: Dict[str, Any]) -> Dict[str, Any]:
+                cfg = load_config()
+                cfg.update(values)
+                save_config(cfg)
+                state.cfg = cfg
+                initial_cloud.update(values)
+                return cfg
+
             def save_cloud_settings() -> None:
                 values = current_cloud_values()
                 if not values["cloud_drive_db_path"]:
-                    ui.notify("Укажите путь к registry БД.", type="warning")
+                    ui.notify("Укажите путь к базе реестра Cloud Drive.", type="warning")
                     return
                 if values["cloud_drive_storage"] == "local" and not values["cloud_drive_storage_root"]:
-                    ui.notify("Укажите корень local storage.", type="warning")
+                    ui.notify("Укажите папку хранения файлов для local storage.", type="warning")
                     return
                 try:
-                    cfg = load_config()
-                    cfg.update(values)
-                    save_config(cfg)
-                    state.cfg = cfg
-                    initial_cloud.update(values)
+                    persist_cloud_values(values)
                     refresh_cloud_visibility()
                     action_row.set_visibility(False)
                     _log_app_event(state, "settings", "save_cloud_drive", details=values)
@@ -5117,7 +5214,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
             async def init_registry() -> None:
                 try:
-                    cfg = build_cloud_config()
+                    cfg = persist_cloud_values(current_cloud_values())
                     service = await run.io_bound(CloudDriveService.from_config, cfg)
                     stats_obj = await run.io_bound(service.registry.stats)
                     render_cloud_stats(stats_obj, title="Registry инициализирован")
@@ -5128,48 +5225,105 @@ def _build_page(initial_screen: str = "search") -> None:
 
             async def refresh_registry_stats() -> None:
                 try:
-                    cfg = build_cloud_config()
+                    cfg = persist_cloud_values(current_cloud_values())
                     service = await run.io_bound(CloudDriveService.from_config, cfg)
                     stats_obj = await run.io_bound(service.registry.stats)
                     render_cloud_stats(stats_obj, title="Текущая статистика registry")
+                    render_bootstrap_status()
                 except Exception as exc:
                     ui.notify(f"Не удалось прочитать stats: {exc}", type="negative")
+
+            def _count_catalog_files(catalog_root: Path, limit_value: int) -> int:
+                total = 0
+                for _dirpath, _dirnames, filenames in os.walk(catalog_root):
+                    total += len(filenames)
+                    if limit_value > 0 and total >= limit_value:
+                        return limit_value
+                return total
+
+            def _run_bootstrap_background(cfg: Dict[str, Any], *, import_files: bool, limit_value: int, catalog: str) -> None:
+                root_path = Path(catalog)
+                total_files = _count_catalog_files(root_path, limit_value)
+                _write_cloud_bootstrap_state(
+                    {
+                        "status": "running",
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                        "finished_at": "",
+                        "error": "",
+                        "catalog": catalog,
+                        "import_files": bool(import_files),
+                        "limit_value": int(limit_value),
+                        "total_files": int(total_files),
+                        "imported_files": 0,
+                        "imported_folders": 0,
+                        "current_path": catalog,
+                        "thread_id": threading.get_ident(),
+                    }
+                )
+                try:
+                    service = CloudDriveService.from_config(cfg)
+                    stats_obj = service.bootstrap_from_catalog(
+                        catalog,
+                        max_files=None if limit_value <= 0 else limit_value,
+                        import_files=import_files,
+                        progress_callback=lambda payload: _write_cloud_bootstrap_state(payload),
+                    )
+                    _write_cloud_bootstrap_state(
+                        {
+                            "status": "done",
+                            "finished_at": datetime.now(timezone.utc).isoformat(),
+                            "folders": getattr(stats_obj, "folders", 0),
+                            "files": getattr(stats_obj, "files", 0),
+                            "versions": getattr(stats_obj, "versions", 0),
+                            "pending_jobs": getattr(stats_obj, "pending_jobs", 0),
+                        }
+                    )
+                except Exception as exc:
+                    _write_cloud_bootstrap_state(
+                        {
+                            "status": "error",
+                            "finished_at": datetime.now(timezone.utc).isoformat(),
+                            "error": str(exc),
+                        }
+                    )
 
             async def bootstrap_registry(*, import_files: bool) -> None:
                 catalog = str(catalog_input.value or "").strip()
                 if not catalog:
-                    ui.notify("Укажите каталог для bootstrap.", type="warning")
+                    ui.notify("Укажите источник импорта.", type="warning")
                     return
                 if not Path(catalog).exists():
-                    ui.notify("Каталог для bootstrap не найден.", type="negative")
+                    ui.notify("Источник импорта не найден.", type="negative")
                     return
                 limit_value = int(bootstrap_limit.value or 0)
                 try:
-                    cfg = build_cloud_config()
-                    service = await run.io_bound(CloudDriveService.from_config, cfg)
-                    stats_obj = await run.io_bound(
-                        lambda: service.bootstrap_from_catalog(
-                            catalog,
-                            max_files=None if limit_value <= 0 else limit_value,
-                            import_files=import_files,
-                        )
+                    cfg = persist_cloud_values(current_cloud_values())
+                    current_state = _read_cloud_bootstrap_state()
+                    if str(current_state.get("status") or "") == "running":
+                        ui.notify("Bootstrap уже выполняется.", type="warning")
+                        render_bootstrap_status()
+                        return
+                    thread = threading.Thread(
+                        target=_run_bootstrap_background,
+                        kwargs={"cfg": cfg, "import_files": import_files, "limit_value": limit_value, "catalog": catalog},
+                        name="cloud-drive-bootstrap",
+                        daemon=True,
                     )
-                    render_cloud_stats(
-                        stats_obj,
-                        title="Bootstrap завершён" + (" с копированием файлов" if import_files else " (только registry)"),
-                    )
+                    thread.start()
+                    render_bootstrap_status()
                     _log_app_event(
                         state,
                         "cloud_drive",
                         "bootstrap",
                         details={"catalog": catalog, "import_files": import_files, "limit": limit_value},
                     )
-                    ui.notify("Bootstrap Cloud Drive завершён.", type="positive")
+                    ui.notify("Bootstrap Cloud Drive запущен в фоне.", type="positive")
                 except Exception as exc:
                     ui.notify(f"Bootstrap Cloud Drive не удался: {exc}", type="negative")
 
             refresh_cloud_visibility()
             render_cloud_stats(None, title="Cloud Drive ещё не инициализирован")
+            render_bootstrap_status()
 
             enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
             db_input.on_value_change(lambda _: refresh_cloud_dirty())
@@ -5187,6 +5341,9 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.button("Stats", icon="monitoring", on_click=refresh_registry_stats).props("outline")
                 ui.button("Bootstrap metadata", icon="sync", on_click=lambda: bootstrap_registry(import_files=False)).props("outline")
                 ui.button("Bootstrap + import files", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
+            bootstrap_box
+            _stop_managed_timer(state.cloud_drive_timer)
+            state.cloud_drive_timer = ui.timer(3.0, render_bootstrap_status)
 
     def render_admin_llm_settings() -> None:
         def _fetch_ollama_models(ollama_url: str) -> List[str]:
@@ -6027,6 +6184,11 @@ def _build_page(initial_screen: str = "search") -> None:
         if not _is_admin(state):
             _stop_managed_timer(state.scheduler_timer)
             state.scheduler_timer = None
+            _stop_managed_timer(state.cloud_drive_timer)
+            state.cloud_drive_timer = None
+        if state.screen != "settings" or not _is_admin(state):
+            _stop_managed_timer(state.cloud_drive_timer)
+            state.cloud_drive_timer = None
         if state.current_user is not None or state.screen != "search":
             _stop_managed_timer(state.tg_login_timer)
             state.tg_login_timer = None
@@ -6140,6 +6302,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     except Exception as exc:
         print(f"[nice_app] background recovery skipped: {exc}", file=sys.stderr)
     _start_recovery_watchdog(cfg)
+    _start_global_scheduler(cfg)
     ui.run(
         title="RAG Каталог",
         host=args.host,

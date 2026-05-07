@@ -1,0 +1,285 @@
+# Roadmap: Cloud Drive
+
+## Цель
+
+Преобразовать текущий RAG-каталог из приложения, работающего поверх файловой шары, в полноценный продукт уровня "свой Dropbox/Google Drive" с:
+
+- центральным registry файлов и папок;
+- управляемым storage backend;
+- web-клиентом как основным рабочим интерфейсом;
+- API как базовым контрактом для интеграций и sync-клиента;
+- фоновыми задачами индексации, OCR, preview и импорта;
+- дальнейшей возможностью добавить desktop sync client.
+
+## Архитектурные принципы
+
+- `Registry` и бизнес-логика файлов живут отдельно от файловой системы.
+- `Web` является главным клиентом первой очереди.
+- `API` обязателен до появления sync-клиента.
+- `Storage` абстрагирован: сначала `local`, затем `S3/MinIO`.
+- `O:\Обмен` рассматривается как источник импорта/совместимости, а не как source of truth.
+- Все долгие операции должны иметь наблюдаемый progress/status и возможность безопасного восстановления.
+
+## Этапы
+
+### Этап 1. Stabilize Foundation
+
+Цель:
+- закрепить текущий registry/storage foundation;
+- убрать "немые" фоновые операции;
+- довести bootstrap и scheduler до эксплуатационного уровня.
+
+Выход:
+- Cloud Drive bootstrap прозрачен в UI;
+- scheduler работает как серверный фон;
+- базовые ошибки и статусы видны в системе.
+
+### Этап 2. Registry-backed Explorer
+
+Цель:
+- перевести проводник с `os.walk` на `cloud_folders/cloud_files`;
+- отделить UI навигации от прямого чтения файловой системы;
+- подготовить единый каталог для поиска, предпросмотра и ACL.
+
+Выход:
+- explorer читает из registry;
+- текущий путь, хлебные крошки, дерево, сортировка и фильтры работают поверх Cloud Drive.
+
+### Этап 3. File Operations and Upload
+
+Цель:
+- сделать Cloud Drive usable как продукт, а не только как импортированный каталог;
+- добавить создание папок, загрузку файлов, versioning, download, delete/move/rename.
+
+Выход:
+- пользователь может работать с файлами через web без прямой зависимости от `O:\`.
+
+### Этап 4. Search and Index Integration
+
+Цель:
+- связать registry, Qdrant, OCR и lexical search в единый pipeline;
+- перевести поиск на registry-first модель.
+
+Выход:
+- поиск, preview, indexing и OCR работают по registry/file-version сущностям.
+
+### Этап 5. API and External Clients
+
+Цель:
+- вынести файловые операции в стабильный HTTP API;
+- подготовить платформу для Telegram-интеграций и будущего sync client.
+
+Выход:
+- backend не завязан на NiceGUI как единственную точку входа.
+
+### Этап 6. Desktop Sync Client
+
+Цель:
+- реализовать Windows sync-agent для локальной синхронизации папок пользователей.
+
+Выход:
+- появляется второй полноценный клиент после web.
+
+## Разделение работ: Codex / Claude
+
+Ниже разделение сделано примерно поровну по объёму и сложности. Принцип такой:
+
+- `Codex` берёт системный backend, data model, runtime, CLI, API, фоновые задачи, миграции и интеграционные гарантии.
+- `Claude` берёт основной объём product/UI: проводник, пользовательские сценарии, настройки, визуальную логику, usability, flow и часть клиентской интеграции.
+
+Это не строгое "backend vs frontend", а более практичное разделение по зонам ответственности.
+
+## Backlog по исполнителям
+
+### Codex
+
+#### 1. Runtime и foundation hardening
+
+- Довести bootstrap state до полноценной job-модели в `cloud_jobs`.
+- Добавить отдельные статусы `pending/running/completed/failed/cancelled`.
+- Привязать bootstrap/import/reindex к `job_id`, а не только к runtime JSON.
+- Добавить cancellable long-running jobs.
+- Убрать остаточные page-bound timer зависимости.
+- Нормализовать scheduler по локальному времени/таймзоне и покрыть тестами.
+
+#### 2. Registry model и storage contracts
+
+- Доработать schema registry:
+  - move/rename support;
+  - soft delete / restore;
+  - version metadata;
+  - file hash / dedup hooks;
+  - storage backend metadata.
+- Добавить миграции schema version для Cloud Drive.
+- Подготовить поддержку `S3/MinIO` как реального backend, а не только заготовки.
+- Добавить health-check storage backend.
+
+#### 3. API слой
+
+- Вынести файловые операции в FastAPI endpoints:
+  - list folders/files;
+  - get node;
+  - upload;
+  - download;
+  - create folder;
+  - rename/move/delete;
+  - versions;
+  - jobs/status.
+- Подготовить auth/authorization hooks для API.
+- Добавить endpoint bootstrap status / job status.
+
+#### 4. Search/index integration
+
+- Перевести индексацию на registry entities:
+  - file_id;
+  - version_id;
+  - source_path/storage_key;
+  - index state per version.
+- Перестроить pipeline:
+  - import -> extract -> OCR -> chunk -> embeddings -> Qdrant/lexical.
+- Связать cloud registry с `index_state`/telemetry.
+- Добавить retry/requeue на уровне job model.
+
+#### 5. Sync backend prerequisites
+
+- Реализовать conflict model и version comparison contract.
+- Добавить file change feed / delta endpoints.
+- Добавить audit trail для sync операций.
+- Подготовить серверную часть selective sync.
+
+### Claude
+
+#### 1. Cloud Drive admin UX
+
+- Довести секцию Cloud Drive в настройках:
+  - нормальные подписи;
+  - tooltips;
+  - progress/status;
+  - кнопки refresh/cancel/retry;
+  - журнал последних операций.
+- Привести блок к brandbook/wireframe v2.
+- Добавить понятные empty/error/loading states.
+
+#### 2. Explorer on registry
+
+- Перевести экран проводника на чтение из Cloud Drive registry.
+- Пересобрать layout:
+  - дерево;
+  - breadcrumbs;
+  - список/плитка;
+  - свойства;
+  - фильтры.
+- Синхронизировать состояние между левым деревом, breadcrumbs и активным каталогом.
+- Убрать дубли текущего пути и сделать навигацию usable.
+
+#### 3. User file workflows
+
+- UI для:
+  - создания папки;
+  - загрузки файлов;
+  - drag-and-drop;
+  - rename/move/delete;
+  - версий файла;
+  - скачивания;
+  - предпросмотра.
+- Визуальный статус фоновых задач по файлу:
+  - indexing;
+  - OCR;
+  - preview;
+  - ошибки.
+
+#### 4. Search UX over Cloud Drive
+
+- Перевести search UI на Cloud Drive сущности.
+- Сделать быстрый вывод:
+  - папки;
+  - файлы;
+  - lazy semantic layer.
+- Визуально связать результаты поиска с каталогом, версией, preview и действиями.
+- Довести карточки и историю запросов под новую модель.
+
+#### 5. Клиентская логика sync/scenarios
+
+- Спроектировать UX для будущего desktop sync client:
+  - что видит пользователь;
+  - как настраивает локальную папку;
+  - как отображаются конфликты;
+  - как работает выборочная синхронизация.
+- Подготовить UI admin/user flows для этого ещё до реализации клиента.
+
+## Зависимости между работами
+
+### Блокеры Codex -> Claude
+
+- API и registry contracts нужны до полноценного перехода explorer/search на Cloud Drive.
+- Job model нужна до полноценного UX прогресса и управления задачами.
+- Storage backend metadata нужна до UI версий/перемещений/синхронизации.
+
+### Блокеры Claude -> Codex
+
+- Стабильные пользовательские flow и понятные UX states полезны до окончательной фиксации API.
+- Реальные сценарии explorer/search/upload помогут выявить, каких endpoints и полей не хватает.
+
+## Порядок исполнения
+
+### Sprint 1
+
+Codex:
+- job model для bootstrap/import;
+- scheduler hardening;
+- registry migrations;
+- bootstrap status API.
+
+Claude:
+- Cloud Drive admin UX;
+- live progress;
+- error/empty/loading states;
+- cleanup настроек и терминологии.
+
+### Sprint 2
+
+Codex:
+- registry-backed data access layer;
+- file operations API;
+- storage health and contract.
+
+Claude:
+- explorer на registry;
+- breadcrumbs/tree/list integration;
+- visual states и actions.
+
+### Sprint 3
+
+Codex:
+- upload/version/delete/move backend;
+- search/index registry integration.
+
+Claude:
+- upload/versioning UI;
+- file actions UI;
+- search UX adaptation.
+
+### Sprint 4
+
+Codex:
+- sync backend prerequisites;
+- delta/feed API;
+- audit/conflict contracts.
+
+Claude:
+- sync UX;
+- admin/user sync settings;
+- product polish для cloud workflows.
+
+## Definition of Done
+
+Cloud Drive можно считать первой рабочей версией, когда:
+
+- web-клиент позволяет жить без прямой работы через `O:\Обмен`;
+- explorer и search читают из registry, а не из `os.walk`;
+- upload/download/versioning работают через registry + storage backend;
+- индексатор и OCR работают по registry/job model;
+- все долгие операции имеют observable status и recoverable execution;
+- API покрывает web и Telegram-интеграции;
+- локальная файловая шара становится только источником миграции/совместимости.
+
