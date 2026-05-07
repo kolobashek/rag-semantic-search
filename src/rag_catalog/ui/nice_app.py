@@ -3234,6 +3234,13 @@ def _build_page(initial_screen: str = "search") -> None:
                 old_pw = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
                 new_pw = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
                 new_pw2 = ui.input("Повторите новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                _focus_next_js = (
+                    "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
+                    "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
+                    "if(i>=0&&ins[i+1])ins[i+1].focus();"
+                )
+                old_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
+                new_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
 
                 def force_change() -> None:
                     new_password = str(new_pw.value or "")
