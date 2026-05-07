@@ -76,6 +76,7 @@ from .helpers import (
     _save_ui_settings,
     _schedule_display_label,
     _search_suggestions,
+    _select_in_os_explorer,
     _telegram_deeplink,
     _viewer_file_url,
 )
@@ -689,7 +690,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.label(candidate.name).classes("text-lg font-semibold truncate")
                     ui.label(str(candidate)).classes("rag-path")
                 ui.button("Скачать", icon="download", on_click=lambda p=candidate: ui.download(p, filename=p.name)).props("outline dense")
-                ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda p=candidate: _open_os_path(str(p.parent))).props("outline dense")
+                ui.button("Найти в ОС", icon="open_in_new", on_click=lambda p=candidate: _select_in_os_explorer(str(p))).props("outline dense").tooltip("Выделить файл в проводнике Windows")
                 ui.button(icon="close", on_click=dialog.close, color=None).props("flat round dense")
 
             if ext == ".pdf":
@@ -978,7 +979,10 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.button("В проводник приложения", icon="folder", on_click=open_in_app_explorer).props("outline dense")
                             if p and p.exists() and p.is_file():
                                 ui.button("Скачать", icon="download", on_click=lambda pth=p: ui.download(pth, filename=pth.name)).props("outline dense")
-                        ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda pth=full_path: _open_os_path(str(Path(pth).parent if kind != "Каталог" else pth))).props("outline dense")
+                        if kind == "Каталог":
+                            ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda pth=full_path: _open_os_path(pth)).props("outline dense")
+                        else:
+                            ui.button("Найти в ОС", icon="open_in_new", on_click=lambda pth=full_path: _select_in_os_explorer(pth)).props("outline dense").tooltip("Выделить файл в проводнике Windows")
                     if llm_on and kind != "Каталог":
                         if is_explaining and state.doc_explain_loading:
                             ui.spinner(size="xs").classes("ml-1")
@@ -2239,9 +2243,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 if not compact:
                     if not is_dir:
                         ui.button("Скачать", icon="download", on_click=lambda p=path: (_log_app_event(state, "explorer", "download", details={"path": str(p)}), ui.download(p, filename=p.name))).props("outline dense")
-                    ui.button("ОС", icon="open_in_new", on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("flat dense data-rag-os")
+                    _os_fn = (lambda p=path: _open_os_path(str(p))) if is_dir else (lambda p=path: _select_in_os_explorer(str(p)))
+                    ui.button("ОС", icon="open_in_new", on_click=_os_fn).props("flat dense data-rag-os").tooltip("Открыть в проводнике Windows" if is_dir else "Выделить файл в проводнике Windows")
                 else:
-                    os_button = ui.button(on_click=lambda p=path: _open_os_path(str(p.parent if p.is_file() else p))).props("data-rag-os")
+                    _os_fn2 = (lambda p=path: _open_os_path(str(p))) if is_dir else (lambda p=path: _select_in_os_explorer(str(p)))
+                    os_button = ui.button(on_click=_os_fn2).props("data-rag-os")
                     os_button.classes("hidden")
                 render_star(path, item_type="folder" if is_dir else "file")
 
@@ -4645,11 +4651,28 @@ def _build_page(initial_screen: str = "search") -> None:
             with ui.expansion("Кандидаты из истории поиска", icon="psychology", value=False).classes("w-full"):
                 if not candidates:
                     ui.label("Пока нет кандидатов. Они появятся после положительных реакций на результаты поиска.").classes("rag-meta")
+
+                def _quick_add_alias(cq: str, cp: str) -> None:
+                    import re as _re
+                    _key = _re.sub(r"[^a-z0-9]+", "_", cq.lower()).strip("_") or "alias"
+                    try:
+                        telemetry.save_search_alias_group(
+                            key=_key, label=cq, aliases=[cq, cp], source="analytics"
+                        )
+                        _log_app_event(state, "settings", "search_alias_add", details={"key": _key, "from": "admin_candidate"})
+                        ui.notify(f"Синоним добавлен: «{cq}» = «{cp}»", type="positive")
+                        render()
+                    except Exception as exc:
+                        ui.notify(f"Не удалось добавить: {exc}", type="negative")
+
                 for item in candidates:
+                    cand_q = str(item.get("query") or "")
+                    cand_p = str(item.get("candidate") or "")
                     with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(str(item.get("candidate") or "")).classes("font-medium")
-                        ui.label(f"запрос: {item.get('query') or ''}").classes("rag-meta")
+                        ui.label(cand_p).classes("font-medium")
+                        ui.label(f"запрос: {cand_q}").classes("rag-meta")
                         ui.label(str(item.get("title") or item.get("path") or "")).classes("rag-path flex-1")
+                        ui.button("Добавить", icon="add", on_click=lambda cq=cand_q, cp=cand_p: _quick_add_alias(cq, cp)).props("flat dense no-caps").classes("text-xs")
 
     def render_settings_screen() -> None:
         auth_db = _get_auth_db(state)
@@ -5311,6 +5334,7 @@ def _build_page(initial_screen: str = "search") -> None:
                                 with ui.row().classes("w-full items-center gap-2"):
                                     ui.label(str(row["query"])).classes("flex-1 text-sm truncate")
                                     ui.label(f"×{row['count']}").classes("rag-chip text-xs bg-red-50 text-red-600")
+                                    ui.button(icon="search", on_click=choose_query_handler(str(row["query"])), color=None).props("flat round dense").tooltip("Выполнить этот запрос")
                         else:
                             with ui.row().classes("items-center gap-2"):
                                 ui.icon("check_circle").classes("text-positive")
@@ -5326,6 +5350,7 @@ def _build_page(initial_screen: str = "search") -> None:
                                 with ui.row().classes("w-full items-center gap-2"):
                                     ui.label(str(row["query"])).classes("flex-1 text-sm truncate")
                                     ui.label(f"{int(row['score'])}").classes("rag-chip text-xs bg-red-50 text-red-600")
+                                    ui.button(icon="search", on_click=choose_query_handler(str(row["query"])), color=None).props("flat round dense").tooltip("Выполнить этот запрос")
                         else:
                             with ui.row().classes("items-center gap-2"):
                                 ui.icon("check_circle").classes("text-positive")
@@ -5388,6 +5413,25 @@ def _build_page(initial_screen: str = "search") -> None:
                             "кандидаты на добавление как синоним."
                         ).classes("rag-meta text-xs mb-1")
                         if candidates:
+                            tdb_ref = _get_telemetry(state)
+
+                            def _add_synonym_from_candidate(cq: str, cp: str) -> None:
+                                if not tdb_ref:
+                                    return
+                                import re as _re
+                                _key = _re.sub(r"[^a-z0-9]+", "_", cq.lower()).strip("_") or "alias"
+                                try:
+                                    tdb_ref.save_search_alias_group(
+                                        key=_key,
+                                        label=cq,
+                                        aliases=[cq, cp],
+                                        source="analytics",
+                                    )
+                                    _log_app_event(state, "settings", "search_alias_add", details={"key": _key, "from": "analytics_candidate"})
+                                    ui.notify(f"Синоним добавлен: «{cq}» = «{cp}»", type="positive")
+                                except Exception as exc:
+                                    ui.notify(f"Не удалось добавить: {exc}", type="negative")
+
                             for cand in candidates[:20]:
                                 q = str(cand.get("query") or "")
                                 phrase = str(cand.get("candidate") or "")
@@ -5402,6 +5446,7 @@ def _build_page(initial_screen: str = "search") -> None:
                                         if title:
                                             ui.label(title).classes("rag-path text-xs truncate")
                                     ui.label(f"+{score}").classes("rag-chip text-xs bg-green-50 text-green-700")
+                                    ui.button(icon="add", on_click=lambda cq=q, cp=phrase: _add_synonym_from_candidate(cq, cp), color=None).props("flat round dense").tooltip("Добавить как синоним")
                         else:
                             ui.label("Недостаточно данных для предложений.").classes("rag-meta")
 

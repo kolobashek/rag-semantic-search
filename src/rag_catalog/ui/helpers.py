@@ -613,6 +613,17 @@ def _open_os_path(path: str) -> None:
         ui.notify(f"Не удалось открыть проводник ОС: {exc}", type="negative")
 
 
+def _select_in_os_explorer(path: str) -> None:
+    """Open Windows Explorer with the file selected (explorer /select,<path>)."""
+    value = str(path or "").strip()
+    if not value:
+        return
+    try:
+        subprocess.Popen(["explorer", f"/select,{value}"])
+    except Exception as exc:
+        ui.notify(f"Не удалось открыть проводник ОС: {exc}", type="negative")
+
+
 def _within_catalog(root: Path, candidate: Path) -> bool:
     try:
         candidate.resolve().relative_to(root.resolve())
