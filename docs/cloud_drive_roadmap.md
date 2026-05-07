@@ -416,7 +416,7 @@ Codex:
 - [x] Добавить audit trail для Cloud Drive операций: view/download/upload/delete/move/rename/search.
 - [x] Добавить CI quality gate: `pytest`, `py_compile`, launcher smoke, docker smoke.
 - [x] Подключить `ruff` и постепенно включать правила без массового churn.
-- [ ] Зафиксировать dependency lock / reproducible install path.
+- [x] Зафиксировать dependency lock / reproducible install path.
 
 Claude:
 - [ ] Показать пользователю понятные состояния доступа: нет прав, сессия истекла, нужна смена пароля.
