@@ -455,6 +455,15 @@ def _file_url(full_path: str) -> str:
         return ""
 
 
+def _schedule_display_label(sched: Dict[str, Any]) -> str:
+    label = str(sched.get("label") or "").strip()
+    if label:
+        return label
+    stage_label = _STAGE_LABELS.get(str(sched.get("stage") or "all"), str(sched.get("stage") or "Все этапы"))
+    cadence_label = _CADENCE_LABELS.get(str(sched.get("cadence") or "daily"), str(sched.get("cadence") or "ежедневно"))
+    return f"{stage_label} · {cadence_label}"
+
+
 def _folder_url(full_path: str) -> str:
     try:
         p = PureWindowsPath(full_path).parent
@@ -2219,6 +2228,9 @@ def _install_css() -> None:
           border-radius: 10px;
           background: var(--rag-sunken);
         }
+        .rag-pipeline-row-card {
+          width: 100%;
+        }
         .rag-pipeline-row.running {
           border-color: color-mix(in srgb, var(--rag-accent) 55%, var(--rag-border));
         }
@@ -2261,6 +2273,19 @@ def _install_css() -> None:
           flex-wrap: nowrap;
           width: 150px;
           min-width: 150px;
+        }
+        .rag-progress-stack {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .rag-progress-topline {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .rag-progressbar .q-linear-progress__text {
+          display: none !important;
         }
         .rag-pipeline-row > * {
           min-width: 0;
@@ -3898,11 +3923,18 @@ def _build_page(initial_screen: str = "search") -> None:
 
         with ui.row().classes("w-full items-center gap-2"):
             ui.label("Индексация").classes("text-2xl font-semibold")
-            active_label = "running" if (telemetry.get("active_stages") or telemetry.get("active_ocr")) else "idle"
-            ui.label(f"● {active_label}").classes("rag-chip")
+            active_stage_names = [
+                _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or ""))
+                for row in (telemetry.get("active_stages") or [])
+            ]
+            if telemetry.get("active_ocr"):
+                active_stage_names.append("OCR")
+            active_label = "Запущено: " + ", ".join(active_stage_names) if active_stage_names else "Нет активных задач"
+            ui.label(active_label).classes("rag-chip")
             ui.space()
-            ui.button("Пауза", icon="pause", on_click=lambda: ui.notify("Пауза будет доступна после добавления cooperative-cancel в worker.", type="warning")).props("outline dense")
-            ui.button("Отмена", icon="close", on_click=lambda: ui.notify("Отмена будет доступна после добавления cooperative-cancel в worker.", type="warning")).props("outline dense color=negative")
+            if active_stage_names:
+                ui.button("Пауза", icon="pause", on_click=lambda: ui.notify("Пауза будет доступна после добавления cooperative-cancel в worker.", type="warning")).props("outline dense")
+                ui.button("Отмена", icon="close", on_click=lambda: ui.notify("Отмена будет доступна после добавления cooperative-cancel в worker.", type="warning")).props("outline dense color=negative")
         ui.label("Этапы, OCR, расписание и параметры индексирования.").classes("rag-meta")
 
         # ── Метрики ──────────────────────────────────────────────────────
@@ -4096,6 +4128,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
                 total_f = int(row.get("total_files") or row.get("found_scanned") or 0)
                 pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if status_str not in {"running", "idle"} else 0.0)
+                pct_label = f"{pct * 100:.0f}%"
                 duration_value = row.get("duration_sec", row.get("last_duration_sec"))
                 last_ts = row.get("ts_finished") or row.get("ts_updated") or row.get("ts_started")
                 status_cls = "running" if is_running else status_str
@@ -4124,34 +4157,45 @@ def _build_page(initial_screen: str = "search") -> None:
                 row_for_dialog["stage"] = label
                 if is_ocr:
                     row_for_dialog["_log_path"] = PROJECT_ROOT / "logs" / "ocr.log"
-                with ui.element("div").classes(f"rag-pipeline-row {status_cls}"):
+                with ui.element("div").classes(f"rag-pipeline-row rag-pipeline-row-card {status_cls}"):
                     with ui.row().classes("items-center gap-2 min-w-0"):
                         ui.icon(status_icon).classes(f"rag-phase-status {status_cls}")
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label(label).classes("font-semibold truncate")
                             ui.label(_format_relative_time(last_ts)).classes("rag-meta")
-                    with ui.column().classes("gap-1 min-w-0"):
-                        with ui.row().classes("w-full items-center gap-2"):
+                    with ui.column().classes("rag-progress-stack min-w-0"):
+                        with ui.row().classes("rag-progress-topline w-full items-center gap-2"):
                             ui.button(status_title, on_click=lambda r=row_for_dialog: show_stage_status_details(r), color=None).props("flat dense no-caps").classes(f"rag-chip rag-status-chip {status_cls}")
                             ui.label(f"{processed:,} / {total_f:,}".replace(",", " ")).classes("rag-meta")
                             ui.space()
+                            ui.label(pct_label).classes("rag-meta")
                             ui.label(_format_duration_seconds(duration_value)).classes("rag-meta")
-                        ui.linear_progress(value=pct).props("color=indigo-5" if is_running else "").classes("w-full")
+                        ui.linear_progress(value=pct).props("color=indigo-5" if is_running else "").classes("w-full rag-progressbar")
                     ui.label(stats_text).classes("rag-meta")
                     with ui.row().classes("rag-pipeline-actions"):
-                        if is_ocr:
-                            ui.button(icon="play_arrow", on_click=run_ocr_now).props("flat dense round").tooltip("Запустить")
-                            ui.button(icon="restart_alt", on_click=run_ocr_now).props("flat dense round").tooltip("Рестарт")
+                        if is_running:
+                            if is_ocr:
+                                ui.button(icon="restart_alt", on_click=run_ocr_now).props("flat dense round").tooltip("Рестарт")
+                            else:
+                                ui.button(icon="restart_alt", on_click=make_run_handler(key)).props("flat dense round").tooltip("Рестарт")
+                            ui.button(icon="pause", on_click=lambda l=label: pause_phase(l)).props("flat dense round").tooltip("Пауза")
+                            ui.button(icon="stop", on_click=lambda l=label: stop_phase(l)).props("flat dense round").tooltip("Остановить")
                         else:
-                            ui.button(icon="play_arrow", on_click=make_run_handler(key)).props("flat dense round").tooltip("Запустить")
-                            ui.button(icon="restart_alt", on_click=make_run_handler(key)).props("flat dense round").tooltip("Рестарт")
-                        ui.button(icon="pause", on_click=lambda l=label: pause_phase(l)).props("flat dense round").tooltip("Пауза")
-                        ui.button(icon="stop", on_click=lambda l=label: stop_phase(l)).props("flat dense round").tooltip("Остановить")
+                            if is_ocr:
+                                ui.button(icon="play_arrow", on_click=run_ocr_now).props("flat dense round").tooltip("Запустить")
+                            else:
+                                ui.button(icon="play_arrow", on_click=make_run_handler(key)).props("flat dense round").tooltip("Запустить")
 
             def _refresh_progress() -> None:
                 fresh = _read_index_telemetry(state.cfg)
                 stats = _read_index_stats(state.cfg)
-                active_chip.set_text("running" if (fresh.get("active_stages") or fresh.get("active_ocr")) else "idle")
+                active_names = [
+                    _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or ""))
+                    for row in (fresh.get("active_stages") or [])
+                ]
+                if fresh.get("active_ocr"):
+                    active_names.append("OCR")
+                active_chip.set_text("Запущено: " + ", ".join(active_names) if active_names else "Нет активных задач")
                 by_stage = dict(stats.get("by_stage") or {})
                 total_files = int(stats.get("total") or 0)
                 content_files = int(by_stage.get("content") or 0)
@@ -4175,7 +4219,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 summary_by_stage = {str(row.get("stage") or ""): row for row in (fresh.get("stage_summary") or [])}
                 progress_area.clear()
                 with progress_area:
-                    with ui.element("div").classes("rag-pipeline-row rag-pipeline-head"):
+                    with ui.element("div").classes("rag-pipeline-row rag-pipeline-row-card rag-pipeline-head"):
                         ui.label("Этап").classes("rag-meta font-semibold")
                         ui.label("Прогресс").classes("rag-meta font-semibold")
                         ui.label("Статистика").classes("rag-meta font-semibold")
@@ -4243,20 +4287,23 @@ def _build_page(initial_screen: str = "search") -> None:
                             if not current:
                                 ui.label("Расписаний пока нет. Нажмите «Добавить расписание» чтобы создать.").classes("rag-meta")
                             for sched in current:
+                                cadence_key = str(sched.get("cadence") or "daily")
                                 days_str = " ".join(_DAY_RU.get(d, d) for d in (sched.get("days") or []))
-                                cadence_str = _CADENCE_LABELS.get(str(sched.get("cadence") or "daily"), "")
+                                cadence_str = _CADENCE_LABELS.get(cadence_key, "")
                                 stage_str = _STAGE_LABELS.get(str(sched.get("stage") or "all"), str(sched.get("stage") or ""))
                                 last_run = str(sched.get("last_run_at") or "—")
                                 enabled_val = bool(int(sched.get("enabled") or 0))
                                 color_cls = "" if enabled_val else "opacity-50"
+                                schedule_label = _schedule_display_label(sched)
+                                cadence_display = cadence_str if cadence_key == "hourly" else f"{cadence_str} в {sched.get('time') or '?'}"
                                 with ui.row().classes(f"w-full items-center gap-2 p-2 border border-gray-200 rounded {color_cls}"):
                                     ui.icon("check_circle" if enabled_val else "radio_button_unchecked").classes(
                                         "text-xl " + ("text-green-500" if enabled_val else "text-gray-400")
                                     )
-                                    ui.label(str(sched.get("label") or "Без названия")).classes("font-semibold min-w-32")
+                                    ui.label(schedule_label).classes("font-semibold min-w-32")
                                     ui.label(stage_str).classes("rag-chip")
-                                    ui.label(f"{cadence_str} в {sched.get('time') or '?'}").classes("rag-meta")
-                                    if days_str:
+                                    ui.label(cadence_display).classes("rag-meta")
+                                    if days_str and cadence_key != "hourly":
                                         ui.label(days_str).classes("rag-meta min-w-20")
                                     ui.space()
                                     ui.label(f"Последний: {last_run[:16] if last_run != '—' else '—'}").classes("rag-meta text-xs")
@@ -4284,6 +4331,13 @@ def _build_page(initial_screen: str = "search") -> None:
                                 dlg_time = ui.input(
                                     "Время (ЧЧ:ММ)", value=str((existing or {}).get("time") or "03:00")
                                 ).props("dense outlined mask='##:##'").classes("w-32")
+                            def refresh_schedule_form() -> None:
+                                is_hourly = str(dlg_cadence.value or "daily") == "hourly"
+                                dlg_time.set_visibility(not is_hourly)
+                                if is_hourly:
+                                    dlg_time.set_value("")
+                            refresh_schedule_form()
+                            dlg_cadence.on_value_change(lambda _: refresh_schedule_form())
                             ui.label("Дни недели (для ежедневного/еженедельного):").classes("rag-meta")
                             existing_days = (existing or {}).get("days") or _DAY_LABELS[:5]
                             day_checks = {d: ui.checkbox(_DAY_RU.get(d, d), value=(d in existing_days)) for d in _DAY_LABELS}

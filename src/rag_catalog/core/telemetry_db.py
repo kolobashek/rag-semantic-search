@@ -110,6 +110,25 @@ def _norm_text(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower().replace("ё", "е"))
 
 
+def _default_schedule_label(stage: str, cadence: str) -> str:
+    stage_map = {
+        "all": "Все этапы",
+        "metadata": "Metadata",
+        "small": "Small chunks",
+        "large": "Large chunks",
+        "content": "Content",
+        "ocr": "OCR",
+    }
+    cadence_map = {
+        "hourly": "каждый час",
+        "daily": "ежедневно",
+        "weekly": "еженедельно",
+    }
+    stage_label = stage_map.get(stage or "all", stage or "Все этапы")
+    cadence_label = cadence_map.get(cadence or "daily", cadence or "ежедневно")
+    return f"{stage_label} · {cadence_label}"
+
+
 class TelemetryDB:
     """Простой потокобезопасный слой записи/чтения телеметрии."""
 
@@ -418,6 +437,8 @@ class TelemetryDB:
         query_original: str = "",
         query_used: str = "",
     ) -> None:
+        clean_time = "" if clean_cadence == "hourly" else str(time or "03:00").strip()
+        clean_label = str(label or "").strip() or _default_schedule_label(clean_stage, clean_cadence)
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -1268,10 +1289,10 @@ class TelemetryDB:
                     """,
                     (
                         sched_id,
-                        str(label or "").strip(),
+                        clean_label,
                         1 if enabled else 0,
                         clean_cadence,
-                        str(time or "03:00").strip(),
+                        clean_time,
                         json.dumps(clean_days, ensure_ascii=False),
                         clean_stage,
                         now,
@@ -1279,8 +1300,8 @@ class TelemetryDB:
                     ),
                 )
         return {
-            "id": sched_id, "label": label, "enabled": enabled,
-            "cadence": clean_cadence, "time": time, "days": clean_days,
+            "id": sched_id, "label": clean_label, "enabled": enabled,
+            "cadence": clean_cadence, "time": clean_time, "days": clean_days,
             "stage": clean_stage,
         }
 
