@@ -7101,11 +7101,12 @@ def _build_page(initial_screen: str = "search") -> None:
 
         # ── Реестр секций: (key, icon, label, keywords) ─────────────────
         user_sections: List[tuple] = [
-            ("profile",   "person",          "Профиль",              ["имя", "аккаунт", "профиль"]),
-            ("telegram_sync", "sync",         "Синхронизация Telegram", ["telegram", "бот", "синхронизация"]),
-            ("explorer",  "folder_open",      "Проводник",            ["файлы", "вид", "сортировка"]),
-            ("favorites", "star_border",      "Избранное",            ["закладки"]),
-            ("password",  "key",              "Пароль и выход",       ["смена", "выход", "logout"]),
+            ("profile",      "person",          "Профиль",                  ["имя", "аккаунт", "профиль"]),
+            ("telegram_sync", "sync",           "Синхронизация Telegram",   ["telegram", "бот", "синхронизация"]),
+            ("cloud_sync_user", "sync_alt",     "Cloud Sync",               ["sync", "синхронизация", "папка", "desktop"]),
+            ("explorer",     "folder_open",     "Проводник",                ["файлы", "вид", "сортировка"]),
+            ("favorites",    "star_border",     "Избранное",                ["закладки"]),
+            ("password",     "key",             "Пароль и выход",           ["смена", "выход", "logout"]),
         ]
         admin_sections: List[tuple] = [
             ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
@@ -7270,6 +7271,50 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.button("Синхронизировать", icon="link", on_click=bind_tg).props("outline")
                             if linked_tg_id:
                                 ui.button("Отвязать", icon="link_off", on_click=unlink_tg).props("flat color=negative")
+
+                elif sec == "cloud_sync_user":
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Cloud Sync").classes("text-xl font-semibold")
+                        ui.label(
+                            "Desktop sync-клиент синхронизирует выбранные папки вашего компьютера "
+                            "с Cloud Drive. Настройте пары папок и политику конфликтов."
+                        ).classes("rag-meta")
+                        cd_enabled2 = bool(state.cfg.get("cloud_drive_enabled"))
+                        if not cd_enabled2:
+                            with ui.element("div").classes("cd-empty-state w-full py-4"):
+                                ui.icon("cloud_off", size="28px").classes("opacity-30")
+                                ui.label("Cloud Drive не включён — обратитесь к администратору.").classes("text-center")
+                        else:
+                            # Status card
+                            with ui.row().classes("w-full items-center gap-3 p-3 rag-explorer-item"):
+                                ui.icon("sync_disabled", size="24px").classes("text-slate-400")
+                                with ui.column().classes("flex-1 gap-0"):
+                                    ui.label("Sync-клиент не подключён").classes("font-medium")
+                                    ui.label("Установите desktop sync-агент, чтобы автоматически синхронизировать файлы.").classes("rag-meta text-xs")
+                                ui.badge("Не подключён", color="grey-4").classes("text-xs")
+
+                            ui.separator()
+                            ui.label("Мои папки синхронизации").classes("font-semibold")
+
+                            user_pairs_raw = state.cfg.get("cloud_sync_folder_pairs") or []
+                            user_pairs = [p for p in (user_pairs_raw if isinstance(user_pairs_raw, list) else []) if isinstance(p, dict)]
+
+                            if not user_pairs:
+                                with ui.element("div").classes("cd-empty-state w-full py-3"):
+                                    ui.icon("folder_copy", size="24px").classes("opacity-30")
+                                    ui.label("Нет настроенных папок для синхронизации.").classes("text-center")
+                                    ui.label("Добавьте пары папок в Настройках → Sync клиент (доступно администраторам).").classes("text-center rag-meta text-xs")
+                            else:
+                                with ui.column().classes("w-full gap-1"):
+                                    for _pair in user_pairs:
+                                        with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                            ui.icon("folder_copy", size="20px").classes("text-indigo-400")
+                                            with ui.column().classes("flex-1 gap-0"):
+                                                ui.label(str(_pair.get("local_path") or "(не задано)")).classes("text-sm font-medium")
+                                                ui.label(f"→ Cloud Drive: {_pair.get('cd_path', '/')}").classes("rag-meta text-xs")
+                                            _pol = str(_pair.get("conflict_policy") or "ask")
+                                            _pol_lbl = {"ask": "Спрашивать", "server_wins": "Сервер", "local_wins": "Локальная"}.get(_pol, _pol)
+                                            ui.badge(_pol_lbl, color="grey-4").classes("text-xs")
 
                 elif sec == "explorer":
                     with ui.column().classes("rag-card w-full p-4 gap-3"):
