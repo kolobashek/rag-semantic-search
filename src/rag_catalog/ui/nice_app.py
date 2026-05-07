@@ -1158,6 +1158,26 @@ def _build_page(initial_screen: str = "search") -> None:
             _ss_btn = ui.button(icon=_ss_icon, on_click=_toggle_ss, color=None).props("flat round dense")
             _ss_btn.classes("text-amber-500" if _ss_active else "text-slate-400")
             _ss_btn.tooltip(_ss_tip)
+            def _export_results_csv() -> None:
+                import csv as _csv
+                import io as _io
+                buf = _io.StringIO()
+                writer = _csv.writer(buf)
+                writer.writerow(["#", "Имя файла", "Путь", "Тип", "Оценка", "Фрагмент"])
+                for i, r in enumerate(state.results, 1):
+                    writer.writerow([
+                        i,
+                        str(r.get("filename") or ""),
+                        str(r.get("full_path") or r.get("path") or ""),
+                        _result_kind(r),
+                        f"{float(r.get('rank_score') or r.get('score') or 0):.4f}",
+                        _clean_text(r.get("text") or "")[:200],
+                    ])
+                content_bytes = buf.getvalue().encode("utf-8-sig")
+                safe_q = re.sub(r"[^\w\-а-яёА-ЯЁ ]", "_", state.searched_query or "results")[:40]
+                ui.download(content_bytes, filename=f"search_{safe_q}.csv")
+                _log_app_event(state, "search", "export_csv", details={"query": state.searched_query, "count": len(state.results)})
+            ui.button(icon="download", on_click=_export_results_csv, color=None).props("flat round dense").tooltip("Экспорт результатов в CSV")
         if state.search_stats_hint:
             ui.label(state.search_stats_hint).classes("rag-meta")
         if state.search_lazy_loading:
