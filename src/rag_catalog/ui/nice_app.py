@@ -5622,6 +5622,39 @@ def _build_page(initial_screen: str = "search") -> None:
                     auth_ok_filter.on_value_change(lambda e: refresh_auth_table())
                     refresh_auth_table()
 
+                if bool(state.cfg.get("cloud_drive_enabled")):
+                    ui.separator().classes("my-2")
+                    ui.label("Cloud Drive — журнал операций").classes("font-semibold text-sm")
+                    tdb = _get_telemetry(state)
+                    cd_events_raw = tdb.list_app_events(feature="cloud_drive", limit=200) if tdb else []
+                    cd_events_table = ui.table(
+                        rows=cd_events_raw,
+                        columns=[
+                            {"name": "ts", "label": "Время", "field": "ts", "sortable": True},
+                            {"name": "username", "label": "Пользователь", "field": "username"},
+                            {"name": "action", "label": "Операция", "field": "action"},
+                            {"name": "ok", "label": "OK", "field": "ok"},
+                        ],
+                        pagination=15,
+                    ).classes("w-full")
+
+                    cd_action_filter = ui.input("Операция").props("dense outlined clearable").classes("w-48")
+                    cd_user_filter2 = ui.input("Пользователь").props("dense outlined clearable").classes("w-48")
+
+                    def refresh_cd_audit() -> None:
+                        rows = list(cd_events_raw)
+                        if str(cd_action_filter.value or "").strip():
+                            needle = cd_action_filter.value.strip().lower()
+                            rows = [r for r in rows if needle in str(r.get("action") or "").lower()]
+                        if str(cd_user_filter2.value or "").strip():
+                            needle2 = cd_user_filter2.value.strip().lower()
+                            rows = [r for r in rows if needle2 in str(r.get("username") or "").lower()]
+                        cd_events_table.rows = rows
+                        cd_events_table.update()
+
+                    cd_action_filter.on_value_change(lambda e: refresh_cd_audit())
+                    cd_user_filter2.on_value_change(lambda e: refresh_cd_audit())
+
     def render() -> None:
         page_root.classes(remove="search")
         if state.screen == "search":
