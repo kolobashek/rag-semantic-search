@@ -458,7 +458,7 @@ Codex:
 - [ ] Разрезать `index_rag.py` на `indexing/`, `extractors/`, `chunking/`, `qdrant_writer`.
   - [x] Вынести text chunking в `src/rag_catalog/core/chunking/`.
   - [ ] Вынести extractors.
-  - [ ] Вынести qdrant writer.
+  - [x] Вынести qdrant writer в `src/rag_catalog/core/indexing/qdrant_writer.py`.
   - [ ] Вынести stage runner.
 - [x] Вынести Cloud Drive API из `nice_app.py` в отдельный модуль: endpoint'ы находятся в `src/rag_catalog/ui/api.py`, `nice_app.py` только импортирует модуль регистрации routes.
 - [ ] Вынести auth helpers из `nice_app.py`.

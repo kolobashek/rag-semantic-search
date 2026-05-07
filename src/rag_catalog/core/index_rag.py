@@ -29,20 +29,13 @@ apply_windows_platform_workarounds()
 from docx import Document
 from openpyxl import load_workbook
 from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    FieldCondition,
-    Filter,
-    FilterSelector,
-    MatchValue,
-    PointStruct,
-    VectorParams,
-)
+from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
+from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .index_state_db import IndexStateDB
 from .ocr_runtime import apply_tesseract_runtime, resolve_ocr_runtime
 from .rag_core import load_config
@@ -501,24 +494,22 @@ class RAGIndexer:
     # ── collection setup ───────────────────────────────────────────────
 
     def _setup_collection(self) -> None:
-        existing = [c.name for c in self.qdrant.get_collections().collections]
-        if self.collection_name in existing:
-            if self.recreate:
-                logger.info("Пересоздание коллекции %s…", self.collection_name)
-                self.qdrant.delete_collection(self.collection_name)
-                self._create_collection()
-                self.state_db.clear()
-                logger.info("state_entries очищен (--recreate)")
-            else:
-                logger.info("Коллекция %s уже существует.", self.collection_name)
-        else:
-            self._create_collection()
+        recreated = ensure_collection(
+            self.qdrant,
+            collection_name=self.collection_name,
+            vector_size=self.vector_size,
+            recreate=self.recreate,
+        )
+        if recreated:
+            self.state_db.clear()
+            logger.info("state_entries очищен (--recreate)")
 
     def _create_collection(self) -> None:
-        logger.info("Создание коллекции %s…", self.collection_name)
-        self.qdrant.create_collection(
+        ensure_collection(
+            self.qdrant,
             collection_name=self.collection_name,
-            vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
+            vector_size=self.vector_size,
+            recreate=False,
         )
 
     # ── fingerprint ────────────────────────────────────────────────────
@@ -588,21 +579,13 @@ class RAGIndexer:
 
     def _delete_file_vectors(self, filepath: Path, *, payload_match: Optional[Dict[str, Any]] = None) -> None:
         """Удалить все векторы в Qdrant, связанные с данным файлом или payload identity."""
-        must = []
-        if payload_match:
-            for key, value in payload_match.items():
-                if value not in (None, ""):
-                    must.append(FieldCondition(key=str(key), match=MatchValue(value=value)))
-        if not must:
-            must.append(FieldCondition(key="full_path", match=MatchValue(value=str(filepath))))
         try:
-            self.qdrant.delete(
+            delete_file_vectors(
+                self.qdrant,
                 collection_name=self.collection_name,
-                wait=False,
-                timeout=self.qdrant_timeout_sec,
-                points_selector=FilterSelector(
-                    filter=Filter(must=must)
-                ),
+                filepath=filepath,
+                timeout_sec=self.qdrant_timeout_sec,
+                payload_match=payload_match,
             )
             logger.debug("Удалены старые векторы для: %s", filepath)
         except Exception as exc:
@@ -982,7 +965,7 @@ class RAGIndexer:
 
     def _flush_buffer(self) -> None:
         if self._points_buffer:
-            self.qdrant.upsert(self.collection_name, points=self._points_buffer)
+            upsert_points(self.qdrant, collection_name=self.collection_name, points=self._points_buffer)
             logger.info(
                 "Загружен батч: %d точек (итого %d)", len(self._points_buffer), self.point_count
             )
@@ -1264,9 +1247,9 @@ class RAGIndexer:
                     PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=p)
                     for v, p in zip(vectors, chunk_payloads)
                 ]
-                self.qdrant.upsert(self.collection_name, points=points)
-                self.point_count += len(points)
-                stage_stats["points_added"] += len(points)
+                written = upsert_points(self.qdrant, collection_name=self.collection_name, points=points)
+                self.point_count += written
+                stage_stats["points_added"] += written
             logger.info(
                 "Записан батч: %d точек (итого %d)", len(pending_texts), self.point_count
             )
