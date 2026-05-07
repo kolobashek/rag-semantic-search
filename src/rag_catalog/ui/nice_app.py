@@ -4686,12 +4686,13 @@ def _build_page(initial_screen: str = "search") -> None:
 
         # ── Реестр секций: (key, icon, label, keywords) ─────────────────
         user_sections: List[tuple] = [
-            ("profile",      "person",          "Профиль",                  ["имя", "аккаунт", "профиль"]),
-            ("telegram_sync", "sync",           "Синхронизация Telegram",   ["telegram", "бот", "синхронизация"]),
-            ("cloud_sync_user", "sync_alt",     "Cloud Sync",               ["sync", "синхронизация", "папка", "desktop"]),
-            ("explorer",     "folder_open",     "Проводник",                ["файлы", "вид", "сортировка"]),
-            ("favorites",    "star_border",     "Избранное",                ["закладки"]),
-            ("password",     "key",             "Пароль и выход",           ["смена", "выход", "logout"]),
+            ("profile",         "person",         "Профиль",                  ["имя", "аккаунт", "профиль"]),
+            ("telegram_sync",   "sync",           "Синхронизация Telegram",   ["telegram", "бот", "синхронизация"]),
+            ("cloud_sync_user", "sync_alt",       "Cloud Sync",               ["sync", "синхронизация", "папка", "desktop"]),
+            ("explorer",        "folder_open",    "Проводник",                ["файлы", "вид", "сортировка"]),
+            ("favorites",       "star_border",    "Избранное",                ["закладки"]),
+            ("saved_searches",  "bookmark",       "Сохранённые запросы",      ["запросы", "поиск", "сохранено"]),
+            ("password",        "key",            "Пароль и выход",           ["смена", "выход", "logout"]),
         ]
         admin_sections: List[tuple] = [
             ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
@@ -4940,6 +4941,25 @@ def _build_page(initial_screen: str = "search") -> None:
                                 ui.button(icon="delete", on_click=lambda p=fav_path: (
                                     _toggle_favorite(state, p), render_section()
                                 )).props("flat round dense")
+
+                elif sec == "saved_searches":
+                    with ui.column().classes("rag-card w-full p-4 gap-3"):
+                        ui.label("Сохранённые запросы").classes("text-xl font-semibold")
+                        if not state.saved_searches:
+                            ui.label("Нет сохранённых запросов. Нажмите на закладку рядом с результатами поиска, чтобы сохранить запрос.").classes("rag-meta")
+                        for ss in state.saved_searches:
+                            ss_q = str(ss.get("query") or "")
+                            ss_label = str(ss.get("label") or ss_q)
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.icon("bookmark", size="16px").classes("text-amber-500 shrink-0")
+                                with ui.column().classes("flex-1 min-w-0 gap-0"):
+                                    ui.label(ss_label).classes("text-sm font-medium truncate")
+                                    if ss_label != ss_q:
+                                        ui.label(ss_q).classes("rag-path text-xs truncate")
+                                ui.button(icon="search", on_click=choose_query_handler(ss_q), color=None).props("flat round dense").tooltip("Выполнить этот запрос")
+                                ui.button(icon="delete", on_click=lambda q=ss_q: (
+                                    _toggle_saved_search(state, q), render_section()
+                                ), color=None).props("flat round dense")
 
                 elif sec == "password":
                     with ui.column().classes("rag-card w-full p-4 gap-3"):
