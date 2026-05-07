@@ -394,7 +394,7 @@ Claude:
 Codex:
 - [x] Закрыть local end-to-end `Cloud Drive -> reindex job -> extract/OCR/chunk/embed -> Qdrant/search payload`.
 - [x] Сделать обработчик `reindex` jobs, а не только постановку задачи.
-- [ ] Связать `cloud_files.id` / `cloud_file_versions.id` с telemetry; `index_state` и Qdrant payload уже связаны.
+- [x] Связать `cloud_files.id` / `cloud_file_versions.id` с telemetry; `index_state` и Qdrant payload уже связаны.
 - [x] На upload/move/rename/delete автоматически ставить нужные reindex/cleanup jobs.
 - [x] Сделать local storage-aware indexing для файлов, загруженных в Cloud Drive storage вне `catalog_path`.
 - [x] Добавить per-file job status API для indexing/OCR/preview/error.

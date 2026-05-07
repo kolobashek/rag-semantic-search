@@ -786,6 +786,14 @@ def _build_page(initial_screen: str = "search") -> None:
 
         def rate_result(value: int, result: Dict[str, Any] = result, index: int = index) -> None:
             result_path = str(result.get("full_path") or result.get("path") or "")
+            telemetry_details = {
+                "screen": "search",
+                "reason": "explicit",
+                "cloud_file_id": cloud_file_id,
+                "cloud_version_id": cloud_version_id,
+                "cloud_path": cloud_path,
+                "source": "cloud_drive" if is_cloud_result else "filesystem",
+            }
             _get_telemetry(state).log_search_feedback(
                 username=_username(state),
                 source="nicegui",
@@ -795,18 +803,26 @@ def _build_page(initial_screen: str = "search") -> None:
                 feedback=value,
                 result_rank=index,
                 result_score=float(result.get("score") or 0),
-                details={"screen": "search", "reason": "explicit"},
+                details=telemetry_details,
             )
             _log_app_event(
                 state,
                 "search",
                 "feedback",
-                details={"value": value, "path": result_path, "query": state.searched_query},
+                details={**telemetry_details, "value": value, "path": result_path, "query": state.searched_query},
             )
             ui.notify("Оценка сохранена.", type="positive")
 
         def track_result_use(reason: str, result: Dict[str, Any] = result, index: int = index) -> None:
             result_path = str(result.get("full_path") or result.get("path") or "")
+            telemetry_details = {
+                "screen": "search",
+                "reason": reason,
+                "cloud_file_id": cloud_file_id,
+                "cloud_version_id": cloud_version_id,
+                "cloud_path": cloud_path,
+                "source": "cloud_drive" if is_cloud_result else "filesystem",
+            }
             try:
                 _get_telemetry(state).log_search_feedback(
                     username=_username(state),
@@ -817,10 +833,16 @@ def _build_page(initial_screen: str = "search") -> None:
                     feedback=2,
                     result_rank=index,
                     result_score=float(result.get("score") or 0),
-                    details={"screen": "search", "reason": reason},
+                    details=telemetry_details,
                 )
             except Exception:
                 pass
+            _log_app_event(
+                state,
+                "search",
+                "result_use",
+                details={**telemetry_details, "path": result_path, "query": state.searched_query},
+            )
 
         def open_primary() -> None:
             if kind == "Каталог":
