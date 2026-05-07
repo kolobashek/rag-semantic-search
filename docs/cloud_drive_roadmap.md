@@ -333,6 +333,9 @@ Claude:
 - [x] versioning UI (история версий на каждом файле);
 - [x] download UI (кнопка для файлов в storage);
 - [x] create folder UI (диалог + toolbar кнопка);
+- [x] details panel: свойства + Действия (new folder/upload) + Фильтры;
+- [x] header breadcrumbs: синхронизированы с текущим cd_path;
+- [x] search quick-match: SQL LIKE по реестру над семантическими результатами;
 - [ ] file actions UI (rename/move/delete — ждёт Codex);
 - [ ] search UX adaptation (ждёт Codex search/index integration).
 
