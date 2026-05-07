@@ -53,3 +53,24 @@ def test_cloud_drive_service_storage_health(tmp_path: Path) -> None:
     assert health.backend == "local"
     assert health.ok is True
     assert health.writable is True
+
+
+def test_cloud_drive_upload_uses_content_addressed_dedup_storage(tmp_path: Path) -> None:
+    storage_root = tmp_path / "storage"
+    service = CloudDriveService(
+        registry=CloudDriveRegistryDB(str(tmp_path / "registry.db")),
+        storage=LocalStorageAdapter(str(storage_root)),
+    )
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    service.registry.upsert_folder(path="A", name="A", parent_id=root.id, depth=1, source_path="")
+    service.registry.upsert_folder(path="B", name="B", parent_id=root.id, depth=1, source_path="")
+    source = tmp_path / "payload.txt"
+    source.write_text("same-content", encoding="utf-8")
+
+    first = service.upload_file(parent_path="A", filename="first.txt", source_path=str(source), mime_type="text/plain")
+    second = service.upload_file(parent_path="B", filename="second.txt", source_path=str(source), mime_type="text/plain")
+
+    assert first["storage_key"] == second["storage_key"]
+    assert first["storage_key"].startswith("objects/sha256/")
+    stored_files = [path for path in storage_root.rglob("*") if path.is_file()]
+    assert len(stored_files) == 1

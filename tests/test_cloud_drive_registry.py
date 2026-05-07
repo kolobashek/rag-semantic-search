@@ -49,13 +49,13 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
 
     assert stats.folders >= 2
     assert stats.files == 2
-    assert (storage_root / 'Folder A' / 'hello.txt').exists()
-    assert (storage_root / 'root.pdf').exists()
     folder = registry.get_folder_by_path('Folder A')
     assert folder is not None
     file_row = registry.get_file_by_path('Folder A/hello.txt')
     assert file_row is not None
     assert file_row.size_bytes == 5
+    assert file_row.storage_key.startswith('objects/sha256/')
+    assert Path(storage.resolve_path(file_row.storage_key)).exists()
 
     root_node = service.get_node('')
     assert root_node['node_type'] == 'folder'
@@ -94,8 +94,10 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     )
     assert uploaded['node_type'] == 'file'
     assert uploaded['path'] == 'Folder A/new.txt'
-    assert registry.get_file_by_path('Folder A/new.txt') is not None
-    assert (storage_root / 'Folder A' / 'new.txt').exists()
+    uploaded_row = registry.get_file_by_path('Folder A/new.txt')
+    assert uploaded_row is not None
+    assert uploaded_row.storage_key.startswith('objects/sha256/')
+    assert Path(storage.resolve_path(uploaded_row.storage_key)).exists()
 
     second_upload_source = tmp_path / 'new-v2.txt'
     second_upload_source.write_text('new-content-v2', encoding='utf-8')
@@ -109,25 +111,29 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert versions['file']['path'] == 'Folder A/new.txt'
     assert len(versions['versions']) == 2
     assert versions['versions'][0]['is_current'] is True
+    current_storage_key = versions['versions'][0]['storage_key']
 
     moved_file = service.move_node(source_path='Folder A/new.txt', dest_parent_path='', new_name='renamed.txt')
     assert moved_file['node_type'] == 'file'
     assert moved_file['path'] == 'renamed.txt'
-    assert registry.get_file_by_path('renamed.txt') is not None
-    assert (storage_root / 'renamed.txt').exists()
+    moved_file_row = registry.get_file_by_path('renamed.txt')
+    assert moved_file_row is not None
+    assert moved_file_row.storage_key == current_storage_key
+    assert Path(storage.resolve_path(moved_file_row.storage_key)).exists()
 
     moved_folder = service.move_node(source_path='Folder A', dest_parent_path='', new_name='Archive')
     assert moved_folder['node_type'] == 'folder'
     assert moved_folder['path'] == 'Archive'
     assert registry.get_folder_by_path('Archive') is not None
-    assert registry.get_file_by_path('Archive/hello.txt') is not None
-    assert (storage_root / 'Archive' / 'hello.txt').exists()
+    archived_hello = registry.get_file_by_path('Archive/hello.txt')
+    assert archived_hello is not None
+    assert archived_hello.storage_key == file_row.storage_key
 
     deleted_file = service.delete_node('renamed.txt')
     assert deleted_file['node_type'] == 'file'
     assert registry.get_file_by_path('renamed.txt') is not None
     assert registry.get_file_by_path('renamed.txt').deleted_at != ''
-    assert not (storage_root / 'renamed.txt').exists()
+    assert Path(storage.resolve_path(current_storage_key)).exists()
 
     deleted_folder = service.delete_node('Archive')
     assert deleted_folder['node_type'] == 'folder'

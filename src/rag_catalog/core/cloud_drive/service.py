@@ -76,6 +76,14 @@ class CloudDriveService:
             error=str(result.get('error') or ''),
         )
 
+    @staticmethod
+    def _immutable_storage_key(*, checksum: str, filename: str) -> str:
+        clean_checksum = str(checksum or '').strip().lower()
+        if not clean_checksum:
+            raise RuntimeError('Не удалось вычислить checksum файла.')
+        suffix = Path(str(filename or '')).suffix.lower()
+        return f'objects/sha256/{clean_checksum[:2]}/{clean_checksum[2:4]}/{clean_checksum}{suffix}'
+
     def get_node(self, path: str = '') -> dict:
         clean_path = str(path or '').strip().replace('\\', '/').strip('/')
         if not clean_path:
@@ -222,10 +230,11 @@ class CloudDriveService:
         if not source.exists() or not source.is_file():
             raise RuntimeError(f'Временный файл не найден: {source}')
         target_path = f'{clean_parent}/{clean_name}' if clean_parent else clean_name
-        storage_key = target_path
         actual_mime = str(mime_type or '').strip() or guess_mime_type(source)
         checksum = compute_file_checksum(source)
-        self.storage.put_file(source, storage_key)
+        storage_key = self._immutable_storage_key(checksum=checksum, filename=clean_name)
+        if not self.storage.exists(storage_key):
+            self.storage.put_file(source, storage_key)
         file_row = self.registry.upsert_file(
             folder_id=parent.id,
             path=target_path,
@@ -277,12 +286,6 @@ class CloudDriveService:
         if source_node is None:
             raise RuntimeError(f'Узел не найден: {source_path}')
         if hasattr(source_node, 'folder_id'):
-            old_storage_key = source_node.storage_key
-            target_name = str(new_name or source_node.name).strip()
-            clean_parent = str(dest_parent_path or '').strip().replace('\\', '/').strip('/')
-            new_storage_key = f'{clean_parent}/{target_name}' if clean_parent else target_name
-            if new_storage_key != old_storage_key:
-                self.storage.move(old_storage_key, new_storage_key)
             file_row = self.registry.rename_move_file(
                 source_path=source_path,
                 dest_parent_path=dest_parent_path,
@@ -311,11 +314,6 @@ class CloudDriveService:
         target_name = str(new_name or source_node.name).strip()
         clean_parent = str(dest_parent_path or '').strip().replace('\\', '/').strip('/')
         new_prefix = f'{clean_parent}/{target_name}' if clean_parent else target_name
-        for child in self.registry.list_files_under_path(old_prefix):
-            suffix = child.path[len(old_prefix):].lstrip('/')
-            next_key = f'{new_prefix}/{suffix}' if suffix else new_prefix
-            if next_key != child.storage_key:
-                self.storage.move(child.storage_key, next_key)
         folder = self.registry.rename_move_folder(
             source_path=source_path,
             dest_parent_path=dest_parent_path,
@@ -344,8 +342,6 @@ class CloudDriveService:
         if source_node is None:
             raise RuntimeError(f'Узел не найден: {path}')
         if hasattr(source_node, 'folder_id'):
-            if self.storage.exists(source_node.storage_key):
-                self.storage.delete(source_node.storage_key)
             self._queue_cleanup_file(source_node, reason='delete', path=source_node.path)
             file_row = self.registry.delete_file(path)
             return {
@@ -355,8 +351,6 @@ class CloudDriveService:
                 'deleted_at': file_row.deleted_at,
             }
         for child in self.registry.list_files_under_path(source_node.path):
-            if self.storage.exists(child.storage_key):
-                self.storage.delete(child.storage_key)
             self._queue_cleanup_file(child, reason='delete_folder', path=child.path)
         folder = self.registry.delete_folder(path)
         return {
@@ -690,13 +684,13 @@ class CloudDriveService:
                     raise CloudDriveJobCancelled('cancelled_by_user')
                 file_path = base / filename
                 rel_file = file_path.relative_to(root)
-                storage_key = str(rel_file).replace('\\', '/')
+                checksum = compute_file_checksum(file_path)
+                storage_key = self._immutable_storage_key(checksum=checksum, filename=filename)
                 if import_files and not self.storage.exists(storage_key):
                     self.storage.put_file(file_path, storage_key)
-                checksum = compute_file_checksum(file_path)
                 self.registry.upsert_file(
                     folder_id=base_id,
-                    path=storage_key,
+                    path=str(rel_file).replace('\\', '/'),
                     name=filename,
                     storage_key=storage_key,
                     mime_type=guess_mime_type(file_path),

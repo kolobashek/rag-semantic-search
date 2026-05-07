@@ -388,18 +388,18 @@ class CloudDriveRegistryDB:
                 conn.execute(
                     '''
                     UPDATE cloud_files
-                    SET folder_id=?, name=?, path=?, storage_key=?, source_path=?, updated_at=?
+                    SET folder_id=?, name=?, path=?, source_path=?, updated_at=?
                     WHERE id=?
                     ''',
-                    (parent.id, target_name, target_path, target_path, source_path_value, now, file_row.id),
+                    (parent.id, target_name, target_path, source_path_value, now, file_row.id),
                 )
                 conn.execute(
                     '''
                     UPDATE cloud_file_versions
-                    SET storage_key=?, source_path=?
+                    SET source_path=?
                     WHERE file_id=?
                     ''',
-                    (target_path, source_path_value, file_row.id),
+                    (source_path_value, file_row.id),
                 )
                 saved = conn.execute('SELECT * FROM cloud_files WHERE id=?', (file_row.id,)).fetchone()
         assert saved is not None
@@ -498,12 +498,11 @@ class CloudDriveRegistryDB:
                     conn.execute(
                         '''
                         UPDATE cloud_files
-                        SET folder_id=?, path=?, storage_key=?, source_path=?, updated_at=?
+                        SET folder_id=?, path=?, source_path=?, updated_at=?
                         WHERE id=?
                         ''',
                         (
                             str(parent_row['id']) if parent_row else row['folder_id'],
-                            next_path,
                             next_path,
                             next_source,
                             now,
@@ -513,10 +512,10 @@ class CloudDriveRegistryDB:
                     conn.execute(
                         '''
                         UPDATE cloud_file_versions
-                        SET storage_key=?, source_path=?
+                        SET source_path=?
                         WHERE file_id=?
                         ''',
-                        (next_path, next_source, str(row['id'])),
+                        (next_source, str(row['id'])),
                     )
                 saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
         assert saved is not None

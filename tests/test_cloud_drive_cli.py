@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from rag_catalog.cli import cloud_drive
+from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
 
 
 def test_cloud_drive_cli_init_and_stats(tmp_path: Path, monkeypatch) -> None:
@@ -39,4 +40,8 @@ def test_cloud_drive_cli_bootstrap(tmp_path: Path, monkeypatch) -> None:
 
     rc = cloud_drive.main(['bootstrap', '--import-files'])
     assert rc == 0
-    assert (tmp_path / 'state' / 'storage' / 'hello.txt').exists()
+    registry = CloudDriveRegistryDB(str(tmp_path / 'state' / 'cloud_drive.db'))
+    row = registry.get_file_by_path('hello.txt')
+    assert row is not None
+    assert row.storage_key.startswith('objects/sha256/')
+    assert (tmp_path / 'state' / 'storage' / row.storage_key).exists()

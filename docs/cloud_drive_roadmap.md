@@ -472,8 +472,8 @@ Claude:
 
 Codex:
 - [ ] Реализовать production S3/MinIO path: upload/download, presigned URLs, health, failure modes.
-- [ ] Добавить immutable storage keys и path-independent `doc_id`.
-- [ ] Добавить dedup by checksum.
+- [x] Добавить immutable storage keys и path-independent `doc_id`: новые upload/bootstrap объекты получают content-addressed `objects/sha256/...`, rename/move меняют registry path без перемещения storage object.
+- [x] Добавить dedup by checksum: одинаковый контент переиспользует один storage object.
 - [ ] Добавить soft delete/trash/restore.
 - [ ] Добавить file change feed / delta endpoints.
 - [ ] Добавить conflict model и selective sync backend.
