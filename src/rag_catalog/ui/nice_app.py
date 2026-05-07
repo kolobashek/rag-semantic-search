@@ -675,6 +675,20 @@ def api_cloud_drive_bootstrap_jobs(limit: int = 20) -> List[Dict[str, Any]]:
     ]
 
 
+@app.get("/api/cloud-drive/storage-health")
+def api_cloud_drive_storage_health() -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    health = service.get_storage_health()
+    return {
+        "backend": health.backend,
+        "ok": health.ok,
+        "writable": health.writable,
+        "target": health.target,
+        "error": health.error,
+    }
+
+
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     explicit = str(cfg.get("telemetry_db_path") or "").strip()
     if explicit:

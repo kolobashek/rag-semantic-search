@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter, compute_file_checksum, guess_mime_type
+from rag_catalog.core.cloud_drive.service import CloudDriveService
+from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
 
 
 def test_local_storage_adapter_put_and_delete(tmp_path: Path) -> None:
@@ -27,3 +29,27 @@ def test_storage_helpers(tmp_path: Path) -> None:
 
     assert compute_file_checksum(file_path)
     assert guess_mime_type(file_path) == 'application/pdf'
+
+
+def test_local_storage_healthcheck(tmp_path: Path) -> None:
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+
+    health = storage.healthcheck()
+
+    assert health["backend"] == "local"
+    assert health["ok"] is True
+    assert health["writable"] is True
+    assert str(tmp_path / 'storage') == health["target"]
+
+
+def test_cloud_drive_service_storage_health(tmp_path: Path) -> None:
+    service = CloudDriveService(
+        registry=CloudDriveRegistryDB(str(tmp_path / 'registry.db')),
+        storage=LocalStorageAdapter(str(tmp_path / 'storage')),
+    )
+
+    health = service.get_storage_health()
+
+    assert health.backend == "local"
+    assert health.ok is True
+    assert health.writable is True

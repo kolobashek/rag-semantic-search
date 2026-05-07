@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from .models import CloudDriveJob, CloudDriveStats
+from .models import CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
 from .registry import CloudDriveRegistryDB
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
 
@@ -54,6 +54,16 @@ class CloudDriveService:
 
     def list_bootstrap_jobs(self, *, limit: int = 20) -> list[CloudDriveJob]:
         return self.registry.list_jobs(job_type='bootstrap', limit=limit)
+
+    def get_storage_health(self) -> CloudDriveStorageHealth:
+        result = dict(self.storage.healthcheck())
+        return CloudDriveStorageHealth(
+            backend=str(result.get('backend') or ''),
+            ok=bool(result.get('ok')),
+            writable=bool(result.get('writable')),
+            target=str(result.get('target') or ''),
+            error=str(result.get('error') or ''),
+        )
 
     def cancel_job(self, job_id: str) -> CloudDriveJob:
         job = self.registry.get_job(job_id)

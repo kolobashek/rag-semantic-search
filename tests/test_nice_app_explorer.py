@@ -17,6 +17,7 @@ from rag_catalog.ui.nice_app import (
     _run_catalog_search,
     api_cloud_drive_bootstrap_jobs,
     api_cloud_drive_bootstrap_status,
+    api_cloud_drive_storage_health,
 )
 import rag_catalog.ui.nice_app as nice_app
 from rag_catalog.core.index_state_db import IndexStateDB
@@ -400,3 +401,18 @@ def test_cloud_drive_bootstrap_jobs_api_returns_serialized_jobs(monkeypatch, tmp
     assert jobs[0]["status"] == "running"
     assert jobs[0]["attempts"] == 2
     assert jobs[0]["progress"]["files_imported"] == 7
+
+
+def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    health = api_cloud_drive_storage_health()
+
+    assert health["backend"] == "local"
+    assert health["ok"] is True
+    assert health["writable"] is True

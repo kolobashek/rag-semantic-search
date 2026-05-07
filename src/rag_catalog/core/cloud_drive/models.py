@@ -58,3 +58,12 @@ class CloudDriveStats:
     versions: int
     pending_jobs: int
     root_path: str = ""
+
+
+@dataclass(slots=True)
+class CloudDriveStorageHealth:
+    backend: str
+    ok: bool
+    writable: bool
+    target: str = ""
+    error: str = ""

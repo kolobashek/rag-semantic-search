@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import shutil
+import uuid
 from pathlib import Path
 from typing import Protocol
 
@@ -12,6 +13,7 @@ class StorageAdapter(Protocol):
     def exists(self, storage_key: str) -> bool: ...
     def delete(self, storage_key: str) -> None: ...
     def resolve_path(self, storage_key: str) -> str: ...
+    def healthcheck(self) -> dict: ...
 
 
 class LocalStorageAdapter:
@@ -38,6 +40,28 @@ class LocalStorageAdapter:
 
     def resolve_path(self, storage_key: str) -> str:
         return str(self._target(storage_key))
+
+    def healthcheck(self) -> dict:
+        probe = self.root / ".healthcheck"
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return {
+                "backend": "local",
+                "ok": True,
+                "writable": True,
+                "target": str(self.root),
+                "error": "",
+            }
+        except Exception as exc:
+            return {
+                "backend": "local",
+                "ok": False,
+                "writable": False,
+                "target": str(self.root),
+                "error": str(exc),
+            }
 
 
 class S3StorageAdapter:
@@ -75,6 +99,27 @@ class S3StorageAdapter:
         if prefix == 's3://':
             return f's3://{self.bucket}/{storage_key}'
         return f'{prefix}/{self.bucket}/{storage_key}'
+
+    def healthcheck(self) -> dict:
+        probe_key = f".healthcheck/{uuid.uuid4().hex}"
+        try:
+            self._client.put_object(Bucket=self.bucket, Key=probe_key, Body=b"ok")
+            self._client.delete_object(Bucket=self.bucket, Key=probe_key)
+            return {
+                "backend": "s3",
+                "ok": True,
+                "writable": True,
+                "target": self.resolve_path(""),
+                "error": "",
+            }
+        except Exception as exc:
+            return {
+                "backend": "s3",
+                "ok": False,
+                "writable": False,
+                "target": self.resolve_path(""),
+                "error": str(exc),
+            }
 
 
 def resolve_storage_adapter(config: dict) -> StorageAdapter:

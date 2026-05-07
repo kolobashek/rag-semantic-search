@@ -53,6 +53,8 @@
 - добавлены read-only API endpoints для bootstrap status и списка bootstrap jobs.
 - добавлены schema migrations для Cloud Drive registry (`v1 -> v2`);
 - bootstrap jobs получили SQL-поля `started_at/finished_at`, теперь жизненный цикл jobs наблюдаем не только через `payload`.
+- добавлен storage health-check contract для backend;
+- добавлен read-only API endpoint для health-check storage backend.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -136,7 +138,7 @@
   - storage backend metadata.
 - [x] Добавить миграции schema version для Cloud Drive.
 - Подготовить поддержку `S3/MinIO` как реального backend, а не только заготовки.
-- Добавить health-check storage backend.
+- [x] Добавить health-check storage backend.
 
 #### 3. API слой
 
