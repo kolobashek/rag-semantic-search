@@ -40,6 +40,25 @@ def test_default_admin_requires_password_change(tmp_path) -> None:
     assert changed["must_change_password"] == 0
 
 
+def test_default_admin_can_use_explicit_bootstrap_password(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RAG_BOOTSTRAP_ADMIN_PASSWORD", "temporary-secret")
+    db = UserAuthDB(str(tmp_path / "users.db"))
+
+    assert db.login(username="admin", password="admin") is None
+    user = db.login(username="admin", password="temporary-secret")
+    assert user is not None
+    assert user["role"] == "admin"
+    assert user["must_change_password"] == 1
+
+
+def test_default_admin_can_be_disabled(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RAG_DISABLE_DEFAULT_ADMIN", "1")
+    db = UserAuthDB(str(tmp_path / "users.db"))
+
+    assert db.login(username="admin", password="admin") is None
+    assert db.get_user(username="admin") is None
+
+
 def test_session_token_restores_and_revokes_user(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     user = db.login(username="admin", password="admin")

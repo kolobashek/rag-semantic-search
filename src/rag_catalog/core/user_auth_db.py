@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -245,6 +246,10 @@ class UserAuthDB:
         row = conn.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()
         if row is not None:
             return
+        disable_default = str(os.environ.get("RAG_DISABLE_DEFAULT_ADMIN") or "").strip().lower()
+        if disable_default in {"1", "true", "yes", "on"}:
+            return
+        bootstrap_password = str(os.environ.get("RAG_BOOTSTRAP_ADMIN_PASSWORD") or "").strip() or "admin"
         now = _utc_now()
         conn.execute(
             """
@@ -254,7 +259,7 @@ class UserAuthDB:
             )
             VALUES ('admin', 'Administrator', '', ?, 'admin', 1, 'active', ?, ?)
             """,
-            (_hash_password("admin"), now, now),
+            (_hash_password(bootstrap_password), now, now),
         )
 
     def request_verification(
