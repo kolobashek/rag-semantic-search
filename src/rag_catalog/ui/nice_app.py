@@ -4232,7 +4232,9 @@ def _build_page(initial_screen: str = "search") -> None:
             # Entry stats bar
             with ui.row().classes("w-full items-center gap-2 px-1"):
                 ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes("rag-path flex-1")
-                ui.label("Cloud Drive").classes("cd-status-badge cd-status-running text-xs")
+                with ui.element("span").classes("cd-status-badge cd-status-done text-xs"):
+                    ui.icon("cloud_done", size="14px")
+                    ui.label("Cloud Drive")
 
             # Empty state
             if root_folder is None:
