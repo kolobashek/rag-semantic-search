@@ -13,7 +13,7 @@ from rag_catalog.core.db_contract import ensure_schema_version
 
 from .models import CloudDriveFile, CloudDriveFolder, CloudDriveJob, CloudDriveStats
 
-CLOUD_DRIVE_SCHEMA_VERSION = 1
+CLOUD_DRIVE_SCHEMA_VERSION = 2
 
 
 def _utc_now() -> str:
@@ -50,6 +50,7 @@ class CloudDriveRegistryDB:
         with self._lock:
             with self._connect() as conn:
                 self._prepare_connection(conn)
+                current_version = self._read_schema_version(conn)
                 conn.executescript(
                     '''
                     CREATE TABLE IF NOT EXISTS cloud_folders (
@@ -113,11 +114,14 @@ class CloudDriveRegistryDB:
                         payload_json TEXT NOT NULL DEFAULT '{}',
                         attempts INTEGER NOT NULL DEFAULT 0,
                         last_error TEXT NOT NULL DEFAULT '',
+                        started_at TEXT NOT NULL DEFAULT '',
+                        finished_at TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
                     '''
                 )
+                self._apply_migrations(conn, current_version=current_version)
                 ensure_schema_version(
                     conn,
                     db_kind='cloud_drive',
@@ -134,6 +138,32 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
                     '''
                 )
+
+    def _read_schema_version(self, conn: sqlite3.Connection) -> int:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                db_kind TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                code_root TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        row = conn.execute(
+            "SELECT schema_version FROM schema_meta WHERE db_kind='cloud_drive'",
+        ).fetchone()
+        return int(row["schema_version"]) if row is not None else 0
+
+    def _has_column(self, conn: sqlite3.Connection, table: str, column: str) -> bool:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(str(row["name"]) == str(column) for row in rows)
+
+    def _apply_migrations(self, conn: sqlite3.Connection, *, current_version: int) -> None:
+        if current_version <= 1 and not self._has_column(conn, "cloud_jobs", "started_at"):
+            conn.execute("ALTER TABLE cloud_jobs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
+        if current_version <= 1 and not self._has_column(conn, "cloud_jobs", "finished_at"):
+            conn.execute("ALTER TABLE cloud_jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
 
     def ensure_root_folder(self, *, root_name: str, source_path: str = '') -> CloudDriveFolder:
         clean_name = str(root_name or '').strip() or 'root'
@@ -247,14 +277,16 @@ class CloudDriveRegistryDB:
         now = _utc_now()
         job_id = str(uuid.uuid4())
         payload_json = json.dumps(payload or {}, ensure_ascii=False)
+        started_at = now if str(status) == 'running' else ''
+        finished_at = now if str(status) in {'completed', 'failed', 'cancelled'} else ''
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
                     '''
-                    INSERT INTO cloud_jobs (id, job_type, status, file_id, version_id, payload_json, attempts, last_error, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?)
+                    INSERT INTO cloud_jobs (id, job_type, status, file_id, version_id, payload_json, attempts, last_error, started_at, finished_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?)
                     ''',
-                    (job_id, job_type, status, file_id, version_id, payload_json, now, now),
+                    (job_id, job_type, status, file_id, version_id, payload_json, started_at, finished_at, now, now),
                 )
         return CloudDriveJob(
             id=job_id,
@@ -264,6 +296,8 @@ class CloudDriveRegistryDB:
             version_id=version_id,
             payload=payload or {},
             progress=dict((payload or {}).get('progress') or {}),
+            started_at=started_at,
+            finished_at=finished_at,
             created_at=now,
             updated_at=now,
         )
@@ -311,9 +345,16 @@ class CloudDriveRegistryDB:
                 row = conn.execute('SELECT * FROM cloud_jobs WHERE id=?', (str(job_id),)).fetchone()
                 if row is None:
                     raise RuntimeError(f'Job не найден: {job_id}')
+                next_status = str(status or row['status'])
                 current_payload = json.loads(str(row['payload_json'] or '{}'))
                 if payload:
                     current_payload.update(payload)
+                started_at = str(row['started_at'] or '')
+                finished_at = str(row['finished_at'] or '')
+                if next_status == 'running' and not started_at:
+                    started_at = now
+                if next_status in {'completed', 'failed', 'cancelled'}:
+                    finished_at = now
                 conn.execute(
                     '''
                     UPDATE cloud_jobs
@@ -321,14 +362,18 @@ class CloudDriveRegistryDB:
                         payload_json=?,
                         last_error=?,
                         attempts=?,
+                        started_at=?,
+                        finished_at=?,
                         updated_at=?
                     WHERE id=?
                     ''',
                     (
-                        str(status or row['status']),
+                        next_status,
                         json.dumps(current_payload, ensure_ascii=False),
                         str(last_error if last_error is not None else row['last_error'] or ''),
                         int(attempts if attempts is not None else row['attempts'] or 0),
+                        started_at,
+                        finished_at,
                         now,
                         str(job_id),
                     ),
@@ -395,5 +440,7 @@ class CloudDriveRegistryDB:
             last_error=str(row['last_error'] or ''),
             created_at=str(row['created_at'] or ''),
             updated_at=str(row['updated_at'] or ''),
+            started_at=str(row['started_at'] or ''),
+            finished_at=str(row['finished_at'] or ''),
             progress=dict(payload.get('progress') or {}),
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
@@ -73,6 +74,15 @@ def test_registry_job_lifecycle(tmp_path: Path) -> None:
     )
     assert updated.status == 'running'
     assert updated.progress['imported_files'] == 10
+    assert updated.started_at != ''
+    assert updated.finished_at == ''
+
+    completed = registry.update_job(
+        job.id,
+        status='completed',
+        payload={'progress': {'status': 'done', 'imported_files': 10}},
+    )
+    assert completed.finished_at != ''
 
     latest = registry.get_latest_job(job_type='bootstrap')
     assert latest is not None
@@ -153,3 +163,113 @@ def test_bootstrap_from_catalog_can_be_cancelled(tmp_path: Path) -> None:
         assert False, 'expected cancellation'
     except CloudDriveJobCancelled:
         pass
+
+
+def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
+    db_path = tmp_path / 'registry.db'
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE schema_meta (
+                db_kind TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                code_root TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO schema_meta (db_kind, schema_version, updated_at, code_root)
+            VALUES ('cloud_drive', 1, '2026-05-07T00:00:00+00:00', '')
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cloud_jobs (
+                id TEXT PRIMARY KEY,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                file_id TEXT NOT NULL DEFAULT '',
+                version_id TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cloud_folders (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                depth INTEGER NOT NULL DEFAULT 0,
+                source_path TEXT NOT NULL DEFAULT '',
+                is_root INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cloud_files (
+                id TEXT PRIMARY KEY,
+                folder_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                storage_key TEXT NOT NULL,
+                mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                checksum TEXT NOT NULL DEFAULT '',
+                source_path TEXT NOT NULL DEFAULT '',
+                current_version_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cloud_file_versions (
+                id TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                storage_key TEXT NOT NULL,
+                checksum TEXT NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                source_path TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cloud_permissions (
+                id TEXT PRIMARY KEY,
+                subject_type TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                access_level TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    registry = CloudDriveRegistryDB(str(db_path))
+    migrated = registry.queue_job(job_type='bootstrap', payload={'progress': {'status': 'pending'}})
+    fetched = registry.get_job(migrated.id)
+
+    assert fetched is not None
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_jobs)").fetchall()}
+        version = conn.execute("SELECT schema_version FROM schema_meta WHERE db_kind='cloud_drive'").fetchone()[0]
+    assert 'started_at' in columns
+    assert 'finished_at' in columns
+    assert int(version) == 2

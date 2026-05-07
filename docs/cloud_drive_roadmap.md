@@ -51,6 +51,8 @@
 - добавлена история последних bootstrap jobs в admin UI;
 - добавлен recovery для `running/pending` bootstrap jobs после рестарта.
 - добавлены read-only API endpoints для bootstrap status и списка bootstrap jobs.
+- добавлены schema migrations для Cloud Drive registry (`v1 -> v2`);
+- bootstrap jobs получили SQL-поля `started_at/finished_at`, теперь жизненный цикл jobs наблюдаем не только через `payload`.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -132,7 +134,7 @@
   - version metadata;
   - file hash / dedup hooks;
   - storage backend metadata.
-- Добавить миграции schema version для Cloud Drive.
+- [x] Добавить миграции schema version для Cloud Drive.
 - Подготовить поддержку `S3/MinIO` как реального backend, а не только заготовки.
 - Добавить health-check storage backend.
 
@@ -263,7 +265,7 @@ _Коммит: f046509 (feat(ui): Cloud Drive admin UX polish — Sprint 1)_
 Codex:
 - [x] job model для bootstrap/import;
 - [x] scheduler hardening;
-- [ ] registry migrations;
+- [x] registry migrations;
 - [x] bootstrap status API.
 - [x] cancel/retry bootstrap jobs;
 - [x] stale bootstrap recovery.

@@ -46,6 +46,8 @@ class CloudDriveJob:
     last_error: str = ""
     created_at: str = ""
     updated_at: str = ""
+    started_at: str = ""
+    finished_at: str = ""
     progress: Dict[str, Any] = field(default_factory=dict)
 
 
