@@ -776,6 +776,40 @@ def api_cloud_drive_versions(path: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@app.post("/api/cloud-drive/move")
+def api_cloud_drive_move(source_path: str = "", dest_parent_path: str = "", new_name: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    try:
+        return service.move_node(source_path=source_path, dest_parent_path=dest_parent_path, new_name=new_name)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/cloud-drive/rename")
+def api_cloud_drive_rename(path: str = "", new_name: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    node = service.registry.get_node_by_path(path)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Узел не найден: {path}")
+    parent_path = node.path.rsplit("/", 1)[0] if "/" in node.path else ""
+    try:
+        return service.move_node(source_path=path, dest_parent_path=parent_path, new_name=new_name)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/cloud-drive/delete")
+def api_cloud_drive_delete(path: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    try:
+        return service.delete_node(path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     explicit = str(cfg.get("telemetry_db_path") or "").strip()
     if explicit:

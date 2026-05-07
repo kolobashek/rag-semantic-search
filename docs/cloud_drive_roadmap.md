@@ -71,6 +71,11 @@
 - добавлен endpoint просмотра версий файла:
   - `GET /api/cloud-drive/versions`
 - Cloud Drive service и registry получили `list_versions()` / `list_file_versions()` для чтения истории версий по пути файла.
+- добавлены registry-backed endpoints перемещения, переименования и удаления:
+  - `POST /api/cloud-drive/move`
+  - `POST /api/cloud-drive/rename`
+  - `POST /api/cloud-drive/delete`
+- Cloud Drive service и registry получили операции `move_node()` / `delete_node()` с обновлением storage key для local storage.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -164,7 +169,7 @@
   - [x] create folder;
   - [x] upload;
   - [x] download;
-  - rename/move/delete;
+  - [x] rename/move/delete;
   - [x] versions;
   - jobs/status.
 - Подготовить auth/authorization hooks для API.

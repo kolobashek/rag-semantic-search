@@ -339,6 +339,227 @@ class CloudDriveRegistryDB:
             for row in rows
         ]
 
+    def list_files_under_path(self, path: str) -> List[CloudDriveFile]:
+        clean_path = self._normalize_path(path)
+        if not clean_path:
+            raise RuntimeError('Для корневого каталога используйте list_files_in_folder/root traversal.')
+        like_value = f"{clean_path}/%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM cloud_files
+                WHERE deleted_at='' AND (path=? OR path LIKE ?)
+                ORDER BY path
+                """,
+                (clean_path, like_value),
+            ).fetchall()
+            return [self._file_from_row(row) for row in rows]
+
+    def rename_move_file(self, *, source_path: str, dest_parent_path: str = '', new_name: str = '') -> CloudDriveFile:
+        clean_source = self._normalize_path(source_path)
+        file_row = self.get_file_by_path(clean_source)
+        if file_row is None:
+            raise RuntimeError(f'Файл не найден: {clean_source}')
+        parent = self.get_root_folder() if not self._normalize_path(dest_parent_path) else self.get_folder_by_path(dest_parent_path)
+        if parent is None:
+            raise RuntimeError(f'Родительский каталог не найден: {dest_parent_path or "/"}')
+        target_name = str(new_name or file_row.name).strip().strip('/\\')
+        if not target_name:
+            raise RuntimeError('Не задано новое имя файла.')
+        if '/' in target_name or '\\' in target_name:
+            raise RuntimeError('Имя файла не должно содержать разделители пути.')
+        clean_parent = self._normalize_path(dest_parent_path)
+        target_path = self._normalize_path(f'{clean_parent}/{target_name}' if clean_parent else target_name)
+        if target_path != clean_source:
+            if self.get_folder_by_path(target_path) is not None:
+                raise RuntimeError(f'Каталог с таким именем уже существует: {target_path}')
+            existing_file = self.get_file_by_path(target_path)
+            if existing_file is not None and existing_file.id != file_row.id:
+                raise RuntimeError(f'Файл с таким именем уже существует: {target_path}')
+        source_parent = clean_source.rsplit('/', 1)[0] if '/' in clean_source else ''
+        now = _utc_now()
+        source_path_value = str(Path(parent.source_path) / target_name) if parent.source_path else file_row.source_path
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    '''
+                    UPDATE cloud_files
+                    SET folder_id=?, name=?, path=?, storage_key=?, source_path=?, updated_at=?
+                    WHERE id=?
+                    ''',
+                    (parent.id, target_name, target_path, target_path, source_path_value, now, file_row.id),
+                )
+                conn.execute(
+                    '''
+                    UPDATE cloud_file_versions
+                    SET storage_key=?, source_path=?
+                    WHERE file_id=?
+                    ''',
+                    (target_path, source_path_value, file_row.id),
+                )
+                saved = conn.execute('SELECT * FROM cloud_files WHERE id=?', (file_row.id,)).fetchone()
+        assert saved is not None
+        return self._file_from_row(saved)
+
+    def rename_move_folder(self, *, source_path: str, dest_parent_path: str = '', new_name: str = '') -> CloudDriveFolder:
+        clean_source = self._normalize_path(source_path)
+        folder = self.get_folder_by_path(clean_source)
+        if folder is None:
+            raise RuntimeError(f'Каталог не найден: {clean_source}')
+        if folder.is_root:
+            raise RuntimeError('Корневой каталог нельзя перемещать или переименовывать.')
+        clean_parent = self._normalize_path(dest_parent_path)
+        parent = self.get_root_folder() if not clean_parent else self.get_folder_by_path(clean_parent)
+        if parent is None:
+            raise RuntimeError(f'Родительский каталог не найден: {dest_parent_path or "/"}')
+        target_name = str(new_name or folder.name).strip().strip('/\\')
+        if not target_name:
+            raise RuntimeError('Не задано новое имя каталога.')
+        if '/' in target_name or '\\' in target_name:
+            raise RuntimeError('Имя каталога не должно содержать разделители пути.')
+        target_path = self._normalize_path(f'{clean_parent}/{target_name}' if clean_parent else target_name)
+        if clean_parent == clean_source or clean_parent.startswith(f'{clean_source}/'):
+            raise RuntimeError('Нельзя переместить каталог внутрь самого себя.')
+        if target_path != clean_source:
+            if self.get_folder_by_path(target_path) is not None:
+                raise RuntimeError(f'Каталог уже существует: {target_path}')
+            if self.get_file_by_path(target_path) is not None:
+                raise RuntimeError(f'Файл с таким именем уже существует: {target_path}')
+        now = _utc_now()
+        old_prefix = clean_source
+        new_prefix = target_path
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    '''
+                    UPDATE cloud_folders
+                    SET parent_id=?, name=?, path=?, depth=?, source_path=?, updated_at=?
+                    WHERE id=?
+                    ''',
+                    (
+                        parent.id,
+                        target_name,
+                        new_prefix,
+                        int(parent.depth) + 1,
+                        str(Path(parent.source_path) / target_name) if parent.source_path else folder.source_path,
+                        now,
+                        folder.id,
+                    ),
+                )
+                folder_rows = conn.execute(
+                    "SELECT * FROM cloud_folders WHERE path LIKE ? ORDER BY depth ASC",
+                    (f"{old_prefix}/%",),
+                ).fetchall()
+                for row in folder_rows:
+                    row_path = str(row['path'])
+                    suffix = row_path[len(old_prefix):].lstrip('/')
+                    next_path = self._normalize_path(f'{new_prefix}/{suffix}' if suffix else new_prefix)
+                    next_depth = len([part for part in next_path.split('/') if part])
+                    parent_path = next_path.rsplit('/', 1)[0] if '/' in next_path else ''
+                    parent_row = conn.execute(
+                        "SELECT id, source_path FROM cloud_folders WHERE path=?",
+                        (parent_path,),
+                    ).fetchone()
+                    next_source = str(Path(str(parent_row['source_path'] or '')) / str(row['name'])) if parent_row and str(parent_row['source_path'] or '') else str(row['source_path'] or '')
+                    conn.execute(
+                        '''
+                        UPDATE cloud_folders
+                        SET parent_id=?, path=?, depth=?, source_path=?, updated_at=?
+                        WHERE id=?
+                        ''',
+                        (
+                            str(parent_row['id']) if parent_row else None,
+                            next_path,
+                            next_depth,
+                            next_source,
+                            now,
+                            str(row['id']),
+                        ),
+                    )
+                file_rows = conn.execute(
+                    "SELECT * FROM cloud_files WHERE deleted_at='' AND path LIKE ?",
+                    (f"{old_prefix}/%",),
+                ).fetchall()
+                for row in file_rows:
+                    row_path = str(row['path'])
+                    suffix = row_path[len(old_prefix):].lstrip('/')
+                    next_path = self._normalize_path(f'{new_prefix}/{suffix}' if suffix else new_prefix)
+                    parent_path = next_path.rsplit('/', 1)[0] if '/' in next_path else ''
+                    parent_row = conn.execute(
+                        "SELECT id, source_path FROM cloud_folders WHERE path=?",
+                        (parent_path,),
+                    ).fetchone()
+                    filename = str(row['name'])
+                    next_source = str(Path(str(parent_row['source_path'] or '')) / filename) if parent_row and str(parent_row['source_path'] or '') else str(row['source_path'] or '')
+                    conn.execute(
+                        '''
+                        UPDATE cloud_files
+                        SET folder_id=?, path=?, storage_key=?, source_path=?, updated_at=?
+                        WHERE id=?
+                        ''',
+                        (
+                            str(parent_row['id']) if parent_row else row['folder_id'],
+                            next_path,
+                            next_path,
+                            next_source,
+                            now,
+                            str(row['id']),
+                        ),
+                    )
+                    conn.execute(
+                        '''
+                        UPDATE cloud_file_versions
+                        SET storage_key=?, source_path=?
+                        WHERE file_id=?
+                        ''',
+                        (next_path, next_source, str(row['id'])),
+                    )
+                saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
+        assert saved is not None
+        return self._folder_from_row(saved)
+
+    def delete_file(self, path: str) -> CloudDriveFile:
+        clean_path = self._normalize_path(path)
+        file_row = self.get_file_by_path(clean_path)
+        if file_row is None:
+            raise RuntimeError(f'Файл не найден: {clean_path}')
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE cloud_files SET deleted_at=?, updated_at=? WHERE id=?",
+                    (now, now, file_row.id),
+                )
+                saved = conn.execute('SELECT * FROM cloud_files WHERE id=?', (file_row.id,)).fetchone()
+        assert saved is not None
+        return self._file_from_row(saved)
+
+    def delete_folder(self, path: str) -> CloudDriveFolder:
+        clean_path = self._normalize_path(path)
+        folder = self.get_folder_by_path(clean_path)
+        if folder is None:
+            raise RuntimeError(f'Каталог не найден: {clean_path}')
+        if folder.is_root:
+            raise RuntimeError('Корневой каталог нельзя удалить.')
+        with self._lock:
+            with self._connect() as conn:
+                file_ids = [
+                    str(row['id'])
+                    for row in conn.execute(
+                        "SELECT id FROM cloud_files WHERE path LIKE ? OR path=?",
+                        (f"{clean_path}/%", clean_path),
+                    ).fetchall()
+                ]
+                if file_ids:
+                    placeholders = ",".join("?" for _ in file_ids)
+                    conn.execute(
+                        f"DELETE FROM cloud_file_versions WHERE file_id IN ({placeholders})",
+                        file_ids,
+                    )
+                conn.execute("DELETE FROM cloud_files WHERE path LIKE ? OR path=?", (f"{clean_path}/%", clean_path))
+                conn.execute("DELETE FROM cloud_folders WHERE path LIKE ? OR path=?", (f"{clean_path}/%", clean_path))
+        return folder
+
     def queue_job(self, *, job_type: str, status: str = 'pending', file_id: str = '', version_id: str = '', payload: Optional[Dict[str, Any]] = None) -> CloudDriveJob:
         now = _utc_now()
         job_id = str(uuid.uuid4())

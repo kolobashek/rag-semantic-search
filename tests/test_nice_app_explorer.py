@@ -21,6 +21,9 @@ from rag_catalog.ui.nice_app import (
     api_cloud_drive_bootstrap_status,
     api_cloud_drive_create_folder,
     api_cloud_drive_download,
+    api_cloud_drive_delete,
+    api_cloud_drive_move,
+    api_cloud_drive_rename,
     api_cloud_drive_upload,
     api_cloud_drive_list,
     api_cloud_drive_node,
@@ -583,3 +586,43 @@ def test_cloud_drive_versions_api(monkeypatch, tmp_path) -> None:
     assert versions["file"]["path"] == "Folder A/hello.txt"
     assert len(versions["versions"]) == 2
     assert versions["versions"][0]["is_current"] is True
+
+
+def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    folder = service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    source_file = tmp_path / "hello.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    service.storage.put_file(source_file, "Folder A/hello.txt")
+    service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Folder A/hello.txt",
+        name="hello.txt",
+        storage_key="Folder A/hello.txt",
+        mime_type="text/plain",
+        size_bytes=5,
+        checksum="abc",
+        source_path="O:/Обмен/Folder A/hello.txt",
+    )
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    renamed = api_cloud_drive_rename(path="Folder A/hello.txt", new_name="renamed.txt")
+    moved = api_cloud_drive_move(source_path="Folder A", dest_parent_path="", new_name="Archive")
+    deleted = api_cloud_drive_delete(path="Archive")
+
+    assert renamed["path"] == "Folder A/renamed.txt"
+    assert moved["path"] == "Archive"
+    assert deleted["node_type"] == "folder"
+    assert service.registry.get_folder_by_path("Archive") is None

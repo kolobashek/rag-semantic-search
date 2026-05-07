@@ -262,6 +262,89 @@ class CloudDriveService:
             'versions': versions,
         }
 
+    def move_node(self, *, source_path: str, dest_parent_path: str = '', new_name: str = '') -> dict:
+        source_node = self.registry.get_node_by_path(source_path)
+        if source_node is None:
+            raise RuntimeError(f'Узел не найден: {source_path}')
+        if hasattr(source_node, 'folder_id'):
+            old_storage_key = source_node.storage_key
+            target_name = str(new_name or source_node.name).strip()
+            clean_parent = str(dest_parent_path or '').strip().replace('\\', '/').strip('/')
+            new_storage_key = f'{clean_parent}/{target_name}' if clean_parent else target_name
+            if new_storage_key != old_storage_key:
+                self.storage.move(old_storage_key, new_storage_key)
+            file_row = self.registry.rename_move_file(
+                source_path=source_path,
+                dest_parent_path=dest_parent_path,
+                new_name=new_name,
+            )
+            return {
+                'node_type': 'file',
+                'id': file_row.id,
+                'folder_id': file_row.folder_id,
+                'name': file_row.name,
+                'path': file_row.path,
+                'storage_key': file_row.storage_key,
+                'mime_type': file_row.mime_type,
+                'size_bytes': file_row.size_bytes,
+                'checksum': file_row.checksum,
+                'source_path': file_row.source_path,
+                'current_version_id': file_row.current_version_id,
+                'created_at': file_row.created_at,
+                'updated_at': file_row.updated_at,
+                'deleted_at': file_row.deleted_at,
+            }
+        old_prefix = source_node.path
+        target_name = str(new_name or source_node.name).strip()
+        clean_parent = str(dest_parent_path or '').strip().replace('\\', '/').strip('/')
+        new_prefix = f'{clean_parent}/{target_name}' if clean_parent else target_name
+        for child in self.registry.list_files_under_path(old_prefix):
+            suffix = child.path[len(old_prefix):].lstrip('/')
+            next_key = f'{new_prefix}/{suffix}' if suffix else new_prefix
+            if next_key != child.storage_key:
+                self.storage.move(child.storage_key, next_key)
+        folder = self.registry.rename_move_folder(
+            source_path=source_path,
+            dest_parent_path=dest_parent_path,
+            new_name=new_name,
+        )
+        return {
+            'node_type': 'folder',
+            'id': folder.id,
+            'name': folder.name,
+            'path': folder.path,
+            'source_path': folder.source_path,
+            'depth': folder.depth,
+            'is_root': folder.is_root,
+            'created_at': folder.created_at,
+            'updated_at': folder.updated_at,
+        }
+
+    def delete_node(self, path: str) -> dict:
+        source_node = self.registry.get_node_by_path(path)
+        if source_node is None:
+            raise RuntimeError(f'Узел не найден: {path}')
+        if hasattr(source_node, 'folder_id'):
+            if self.storage.exists(source_node.storage_key):
+                self.storage.delete(source_node.storage_key)
+            file_row = self.registry.delete_file(path)
+            return {
+                'node_type': 'file',
+                'id': file_row.id,
+                'path': file_row.path,
+                'deleted_at': file_row.deleted_at,
+            }
+        for child in self.registry.list_files_under_path(source_node.path):
+            if self.storage.exists(child.storage_key):
+                self.storage.delete(child.storage_key)
+        folder = self.registry.delete_folder(path)
+        return {
+            'node_type': 'folder',
+            'id': folder.id,
+            'path': folder.path,
+            'deleted': True,
+        }
+
     def cancel_job(self, job_id: str) -> CloudDriveJob:
         job = self.registry.get_job(job_id)
         if job is None:

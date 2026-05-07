@@ -110,6 +110,30 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert len(versions['versions']) == 2
     assert versions['versions'][0]['is_current'] is True
 
+    moved_file = service.move_node(source_path='Folder A/new.txt', dest_parent_path='', new_name='renamed.txt')
+    assert moved_file['node_type'] == 'file'
+    assert moved_file['path'] == 'renamed.txt'
+    assert registry.get_file_by_path('renamed.txt') is not None
+    assert (storage_root / 'renamed.txt').exists()
+
+    moved_folder = service.move_node(source_path='Folder A', dest_parent_path='', new_name='Archive')
+    assert moved_folder['node_type'] == 'folder'
+    assert moved_folder['path'] == 'Archive'
+    assert registry.get_folder_by_path('Archive') is not None
+    assert registry.get_file_by_path('Archive/hello.txt') is not None
+    assert (storage_root / 'Archive' / 'hello.txt').exists()
+
+    deleted_file = service.delete_node('renamed.txt')
+    assert deleted_file['node_type'] == 'file'
+    assert registry.get_file_by_path('renamed.txt') is not None
+    assert registry.get_file_by_path('renamed.txt').deleted_at != ''
+    assert not (storage_root / 'renamed.txt').exists()
+
+    deleted_folder = service.delete_node('Archive')
+    assert deleted_folder['node_type'] == 'folder'
+    assert registry.get_folder_by_path('Archive') is None
+    assert registry.get_file_by_path('Archive/hello.txt') is None
+
 
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))

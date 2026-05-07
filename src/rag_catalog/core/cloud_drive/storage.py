@@ -11,6 +11,7 @@ from typing import Protocol
 class StorageAdapter(Protocol):
     def put_file(self, source_path: Path, storage_key: str) -> None: ...
     def exists(self, storage_key: str) -> bool: ...
+    def move(self, old_storage_key: str, new_storage_key: str) -> None: ...
     def delete(self, storage_key: str) -> None: ...
     def resolve_path(self, storage_key: str) -> str: ...
     def healthcheck(self) -> dict: ...
@@ -32,6 +33,14 @@ class LocalStorageAdapter:
 
     def exists(self, storage_key: str) -> bool:
         return self._target(storage_key).exists()
+
+    def move(self, old_storage_key: str, new_storage_key: str) -> None:
+        source = self._target(old_storage_key)
+        if not source.exists():
+            raise RuntimeError(f'Storage object not found: {old_storage_key}')
+        target = self._target(new_storage_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
 
     def delete(self, storage_key: str) -> None:
         target = self._target(storage_key)
@@ -90,6 +99,14 @@ class S3StorageAdapter:
             return True
         except Exception:
             return False
+
+    def move(self, old_storage_key: str, new_storage_key: str) -> None:
+        self._client.copy_object(
+            Bucket=self.bucket,
+            CopySource={"Bucket": self.bucket, "Key": old_storage_key},
+            Key=new_storage_key,
+        )
+        self._client.delete_object(Bucket=self.bucket, Key=old_storage_key)
 
     def delete(self, storage_key: str) -> None:
         self._client.delete_object(Bucket=self.bucket, Key=storage_key)
