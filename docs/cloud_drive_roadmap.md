@@ -455,11 +455,11 @@ Claude:
 ### P2: архитектурная поддерживаемость
 
 Codex:
-- [ ] Разрезать `index_rag.py` на `indexing/`, `extractors/`, `chunking/`, `qdrant_writer`.
+- [x] Разрезать `index_rag.py` на `indexing/`, `extractors/`, `chunking/`, `qdrant_writer`.
   - [x] Вынести text chunking в `src/rag_catalog/core/chunking/`.
   - [x] Вынести extractors в `src/rag_catalog/core/extractors/`.
   - [x] Вынести qdrant writer в `src/rag_catalog/core/indexing/qdrant_writer.py`.
-  - [ ] Вынести stage runner.
+  - [x] Вынести stage runner в `src/rag_catalog/core/indexing/stage_runner.py`.
 - [x] Вынести Cloud Drive API из `nice_app.py` в отдельный модуль: endpoint'ы находятся в `src/rag_catalog/ui/api.py`, `nice_app.py` только импортирует модуль регистрации routes.
 - [x] Вынести auth/session helpers из `nice_app.py`: session restore/touch/login/logout вынесены в `src/rag_catalog/ui/auth_session.py`; login screens остаются UI-слоем.
 - [ ] Доделать миграцию root shims в тонкие entrypoints и убрать legacy-дубли.
