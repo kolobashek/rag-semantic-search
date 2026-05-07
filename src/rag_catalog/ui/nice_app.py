@@ -710,6 +710,16 @@ def api_cloud_drive_list(path: str = "") -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@app.post("/api/cloud-drive/folders")
+def api_cloud_drive_create_folder(parent_path: str = "", name: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    try:
+        return service.create_folder(parent_path=parent_path, name=name)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     explicit = str(cfg.get("telemetry_db_path") or "").strip()
     if explicit:
@@ -5482,31 +5492,31 @@ def _build_page(initial_screen: str = "search") -> None:
             stats_ref: Dict[str, Any] = {"value": None}
             ui.label("Cloud Drive").classes("text-xl font-semibold")
             ui.label(
-                "Центральный registry для облачного диска: папки, файлы, версии и фоновые задачи. "
-                "Сейчас поддержан local storage и bootstrap из текущего catalog_path."
+                "Централизованный реестр файлов и папок: дерево каталогов, версии, фоновые задачи. "
+                "Поддерживается local storage; импорт — из указанного каталога источника."
             ).classes("rag-meta")
 
             enabled_input = ui.checkbox("Включить Cloud Drive", value=initial_cloud["cloud_drive_enabled"])
-            enabled_input.tooltip("Включает registry и storage-слой Cloud Drive. Техническое имя: cloud_drive_enabled.")
+            enabled_input.tooltip("Включает реестр файлов и хранилище Cloud Drive. После включения в проводнике используется реестр вместо прямого обхода файловой системы.")
 
             db_input = ui.input("База реестра Cloud Drive", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("w-full")
-            db_input.tooltip("SQLite-база с реестром папок, файлов, версий и фоновых задач. Техническое имя: cloud_drive_db_path (раньше: 'Путь к registry БД').")
+            db_input.tooltip("SQLite-база реестра: хранит структуру папок, метаданные файлов, версии и историю фоновых задач.")
 
             storage_kind = ui.select(
                 {"local": "Local storage", "s3": "S3 / MinIO"},
                 value=initial_cloud["cloud_drive_storage"],
                 label="Хранилище файлов",
             ).props("dense outlined").classes("w-full max-w-sm")
-            storage_kind.tooltip("Куда складывается физическое содержимое файлов. Техническое имя: cloud_drive_storage, программный термин: storage backend.")
+            storage_kind.tooltip("Место физического хранения содержимого файлов. Local — локальная папка на сервере; S3/MinIO — объектное хранилище.")
 
             storage_root_input = ui.input("Папка хранения файлов", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("w-full")
-            storage_root_input.tooltip("Корневая папка для local storage backend. Техническое имя: cloud_drive_storage_root (раньше: 'Корень local storage').")
+            storage_root_input.tooltip("Корневая папка, куда сохраняются физические файлы при использовании local storage. Должна существовать и быть доступна для записи.")
 
             catalog_input = ui.input("Источник импорта", value=initial_cloud["catalog_path"]).props("dense outlined").classes("w-full")
-            catalog_input.tooltip("Каталог, из которого bootstrap читает дерево папок и файлов для первого наполнения registry. Техническое имя: catalog_path, программный термин: bootstrap source (раньше: 'Каталог для bootstrap').")
+            catalog_input.tooltip("Каталог источника для импорта: bootstrap сканирует его дерево папок и файлов и заносит в реестр. Обычно совпадает с основным каталогом документов.")
 
             bootstrap_limit = ui.number("Лимит импорта файлов (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full max-w-sm")
-            bootstrap_limit.tooltip("Ограничивает bootstrap по количеству файлов для тестового запуска. 0 отключает лимит. Программный термин: max_files.")
+            bootstrap_limit.tooltip("Ограничивает количество файлов при пробном запуске импорта. 0 — без ограничения, импортируются все файлы из каталога источника.")
 
             status_box = ui.column().classes("w-full gap-1")
             bootstrap_box = ui.column().classes("w-full gap-1")
@@ -5547,7 +5557,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     if not stats_obj:
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("cloud_off", size="28px").classes("opacity-30")
-                            ui.label("Registry ещё не инициализирован — нажмите «Init registry».").classes("text-center")
+                            ui.label("Реестр ещё не инициализирован — нажмите «Инициализировать реестр».").classes("text-center")
                         return
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         for icon_name, lbl, val in [
@@ -5597,7 +5607,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     if status == "idle":
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("cloud_upload", size="24px").classes("opacity-30")
-                            ui.label("Импорт не запущен. Нажмите «Bootstrap» ниже.").classes("text-center")
+                            ui.label("Импорт не запущен. Нажмите «Импортировать в реестр» ниже.").classes("text-center")
                         return
                     _cd_status_badge(status)
                     imported_files = _safe_int(bootstrap_state.get("imported_files"), 0)
@@ -5728,11 +5738,11 @@ def _build_page(initial_screen: str = "search") -> None:
                     cfg = persist_cloud_values(current_cloud_values())
                     service = await run.io_bound(CloudDriveService.from_config, cfg)
                     stats_obj = await run.io_bound(service.registry.stats)
-                    render_cloud_stats(stats_obj, title="Registry инициализирован")
+                    render_cloud_stats(stats_obj, title="Реестр инициализирован")
                     _log_app_event(state, "cloud_drive", "init_registry", details=current_cloud_values())
-                    ui.notify("Cloud Drive registry инициализирован.", type="positive")
+                    ui.notify("Реестр Cloud Drive инициализирован.", type="positive")
                 except Exception as exc:
-                    ui.notify(f"Не удалось инициализировать registry: {exc}", type="negative")
+                    ui.notify(f"Не удалось инициализировать реестр: {exc}", type="negative")
 
             async def refresh_registry_stats() -> None:
                 try:
@@ -5840,13 +5850,13 @@ def _build_page(initial_screen: str = "search") -> None:
             with action_row:
                 with ui.row().classes("rag-dirty-actions-inner"):
                     ui.button("Отменить", icon="close", on_click=reset_cloud_settings).props("flat dense")
-                    ui.button("Сохранить Cloud Drive", icon="save", on_click=save_cloud_settings).props("outline dense")
+                    ui.button("Сохранить настройки", icon="save", on_click=save_cloud_settings).props("outline dense")
 
             with ui.row().classes("w-full gap-2 flex-wrap"):
-                ui.button("Init registry", icon="database", on_click=init_registry).props("outline")
-                ui.button("Stats", icon="monitoring", on_click=refresh_registry_stats).props("outline")
-                ui.button("Bootstrap metadata", icon="sync", on_click=lambda: bootstrap_registry(import_files=False)).props("outline")
-                ui.button("Bootstrap + import files", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
+                ui.button("Инициализировать реестр", icon="database", on_click=init_registry).props("outline")
+                ui.button("Обновить статистику", icon="monitoring", on_click=refresh_registry_stats).props("outline")
+                ui.button("Сканировать структуру", icon="sync", on_click=lambda: bootstrap_registry(import_files=False)).props("outline")
+                ui.button("Импортировать в реестр", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
             bootstrap_box
             jobs_box
             _stop_managed_timer(state.cloud_drive_timer)

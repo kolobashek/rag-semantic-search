@@ -74,6 +74,11 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert listing['folders'] == []
     assert [item['name'] for item in listing['files']] == ['hello.txt']
 
+    created = service.create_folder(parent_path='Folder A', name='Nested')
+    assert created['node_type'] == 'folder'
+    assert created['path'] == 'Folder A/Nested'
+    assert registry.get_folder_by_path('Folder A/Nested') is not None
+
 
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))

@@ -160,6 +160,20 @@ class CloudDriveService:
             ],
         }
 
+    def create_folder(self, *, parent_path: str = '', name: str) -> dict:
+        folder = self.registry.create_folder(parent_path=parent_path, name=name)
+        return {
+            'node_type': 'folder',
+            'id': folder.id,
+            'name': folder.name,
+            'path': folder.path,
+            'source_path': folder.source_path,
+            'depth': folder.depth,
+            'is_root': folder.is_root,
+            'created_at': folder.created_at,
+            'updated_at': folder.updated_at,
+        }
+
     def cancel_job(self, job_id: str) -> CloudDriveJob:
         job = self.registry.get_job(job_id)
         if job is None:

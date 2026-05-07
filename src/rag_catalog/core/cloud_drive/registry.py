@@ -190,6 +190,31 @@ class CloudDriveRegistryDB:
             row = conn.execute('SELECT * FROM cloud_folders WHERE is_root=1 LIMIT 1').fetchone()
             return self._folder_from_row(row) if row else None
 
+    def create_folder(self, *, parent_path: str = '', name: str) -> CloudDriveFolder:
+        clean_name = str(name or '').strip().strip('/\\')
+        if not clean_name:
+            raise RuntimeError('Не задано имя каталога.')
+        if '/' in clean_name or '\\' in clean_name:
+            raise RuntimeError('Имя каталога не должно содержать разделители пути.')
+        clean_parent = self._normalize_path(parent_path)
+        parent = self.get_root_folder() if not clean_parent else self.get_folder_by_path(clean_parent)
+        if parent is None:
+            raise RuntimeError(f'Родительский каталог не найден: {clean_parent or "/"}')
+        folder_path = self._normalize_path(f'{clean_parent}/{clean_name}' if clean_parent else clean_name)
+        if self.get_folder_by_path(folder_path) is not None:
+            raise RuntimeError(f'Каталог уже существует: {folder_path}')
+        if self.get_file_by_path(folder_path) is not None:
+            raise RuntimeError(f'Файл с таким именем уже существует: {folder_path}')
+        source_path = str(Path(parent.source_path) / clean_name) if parent.source_path else ''
+        return self.upsert_folder(
+            path=folder_path,
+            name=clean_name,
+            parent_id=parent.id,
+            depth=int(parent.depth) + 1,
+            source_path=source_path,
+            is_root=False,
+        )
+
     def upsert_folder(self, *, path: str, name: str, parent_id: Optional[str], depth: int, source_path: str = '', is_root: bool = False) -> CloudDriveFolder:
         clean_path = self._normalize_path(path)
         now = _utc_now()

@@ -17,6 +17,7 @@ from rag_catalog.ui.nice_app import (
     _run_catalog_search,
     api_cloud_drive_bootstrap_jobs,
     api_cloud_drive_bootstrap_status,
+    api_cloud_drive_create_folder,
     api_cloud_drive_list,
     api_cloud_drive_node,
     api_cloud_drive_storage_health,
@@ -456,3 +457,27 @@ def test_cloud_drive_node_and_list_api(monkeypatch, tmp_path) -> None:
     assert folder_node["name"] == "Folder A"
     assert listing["folder"]["path"] == "Folder A"
     assert [item["name"] for item in listing["files"]] == ["hello.txt"]
+
+
+def test_cloud_drive_create_folder_api(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    created = api_cloud_drive_create_folder(parent_path="Folder A", name="Nested")
+
+    assert created["node_type"] == "folder"
+    assert created["path"] == "Folder A/Nested"
+    assert service.registry.get_folder_by_path("Folder A/Nested") is not None

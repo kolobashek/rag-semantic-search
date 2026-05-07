@@ -59,6 +59,9 @@
   - `GET /api/cloud-drive/node`
   - `GET /api/cloud-drive/list`
 - Cloud Drive service получил read-only методы `get_node()` и `list_directory()` для explorer/API слоя.
+- добавлен registry-backed endpoint создания папки:
+  - `POST /api/cloud-drive/folders`
+- Cloud Drive service получил `create_folder()` с валидацией конфликтов имени и родительского каталога.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -149,9 +152,9 @@
 - Вынести файловые операции в FastAPI endpoints:
   - [x] list folders/files;
   - [x] get node;
+  - [x] create folder;
   - upload;
   - download;
-  - create folder;
   - rename/move/delete;
   - versions;
   - jobs/status.
