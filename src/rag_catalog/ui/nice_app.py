@@ -1137,6 +1137,19 @@ def _build_page(initial_screen: str = "search") -> None:
                 icon="expand_more",
             ).props("outline no-caps").classes("w-full mt-1")
 
+    def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
+        active = _is_favorite(state, str(path))
+        icon = "star" if active else "star_border"
+        star = ui.button(icon=icon, color=None).props("flat round dense data-rag-favorite-button")
+        star.classes("rag-favorite-star active" if active else "rag-favorite-star")
+        star.tooltip("Убрать из избранного" if active else "Добавить в избранное")
+
+        def toggle() -> None:
+            _toggle_favorite(state, path, item_type=item_type)
+            render()
+
+        star.on("click.stop", toggle)
+
     def _render_cd_explorer(page_state: PageState, svc: "CloudDriveService") -> None:  # noqa: PLR0912,PLR0915
         """Registry-backed Cloud Drive explorer screen."""
         from rag_catalog.core.cloud_drive.models import CloudDriveFolder, CloudDriveFile  # noqa: PLC0415
@@ -1887,19 +1900,6 @@ def _build_page(initial_screen: str = "search") -> None:
                 "data-rag-favorite": favorite,
             }
             return " ".join(f'{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items())
-
-        def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
-            active = _is_favorite(state, str(path))
-            icon = "star" if active else "star_border"
-            star = ui.button(icon=icon, color=None).props("flat round dense data-rag-favorite-button")
-            star.classes("rag-favorite-star active" if active else "rag-favorite-star")
-            star.tooltip("Убрать из избранного" if active else "Добавить в избранное")
-
-            def toggle() -> None:
-                _toggle_favorite(state, path, item_type=item_type)
-                render()
-
-            star.on("click.stop", toggle)
 
         def open_favorites_dialog() -> None:
             with ui.dialog() as dialog, ui.card().classes("w-[min(900px,92vw)] max-h-[80vh] overflow-auto gap-3"):
