@@ -3391,6 +3391,7 @@ def _build_page(initial_screen: str = "search") -> None:
                         reg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")
                         reg_display_input = ui.input("Имя").props("dense outlined").classes("w-full")
                         reg_tg_user_input = ui.input("Telegram username (необязательно)").props("dense outlined").classes("w-full")
+                        reg_tg_user_input.on("keyup.enter", lambda _: register_request())
                         ui.button("Отправить заявку", icon="how_to_reg", on_click=register_request).props("unelevated")
                         ui.label("После одобрения администратором вы получите доступ к аккаунту.").classes("rag-meta")
 
@@ -4805,6 +4806,11 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.notify("Вход выполнен.", type="positive")
                     render()
 
+                username_input.on("keyup.enter", lambda _: ui.run_javascript(
+                    "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
+                    "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
+                    "if(i>=0&&ins[i+1])ins[i+1].focus();"
+                ))
                 password_input.on("keyup.enter", lambda _: login())
                 ui.button("Войти", icon="login", on_click=login).props("unelevated")
             return
@@ -5095,6 +5101,13 @@ def _build_page(initial_screen: str = "search") -> None:
                         old_pw = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
                         new_pw = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
                         new_pw2 = ui.input("Повторите пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                        _focus_next_js = (
+                            "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
+                            "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
+                            "if(i>=0&&ins[i+1])ins[i+1].focus();"
+                        )
+                        old_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
+                        new_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
 
                         def change_pw() -> None:
                             if str(new_pw.value or "") != str(new_pw2.value or ""):
@@ -5110,6 +5123,7 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.notify("Пароль изменён." if ok else "Не удалось изменить пароль.",
                                       type="positive" if ok else "negative")
 
+                        new_pw2.on("keyup.enter", lambda _: change_pw())
                         with ui.row().classes("gap-2"):
                             ui.button("Сменить пароль", icon="key", on_click=change_pw).props("outline")
                             ui.button("Выйти", icon="logout", on_click=do_logout).props("flat")
