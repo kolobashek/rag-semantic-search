@@ -720,6 +720,23 @@ def api_cloud_drive_create_folder(parent_path: str = "", name: str = "") -> Dict
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.get("/api/cloud-drive/download")
+def api_cloud_drive_download(path: str) -> FileResponse:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    try:
+        descriptor = service.get_download_descriptor(path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if descriptor.get("mode") != "local_file":
+        raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает direct download.")
+    return FileResponse(
+        path=str(descriptor["file_path"]),
+        media_type=str(descriptor["mime_type"]),
+        filename=str(descriptor["filename"]),
+    )
+
+
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     explicit = str(cfg.get("telemetry_db_path") or "").strip()
     if explicit:
@@ -3839,7 +3856,7 @@ def _build_page(initial_screen: str = "search") -> None:
             if root_folder is None:
                 with ui.element("div").classes("cd-empty-state"):
                     ui.icon("cloud_off", size="24px").classes("opacity-30")
-                    ui.label("Registry пуст. Запустите bootstrap в настройках Cloud Drive.").classes("text-center text-xs")
+                    ui.label("Реестр пуст. Запустите импорт в настройках Cloud Drive.").classes("text-center text-xs")
             else:
                 def _render_tree_node_cd(folder: CloudDriveFolder, depth: int) -> None:
                     is_current = folder.path == cd_path or (not cd_path and folder.is_root)
@@ -3947,7 +3964,7 @@ def _build_page(initial_screen: str = "search") -> None:
             if root_folder is None:
                 with ui.element("div").classes("cd-empty-state w-full"):
                     ui.icon("cloud_off", size="32px").classes("opacity-20")
-                    ui.label("Registry пуст — запустите bootstrap в Настройки → Cloud Drive.").classes("text-center")
+                    ui.label("Реестр пуст — запустите импорт в Настройки → Cloud Drive.").classes("text-center")
             elif not child_folders and not child_files:
                 with ui.element("div").classes("cd-empty-state w-full"):
                     ui.icon("folder_open", size="32px").classes("opacity-20")
@@ -5660,7 +5677,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     if not jobs:
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("history", size="24px").classes("opacity-30")
-                            ui.label("История задач пуста. Запустите bootstrap, чтобы начать.").classes("text-center")
+                            ui.label("История задач пуста. Запустите импорт, чтобы начать.").classes("text-center")
                         return
                     for job in jobs:
                         progress = dict(job.progress or {})
@@ -5719,10 +5736,10 @@ def _build_page(initial_screen: str = "search") -> None:
             def save_cloud_settings() -> None:
                 values = current_cloud_values()
                 if not values["cloud_drive_db_path"]:
-                    ui.notify("Укажите путь к базе реестра Cloud Drive.", type="warning")
+                    ui.notify("Укажите путь к базе данных реестра.", type="warning")
                     return
                 if values["cloud_drive_storage"] == "local" and not values["cloud_drive_storage_root"]:
-                    ui.notify("Укажите папку хранения файлов для local storage.", type="warning")
+                    ui.notify("Укажите папку хранения файлов для локального хранилища.", type="warning")
                     return
                 try:
                     persist_cloud_values(values)
@@ -5731,7 +5748,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     _log_app_event(state, "settings", "save_cloud_drive", details=values)
                     ui.notify("Настройки Cloud Drive сохранены.", type="positive")
                 except Exception as exc:
-                    ui.notify(f"Не удалось сохранить Cloud Drive: {exc}", type="negative")
+                    ui.notify(f"Не удалось сохранить настройки: {exc}", type="negative")
 
             async def init_registry() -> None:
                 try:
@@ -5749,7 +5766,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     cfg = persist_cloud_values(current_cloud_values())
                     service = await run.io_bound(CloudDriveService.from_config, cfg)
                     stats_obj = await run.io_bound(service.registry.stats)
-                    render_cloud_stats(stats_obj, title="Текущая статистика registry")
+                    render_cloud_stats(stats_obj, title="Статистика реестра")
                     render_bootstrap_status()
                     render_bootstrap_jobs()
                 except Exception as exc:
@@ -5775,7 +5792,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     cfg = persist_cloud_values(current_cloud_values())
                     current_state = _read_cloud_bootstrap_status(cfg)
                     if str(current_state.get("job_status") or current_state.get("status") or "") in {"running", "pending"}:
-                        ui.notify("Bootstrap уже выполняется.", type="warning")
+                        ui.notify("Импорт уже выполняется.", type="warning")
                         render_bootstrap_status()
                         return
                     service = CloudDriveService.from_config(cfg)
@@ -5799,9 +5816,9 @@ def _build_page(initial_screen: str = "search") -> None:
                         "bootstrap",
                         details={"catalog": catalog, "import_files": import_files, "limit": limit_value},
                     )
-                    ui.notify("Bootstrap Cloud Drive запущен в фоне.", type="positive")
+                    ui.notify("Импорт запущен в фоне.", type="positive")
                 except Exception as exc:
-                    ui.notify(f"Bootstrap Cloud Drive не удался: {exc}", type="negative")
+                    ui.notify(f"Не удалось запустить импорт: {exc}", type="negative")
 
             async def cancel_bootstrap_job(job_id: str) -> None:
                 try:
@@ -5810,16 +5827,16 @@ def _build_page(initial_screen: str = "search") -> None:
                     await run.io_bound(service.cancel_job, job_id)
                     render_bootstrap_status()
                     render_bootstrap_jobs()
-                    ui.notify("Отмена bootstrap запрошена.", type="warning")
+                    ui.notify("Отмена задачи запрошена.", type="warning")
                 except Exception as exc:
-                    ui.notify(f"Не удалось отменить bootstrap: {exc}", type="negative")
+                    ui.notify(f"Не удалось отменить задачу: {exc}", type="negative")
 
             async def retry_bootstrap_job(job_id: str) -> None:
                 try:
                     cfg = persist_cloud_values(current_cloud_values())
                     current_state = _read_cloud_bootstrap_status(cfg)
                     if str(current_state.get("job_status") or current_state.get("status") or "") in {"running", "pending"}:
-                        ui.notify("Сейчас уже выполняется другой bootstrap.", type="warning")
+                        ui.notify("Сейчас уже выполняется другой импорт.", type="warning")
                         return
                     service = await run.io_bound(CloudDriveService.from_config, cfg)
                     job = await run.io_bound(service.retry_bootstrap_job, job_id)
@@ -5832,12 +5849,12 @@ def _build_page(initial_screen: str = "search") -> None:
                     thread.start()
                     render_bootstrap_status()
                     render_bootstrap_jobs()
-                    ui.notify("Bootstrap перезапущен.", type="positive")
+                    ui.notify("Импорт перезапущен.", type="positive")
                 except Exception as exc:
-                    ui.notify(f"Не удалось повторить bootstrap: {exc}", type="negative")
+                    ui.notify(f"Не удалось повторить импорт: {exc}", type="negative")
 
             refresh_cloud_visibility()
-            render_cloud_stats(None, title="Cloud Drive ещё не инициализирован")
+            render_cloud_stats(None, title="Статистика реестра")
             render_bootstrap_status()
             render_bootstrap_jobs()
 
