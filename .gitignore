@@ -44,6 +44,10 @@ artifacts/*
 tmp/*
 !tmp/.gitkeep
 .launcher_runtime/
+runtime/
+!runtime/.gitkeep
+data/
+!data/.gitkeep
 
 # ── Qdrant база данных ────────────────────────────────────────────────
 qdrant_db/
