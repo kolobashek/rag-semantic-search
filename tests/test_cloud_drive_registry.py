@@ -79,6 +79,11 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert created['path'] == 'Folder A/Nested'
     assert registry.get_folder_by_path('Folder A/Nested') is not None
 
+    descriptor = service.get_download_descriptor('Folder A/hello.txt')
+    assert descriptor['mode'] == 'local_file'
+    assert descriptor['filename'] == 'hello.txt'
+    assert Path(descriptor['file_path']).exists()
+
 
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))

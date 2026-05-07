@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -172,6 +173,24 @@ class CloudDriveService:
             'is_root': folder.is_root,
             'created_at': folder.created_at,
             'updated_at': folder.updated_at,
+        }
+
+    def get_download_descriptor(self, path: str) -> dict:
+        node = self.registry.get_file_by_path(str(path or '').strip().replace('\\', '/').strip('/'))
+        if node is None:
+            raise RuntimeError(f'Файл не найден: {path}')
+        storage_path = Path(self.storage.resolve_path(node.storage_key))
+        if not storage_path.exists() or not storage_path.is_file():
+            raise RuntimeError(f'Файл отсутствует в storage backend: {node.storage_key}')
+        mime_type = node.mime_type or mimetypes.guess_type(node.name)[0] or 'application/octet-stream'
+        return {
+            'mode': 'local_file',
+            'file_path': str(storage_path),
+            'filename': node.name,
+            'mime_type': mime_type,
+            'size_bytes': node.size_bytes,
+            'storage_key': node.storage_key,
+            'path': node.path,
         }
 
     def cancel_job(self, job_id: str) -> CloudDriveJob:

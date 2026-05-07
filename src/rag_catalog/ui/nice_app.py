@@ -3804,6 +3804,44 @@ def _build_page(initial_screen: str = "search") -> None:
             _log_app_event(page_state, "cd_explorer", "open_folder", details={"cd_path": cd_path})
             render()
 
+        async def _cd_new_folder_dialog() -> None:
+            """Show an inline dialog to create a new folder in the current directory."""
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-80"):
+                ui.label("Новая папка").classes("text-lg font-semibold")
+                parent_label = page_state.explorer_cd_path or "/"
+                ui.label(f"В: {parent_label}").classes("rag-path text-xs")
+                name_input = ui.input(
+                    "Имя папки",
+                    placeholder="Введите имя",
+                ).props("dense outlined autofocus").classes("w-full")
+
+                async def _do_create() -> None:
+                    name = str(name_input.value or "").strip()
+                    if not name:
+                        ui.notify("Введите имя папки.", type="warning")
+                        return
+                    try:
+                        await run.io_bound(
+                            svc.create_folder,
+                            parent_path=page_state.explorer_cd_path or "",
+                            name=name,
+                        )
+                        dlg.close()
+                        _log_app_event(
+                            page_state, "cd_explorer", "create_folder",
+                            details={"parent": page_state.explorer_cd_path, "name": name},
+                        )
+                        ui.notify(f"Папка «{name}» создана.", type="positive")
+                        render()
+                    except Exception as exc:
+                        ui.notify(f"Не удалось создать папку: {exc}", type="negative")
+
+                name_input.on("keydown.enter", lambda _: _do_create())
+                with ui.row().classes("w-full justify-end gap-2 mt-1"):
+                    ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                    ui.button("Создать", icon="create_new_folder", on_click=_do_create).props("unelevated dense")
+            dlg.open()
+
         def _cd_open_file(file: CloudDriveFile) -> None:
             src = str(file.source_path or file.path or "")
             if src:
@@ -3920,6 +3958,11 @@ def _build_page(initial_screen: str = "search") -> None:
                         if idx < len(breadcrumbs) - 1:
                             ui.icon("chevron_right").classes("text-slate-400")
                 ui.button(icon="refresh", on_click=lambda: render(), color=None).props("flat round dense").tooltip("Обновить")
+                ui.button(
+                    icon="create_new_folder",
+                    on_click=_cd_new_folder_dialog,
+                    color=None,
+                ).props("flat round dense").tooltip("Создать папку")
 
             # Filter / view toolbar
             with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):

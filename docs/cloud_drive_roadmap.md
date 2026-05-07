@@ -62,6 +62,9 @@
 - добавлен registry-backed endpoint создания папки:
   - `POST /api/cloud-drive/folders`
 - Cloud Drive service получил `create_folder()` с валидацией конфликтов имени и родительского каталога.
+- добавлен registry-backed endpoint скачивания файла:
+  - `GET /api/cloud-drive/download`
+- Cloud Drive service получил `get_download_descriptor()` для local storage backend.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -154,7 +157,7 @@
   - [x] get node;
   - [x] create folder;
   - upload;
-  - download;
+  - [x] download;
   - rename/move/delete;
   - versions;
   - jobs/status.
@@ -203,9 +206,9 @@
   - [x] empty state jobs history (history icon + текст);
   - [x] error state jobs когда нет cloud_drive_db_path (settings icon);
   - [x] error state jobs когда CloudDriveService.from_config выбрасывает.
-- [ ] cleanup настроек и терминологии (проверить после Sprint 2).
+- [x] cleanup настроек и терминологии — кнопки переименованы в русские, tooltips очищены от developer notes, уведомления переведены на продуктовый язык.
 
-_Коммит: f046509 (feat(ui): Cloud Drive admin UX polish — Sprint 1)_
+_Коммиты: f046509 (feat(ui): Cloud Drive admin UX polish — Sprint 1), 9b85dd6 (feat(ui): Cloud Drive admin — Sprint 1 terminology cleanup)_
 
 #### 2. Explorer on registry
 
@@ -289,7 +292,7 @@ Codex:
 Claude:
 - [x] brandbook/wireframe v2 для jobs history (статус-бейджи, иконки, карточки);
 - [x] empty/error/loading states в Cloud Drive admin;
-- [ ] cleanup настроек и терминологии.
+- [x] cleanup настроек и терминологии.
 
 ### Sprint 2
 
