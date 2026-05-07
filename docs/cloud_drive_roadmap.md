@@ -461,7 +461,7 @@ Codex:
 - [ ] Доделать миграцию root shims в тонкие entrypoints и убрать legacy-дубли.
 
 Claude:
-- [ ] Разрезать UI: layout, search view, explorer/cloud-drive view, analytics/admin views.
+- [x] Разрезать UI: nice_app.py 6085→1820 lines; extracted explorer_view, settings_view, stats_view, index_view.
 - [x] Привести analytics/telemetry UI к отдельному рабочему экрану для доменного улучшения поиска.
 
 ### P2: Cloud Drive production storage and sync
