@@ -1096,8 +1096,10 @@ class RAGSearcher:
             self._log_rag_answer(q, answer, False, started, f"rag_answer_error: {exc}")
             return {"ok": False, "answer": answer, "sources": sources, "results": results, "error": f"rag_answer_error: {exc}"}
 
-        ok = bool(answer and "нет данных для ответа" not in answer.lower())
-        self._log_rag_answer(q, answer, ok, started, "" if ok else "weak_answer")
+        verification = self._verify_rag_answer(answer, sources)
+        ok = bool(answer and "нет данных для ответа" not in answer.lower() and verification["ok"])
+        error = "" if ok else str(verification.get("error") or "weak_answer")
+        self._log_rag_answer(q, answer, ok, started, error)
         return {
             "ok": ok,
             "question": q,
@@ -1105,6 +1107,8 @@ class RAGSearcher:
             "sources": sources,
             "results": results,
             "duration_ms": int((time.perf_counter() - started) * 1000),
+            "verification": verification,
+            "error": "" if ok else error,
         }
 
     def _rag_sources(self, results: List[Dict[str, Any]], *, max_sources: int = 5) -> List[Dict[str, Any]]:
@@ -1146,6 +1150,32 @@ class RAGSearcher:
             )
         except Exception:
             logger.debug("Failed to log rag answer telemetry", exc_info=True)
+
+    def _verify_rag_answer(self, answer: str, sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Lightweight grounding gate for numeric/date facts in generated answers."""
+        answer_facts = self._extract_verifiable_facts(answer)
+        if not answer_facts:
+            return {"ok": True, "checked_facts": [], "missing_facts": []}
+        source_text = "\n".join(str(src.get("excerpt") or "") for src in sources)
+        source_facts = self._extract_verifiable_facts(source_text)
+        missing = sorted(answer_facts - source_facts)
+        if missing:
+            return {
+                "ok": False,
+                "checked_facts": sorted(answer_facts),
+                "missing_facts": missing,
+                "error": "unsupported_facts",
+            }
+        return {"ok": True, "checked_facts": sorted(answer_facts), "missing_facts": []}
+
+    def _extract_verifiable_facts(self, text: str) -> set[str]:
+        facts: set[str] = set()
+        normalized = str(text or "").lower().replace(",", ".")
+        for match in re.finditer(r"\b\d{1,4}(?:\.\d+)?\b", normalized):
+            facts.add(match.group(0).rstrip("."))
+        for match in re.finditer(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", normalized):
+            facts.add(match.group(0).replace("/", ".").replace("-", "."))
+        return facts
 
     def answer_fact_question(self, question: str, limit: int = 20) -> Dict[str, Any]:
         """

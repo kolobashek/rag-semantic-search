@@ -410,6 +410,28 @@ def test_answer_documents_generates_answer_with_sources(monkeypatch) -> None:
     assert out["sources"][0]["excerpt"].startswith("Подтвержденный")
 
 
+def test_answer_documents_rejects_unsupported_numeric_facts(monkeypatch) -> None:
+    from rag_catalog.core import llm
+
+    s = _make_searcher(connected=True)
+    s.config = {"llm_rag_model": "fake", "ollama_url": "http://ollama.test", "llm_answer_top_k": 1}
+    s.search = lambda *args, **kwargs: [  # type: ignore[method-assign]
+        {
+            "filename": "source.docx",
+            "full_path": r"O:\source.docx",
+            "text": "В источнике указана сумма 100 рублей.",
+            "score": 0.91,
+        }
+    ]
+    monkeypatch.setattr(llm, "rag_answer", lambda query, results, **kwargs: "Сумма составляет 999 рублей.")
+
+    out = s.answer_documents("какая сумма?")
+
+    assert out["ok"] is False
+    assert out["error"] == "unsupported_facts"
+    assert "999" in out["verification"]["missing_facts"]
+
+
 def test_answer_fact_question_handles_search_error() -> None:
     s = _make_searcher(connected=True)
 
