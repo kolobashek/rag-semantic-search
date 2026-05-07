@@ -4868,6 +4868,7 @@ def _build_page(initial_screen: str = "search") -> None:
             tab_quality = ui.tab("Качество поиска", icon="thumbs_up_down")
             tab_synonyms = ui.tab("Синонимы", icon="auto_awesome")
             tab_queries = ui.tab("Запросы", icon="manage_search")
+            tab_benchmark = ui.tab("Бенчмарк", icon="assessment")
             tab_audit = ui.tab("Аудит", icon="security")
 
         with ui.tab_panels(tabs, value=tab_overview).classes("w-full"):
@@ -5185,6 +5186,143 @@ def _build_page(initial_screen: str = "search") -> None:
                     refresh_search_table()
 
             # ── Аудит ──────────────────────────────────────────────────
+            # ── Бенчмарк ───────────────────────────────────────────────
+            with ui.tab_panel(tab_benchmark):
+                from rag_catalog.core.search_eval import evaluate_search, load_golden_queries
+
+                _DEFAULT_GOLDEN = str(PROJECT_ROOT / "eval" / "search_golden.json")
+                _bench_state: Dict[str, Any] = {"result": None, "running": False, "error": ""}
+
+                with ui.column().classes("rag-card w-full p-4 gap-3"):
+                    ui.label("Оффлайн-бенчмарк качества поиска").classes("text-xl font-semibold")
+                    ui.label(
+                        "Запускает поиск по набору эталонных запросов и вычисляет Recall@k, MRR@k, nDCG@k. "
+                        "Файл golden-запросов — JSON-список {query, expected[]}."
+                    ).classes("rag-meta")
+                    with ui.row().classes("w-full items-end gap-3"):
+                        golden_path_input = ui.input(
+                            "Путь к golden-файлу", value=_DEFAULT_GOLDEN
+                        ).props("dense outlined").classes("flex-1")
+                        k_input = ui.number("K (глубина)", value=10, min=1, max=50, step=1).props("dense outlined").classes("w-28")
+                        run_btn = ui.button("Запустить", icon="play_arrow").props("outline")
+
+                bench_result_area = ui.column().classes("w-full gap-3")
+
+                def _render_bench_result() -> None:
+                    bench_result_area.clear()
+                    with bench_result_area:
+                        err = _bench_state.get("error", "")
+                        if err:
+                            with ui.row().classes("items-center gap-2 text-negative"):
+                                ui.icon("error_outline")
+                                ui.label(err)
+                            return
+                        result = _bench_state.get("result")
+                        if not result:
+                            return
+
+                        rows: list = result.get("rows", [])
+                        k_val = int(result.get("limit", 10))
+                        recall = float(result.get("recall_at_k", 0))
+                        mrr = float(result.get("mrr_at_k", 0))
+                        ndcg = float(result.get("ndcg_at_k", 0))
+                        p50 = int(result.get("latency_p50_ms", 0))
+
+                        # Summary tiles
+                        def _metric_color(v: float, thresholds: tuple) -> str:
+                            lo, hi = thresholds
+                            return "text-positive" if v >= hi else ("text-warning" if v >= lo else "text-negative")
+
+                        with ui.row().classes("w-full gap-3"):
+                            for label, val, fmt, thr, icon_name in [
+                                (f"Recall@{k_val}", recall, f"{recall:.2f}", (0.5, 0.75), "rule"),
+                                (f"MRR@{k_val}", mrr, f"{mrr:.2f}", (0.4, 0.65), "leaderboard"),
+                                (f"nDCG@{k_val}", ndcg, f"{ndcg:.2f}", (0.4, 0.65), "bar_chart"),
+                                ("P50 латентность", p50, f"{p50} мс", None, "speed"),
+                            ]:
+                                color = _metric_color(val, thr) if thr else (
+                                    "text-positive" if p50 < 500 else ("text-warning" if p50 < 2000 else "text-negative")
+                                )
+                                with ui.column().classes("rag-card flex-1 p-3 gap-1 items-center"):
+                                    ui.icon(icon_name).classes(f"text-2xl {color}")
+                                    ui.label(fmt).classes(f"text-xl font-semibold {color}")
+                                    ui.label(label).classes("rag-meta text-xs")
+
+                        # Per-query table
+                        with ui.column().classes("rag-card w-full p-4 gap-2"):
+                            ui.label("Результаты по запросам").classes("font-semibold")
+                            with ui.element("div").classes("w-full overflow-x-auto"):
+                                with ui.element("table").classes("w-full text-xs border-collapse"):
+                                    with ui.element("thead"):
+                                        with ui.element("tr").classes("border-b rag-section-label"):
+                                            for col in ("Запрос", f"Recall@{k_val}", f"MRR@{k_val}", f"nDCG@{k_val}", "Мс", "Результатов"):
+                                                ui.element("th").classes("text-left p-2 font-semibold").text = col
+                                    with ui.element("tbody"):
+                                        for qrow in sorted(rows, key=lambda r: r.get("recall_at_k", 0)):
+                                            r_val = float(qrow.get("recall_at_k", 0))
+                                            row_cls = "border-b hover:bg-slate-50 dark:hover:bg-slate-800"
+                                            if r_val == 0:
+                                                row_cls += " text-negative"
+                                            with ui.element("tr").classes(row_cls):
+                                                ui.element("td").classes("p-2 font-medium max-w-xs truncate").text = str(qrow.get("query", ""))
+                                                for metric in ("recall_at_k", "mrr_at_k", "ndcg_at_k"):
+                                                    ui.element("td").classes("p-2 text-center font-mono").text = f"{float(qrow.get(metric, 0)):.2f}"
+                                                ui.element("td").classes("p-2 text-center font-mono").text = str(qrow.get("latency_ms", 0))
+                                                ui.element("td").classes("p-2 text-center").text = str(qrow.get("results_count", 0))
+
+                        # Failures detail
+                        failures = [r for r in rows if float(r.get("recall_at_k", 0)) == 0]
+                        if failures:
+                            with ui.column().classes("rag-card w-full p-4 gap-2"):
+                                with ui.row().classes("items-center gap-2 mb-1"):
+                                    ui.icon("search_off").classes("text-negative")
+                                    ui.label(f"Провалы ({len(failures)}) — нет ни одного попадания в топ-{k_val}").classes("font-semibold text-negative")
+                                for fail in failures:
+                                    with ui.column().classes("w-full gap-1 p-2 border-b"):
+                                        with ui.row().classes("items-center gap-2"):
+                                            ui.icon("close", size="16px").classes("text-negative")
+                                            ui.label(str(fail.get("query", ""))).classes("font-medium text-sm")
+                                        ui.label(f"Ожидалось: {', '.join(fail.get('expected', []))}").classes("rag-meta text-xs")
+                                        top = fail.get("top", [])
+                                        if top:
+                                            ui.label(f"Топ-1: {top[0].get('filename', top[0].get('path', '—'))} (score {top[0].get('score', 0):.3f})").classes("rag-path text-xs")
+
+                async def _run_benchmark() -> None:
+                    if _bench_state.get("running"):
+                        return
+                    _bench_state["running"] = True
+                    _bench_state["error"] = ""
+                    _bench_state["result"] = None
+                    run_btn.props("loading")
+                    try:
+                        golden_path = str(golden_path_input.value or _DEFAULT_GOLDEN).strip()
+                        k_val = int(k_input.value or 10)
+                        golden = load_golden_queries(golden_path)
+                        searcher = _ensure_searcher(state)
+                        if searcher is None:
+                            _bench_state["error"] = "Поиск не инициализирован — проверьте настройки Qdrant и коллекции."
+                            return
+                        def _search_fn(q: str, lim: int) -> list:
+                            return _run_catalog_search(
+                                searcher,
+                                query=q, query_original=q, query_used=q,
+                                limit=lim, file_type=None,
+                                content_only=False, title_only=False,
+                            )
+                        import asyncio
+                        result = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: evaluate_search(golden, _search_fn, limit=k_val)
+                        )
+                        _bench_state["result"] = result
+                    except Exception as exc:
+                        _bench_state["error"] = str(exc)
+                    finally:
+                        _bench_state["running"] = False
+                        run_btn.props(remove="loading")
+                    _render_bench_result()
+
+                run_btn.on("click", lambda: _run_benchmark())
+
             with ui.tab_panel(tab_audit):
                 auth_events = auth_db.list_auth_events(limit=200)
                 with ui.column().classes("w-full gap-2"):

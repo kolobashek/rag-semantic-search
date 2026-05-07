@@ -437,7 +437,7 @@ Codex:
 - [ ] Добавить grouping/diversity: лимит чанков на документ и MMR-подобную диверсификацию.
 
 Claude:
-- [ ] Добавить UI для eval results: сравнение пайплайнов, топ провалов, latency.
+- [x] Добавить UI для eval results: сравнение пайплайнов, топ провалов, latency.
 - [ ] Обновить UX поиска под retrieval v2: source grouping, provenance, preview snippets.
 
 ### P2: LLM/RAG assistant
