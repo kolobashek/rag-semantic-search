@@ -1199,11 +1199,17 @@ def _build_page(initial_screen: str = "search") -> None:
             reverse=True,
         )
 
-        # Считаем кол-во по группам для чипов
-        group_counts: Dict[str, int] = {}
+        # Count unique source documents per filter group (not raw chunk count)
+        _doc_keys_by_group: Dict[str, set] = {}
         for r in sorted_results:
-            group_counts.setdefault(_result_group(r), 0)
-            group_counts[_result_group(r)] += 1
+            grp = _result_group(r)
+            key = str(r.get("cloud_file_id") or r.get("full_path") or r.get("path") or id(r))
+            _doc_keys_by_group.setdefault(grp, set()).add(key)
+        group_counts: Dict[str, int] = {g: len(ks) for g, ks in _doc_keys_by_group.items()}
+        total_doc_count = len({
+            str(r.get("cloud_file_id") or r.get("full_path") or r.get("path") or id(r))
+            for r in sorted_results
+        })
 
         # Порядок групп как был в _grouped_results
         group_order = [
@@ -1235,7 +1241,7 @@ def _build_page(initial_screen: str = "search") -> None:
         with ui.row().classes("w-full gap-2 flex-wrap"):
             # «Все»
             all_active = state.active_type_filter is None
-            all_chip = ui.label(f"Все: {len(sorted_results)}").classes(
+            all_chip = ui.label(f"Все: {total_doc_count}").classes(
                 "rag-chip" + (" rag-chip-active" if all_active else "")
             )
             all_chip.on("click", lambda: set_filter(None))
@@ -1256,12 +1262,24 @@ def _build_page(initial_screen: str = "search") -> None:
         else:
             visible = sorted_results
 
-        # Показываем первые displayed_count штук
-        to_show = visible[: state.displayed_count]
+        # Group all visible results by source document, then paginate groups
+        _all_seen: Dict[str, int] = {}
+        _all_groups: List[tuple[Any, List[Any]]] = []
+        for _r in visible:
+            _key = str(_r.get("cloud_file_id") or _r.get("full_path") or _r.get("path") or id(_r))
+            if _key in _all_seen:
+                _all_groups[_all_seen[_key]][1].append(_r)
+            else:
+                _all_seen[_key] = len(_all_groups)
+                _all_groups.append((_r, []))
+
+        groups_to_show = _all_groups[: state.displayed_count]
+        to_show_flat = [r for grp, extras in groups_to_show for r in [grp, *extras]]
+
         cloud_result_jobs: Dict[str, Dict[str, str]] = {}
         cloud_file_ids = [
             str(r.get("cloud_file_id") or "")
-            for r in to_show
+            for r in to_show_flat
             if str(r.get("cloud_file_id") or "")
         ]
         if cloud_file_ids:
@@ -1271,19 +1289,9 @@ def _build_page(initial_screen: str = "search") -> None:
                     cloud_result_jobs = _cd_file_jobs_map(svc.registry, list(dict.fromkeys(cloud_file_ids)))
             except Exception:
                 cloud_result_jobs = {}
-        # Group chunks from the same source document
-        _seen_keys: Dict[str, int] = {}
-        _grouped: List[tuple[Any, List[Any]]] = []  # (primary_result, [extra_results])
-        for _r in to_show:
-            _key = str(_r.get("cloud_file_id") or _r.get("full_path") or _r.get("path") or id(_r))
-            if _key in _seen_keys:
-                _grouped[_seen_keys[_key]][1].append(_r)
-            else:
-                _seen_keys[_key] = len(_grouped)
-                _grouped.append((_r, []))
 
         with ui.column().classes("w-full gap-3"):
-            for idx, (primary, extras) in enumerate(_grouped, 1):
+            for idx, (primary, extras) in enumerate(groups_to_show, 1):
                 render_result(primary, idx, cloud_result_jobs)
                 if extras:
                     with ui.expansion(f"{len(extras)} дополн. фрагм.", icon="unfold_more").classes(
@@ -1294,14 +1302,14 @@ def _build_page(initial_screen: str = "search") -> None:
                                 render_result(extra, idx, cloud_result_jobs)
 
         # Кнопка «Загрузить ещё»
-        remaining = len(visible) - state.displayed_count
-        if remaining > 0:
+        remaining_groups = len(_all_groups) - state.displayed_count
+        if remaining_groups > 0:
             def load_more() -> None:
                 state.displayed_count += 10
                 render()
 
             ui.button(
-                f"Загрузить ещё  ({remaining})",
+                f"Загрузить ещё  ({remaining_groups})",
                 on_click=load_more,
                 icon="expand_more",
             ).props("outline no-caps").classes("w-full mt-1")
