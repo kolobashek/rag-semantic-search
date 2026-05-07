@@ -187,6 +187,15 @@ class UserAuthDB:
                         UNIQUE(username, path)
                     );
 
+                    CREATE TABLE IF NOT EXISTS saved_searches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL,
+                        query TEXT NOT NULL,
+                        label TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        UNIQUE(username, query)
+                    );
+
                     CREATE TABLE IF NOT EXISTS auth_events (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         ts TEXT NOT NULL,
@@ -214,6 +223,8 @@ class UserAuthDB:
                       ON telegram_tokens(token, status, purpose);
                     CREATE INDEX IF NOT EXISTS idx_registration_requests_status
                       ON registration_requests(status, requested_at);
+                    CREATE INDEX IF NOT EXISTS idx_saved_searches_username
+                      ON saved_searches(username, created_at);
                     """
                 )
                 self._migrate_schema(conn)
@@ -1606,6 +1617,49 @@ class UserAuthDB:
                     "UPDATE user_favorites SET last_used_at=? WHERE username=? AND path=?",
                     (_utc_now(), usr, path_value),
                 )
+
+    # ── Saved searches ────────────────────────────────────────────────────────
+
+    def list_saved_searches(self, *, username: str) -> list[Dict[str, Any]]:
+        usr = (username or "").strip().lower()
+        if not usr:
+            return []
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM saved_searches WHERE username=? ORDER BY created_at DESC",
+                    (usr,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+    def add_saved_search(self, *, username: str, query: str, label: str = "") -> bool:
+        usr = (username or "").strip().lower()
+        q = (query or "").strip()
+        if not usr or not q:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO saved_searches (username, query, label, created_at) VALUES (?,?,?,?)",
+                        (usr, q, (label or q).strip(), _utc_now()),
+                    )
+                    return True
+                except Exception:
+                    return False
+
+    def remove_saved_search(self, *, username: str, query: str) -> bool:
+        usr = (username or "").strip().lower()
+        q = (query or "").strip()
+        if not usr or not q:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "DELETE FROM saved_searches WHERE username=? AND query=?",
+                    (usr, q),
+                )
+                return cur.rowcount > 0
 
     def log_auth_event(
         self,

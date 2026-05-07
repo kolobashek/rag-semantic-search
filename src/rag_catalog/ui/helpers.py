@@ -1236,6 +1236,7 @@ def _load_user_state(state: PageState) -> None:
         if "ai_search_expand" in ui_settings:
             state.ai_search_expand = bool(ui_settings.get("ai_search_expand"))
     state.favorites = auth_db.list_favorites(username=username)
+    state.saved_searches = auth_db.list_saved_searches(username=username)
     if not state.history:
         try:
             _get_telemetry(state)

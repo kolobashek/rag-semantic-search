@@ -66,6 +66,7 @@ class PageState:
     session_expired: bool = False
     theme: str = "light"
     favorites: List[Dict[str, Any]] = field(default_factory=list)
+    saved_searches: List[Dict[str, Any]] = field(default_factory=list)
     header_explorer_actions: Optional[ui.row] = None
     header_breadcrumbs: Optional[ui.row] = None
     telemetry: Optional[TelemetryDB] = None
@@ -196,4 +197,33 @@ def _toggle_favorite(
         )
         _log_app_event(state, "favorites", "add", details={"path": path_value, "item_type": item_type or _favorite_type(path)})
     state.favorites = auth_db.list_favorites(username=username)
+    return not active
+
+
+# ─────────────────────────── saved search helpers ───────────────────────────
+
+def _is_saved_search(state: PageState, query: str) -> bool:
+    key = (query or "").strip().lower()
+    return any((item.get("query") or "").strip().lower() == key for item in state.saved_searches)
+
+
+def _toggle_saved_search(state: PageState, query: str) -> bool:
+    username = _username(state)
+    if not username:
+        ui.notify("Войдите, чтобы сохранять запросы.", type="warning")
+        return False
+    auth_db = _get_auth_db(state)
+    q = (query or "").strip()
+    if not q:
+        return False
+    active = _is_saved_search(state, q)
+    if active:
+        auth_db.remove_saved_search(username=username, query=q)
+        _log_app_event(state, "saved_search", "remove", details={"query": q})
+        ui.notify("Запрос удалён из сохранённых.", type="info")
+    else:
+        auth_db.add_saved_search(username=username, query=q)
+        _log_app_event(state, "saved_search", "add", details={"query": q})
+        ui.notify("Запрос сохранён.", type="positive")
+    state.saved_searches = auth_db.list_saved_searches(username=username)
     return not active

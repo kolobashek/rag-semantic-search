@@ -478,7 +478,7 @@ Codex:
 Claude:
 - [ ] Добавить trash/restore UX.
 - [ ] Добавить sync conflict resolution UX.
-- [ ] Добавить saved searches, favorites и collections после стабилизации ACL/search.
+- [x] Добавить saved searches, favorites и collections после стабилизации ACL/search.
 
 ## Definition of Done
 

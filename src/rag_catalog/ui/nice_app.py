@@ -85,10 +85,12 @@ from .state import (
     _get_auth_db,
     _get_telemetry,
     _is_favorite,
+    _is_saved_search,
     _log_app_event,
     _refresh_current_user,
     _save_config_patch,
     _toggle_favorite,
+    _toggle_saved_search,
     _username,
 )
 from .system import (
@@ -470,23 +472,43 @@ def _build_page(initial_screen: str = "search") -> None:
         personal = _dedupe_queries([*state.history, *_my_recent_queries(state.cfg, username, limit=12)], limit=12)
         popular = _popular_queries(state.cfg, exclude_username=username, limit=10)
         cloud_qs = _cloud_query_set(state.cfg, username) if bool(state.cfg.get("cloud_drive_enabled")) else set()
+        saved_qs = [str(s.get("query") or "") for s in state.saved_searches if s.get("query")]
 
         needle = typed.strip().lower()
         if needle:
             personal = [q for q in personal if needle in q.lower()]
             popular = [q for q in popular if needle in q.lower()]
+            saved_show = [q for q in saved_qs if needle in q.lower()]
         else:
             personal = personal[:8]
             popular = popular[:8]
+            saved_show = saved_qs[:6]
 
-        if not personal and not popular:
+        if not personal and not popular and not saved_show:
             return
 
         with area:
             with ui.row().classes("rag-suggest p-3 gap-0 w-full"):
-                # Левая колонка — личная история
+                # Сохранённые запросы (если есть)
+                if saved_show:
+                    has_right = bool(personal or popular)
+                    col_cls = "flex-1 gap-1 min-w-0" + (" pr-3 border-r border-gray-200" if has_right else "")
+                    with ui.column().classes(col_cls):
+                        ui.label("Сохранённые").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
+                        for item in saved_show:
+                            with ui.row().classes("w-full items-center gap-1"):
+                                btn = ui.button(item, icon="bookmark", on_click=choose_query_handler(item), color=None).props("flat align=left no-caps").classes("rag-nav-button rag-suggest-item flex-1")
+                                btn.tooltip(item)
+                                def _remove_ss(q: str = item) -> None:
+                                    _toggle_saved_search(state, q)
+                                    render_suggestions(area, needle)
+                                rm = ui.button(icon="close", on_click=_remove_ss, color=None).props("flat round dense")
+                                rm.classes("rag-feedback-btn shrink-0")
+                                rm.tooltip("Удалить из сохранённых")
+                # Личная история
                 if personal:
-                    col_cls = "flex-1 gap-1 min-w-0" + (" pr-3 border-r border-gray-200" if popular else "")
+                    has_right = bool(popular)
+                    col_cls = "flex-1 gap-1 min-w-0" + (" pr-3 border-r border-gray-200" if has_right else "") + (" pl-3" if saved_show else "")
                     with ui.column().classes(col_cls):
                         ui.label("Моя история").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
                         for item in personal:
@@ -496,9 +518,9 @@ def _build_page(initial_screen: str = "search") -> None:
                                 if item.lower() in cloud_qs:
                                     ci = ui.icon("cloud", size="14px").classes("text-blue-400 shrink-0")
                                     ci.tooltip("Этот запрос ранее возвращал Cloud Drive документы")
-                # Правая колонка — часто ищут
+                # Часто ищут
                 if popular:
-                    col_cls = "flex-1 gap-1 min-w-0" + (" pl-3" if personal else "")
+                    col_cls = "flex-1 gap-1 min-w-0" + (" pl-3" if personal or saved_show else "")
                     with ui.column().classes(col_cls):
                         ui.label("Часто ищут").classes("rag-meta px-2 py-1 font-semibold text-xs uppercase tracking-wide")
                         for item in popular:
@@ -1099,6 +1121,15 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.label(f"Результаты по запросу: {state.searched_query}").classes("text-xl font-semibold")
             if state.expanded_query:
                 ui.label(f"→ расширен: {state.expanded_query}").classes("rag-meta text-sm italic")
+            _ss_active = _is_saved_search(state, state.searched_query)
+            _ss_icon = "bookmark" if _ss_active else "bookmark_border"
+            _ss_tip = "Удалить из сохранённых запросов" if _ss_active else "Сохранить этот запрос"
+            def _toggle_ss(q: str = state.searched_query) -> None:
+                _toggle_saved_search(state, q)
+                render()
+            _ss_btn = ui.button(icon=_ss_icon, on_click=_toggle_ss, color=None).props("flat round dense")
+            _ss_btn.classes("text-amber-500" if _ss_active else "text-slate-400")
+            _ss_btn.tooltip(_ss_tip)
         if state.search_stats_hint:
             ui.label(state.search_stats_hint).classes("rag-meta")
         if state.search_lazy_loading:
