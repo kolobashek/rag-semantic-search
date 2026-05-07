@@ -47,11 +47,11 @@
 - scheduler переведён на локальное время сервера;
 - bootstrap переведён на `cloud_jobs` job-модель;
 - статус bootstrap читается из registry job, а не только из runtime JSON.
+- добавлены `cancel/retry` для bootstrap jobs;
+- добавлена история последних bootstrap jobs в admin UI;
+- добавлен recovery для `running/pending` bootstrap jobs после рестарта.
 
 Осталось в этапе:
-- `cancel/retry` для bootstrap job;
-- список jobs и история последних операций;
-- recovery для `stale/running` bootstrap jobs;
 - status API для jobs;
 - добить остаточные runtime fallback до чистой job-модели.
 
@@ -119,7 +119,7 @@
 - [x] Довести bootstrap state до полноценной job-модели в `cloud_jobs`.
 - [ ] Добавить отдельные статусы `pending/running/completed/failed/cancelled`.
 - [x] Привязать bootstrap/import/reindex к `job_id`, а не только к runtime JSON.
-- [ ] Добавить cancellable long-running jobs.
+- [x] Добавить cancellable long-running jobs.
 - [x] Убрать остаточные page-bound timer зависимости.
 - [x] Нормализовать scheduler по локальному времени/таймзоне и покрыть тестами.
 
@@ -250,6 +250,8 @@ Codex:
 - [x] scheduler hardening;
 - [ ] registry migrations;
 - [ ] bootstrap status API.
+- [x] cancel/retry bootstrap jobs;
+- [x] stale bootstrap recovery.
 
 Claude:
 - Cloud Drive admin UX;

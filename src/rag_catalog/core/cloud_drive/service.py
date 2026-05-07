@@ -9,6 +9,10 @@ from .registry import CloudDriveRegistryDB
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
 
 
+class CloudDriveJobCancelled(RuntimeError):
+    pass
+
+
 class CloudDriveService:
     def __init__(self, *, registry: CloudDriveRegistryDB, storage: StorageAdapter) -> None:
         self.registry = registry
@@ -48,6 +52,49 @@ class CloudDriveService:
     def get_latest_bootstrap_job(self) -> Optional[CloudDriveJob]:
         return self.registry.get_latest_job(job_type='bootstrap')
 
+    def list_bootstrap_jobs(self, *, limit: int = 20) -> list[CloudDriveJob]:
+        return self.registry.list_jobs(job_type='bootstrap', limit=limit)
+
+    def cancel_job(self, job_id: str) -> CloudDriveJob:
+        job = self.registry.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f'Job не найден: {job_id}')
+        if job.job_type != 'bootstrap':
+            raise RuntimeError(f'Cancel пока поддержан только для bootstrap jobs: {job.job_type}')
+        progress = dict(job.progress or {})
+        progress['cancel_requested'] = True
+        if job.status == 'pending':
+            progress['status'] = 'cancelled'
+            progress['finished_at'] = datetime.now(timezone.utc).isoformat()
+            return self.registry.update_job(job_id, status='cancelled', payload={'progress': progress}, last_error='cancelled_by_user')
+        return self.registry.update_job(job_id, payload={'progress': progress})
+
+    def retry_bootstrap_job(self, job_id: str) -> CloudDriveJob:
+        job = self.registry.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f'Job не найден: {job_id}')
+        if job.job_type != 'bootstrap':
+            raise RuntimeError(f'Retry пока поддержан только для bootstrap jobs: {job.job_type}')
+        payload = dict(job.payload or {})
+        return self.create_bootstrap_job(
+            catalog_root=str(payload.get('catalog_root') or ''),
+            max_files=payload.get('max_files'),
+            import_files=bool(payload.get('import_files')),
+        )
+
+    def recover_bootstrap_jobs(self) -> int:
+        recovered = 0
+        for job in self.list_bootstrap_jobs(limit=100):
+            if job.status not in {'running', 'pending'}:
+                continue
+            progress = dict(job.progress or {})
+            progress['status'] = 'stale'
+            progress['error'] = 'server_restart_recovery'
+            progress['finished_at'] = datetime.now(timezone.utc).isoformat()
+            self.registry.update_job(job.id, status='failed', payload={'progress': progress}, last_error='server_restart_recovery')
+            recovered += 1
+        return recovered
+
     def run_bootstrap_job(self, job_id: str) -> CloudDriveStats:
         job = self.registry.get_job(job_id)
         if job is None:
@@ -81,9 +128,17 @@ class CloudDriveService:
         def on_progress(progress_payload: Dict[str, object]) -> None:
             current_job = self.registry.get_job(job_id)
             progress = dict(current_job.progress if current_job else {})
+            if progress.get('cancel_requested'):
+                raise CloudDriveJobCancelled('cancelled_by_user')
             progress.update(progress_payload)
             progress['status'] = 'running'
             self.registry.update_job(job_id, status='running', payload={'progress': progress})
+
+        def should_continue() -> bool:
+            current_job = self.registry.get_job(job_id)
+            if current_job is None:
+                return False
+            return not bool(dict(current_job.progress or {}).get('cancel_requested'))
 
         try:
             stats = self.bootstrap_from_catalog(
@@ -91,6 +146,7 @@ class CloudDriveService:
                 max_files=max_files,
                 import_files=import_files,
                 progress_callback=on_progress,
+                should_continue=should_continue,
             )
             current_job = self.registry.get_job(job_id)
             progress = dict(current_job.progress if current_job else {})
@@ -102,6 +158,18 @@ class CloudDriveService:
             )
             self.registry.update_job(job_id, status='completed', payload={'progress': progress})
             return stats
+        except CloudDriveJobCancelled as exc:
+            current_job = self.registry.get_job(job_id)
+            progress = dict(current_job.progress if current_job else {})
+            progress.update(
+                {
+                    'status': 'cancelled',
+                    'error': str(exc),
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self.registry.update_job(job_id, status='cancelled', payload={'progress': progress}, last_error=str(exc))
+            raise
         except Exception as exc:
             current_job = self.registry.get_job(job_id)
             progress = dict(current_job.progress if current_job else {})
@@ -130,6 +198,7 @@ class CloudDriveService:
         max_files: Optional[int] = None,
         import_files: bool = False,
         progress_callback: Optional[Callable[[Dict[str, object]], None]] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
     ) -> CloudDriveStats:
         root = Path(catalog_root)
         if not root.exists() or not root.is_dir():
@@ -161,6 +230,8 @@ class CloudDriveService:
         emit_progress('start', current_path=str(root))
 
         for dirpath, dirnames, filenames in __import__('os').walk(root):
+            if should_continue is not None and not should_continue():
+                raise CloudDriveJobCancelled('cancelled_by_user')
             base = Path(dirpath)
             base_id = folder_cache.get(base)
             if base_id is None:
@@ -196,6 +267,8 @@ class CloudDriveService:
                     emit_progress('folder', current_path=str(child))
 
             for filename in sorted(filenames):
+                if should_continue is not None and not should_continue():
+                    raise CloudDriveJobCancelled('cancelled_by_user')
                 file_path = base / filename
                 rel_file = file_path.relative_to(root)
                 storage_key = str(rel_file).replace('\\', '/')

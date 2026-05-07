@@ -160,6 +160,17 @@ def _read_cloud_bootstrap_status(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return _read_cloud_bootstrap_state()
 
 
+def _recover_cloud_drive_jobs(cfg: Dict[str, Any]) -> None:
+    try:
+        service = CloudDriveService.from_config(cfg)
+    except Exception:
+        return
+    try:
+        service.recover_bootstrap_jobs()
+    except Exception as exc:
+        print(f"[nice_app] cloud drive recovery skipped: {exc}", file=sys.stderr)
+
+
 def _read_runtime_marker(kind: str) -> Optional[Dict[str, Any]]:
     path = _runtime_marker_path(kind)
     if not path.exists():
@@ -5113,6 +5124,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
             status_box = ui.column().classes("w-full gap-1")
             bootstrap_box = ui.column().classes("w-full gap-1")
+            jobs_box = ui.column().classes("w-full gap-2")
             action_row = ui.row().classes("rag-dirty-actions")
             action_row.set_visibility(False)
 
@@ -5206,6 +5218,54 @@ def _build_page(initial_screen: str = "search") -> None:
                     if finished_at:
                         ui.label(f"Финиш: {finished_at[:19].replace('T', ' ')}").classes("rag-meta")
 
+            def render_bootstrap_jobs() -> None:
+                jobs_box.clear()
+                try:
+                    service = CloudDriveService.from_config(build_cloud_config())
+                    jobs = service.list_bootstrap_jobs(limit=8)
+                except Exception as exc:
+                    with jobs_box:
+                        ui.label("Последние задачи").classes("font-semibold")
+                        ui.label(f"Не удалось прочитать jobs: {exc}").classes("text-negative text-sm")
+                    return
+                with jobs_box:
+                    ui.label("Последние задачи").classes("font-semibold")
+                    if not jobs:
+                        ui.label("История jobs пока пуста.").classes("rag-meta")
+                        return
+                    for job in jobs:
+                        progress = dict(job.progress or {})
+                        raw_status = str(job.status or progress.get("status") or "")
+                        with ui.card().classes("w-full p-3 gap-2"):
+                            with ui.row().classes("w-full items-center justify-between gap-2"):
+                                ui.label(job.id[:8]).classes("font-mono text-sm")
+                                ui.label(raw_status).classes("rag-chip")
+                            current_path = str(progress.get("current_path") or progress.get("catalog") or "").strip()
+                            if current_path:
+                                ui.label(current_path).classes("rag-path")
+                            imported_files = _safe_int(progress.get("imported_files"), 0)
+                            total_files = _safe_int(progress.get("total_files"), 0)
+                            if total_files > 0:
+                                ui.label(f"Файлы: {imported_files:,} / {total_files:,}".replace(",", " ")).classes("rag-meta")
+                            else:
+                                ui.label(f"Файлы: {imported_files:,}".replace(",", " ")).classes("rag-meta")
+                            error_text = str(job.last_error or progress.get("error") or "").strip()
+                            if error_text:
+                                ui.label(error_text).classes("text-negative text-sm")
+                            with ui.row().classes("gap-2"):
+                                if raw_status in {"running", "pending"}:
+                                    ui.button(
+                                        "Отменить",
+                                        icon="close",
+                                        on_click=lambda _e=None, job_id=job.id: cancel_bootstrap_job(job_id),
+                                    ).props("outline dense")
+                                if raw_status in {"failed", "cancelled", "completed"}:
+                                    ui.button(
+                                        "Повторить",
+                                        icon="refresh",
+                                        on_click=lambda _e=None, job_id=job.id: retry_bootstrap_job(job_id),
+                                    ).props("outline dense")
+
             def build_cloud_config() -> Dict[str, Any]:
                 values = current_cloud_values()
                 cfg = dict(state.cfg)
@@ -5255,6 +5315,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     stats_obj = await run.io_bound(service.registry.stats)
                     render_cloud_stats(stats_obj, title="Текущая статистика registry")
                     render_bootstrap_status()
+                    render_bootstrap_jobs()
                 except Exception as exc:
                     ui.notify(f"Не удалось прочитать stats: {exc}", type="negative")
 
@@ -5295,6 +5356,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     )
                     thread.start()
                     render_bootstrap_status()
+                    render_bootstrap_jobs()
                     _log_app_event(
                         state,
                         "cloud_drive",
@@ -5305,9 +5367,43 @@ def _build_page(initial_screen: str = "search") -> None:
                 except Exception as exc:
                     ui.notify(f"Bootstrap Cloud Drive не удался: {exc}", type="negative")
 
+            async def cancel_bootstrap_job(job_id: str) -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    await run.io_bound(service.cancel_job, job_id)
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                    ui.notify("Отмена bootstrap запрошена.", type="warning")
+                except Exception as exc:
+                    ui.notify(f"Не удалось отменить bootstrap: {exc}", type="negative")
+
+            async def retry_bootstrap_job(job_id: str) -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    current_state = _read_cloud_bootstrap_status(cfg)
+                    if str(current_state.get("job_status") or current_state.get("status") or "") in {"running", "pending"}:
+                        ui.notify("Сейчас уже выполняется другой bootstrap.", type="warning")
+                        return
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    job = await run.io_bound(service.retry_bootstrap_job, job_id)
+                    thread = threading.Thread(
+                        target=_run_bootstrap_background,
+                        kwargs={"cfg": cfg, "job_id": job.id},
+                        name="cloud-drive-bootstrap",
+                        daemon=True,
+                    )
+                    thread.start()
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                    ui.notify("Bootstrap перезапущен.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось повторить bootstrap: {exc}", type="negative")
+
             refresh_cloud_visibility()
             render_cloud_stats(None, title="Cloud Drive ещё не инициализирован")
             render_bootstrap_status()
+            render_bootstrap_jobs()
 
             enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
             db_input.on_value_change(lambda _: refresh_cloud_dirty())
@@ -5326,8 +5422,9 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.button("Bootstrap metadata", icon="sync", on_click=lambda: bootstrap_registry(import_files=False)).props("outline")
                 ui.button("Bootstrap + import files", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
             bootstrap_box
+            jobs_box
             _stop_managed_timer(state.cloud_drive_timer)
-            state.cloud_drive_timer = ui.timer(3.0, render_bootstrap_status)
+            state.cloud_drive_timer = ui.timer(3.0, lambda: (render_bootstrap_status(), render_bootstrap_jobs()))
 
     def render_admin_llm_settings() -> None:
         def _fetch_ollama_models(ollama_url: str) -> List[str]:
@@ -6285,6 +6382,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         )
     except Exception as exc:
         print(f"[nice_app] background recovery skipped: {exc}", file=sys.stderr)
+    _recover_cloud_drive_jobs(cfg)
     _start_recovery_watchdog(cfg)
     _start_global_scheduler(cfg)
     ui.run(

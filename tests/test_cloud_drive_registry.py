@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
-from rag_catalog.core.cloud_drive.service import CloudDriveService
+from rag_catalog.core.cloud_drive.service import CloudDriveJobCancelled, CloudDriveService
 from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter
 
 
@@ -99,3 +99,57 @@ def test_service_bootstrap_job(tmp_path: Path) -> None:
     assert saved.status == 'completed'
     assert saved.progress['status'] == 'done'
     assert saved.progress['imported_files'] == 2
+
+
+def test_service_cancel_pending_job(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+
+    job = service.create_bootstrap_job(catalog_root='O:/Обмен', import_files=False)
+    cancelled = service.cancel_job(job.id)
+    assert cancelled.status == 'cancelled'
+    assert cancelled.progress['status'] == 'cancelled'
+
+
+def test_service_retry_and_recover_jobs(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+
+    job = service.create_bootstrap_job(catalog_root='O:/Обмен', import_files=True)
+    registry.update_job(job.id, status='running', payload={'progress': {'status': 'running'}})
+
+    recovered = service.recover_bootstrap_jobs()
+    assert recovered == 1
+    stale = registry.get_job(job.id)
+    assert stale is not None
+    assert stale.status == 'failed'
+    assert stale.progress['status'] == 'stale'
+
+    retried = service.retry_bootstrap_job(job.id)
+    assert retried.id != job.id
+    assert retried.status == 'pending'
+
+
+def test_bootstrap_from_catalog_can_be_cancelled(tmp_path: Path) -> None:
+    catalog = tmp_path / 'catalog'
+    catalog.mkdir()
+    for idx in range(5):
+        (catalog / f'{idx}.txt').write_text('hello', encoding='utf-8')
+    storage_root = tmp_path / 'storage'
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(storage_root))
+    service = CloudDriveService(registry=registry, storage=storage)
+
+    calls = {'count': 0}
+
+    def should_continue() -> bool:
+        calls['count'] += 1
+        return calls['count'] < 3
+
+    try:
+        service.bootstrap_from_catalog(str(catalog), should_continue=should_continue)
+        assert False, 'expected cancellation'
+    except CloudDriveJobCancelled:
+        pass

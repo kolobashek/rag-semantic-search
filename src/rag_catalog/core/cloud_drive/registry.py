@@ -281,6 +281,21 @@ class CloudDriveRegistryDB:
             ).fetchone()
             return self._job_from_row(row) if row else None
 
+    def list_jobs(self, *, job_type: Optional[str] = None, limit: int = 20) -> List[CloudDriveJob]:
+        clean_limit = max(1, int(limit))
+        with self._connect() as conn:
+            if job_type:
+                rows = conn.execute(
+                    'SELECT * FROM cloud_jobs WHERE job_type=? ORDER BY created_at DESC LIMIT ?',
+                    (str(job_type), clean_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    'SELECT * FROM cloud_jobs ORDER BY created_at DESC LIMIT ?',
+                    (clean_limit,),
+                ).fetchall()
+            return [self._job_from_row(row) for row in rows]
+
     def update_job(
         self,
         job_id: str,
