@@ -374,10 +374,17 @@ def _build_page(initial_screen: str = "search") -> None:
             if state.search_request_id != request_id:
                 return
             state.results = _merge_search_results(state.results, full_results, limit=state.limit)
+            cloud_semantic_count = sum(
+                1
+                for item in state.results
+                if item.get("cloud_file_id") or item.get("cloud_path")
+            )
             state.search_stats_hint = (
                 f"{state.search_stats_hint} · после догрузки: {len(state.results)}"
                 if state.search_stats_hint else f"После догрузки: {len(state.results)}"
             )
+            if cloud_semantic_count:
+                state.search_stats_hint = f"{state.search_stats_hint} · Cloud Drive: {cloud_semantic_count}"
             _log_app_event(
                 state,
                 "search",
@@ -386,6 +393,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     "query": query,
                     "query_used": search_query,
                     "results": len(state.results),
+                    "cloud_results": cloud_semantic_count,
                     "content_only": bool(state.content_only),
                     "title_only": bool(state.title_only),
                 },
