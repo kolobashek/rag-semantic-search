@@ -29,8 +29,10 @@ class _FakeTelemetry:
 class _FakeEmbedder:
     def __init__(self, mode: str = "ok") -> None:
         self.mode = mode
+        self.last_query = ""
 
     def encode(self, query, normalize_embeddings=True):
+        self.last_query = query
         if self.mode == "raise":
             raise RuntimeError("embed failed")
         return SimpleNamespace(tolist=lambda: [0.1, 0.2, 0.3])
@@ -119,6 +121,27 @@ def test_search_title_only_disables_content_only_filter_and_logs_original_query(
     assert call["query"] == "typed query"
     assert call["query_original"] == "typed query"
     assert call["query_used"] == "expanded query"
+
+
+def test_search_can_expand_query_in_core_pipeline(monkeypatch) -> None:
+    from rag_catalog.core import llm
+
+    s = _make_searcher(connected=True)
+    s.config = {
+        "llm_enabled": True,
+        "llm_search_expand_enabled": True,
+        "llm_expand_model": "fake-model",
+        "ollama_url": "http://ollama.test",
+    }
+    monkeypatch.setattr(llm, "expand_query", lambda query, **kwargs: f"{query} расширенный")
+    s.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[])  # type: ignore[method-assign]
+    s._lexical_catalog_search = lambda **kwargs: []  # type: ignore[method-assign]
+
+    s.search("паспорт", source="test")
+
+    assert s._embedder.last_query == "паспорт расширенный"
+    assert s.telemetry.search_calls[-1]["query_original"] == "паспорт"
+    assert s.telemetry.search_calls[-1]["query_used"] == "паспорт расширенный"
 
 
 def test_search_title_only_returns_only_metadata_points() -> None:

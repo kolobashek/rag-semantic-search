@@ -88,6 +88,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # ── LLM / Ollama ──────────────────────────────────────────────────────
     "ollama_url": "http://localhost:11434",
     "llm_enabled": False,            # включить RAG Q&A и расширение запроса
+    "llm_search_expand_enabled": False,  # расширять запрос внутри core search pipeline
     "llm_expand_model": "phi3:mini", # модель для расширения запроса
     "llm_rag_model": "qwen3:8b",     # модель для RAG Q&A
     # Ранжирование результатов поиска
@@ -268,7 +269,7 @@ class RAGSearcher:
         raw_original = query_original if query_original else raw_query
         if title_only and content_only:
             content_only = False
-        query_used = raw_query[:MAX_QUERY_LEN]
+        query_used = self._expand_query_for_search(raw_query[:MAX_QUERY_LEN])[:MAX_QUERY_LEN]
         query_original_used = raw_original
         truncated_note = ""
         if len(raw_query) > MAX_QUERY_LEN:
@@ -459,6 +460,25 @@ class RAGSearcher:
         except Exception as exc:
             logger.debug("Search alias expansion failed: %s", exc)
             return {"expanded_query": query or "", "aliases": [], "groups": []}
+
+    def _expand_query_for_search(self, query: str) -> str:
+        config = getattr(self, "config", {}) or {}
+        if not (bool(config.get("llm_enabled", False)) and bool(config.get("llm_search_expand_enabled", False))):
+            return query
+        if not query.strip():
+            return query
+        try:
+            from .llm import expand_query  # noqa: PLC0415
+
+            return expand_query(
+                query,
+                model=str(config.get("llm_expand_model") or "phi3:mini"),
+                ollama_url=str(config.get("ollama_url") or "http://localhost:11434"),
+                timeout=int(config.get("llm_expand_timeout_sec", 15) or 15),
+            )
+        except Exception as exc:
+            logger.warning("Core query expansion failed, using original query: %s", exc)
+            return query
 
     def _terms_from_text(self, text: str) -> List[str]:
         terms = [

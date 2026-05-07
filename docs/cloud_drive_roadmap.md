@@ -443,7 +443,7 @@ Claude:
 ### P2: LLM/RAG assistant
 
 Codex:
-- [ ] Подключить `llm.expand_query()` в основной search pipeline через config flag и telemetry.
+- [x] Подключить `llm.expand_query()` в основной search pipeline через config flag и telemetry. Добавлен opt-in `llm_search_expand_enabled`, `query_used` пишет расширенный запрос.
 - [ ] Добавить RAG answer mode backend: answer + citations + "не знаю" при слабых источниках.
 - [ ] Добавить verifier/gating для фактов: числа, даты, единицы измерения, конфликтующие источники.
 - [ ] Добавить Telegram assistant mode: question detection, answer with sources, follow-up context.
