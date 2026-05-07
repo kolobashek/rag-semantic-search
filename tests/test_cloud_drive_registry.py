@@ -97,6 +97,19 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     assert registry.get_file_by_path('Folder A/new.txt') is not None
     assert (storage_root / 'Folder A' / 'new.txt').exists()
 
+    second_upload_source = tmp_path / 'new-v2.txt'
+    second_upload_source.write_text('new-content-v2', encoding='utf-8')
+    service.upload_file(
+        parent_path='Folder A',
+        filename='new.txt',
+        source_path=str(second_upload_source),
+        mime_type='text/plain',
+    )
+    versions = service.list_versions('Folder A/new.txt')
+    assert versions['file']['path'] == 'Folder A/new.txt'
+    assert len(versions['versions']) == 2
+    assert versions['versions'][0]['is_current'] is True
+
 
 def test_registry_job_lifecycle(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))

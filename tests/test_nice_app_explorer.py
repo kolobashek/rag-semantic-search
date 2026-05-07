@@ -24,6 +24,7 @@ from rag_catalog.ui.nice_app import (
     api_cloud_drive_upload,
     api_cloud_drive_list,
     api_cloud_drive_node,
+    api_cloud_drive_versions,
     api_cloud_drive_storage_health,
 )
 import rag_catalog.ui.nice_app as nice_app
@@ -552,3 +553,33 @@ def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:
     assert result["node_type"] == "file"
     assert result["path"] == "Folder A/hello.txt"
     assert service.registry.get_file_by_path("Folder A/hello.txt") is not None
+
+
+def test_cloud_drive_versions_api(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    source_file = tmp_path / "hello.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    source_file2 = tmp_path / "hello2.txt"
+    source_file2.write_text("hello-2", encoding="utf-8")
+    service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain")
+    service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file2), mime_type="text/plain")
+    monkeypatch.setattr(nice_app, "load_config", lambda: dict(cfg))
+
+    versions = api_cloud_drive_versions("Folder A/hello.txt")
+
+    assert versions["file"]["path"] == "Folder A/hello.txt"
+    assert len(versions["versions"]) == 2
+    assert versions["versions"][0]["is_current"] is True

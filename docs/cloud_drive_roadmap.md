@@ -68,6 +68,9 @@
 - добавлен registry-backed endpoint загрузки файла:
   - `POST /api/cloud-drive/upload`
 - Cloud Drive service получил `upload_file()` для импорта одного файла в существующий каталог registry.
+- добавлен endpoint просмотра версий файла:
+  - `GET /api/cloud-drive/versions`
+- Cloud Drive service и registry получили `list_versions()` / `list_file_versions()` для чтения истории версий по пути файла.
 
 Осталось в этапе:
 - cleanup/удаление legacy runtime state artifacts после подтверждённой миграции.
@@ -162,7 +165,7 @@
   - [x] upload;
   - [x] download;
   - rename/move/delete;
-  - versions;
+  - [x] versions;
   - jobs/status.
 - Подготовить auth/authorization hooks для API.
 - [x] Добавить endpoint bootstrap status / job status.

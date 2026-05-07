@@ -766,6 +766,16 @@ async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(
                 pass
 
 
+@app.get("/api/cloud-drive/versions")
+def api_cloud_drive_versions(path: str) -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    try:
+        return service.list_versions(path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
     explicit = str(cfg.get("telemetry_db_path") or "").strip()
     if explicit:

@@ -244,6 +244,24 @@ class CloudDriveService:
             'deleted_at': file_row.deleted_at,
         }
 
+    def list_versions(self, path: str) -> dict:
+        versions = self.registry.list_file_versions(path=path)
+        file_row = self.registry.get_file_by_path(path)
+        if file_row is None:
+            raise RuntimeError(f'Файл не найден: {path}')
+        return {
+            'file': {
+                'id': file_row.id,
+                'name': file_row.name,
+                'path': file_row.path,
+                'current_version_id': file_row.current_version_id,
+                'size_bytes': file_row.size_bytes,
+                'mime_type': file_row.mime_type,
+                'updated_at': file_row.updated_at,
+            },
+            'versions': versions,
+        }
+
     def cancel_job(self, job_id: str) -> CloudDriveJob:
         job = self.registry.get_job(job_id)
         if job is None:

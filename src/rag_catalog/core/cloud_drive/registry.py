@@ -310,6 +310,35 @@ class CloudDriveRegistryDB:
             ).fetchall()
             return [self._file_from_row(row) for row in rows]
 
+    def list_file_versions(self, *, path: str) -> List[Dict[str, Any]]:
+        file_row = self.get_file_by_path(path)
+        if file_row is None:
+            raise RuntimeError(f'Файл не найден: {path}')
+        with self._connect() as conn:
+            rows = conn.execute(
+                '''
+                SELECT id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at
+                FROM cloud_file_versions
+                WHERE file_id=?
+                ORDER BY created_at DESC
+                ''',
+                (file_row.id,),
+            ).fetchall()
+        return [
+            {
+                'id': str(row['id']),
+                'file_id': str(row['file_id']),
+                'storage_key': str(row['storage_key'] or ''),
+                'checksum': str(row['checksum'] or ''),
+                'size_bytes': int(row['size_bytes'] or 0),
+                'source_path': str(row['source_path'] or ''),
+                'created_by': str(row['created_by'] or ''),
+                'created_at': str(row['created_at'] or ''),
+                'is_current': str(row['id']) == str(file_row.current_version_id),
+            }
+            for row in rows
+        ]
+
     def queue_job(self, *, job_type: str, status: str = 'pending', file_id: str = '', version_id: str = '', payload: Optional[Dict[str, Any]] = None) -> CloudDriveJob:
         now = _utc_now()
         job_id = str(uuid.uuid4())
