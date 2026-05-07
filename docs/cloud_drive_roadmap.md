@@ -403,9 +403,9 @@ Codex:
 
 Claude:
 - [x] Показать per-file indexing/OCR/preview/error status в проводнике.
-- [ ] Показать per-file status в карточках поиска.
+- [x] Показать per-file status в карточках поиска.
 - [ ] Доделать lazy semantic layer в Cloud Drive search после backend-интеграции.
-- [ ] Связать search results с version, preview и file actions.
+- [x] Связать search results с version, preview и file actions.
 
 ### P1: безопасность и эксплуатационная готовность
 

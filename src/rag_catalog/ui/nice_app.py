@@ -723,7 +723,7 @@ def _build_page(initial_screen: str = "search") -> None:
             state.selection_summary_loading = False
         render()
 
-    def render_result(result: Dict[str, Any], index: int) -> None:
+    def render_result(result: Dict[str, Any], index: int, cloud_jobs: Optional[Dict[str, Dict[str, str]]] = None) -> None:
         name = str(result.get("filename") or "Без имени")
         path = str(result.get("path") or "")
         full_path = str(result.get("full_path") or "")
@@ -732,6 +732,57 @@ def _build_page(initial_screen: str = "search") -> None:
         text = _clean_text(result.get("text") or "")
         preview = text[:280] + ("..." if len(text) > 280 else "")
         p = Path(full_path) if full_path else None
+        cloud_file_id = str(result.get("cloud_file_id") or "")
+        cloud_version_id = str(result.get("cloud_version_id") or "")
+        cloud_path = str(result.get("cloud_path") or "")
+        is_cloud_result = bool(cloud_file_id or cloud_path)
+        cloud_job = (cloud_jobs or {}).get(cloud_file_id) if cloud_file_id else None
+
+        def go_cloud_explorer(cloud_item_path: str) -> None:
+            item_path = str(cloud_item_path or "").strip().strip("/")
+            if not item_path:
+                state.explorer_cd_path = ""
+            elif kind == "Каталог":
+                state.explorer_cd_path = item_path
+            else:
+                state.explorer_cd_path = item_path.rsplit("/", 1)[0] if "/" in item_path else ""
+            state.explorer_page = 0
+            state.screen = "explorer"
+            ui.run_javascript("history.pushState(null, '', '/explorer')")
+            render()
+
+        def render_cloud_job_badge() -> None:
+            if not cloud_job:
+                return
+            status = str(cloud_job.get("status") or "")
+            if status == "completed":
+                return
+            icon = {
+                "pending": "hourglass_empty",
+                "running": "sync",
+                "failed": "error_outline",
+                "cancelled": "block",
+            }.get(status)
+            css = {
+                "pending": "cd-status-pending",
+                "running": "cd-status-running",
+                "failed": "cd-status-error",
+                "cancelled": "cd-status-error",
+            }.get(status, "cd-status-pending")
+            label = {
+                "pending": "В очереди",
+                "running": "Индексируется",
+                "failed": "Ошибка индексации",
+                "cancelled": "Отменено",
+            }.get(status, status)
+            tip = label
+            if status == "failed" and cloud_job.get("last_error"):
+                tip = f"Ошибка: {str(cloud_job.get('last_error'))[:160]}"
+            with ui.element("span").classes(f"cd-status-badge {css}"):
+                if icon:
+                    ui.icon(icon, size="14px")
+                ui.label(label)
+                ui.tooltip(tip)
 
         def rate_result(value: int, result: Dict[str, Any] = result, index: int = index) -> None:
             result_path = str(result.get("full_path") or result.get("path") or "")
@@ -774,11 +825,17 @@ def _build_page(initial_screen: str = "search") -> None:
         def open_primary() -> None:
             if kind == "Каталог":
                 track_result_use("open_folder")
-                go_explorer(full_path)
+                if is_cloud_result and cloud_path:
+                    go_cloud_explorer(cloud_path)
+                else:
+                    go_explorer(full_path)
                 return
             if p and p.exists() and p.is_file():
                 track_result_use("open_viewer")
                 open_file_viewer(p)
+            elif is_cloud_result and cloud_path:
+                track_result_use("open_cloud_drive")
+                go_cloud_explorer(cloud_path)
 
         result_key = full_path or path or name
         llm_on = bool(state.cfg.get("llm_enabled"))
@@ -804,10 +861,23 @@ def _build_page(initial_screen: str = "search") -> None:
                         title.tooltip(name)
                         path_label = ui.label(path or full_path).classes("rag-path truncate")
                         path_label.tooltip(path or full_path)
-                ui.label(f"{kind} · {score:.3f}").classes("rag-chip")
+                with ui.row().classes("items-center gap-1 flex-wrap justify-end"):
+                    if is_cloud_result:
+                        ui.label("Cloud Drive").classes("rag-chip")
+                        if cloud_version_id:
+                            v_label = ui.label(f"v {cloud_version_id[:8]}").classes("rag-chip")
+                            v_label.tooltip(f"Cloud Drive version_id: {cloud_version_id}")
+                        render_cloud_job_badge()
+                    ui.label(f"{kind} · {score:.3f}").classes("rag-chip")
 
             with ui.row().classes("w-full items-center justify-between gap-2"):
                 with ui.row().classes("rag-actions items-center"):
+                    if is_cloud_result and cloud_path:
+                        ui.button(
+                            "В Cloud Drive",
+                            icon="cloud",
+                            on_click=lambda pth=cloud_path: go_cloud_explorer(pth),
+                        ).props("outline dense no-caps")
                     if full_path:
                         if kind == "Каталог":
                             ui.button("В проводник приложения", icon="folder_open", on_click=lambda p=full_path: go_explorer(p)).props("outline dense")
@@ -1099,9 +1169,22 @@ def _build_page(initial_screen: str = "search") -> None:
 
         # Показываем первые displayed_count штук
         to_show = visible[: state.displayed_count]
+        cloud_result_jobs: Dict[str, Dict[str, str]] = {}
+        cloud_file_ids = [
+            str(r.get("cloud_file_id") or "")
+            for r in to_show
+            if str(r.get("cloud_file_id") or "")
+        ]
+        if cloud_file_ids:
+            try:
+                svc = _cd_get_service(state.cfg)
+                if svc:
+                    cloud_result_jobs = _cd_file_jobs_map(svc.registry, list(dict.fromkeys(cloud_file_ids)))
+            except Exception:
+                cloud_result_jobs = {}
         with ui.column().classes("w-full gap-3"):
             for idx, result in enumerate(to_show, 1):
-                render_result(result, idx)
+                render_result(result, idx, cloud_result_jobs)
 
         # Кнопка «Загрузить ещё»
         remaining = len(visible) - state.displayed_count
