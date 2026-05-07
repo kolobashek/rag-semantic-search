@@ -425,7 +425,7 @@ Claude:
 ### P1: качество поиска и измеримость
 
 Codex:
-- [ ] Добавить offline relevance benchmark: golden queries, expected docs, `Recall@k`, `MRR`, `nDCG`, latency p50/p95.
+- [x] Добавить offline relevance benchmark: golden queries, expected docs, `Recall@k`, `MRR`, `nDCG`, latency p50/p95.
 - [ ] Добавить retrieval v2 feature flag.
 - [ ] Вынести retrieval pipeline в `src/rag_catalog/core/retrieval/`.
 - [ ] Добавить RRF fusion поверх dense + текущего lexical.
