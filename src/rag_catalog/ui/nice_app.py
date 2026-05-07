@@ -612,8 +612,8 @@ def _build_page(initial_screen: str = "search") -> None:
                     "Лимит",
                     value=initial["limit"],
                     min=1,
-                    max=50,
-                    step=1,
+                    max=200,
+                    step=10,
                 ).props("dense outlined").classes("w-28")
                 content_only_input = ui.checkbox(
                     "Только содержимое",
