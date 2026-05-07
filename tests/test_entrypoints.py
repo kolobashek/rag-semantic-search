@@ -23,6 +23,7 @@ def _run_entrypoint(*args: str) -> subprocess.CompletedProcess[str]:
 
 def test_cli_entrypoint_help_commands() -> None:
     expected = {
+        "cloud_drive.py": "bootstrap",
         "rag_search.py": "--content-only",
         "rag_search_fixed.py": "--content-only",
         "index_rag.py": "--stage",
