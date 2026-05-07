@@ -148,6 +148,40 @@ def test_search_title_only_returns_only_metadata_points() -> None:
     assert [item["type"] for item in out] == ["file_metadata"]
 
 
+def test_search_retrieval_v2_uses_rrf_fusion() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {"retrieval_pipeline": "v2"}
+    s.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[  # type: ignore[method-assign]
+        SimpleNamespace(
+            score=0.99,
+            payload={
+                "type": "file_metadata",
+                "filename": "semantic.docx",
+                "path": "semantic.docx",
+                "full_path": r"O:\semantic.docx",
+            },
+        ),
+        SimpleNamespace(
+            score=0.70,
+            payload={
+                "type": "file_metadata",
+                "filename": "both.docx",
+                "path": "both.docx",
+                "full_path": r"O:\both.docx",
+            },
+        ),
+    ])
+    s._lexical_catalog_search = lambda **kwargs: [  # type: ignore[method-assign]
+        {"type": "file_metadata", "filename": "both.docx", "path": "both.docx", "full_path": r"O:\both.docx", "score": 0.80},
+        {"type": "file_metadata", "filename": "lexical.docx", "path": "lexical.docx", "full_path": r"O:\lexical.docx", "score": 0.75},
+    ]
+
+    out = s.search("both", limit=3, source="test")
+
+    assert out[0]["filename"] == "both.docx"
+    assert out[0]["fusion"] == "rrf"
+
+
 def test_refresh_fs_cache_uses_state_db_with_ancestor_and_empty_folders(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog"
     qdrant = tmp_path / "qdrant"

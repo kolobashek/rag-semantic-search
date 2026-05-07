@@ -24,6 +24,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
 from .index_state_db import IndexStateDB
+from .retrieval import rrf_fuse
 from .telemetry_db import TelemetryDB
 
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
@@ -393,7 +394,11 @@ class RAGSearcher:
             content_only=content_only,
             title_only=title_only,
         )
-        results = self._merge_ranked_results(lexical_results, results, limit=limit, query=query_used)
+        if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
+            fused = rrf_fuse([lexical_results, results], limit=max(limit * 4, 40))
+            results = self._merge_ranked_results([], fused, limit=limit, query=query_used)
+        else:
+            results = self._merge_ranked_results(lexical_results, results, limit=limit, query=query_used)
 
         self.telemetry.log_search(
             source=source,
@@ -755,7 +760,10 @@ class RAGSearcher:
         for item in merged.values():
             path = str(item.get("full_path") or "")
             signal = int(feedback.get(path, 0))
-            base_score = float(item.get("score") or 0)
+            if str(item.get("fusion") or "") == "rrf":
+                base_score = float(item.get("rank_score", item.get("score") or 0) or 0)
+            else:
+                base_score = float(item.get("score") or 0)
             if signal:
                 adjustment = max(-feedback_cap, min(feedback_cap, signal * feedback_step))
             else:

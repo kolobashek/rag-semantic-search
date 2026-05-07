@@ -428,7 +428,7 @@ Codex:
 - [x] Добавить offline relevance benchmark: golden queries, expected docs, `Recall@k`, `MRR`, `nDCG`, latency p50/p95.
 - [x] Добавить retrieval v2 feature flag.
 - [x] Вынести retrieval pipeline в `src/rag_catalog/core/retrieval/`.
-- [ ] Добавить RRF fusion поверх dense + текущего lexical.
+- [x] Добавить RRF fusion поверх dense + текущего lexical.
 - [ ] Добавить BM25/sparse слой или Qdrant sparse vector path.
 - [ ] Добавить reranker stage для top-N результатов.
 - [ ] Подготовить migration path для новых embedding models (`bge-m3`, `multilingual-e5-*`) через версионированные Qdrant collections.
