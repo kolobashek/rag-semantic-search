@@ -3843,6 +3843,92 @@ def _build_page(initial_screen: str = "search") -> None:
             _log_app_event(page_state, "cd_explorer", "open_folder", details={"cd_path": cd_path})
             render()
 
+        async def _cd_upload_dialog() -> None:
+            """File-picker dialog that uploads files to the current Cloud Drive folder."""
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-96"):
+                ui.label("Загрузить файлы").classes("text-lg font-semibold")
+                parent_label = page_state.explorer_cd_path or "/"
+                ui.label(f"В папку: {parent_label}").classes("rag-path text-xs")
+                upload_results: list[dict] = []
+
+                async def _handle_upload(e: Any) -> None:
+                    filename = str(getattr(e, "name", "") or "").strip()
+                    content = getattr(e, "content", None)
+                    if not filename or content is None:
+                        return
+                    import tempfile  # noqa: PLC0415
+                    suffix = Path(filename).suffix
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                            tmp.write(content.read())
+                            tmp_path = tmp.name
+                        result = await run.io_bound(
+                            svc.upload_file,
+                            parent_path=page_state.explorer_cd_path or "",
+                            filename=filename,
+                            source_path=tmp_path,
+                            mime_type="",
+                        )
+                        Path(tmp_path).unlink(missing_ok=True)
+                        upload_results.append({"name": filename, "ok": True})
+                        _log_app_event(
+                            page_state, "cd_explorer", "upload_file",
+                            details={"parent": page_state.explorer_cd_path, "name": filename},
+                        )
+                        ui.notify(f"Файл «{filename}» загружен.", type="positive")
+                    except Exception as exc:
+                        upload_results.append({"name": filename, "ok": False, "err": str(exc)})
+                        ui.notify(f"Ошибка загрузки «{filename}»: {exc}", type="negative")
+
+                uploader = ui.upload(
+                    multiple=True,
+                    on_upload=_handle_upload,
+                    auto_upload=True,
+                    label="Перетащите файлы сюда или нажмите для выбора",
+                ).props("flat bordered").classes("w-full")
+
+                with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                    ui.button(
+                        "Закрыть", icon="check",
+                        on_click=lambda: (dlg.close(), render()),
+                    ).props("unelevated dense")
+            dlg.open()
+
+        async def _cd_versions_dialog(file: "Any") -> None:
+            """Show version history for a Cloud Drive file."""
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-[480px]"):
+                ui.label(f"Версии: {file.name}").classes("text-lg font-semibold")
+                ui.label(file.path).classes("rag-path text-xs")
+                ui.separator()
+                try:
+                    result = await run.io_bound(svc.list_versions, file.path)
+                    versions = result.get("versions", [])
+                    if not versions:
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("history", size="24px").classes("opacity-30")
+                            ui.label("История версий пуста.").classes("text-center")
+                    else:
+                        current_id = str(result.get("file", {}).get("current_version_id") or "")
+                        for ver in versions:
+                            is_cur = str(ver.get("id", "")) == current_id
+                            with ui.row().classes("w-full items-center gap-2 py-1"):
+                                ui.icon(
+                                    "radio_button_checked" if is_cur else "radio_button_unchecked",
+                                    size="16px",
+                                ).classes("text-indigo-500" if is_cur else "text-slate-400")
+                                with ui.column().classes("flex-1 gap-0"):
+                                    ts = str(ver.get("created_at") or "")
+                                    label = f"Текущая · {ts[:19].replace('T', ' ')}" if is_cur else ts[:19].replace("T", " ")
+                                    ui.label(label).classes("text-sm" + (" font-semibold" if is_cur else " rag-meta"))
+                                    size = int(ver.get("size_bytes") or 0)
+                                    if size:
+                                        ui.label(_cd_file_size(size)).classes("rag-meta text-xs")
+                except Exception as exc:
+                    ui.label(f"Не удалось загрузить версии: {exc}").classes("text-negative text-sm")
+                with ui.row().classes("w-full justify-end mt-2"):
+                    ui.button("Закрыть", on_click=dlg.close).props("flat dense")
+            dlg.open()
+
         async def _cd_new_folder_dialog() -> None:
             """Show an inline dialog to create a new folder in the current directory."""
             with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-80"):
@@ -4002,6 +4088,11 @@ def _build_page(initial_screen: str = "search") -> None:
                     on_click=_cd_new_folder_dialog,
                     color=None,
                 ).props("flat round dense").tooltip("Создать папку")
+                ui.button(
+                    icon="upload_file",
+                    on_click=_cd_upload_dialog,
+                    color=None,
+                ).props("flat round dense").tooltip("Загрузить файлы")
 
             # Filter / view toolbar
             with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
@@ -4051,6 +4142,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 with ui.element("div").classes("cd-empty-state w-full"):
                     ui.icon("folder_open", size="32px").classes("opacity-20")
                     ui.label("Папка пуста или элементы не соответствуют фильтру.").classes("text-center")
+                    ui.button(
+                        "Загрузить файлы", icon="upload_file",
+                        on_click=_cd_upload_dialog,
+                        color=None,
+                    ).props("outline dense").classes("mt-2")
             else:
                 # Folders first
                 if child_folders:
@@ -4096,6 +4192,11 @@ def _build_page(initial_screen: str = "search") -> None:
                                             on_click=lambda fi=f: _cd_open_file(fi),
                                             color=None,
                                         ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                    ui.button(
+                                        icon="history",
+                                        on_click=lambda fi=f: _cd_versions_dialog(fi),
+                                        color=None,
+                                    ).props("flat round dense").tooltip("История версий")
                                     if f.storage_key:
                                         ui.button(
                                             icon="download",
@@ -4124,6 +4225,11 @@ def _build_page(initial_screen: str = "search") -> None:
                                             on_click=lambda p=src: _open_os_path(str(Path(p).parent)),
                                             color=None,
                                         ).props("flat round dense").tooltip("Открыть папку в Проводнике")
+                                    ui.button(
+                                        icon="history",
+                                        on_click=lambda fi=f: _cd_versions_dialog(fi),
+                                        color=None,
+                                    ).props("flat round dense").tooltip("История версий")
                                     if f.storage_key:
                                         ui.button(
                                             icon="download",
