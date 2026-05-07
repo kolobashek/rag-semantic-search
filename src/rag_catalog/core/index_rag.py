@@ -12,7 +12,6 @@ import hashlib
 import logging
 import os
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -26,8 +25,6 @@ from ._platform_compat import apply_windows_platform_workarounds
 
 apply_windows_platform_workarounds()
 
-from docx import Document
-from openpyxl import load_workbook
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
@@ -35,9 +32,18 @@ from tqdm import tqdm
 
 from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
+from .extractors import (
+    extract_docx,
+    extract_image,
+    extract_pdf,
+    extract_spreadsheet,
+    extract_xls,
+    extract_xlsx,
+    ocr_pdf,
+)
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .index_state_db import IndexStateDB
-from .ocr_runtime import apply_tesseract_runtime, resolve_ocr_runtime
+from .ocr_runtime import resolve_ocr_runtime
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB
 
@@ -174,44 +180,6 @@ def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) 
     if ext in IMAGE_EXTENSIONS:
         return "large"  # OCR изображений CPU-intensive — всегда в large
     return "large"
-
-
-def _windows_hidden_popen_kwargs() -> Dict[str, Any]:
-    """kwargs for subprocess calls without visible console window on Windows."""
-    if os.name != "nt":
-        return {}
-    kwargs: Dict[str, Any] = {"creationflags": int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)}
-    if hasattr(subprocess, "STARTUPINFO"):
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
-        kwargs["startupinfo"] = si
-    return kwargs
-
-
-def _patch_pdf2image_popen_for_windows(pdf2image_module: Any) -> None:
-    """
-    Patch pdf2image internal Popen to suppress console flicker on Windows.
-
-    pdf2image already hides some subprocesses, but helper calls (pdfinfo/version)
-    may still open short-lived console windows.
-    """
-    if os.name != "nt":
-        return
-    if getattr(pdf2image_module, "_rag_hidden_popen_patched", False):
-        return
-    original_popen = getattr(pdf2image_module, "Popen", None)
-    if original_popen is None:
-        return
-
-    def _hidden_popen(*args: Any, **kwargs: Any) -> Any:
-        hidden = _windows_hidden_popen_kwargs()
-        for key, value in hidden.items():
-            kwargs.setdefault(key, value)
-        return original_popen(*args, **kwargs)
-
-    pdf2image_module.Popen = _hidden_popen
-    pdf2image_module._rag_hidden_popen_patched = True
 
 
 def _generate_tags(
@@ -595,17 +563,7 @@ class RAGIndexer:
 
     def _extract_docx(self, filepath: Path) -> str:
         """Извлечь текст из DOCX (параграфы + таблицы)."""
-        try:
-            doc = Document(filepath)
-            parts = [p.text for p in doc.paragraphs]
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        parts.append(cell.text)
-            return "\n".join(parts)
-        except Exception as exc:
-            logger.warning("Ошибка чтения DOCX %s: %s", filepath, exc)
-            return ""
+        return extract_docx(filepath)
 
     def _extract_xlsx(self, filepath: Path) -> str:
         """
@@ -615,37 +573,7 @@ class RAGIndexer:
         Ранняя остановка: прекращает чтение строк, когда накоплено
         достаточно текста для max_chunks_per_file чанков.
         """
-        try:
-            wb = load_workbook(filepath, read_only=True, data_only=True)
-            parts: List[str] = []
-            # Лимит символов: если задан max_chunks_per_file, останавливаемся раньше.
-            # Эффективный шаг чанка = chunk_size - chunk_overlap, поэтому
-            # для N чанков нужно ~N*(chunk_size-chunk_overlap)+chunk_overlap символов.
-            # Берём chunk_size * max_chunks_per_file с запасом.
-            max_chars = (
-                self.max_chunks_per_file * self.chunk_size
-                if self.max_chunks_per_file
-                else 0
-            )
-            total_chars = 0
-            done = False
-            for sheet_name in wb.sheetnames:
-                if done:
-                    break
-                ws = wb[sheet_name]
-                parts.append(f"Лист: {sheet_name}")
-                for row in ws.iter_rows(values_only=True):
-                    row_text = " | ".join(str(c) if c is not None else "" for c in row)
-                    if row_text.strip():
-                        parts.append(row_text)
-                        total_chars += len(row_text)
-                        if max_chars and total_chars >= max_chars:
-                            done = True
-                            break
-            return "\n".join(parts)
-        except Exception as exc:
-            logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
-            return ""
+        return extract_xlsx(filepath, max_chars=self._extractor_max_chars())
 
     def _extract_spreadsheet(self, filepath: Path) -> str:
         """
@@ -654,54 +582,15 @@ class RAGIndexer:
         Раньше маршрутизация была внутри _extract_xlsx, что приводило
         к неочевидным варнингам при смешении форматов.
         """
-        ext = filepath.suffix.lower()
-        if ext == ".xls":
-            logger.debug("Формат XLS — использую xlrd: %s", filepath.name)
-            return self._extract_xls(filepath)
-        elif ext == ".xlsx":
-            logger.debug("Формат XLSX — использую openpyxl: %s", filepath.name)
-            return self._extract_xlsx(filepath)
-        else:
-            logger.warning("Неизвестное табличное расширение: %s", ext)
-            return ""
+        return extract_spreadsheet(filepath, max_chars=self._extractor_max_chars())
 
     def _extract_xls(self, filepath: Path) -> str:
         """Извлечь текст из старого формата XLS через xlrd.
         Ранняя остановка аналогична _extract_xlsx."""
-        try:
-            import xlrd  # type: ignore
-        except ImportError:
-            logger.warning("xlrd не установлен. Установите: pip install xlrd")
-            return ""
-        try:
-            wb = xlrd.open_workbook(str(filepath))
-            parts: List[str] = []
-            max_chars = (
-                self.max_chunks_per_file * self.chunk_size
-                if self.max_chunks_per_file
-                else 0
-            )
-            total_chars = 0
-            done = False
-            for sheet in wb.sheets():
-                if done:
-                    break
-                parts.append(f"Лист: {sheet.name}")
-                for row_idx in range(sheet.nrows):
-                    row = sheet.row_values(row_idx)
-                    row_text = " | ".join(
-                        str(v) if v not in ("", None) else "" for v in row
-                    )
-                    if row_text.strip():
-                        parts.append(row_text)
-                        total_chars += len(row_text)
-                        if max_chars and total_chars >= max_chars:
-                            done = True
-                            break
-            return "\n".join(parts)
-        except Exception as exc:
-            logger.warning("Ошибка чтения XLS %s: %s", filepath, exc)
-            return ""
+        return extract_xls(filepath, max_chars=self._extractor_max_chars())
+
+    def _extractor_max_chars(self) -> int:
+        return self.max_chunks_per_file * self.chunk_size if self.max_chunks_per_file else 0
 
     def _extract_pdf(self, filepath: Path) -> str:
         """
@@ -710,89 +599,15 @@ class RAGIndexer:
         Fallback на pdfplumber если pymupdf не установлен.
         При пустом текстовом слое — OCR (если не --no-ocr).
         """
-        # ── Попытка pymupdf (быстрый путь) ────────────────────────────
-        try:
-            import fitz  # pymupdf
-            parts: List[str] = []
-            with fitz.open(str(filepath)) as doc:
-                for page_idx, page in enumerate(doc, start=1):
-                    text = page.get_text()
-                    if text and text.strip():
-                        parts.append(f"Страница: {page_idx}\n{text}")
-            full_text = "\n".join(parts).strip()
-            if full_text:
-                return full_text
-            # Текстового слоя нет
-            if self.skip_ocr:
-                logger.debug("Нет текстового слоя, OCR пропущен (--no-ocr): %s", filepath.name)
-                return ""
-            logger.info("Нет текстового слоя в %s — запуск OCR…", filepath.name)
-            return self._ocr_pdf(filepath)
-        except ImportError:
-            logger.debug("pymupdf не установлен, использую pdfplumber")
-        except Exception as exc:
-            logger.warning("pymupdf: ошибка чтения %s: %s", filepath.name, exc)
-            return ""
-
-        # ── Fallback: pdfplumber ───────────────────────────────────────
-        try:
-            import pdfplumber  # type: ignore
-        except ImportError:
-            logger.warning("Ни pymupdf, ни pdfplumber не установлены. pip install pymupdf")
-            return ""
-        try:
-            parts = []
-            with pdfplumber.open(filepath) as pdf:
-                for page_idx, page in enumerate(pdf.pages, start=1):
-                    text = page.extract_text()
-                    if text and text.strip():
-                        parts.append(f"Страница: {page_idx}\n{text}")
-            full_text = "\n".join(parts).strip()
-            if full_text:
-                return full_text
-            if self.skip_ocr:
-                logger.debug("Нет текстового слоя, OCR пропущен (--no-ocr): %s", filepath.name)
-                return ""
-            logger.info("Нет текстового слоя в %s — запуск OCR…", filepath.name)
-            return self._ocr_pdf(filepath)
-        except Exception as exc:
-            logger.warning("pdfplumber: ошибка чтения %s: %s", filepath.name, exc)
-            return ""
+        return extract_pdf(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
 
     def _ocr_pdf(self, filepath: Path) -> str:
         """OCR сканированного PDF через pytesseract + pdf2image."""
-        try:
-            import pdf2image.pdf2image as pdf2image_impl  # type: ignore
-            import pytesseract  # type: ignore
-            from pdf2image import convert_from_path  # type: ignore
-        except ImportError:
-            logger.warning(
-                "pytesseract/pdf2image не установлены. "
-                "Установите: pip install pytesseract pdf2image"
-            )
-            return ""
-
-        try:
-            apply_tesseract_runtime(
-                pytesseract,
-                getattr(self, "ocr_tesseract_cmd", ""),
-            )
-            _patch_pdf2image_popen_for_windows(pdf2image_impl)
-            convert_kwargs: Dict[str, Any] = {"dpi": 200}
-            poppler_bin = str(getattr(self, "ocr_poppler_bin", "") or "").strip()
-            if poppler_bin:
-                convert_kwargs["poppler_path"] = poppler_bin
-            pages = convert_from_path(str(filepath), **convert_kwargs)
-            parts: List[str] = []
-            for i, page_img in enumerate(pages):
-                text = pytesseract.image_to_string(page_img, lang="rus+eng")
-                if text.strip():
-                    parts.append(f"Страница: {i + 1}\n{text}")
-                logger.debug("OCR страница %d/%d — %s", i + 1, len(pages), filepath.name)
-            return "\n".join(parts)
-        except Exception as exc:
-            logger.warning("OCR не удался для %s: %s", filepath, exc)
-            return ""
+        return ocr_pdf(
+            filepath,
+            tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
+            poppler_bin=getattr(self, "ocr_poppler_bin", ""),
+        )
 
     def _extract_image(self, filepath: Path) -> str:
         """
@@ -800,61 +615,11 @@ class RAGIndexer:
         Поддерживает JPEG, PNG, GIF, BMP, TIFF, WEBP.
         Возвращает пустую строку если pytesseract не установлен или текст не найден.
         """
-        try:
-            import pytesseract  # type: ignore
-        except ImportError:
-            logger.debug(
-                "pytesseract не установлен — OCR изображений недоступен. "
-                "Установите: pip install pytesseract"
-            )
-            return ""
-        try:
-            from PIL import Image  # type: ignore
-        except ImportError:
-            logger.debug(
-                "Pillow не установлен — OCR изображений недоступен. "
-                "Установите: pip install Pillow"
-            )
-            return ""
-        try:
-            apply_tesseract_runtime(
-                pytesseract,
-                getattr(self, "ocr_tesseract_cmd", ""),
-            )
-            parts: List[str] = []
-            with Image.open(filepath) as img:
-                # Определяем число кадров/страниц (TIFF-сканы бывают многостраничными)
-                n_frames: int = getattr(img, "n_frames", 1)
-                if n_frames > MAX_IMAGE_PAGES:
-                    logger.warning(
-                        "Изображение %s содержит %d кадров — обрабатываем только первые %d "
-                        "(MAX_IMAGE_PAGES). Остальные пропущены.",
-                        filepath.name, n_frames, MAX_IMAGE_PAGES,
-                    )
-                    n_frames = MAX_IMAGE_PAGES
-                for frame_idx in range(n_frames):
-                    if n_frames > 1:
-                        img.seek(frame_idx)
-                        frame = img.copy()
-                    else:
-                        frame = img
-                    # Конвертируем в RGB если нужно (CMYK, P, LA и прочие)
-                    if frame.mode not in ("RGB", "L", "RGBA"):
-                        frame = frame.convert("RGB")
-                    page_text = pytesseract.image_to_string(frame, lang="rus+eng").strip()
-                    if page_text:
-                        parts.append(page_text)
-                    logger.debug(
-                        "OCR %s стр.%d/%d: %d симв.",
-                        filepath.name, frame_idx + 1, n_frames, len(page_text),
-                    )
-            result = "\n".join(parts).strip()
-            if result:
-                logger.debug("OCR итого %s: %d симв., %d стр.", filepath.name, len(result), n_frames)
-            return result
-        except Exception as exc:
-            logger.warning("OCR изображения не удался для %s: %s", filepath, exc)
-            return ""
+        return extract_image(
+            filepath,
+            tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
+            max_pages=MAX_IMAGE_PAGES,
+        )
 
     # ── chunking ───────────────────────────────────────────────────────
 
