@@ -18,13 +18,13 @@ from nicegui import app, events, run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.rag_core import load_config, save_config
-from rag_catalog.core.user_auth_db import UserAuthDB
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
 from . import explorer_view as _explorer_view
 from . import index_view as _index_view
 from . import settings_view as _settings_view
 from . import stats_view as _stats_view
+from .auth_session import complete_login_session, logout_session, restore_session, touch_session
 from .css import _install_css
 from .helpers import (
     _CADENCE_LABELS,
@@ -134,23 +134,7 @@ def _build_page(initial_screen: str = "search") -> None:
     state.screen = initial_screen
     state.explorer_path = str(Path(str(state.cfg.get("catalog_path") or "")))
     _install_css()
-    try:
-        stored_token = str(app.storage.user.get("auth_token") or "")
-        if stored_token:
-            state.auth_token = stored_token
-            state.current_user = _get_auth_db(state).get_user_by_session(stored_token)
-            if state.current_user:
-                _load_user_state(state)
-                _get_auth_db(state).log_auth_event(username=_username(state), event_type="session_restore", ok=True)
-            else:
-                state.session_expired = True
-                state.auth_token = ""
-                try:
-                    app.storage.user.pop("auth_token", None)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    restore_session(state, on_restored=_load_user_state)
 
     dark_mode = ui.dark_mode(state.theme == "dark")
 
@@ -186,12 +170,7 @@ def _build_page(initial_screen: str = "search") -> None:
         content = ui.column().classes("w-full gap-5")
 
     def touch_activity() -> None:
-        if not state.auth_token or not state.current_user:
-            return
-        try:
-            _get_auth_db(state).touch_session(state.auth_token, min_interval_minutes=60)
-        except Exception:
-            pass
+        touch_session(state, min_interval_minutes=60)
 
     _stop_managed_timer(state.activity_timer)
     state.activity_timer = None
@@ -202,18 +181,9 @@ def _build_page(initial_screen: str = "search") -> None:
     state.scheduler_timer = None
 
     def do_logout() -> None:
-        auth_db = _get_auth_db(state)
-        if state.auth_token:
-            auth_db.revoke_session(state.auth_token)
-        auth_db.log_auth_event(username=_username(state), event_type="logout", ok=True)
-        state.current_user = None
-        state.auth_token = ""
+        logout_session(state)
         state.theme = "light"
         dark_mode.set_value(False)
-        try:
-            app.storage.user.pop("auth_token", None)
-        except Exception:
-            pass
         render()
 
     def toggle_theme() -> None:
@@ -1488,14 +1458,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 tg_login_token = {"value": ""}
 
                 def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
-                    state.current_user = user
-                    state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
-                    auth_db.log_auth_event(username=_username(state), event_type=event_type, ok=True)
+                    complete_login_session(state, user, event_type=event_type)
                     _load_user_state(state)
-                    try:
-                        app.storage.user["auth_token"] = state.auth_token
-                    except Exception:
-                        pass
                     ui.notify("Вход выполнен.", type="positive")
                     render()
 

@@ -461,7 +461,7 @@ Codex:
   - [x] Вынести qdrant writer в `src/rag_catalog/core/indexing/qdrant_writer.py`.
   - [ ] Вынести stage runner.
 - [x] Вынести Cloud Drive API из `nice_app.py` в отдельный модуль: endpoint'ы находятся в `src/rag_catalog/ui/api.py`, `nice_app.py` только импортирует модуль регистрации routes.
-- [ ] Вынести auth helpers из `nice_app.py`.
+- [x] Вынести auth/session helpers из `nice_app.py`: session restore/touch/login/logout вынесены в `src/rag_catalog/ui/auth_session.py`; login screens остаются UI-слоем.
 - [ ] Доделать миграцию root shims в тонкие entrypoints и убрать legacy-дубли.
 
 Claude:

@@ -1,0 +1,66 @@
+"""Session lifecycle helpers for the NiceGUI UI."""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Dict
+
+from nicegui import app
+
+from .state import PageState, _get_auth_db, _username
+
+
+def restore_session(state: PageState, *, on_restored: Callable[[PageState], None] | None = None) -> None:
+    """Restore the current user from browser session storage if possible."""
+    try:
+        stored_token = str(app.storage.user.get("auth_token") or "")
+        if not stored_token:
+            return
+        state.auth_token = stored_token
+        state.current_user = _get_auth_db(state).get_user_by_session(stored_token)
+        if state.current_user:
+            if on_restored is not None:
+                on_restored(state)
+            _get_auth_db(state).log_auth_event(username=_username(state), event_type="session_restore", ok=True)
+            return
+        state.session_expired = True
+        state.auth_token = ""
+        app.storage.user.pop("auth_token", None)
+    except Exception:
+        pass
+
+
+def touch_session(state: PageState, *, min_interval_minutes: int = 60) -> None:
+    """Refresh session activity with throttling in the auth DB."""
+    if not state.auth_token or not state.current_user:
+        return
+    try:
+        _get_auth_db(state).touch_session(state.auth_token, min_interval_minutes=min_interval_minutes)
+    except Exception:
+        pass
+
+
+def complete_login_session(state: PageState, user: Dict[str, Any], *, event_type: str) -> None:
+    """Set the current user, create a persistent session token, and audit login."""
+    auth_db = _get_auth_db(state)
+    state.current_user = user
+    state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
+    auth_db.log_auth_event(username=_username(state), event_type=event_type, ok=True)
+    state.session_expired = False
+    try:
+        app.storage.user["auth_token"] = state.auth_token
+    except Exception:
+        pass
+
+
+def logout_session(state: PageState) -> None:
+    """Revoke current session, clear user state, and remove browser token."""
+    auth_db = _get_auth_db(state)
+    if state.auth_token:
+        auth_db.revoke_session(state.auth_token)
+    auth_db.log_auth_event(username=_username(state), event_type="logout", ok=True)
+    state.current_user = None
+    state.auth_token = ""
+    try:
+        app.storage.user.pop("auth_token", None)
+    except Exception:
+        pass
