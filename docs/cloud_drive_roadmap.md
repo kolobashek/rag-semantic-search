@@ -273,7 +273,7 @@ _Коммит: 6678ff5 (feat(ui): Cloud Drive registry-backed explorer — Sprin
   - [x] rename/move/delete — контекстное меню (more_vert) на каждой строке файла/папки, диалоги переименования и подтверждения удаления;
   - [x] версий файла — диалог `_cd_versions_dialog`, кнопка history на каждом файле;
   - [x] скачивания — кнопка download на файлах с storage_key → `/api/cloud-drive/download`;
-  - [ ] предпросмотра — ждёт backend (index/OCR pipeline).
+  - [x] предпросмотра — backend preview status и viewer integration доступны.
 - Визуальный статус фоновых задач по файлу:
   - [x] indexing;
   - [x] OCR;
@@ -287,11 +287,11 @@ _Коммит: f73fb36 (feat(ui): Cloud Drive Sprint 3 — upload, versions, dow
 - [x] Сделать быстрый вывод из реестра:
   - [x] папки (depth ≤ 3, до 5 совпадений по имени);
   - [x] файлы (корневой уровень, до 5 совпадений по имени);
-  - [ ] lazy semantic layer — ждёт Codex index/OCR pipeline.
+  - [x] lazy semantic layer — backend index/OCR pipeline интегрирован.
 - [x] Карточка «Cloud Drive» показывается над семантическими результатами.
 - [x] Клик по папке → переход в explorer на эту папку.
 - [x] Клик по файлу → открытие viewer (если файл на диске).
-- [ ] Визуально связать результаты поиска с версией, preview и действиями — ждёт Codex.
+- [x] Визуально связать результаты поиска с версией, preview и действиями.
 - [x] История запросов под новую Cloud Drive модель.
 
 _Коммит: 487abb8 (feat(ui): Cloud Drive search hints — registry name matching in search)_
@@ -477,7 +477,7 @@ Codex:
 - [x] Добавить soft delete/trash/restore backend: файлы/папки помечаются `deleted_at`, storage сохраняется, добавлены `restore_node()` и `/api/cloud-drive/restore`.
 - [x] Добавить file change feed / delta endpoints: `CloudDriveService.list_changes()` и `/api/cloud-drive/changes` с cursor `since` и ACL-фильтрацией.
 - [ ] Добавить conflict model и selective sync backend.
-- [ ] Добавить cleanup job для удалённых/старых Qdrant points.
+- [x] Добавить cleanup job для удалённых/старых Qdrant points.
 
 Claude:
 - [ ] Добавить trash/restore UX.
