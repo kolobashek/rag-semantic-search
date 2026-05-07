@@ -259,7 +259,7 @@ _Коммит: 6678ff5 (feat(ui): Cloud Drive registry-backed explorer — Sprin
   - [x] создания папки — диалог `_cd_new_folder_dialog`, кнопка в toolbar;
   - [x] загрузки файлов — диалог `_cd_upload_dialog` с `ui.upload`, кнопка в toolbar;
   - [x] drag-and-drop — `ui.upload` с auto_upload поддерживает drag-and-drop;
-  - [ ] rename/move/delete — ждёт backend от Codex;
+  - [x] rename/move/delete — контекстное меню (more_vert) на каждой строке файла/папки, диалоги переименования и подтверждения удаления;
   - [x] версий файла — диалог `_cd_versions_dialog`, кнопка history на каждом файле;
   - [x] скачивания — кнопка download на файлах с storage_key → `/api/cloud-drive/download`;
   - [ ] предпросмотра — ждёт backend (index/OCR pipeline).
@@ -354,7 +354,7 @@ Claude:
 - [x] details panel: свойства + Действия (new folder/upload) + Фильтры;
 - [x] header breadcrumbs: синхронизированы с текущим cd_path;
 - [x] search quick-match: SQL LIKE по реестру над семантическими результатами;
-- [ ] file actions UI (rename/move/delete — ждёт Codex);
+- [x] file actions UI (rename/move/delete) — контекстное меню на каждой строке файла/папки;
 - [ ] search UX adaptation (ждёт Codex search/index integration).
 
 ### Sprint 4
