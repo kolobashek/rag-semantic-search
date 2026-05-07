@@ -446,7 +446,7 @@ Codex:
 - [x] Подключить `llm.expand_query()` в основной search pipeline через config flag и telemetry. Добавлен opt-in `llm_search_expand_enabled`, `query_used` пишет расширенный запрос.
 - [x] Добавить RAG answer mode backend: answer + citations + "не знаю" при слабых источниках. Добавлен `RAGSearcher.answer_documents()` со structured sources и fallback без источников.
 - [ ] Добавить verifier/gating для фактов: числа, даты, единицы измерения, конфликтующие источники.
-- [ ] Добавить Telegram assistant mode: question detection, answer with sources, follow-up context.
+- [x] Добавить Telegram assistant mode: question detection, answer with sources, follow-up context. Добавлен question detection + `answer_documents()` with sources; follow-up context остается upgrade.
 
 Claude:
 - [x] Добавить web-режим "Ответ по документам" с источниками и кликабельными цитатами.

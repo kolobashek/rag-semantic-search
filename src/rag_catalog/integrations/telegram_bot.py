@@ -571,6 +571,14 @@ def process_query(searcher: RAGSearcher, text: str, source: str = "telegram_bot"
     if fact.get("ok"):
         return format_fact_answer(fact)
 
+    if _looks_like_question(q) and hasattr(searcher, "answer_documents"):
+        try:
+            answer = searcher.answer_documents(q, limit=20, source=source, username=username)
+        except (ConnectionError, RuntimeError) as exc:
+            return f"Ошибка инфраструктуры поиска: {exc}"
+        if isinstance(answer, dict) and answer.get("ok"):
+            return format_rag_answer(answer)
+
     try:
         results = searcher.search(q, limit=3, content_only=False, source=source, username=username)
     except (ConnectionError, RuntimeError) as exc:
@@ -583,6 +591,44 @@ def process_query(searcher: RAGSearcher, text: str, source: str = "telegram_bot"
         lines.append(
             f"{i}. {r.get('filename', '')} | score={r.get('score', 0)} | путь={r.get('full_path', '')}"
         )
+    return "\n".join(lines)
+
+
+def _looks_like_question(text: str) -> bool:
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    if "?" in q:
+        return True
+    first = q.split(maxsplit=1)[0]
+    return first in {
+        "что",
+        "кто",
+        "где",
+        "когда",
+        "какой",
+        "какая",
+        "какое",
+        "какие",
+        "почему",
+        "зачем",
+        "как",
+        "сколько",
+        "чем",
+    }
+
+
+def format_rag_answer(result: Dict[str, Any]) -> str:
+    answer = _clean_tg_text(str(result.get("answer") or "Модель не дала ответа."), 2500)
+    lines = [answer]
+    sources = result.get("sources") or []
+    if sources:
+        lines.append("")
+        lines.append("Источники:")
+        for idx, src in enumerate(sources[:5], 1):
+            filename = _clean_tg_text(str(src.get("filename") or src.get("path") or "источник"), 120)
+            path = _clean_tg_text(str(src.get("full_path") or src.get("path") or ""), 180)
+            lines.append(f"{idx}. {filename}" + (f" — {path}" if path else ""))
     return "\n".join(lines)
 
 

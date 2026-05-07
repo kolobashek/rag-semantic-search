@@ -7,6 +7,7 @@ from telegram_bot import (
     build_interactive_search_response,
     chat_action,
     format_fact_answer,
+    format_rag_answer,
     process_contact_message,
     process_message,
     process_query,
@@ -17,11 +18,12 @@ import telegram_bot
 
 
 class _FakeSearcher:
-    def __init__(self, fact_result=None, fact_exc=None, search_result=None, search_exc=None):
+    def __init__(self, fact_result=None, fact_exc=None, search_result=None, search_exc=None, answer_result=None):
         self._fact_result = fact_result
         self._fact_exc = fact_exc
         self._search_result = search_result if search_result is not None else []
         self._search_exc = search_exc
+        self._answer_result = answer_result
         self.last_search_kwargs = {}
 
     def answer_fact_question(self, _q, limit=30):
@@ -34,6 +36,9 @@ class _FakeSearcher:
             raise self._search_exc
         self.last_search_kwargs = dict(_kwargs)
         return self._search_result
+
+    def answer_documents(self, *_args, **_kwargs):
+        return self._answer_result if self._answer_result is not None else {"ok": False}
 
 
 class _FakeAuthDB:
@@ -126,6 +131,21 @@ def test_process_query_fallback_results() -> None:
     out = process_query(s, "паспорт")
     assert "Точный факт не извлечён" in out
     assert "паспорт.docx" in out
+
+
+def test_process_query_returns_rag_answer_for_question() -> None:
+    s = _FakeSearcher(
+        fact_result={"ok": False},
+        answer_result={
+            "ok": True,
+            "answer": "В документах указано, что договор действует до 2026 года.",
+            "sources": [{"filename": "договор.docx", "full_path": r"O:\Обмен\договор.docx"}],
+        },
+    )
+    out = process_query(s, "когда действует договор?", username="ivan")
+    assert "действует до 2026" in out
+    assert "Источники:" in out
+    assert "договор.docx" in out
 
 
 def test_process_query_no_results() -> None:
