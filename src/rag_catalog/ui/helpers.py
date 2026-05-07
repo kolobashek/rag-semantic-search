@@ -32,7 +32,6 @@ from .state import (
 )
 from .system import _STAGE_LABELS, _telemetry_db_path
 
-
 # ─────────────────────────── constants ──────────────────────────────────────
 
 _CADENCE_LABELS: Dict[str, str] = {
@@ -675,7 +674,6 @@ def _cd_search_by_name(
     max_folders: int = 5,
     max_files: int = 5,
 ) -> "tuple[list, list]":
-    import sqlite3 as _sqlite3  # noqa: PLC0415
     pattern = f"%{query.lower()}%"
     try:
         with registry._connect() as conn:

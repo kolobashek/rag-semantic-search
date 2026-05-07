@@ -14,7 +14,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-
 SCHEMA_VERSION = 2
 
 

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ._platform_compat import apply_windows_platform_workarounds
+
 apply_windows_platform_workarounds()
 
 from .index_state_db import IndexStateDB

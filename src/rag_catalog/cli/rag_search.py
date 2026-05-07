@@ -18,6 +18,7 @@ import sys
 from typing import Optional
 
 from rag_catalog.core._platform_compat import apply_windows_platform_workarounds
+
 apply_windows_platform_workarounds()
 
 from rag_catalog.core.rag_core import RAGSearcher, load_config

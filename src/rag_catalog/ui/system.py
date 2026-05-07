@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
-from rag_catalog.core.rag_core import load_config
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.telemetry_db import TelemetryDB
 

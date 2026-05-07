@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 
 from .db_contract import ensure_schema_version
 
-
 SCHEMA_VERSION = 3
 
 
@@ -437,8 +436,6 @@ class TelemetryDB:
         query_original: str = "",
         query_used: str = "",
     ) -> None:
-        clean_time = "" if clean_cadence == "hourly" else str(time or "03:00").strip()
-        clean_label = str(label or "").strip() or _default_schedule_label(clean_stage, clean_cadence)
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -1271,6 +1268,8 @@ class TelemetryDB:
         clean_cadence = cadence if cadence in {"hourly", "daily", "weekly"} else "daily"
         clean_stage = stage if stage in {"all", "metadata", "small", "large", "content"} else "all"
         clean_days = [str(d) for d in (days or []) if str(d).strip()]
+        clean_time = "" if clean_cadence == "hourly" else str(time or "03:00").strip()
+        clean_label = str(label or "").strip() or _default_schedule_label(clean_stage, clean_cadence)
         now = _utc_now()
         with self._lock:
             with self._connect() as conn:

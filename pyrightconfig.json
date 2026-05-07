@@ -1,0 +1,20 @@
+{
+  "include": ["src"],
+  "exclude": ["**/__pycache__", "**/.venv", "**/node_modules"],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "reportUndefinedVariable": "error",
+
+  "reportArgumentType": "none",
+  "reportCallIssue": "none",
+  "reportOperatorIssue": "none",
+  "reportOptionalCall": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportOptionalSubscript": "none",
+  "reportIndexIssue": "none",
+  "reportReturnType": "none",
+  "reportGeneralTypeIssues": "none"
+}

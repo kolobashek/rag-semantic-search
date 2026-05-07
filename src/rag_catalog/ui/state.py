@@ -19,7 +19,6 @@ from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .system import _telemetry_db_path
 
-
 # ─────────────────────────── PageState ─────────────────────────────────────
 
 @dataclass

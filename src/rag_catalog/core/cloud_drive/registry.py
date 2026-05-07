@@ -376,7 +376,6 @@ class CloudDriveRegistryDB:
             existing_file = self.get_file_by_path(target_path)
             if existing_file is not None and existing_file.id != file_row.id:
                 raise RuntimeError(f'Файл с таким именем уже существует: {target_path}')
-        source_parent = clean_source.rsplit('/', 1)[0] if '/' in clean_source else ''
         now = _utc_now()
         source_path_value = str(Path(parent.source_path) / target_name) if parent.source_path else file_row.source_path
         with self._lock:

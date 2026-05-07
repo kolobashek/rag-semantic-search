@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 import psutil
+
 from rag_catalog.core.rag_core import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -78,7 +79,7 @@ def _pid_commandline(pid: int) -> str:
         try:
             cmd = (
                 "$p=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}';"
-                "if($p){$p.CommandLine}else{''}"
+                "if($p){{$p.CommandLine}}else{{''}}"
             ).format(pid=int(pid))
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", cmd],

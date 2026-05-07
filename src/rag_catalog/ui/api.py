@@ -9,11 +9,10 @@ Depends on: .state, .system, .helpers, core modules.
 
 from __future__ import annotations
 
+import mimetypes
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-import mimetypes
+from typing import Any, Dict, List
 
 from fastapi import File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -26,7 +25,6 @@ from rag_catalog.core.user_auth_db import UserAuthDB
 from .helpers import _resolve_catalog_file
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _safe_int
-
 
 # ─────────────────────────── auth helpers (API-only) ───────────────────────
 

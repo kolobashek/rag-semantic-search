@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import mimetypes
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional

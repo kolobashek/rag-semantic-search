@@ -5,58 +5,23 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import os
 import re
 import sys
 import threading
 import time
-from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 from nicegui import app, events, run, ui
 
-from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
 from rag_catalog.core.cloud_drive import CloudDriveService
-from rag_catalog.core.telemetry_db import TelemetryDB
+from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
-from .system import (
-    _STAGE_LABELS,
-    _start_recovery_watchdog,
-    _run_recovery_cycle,
-    _recover_cloud_drive_jobs,
-    _start_global_scheduler,
-    _stop_managed_timer,
-    _launch_indexer,
-    _launch_ocr,
-    _read_cloud_bootstrap_status,
-    _recover_background_tasks,
-    _resolve_index_recovery_stage,
-    _find_live_running_index_run,
-    _find_live_running_ocr_run,
-    _effective_workers,
-    _parse_utc_iso,
-    _is_recent_failure,
-    _safe_int,
-    _telemetry_db_path,
-)
-from .state import (
-    PageState,
-    CONFIG_PATH_KEYS,
-    _save_config_patch,
-    _users_db_path,
-    _get_auth_db,
-    _refresh_current_user,
-    _username,
-    _get_telemetry,
-    _log_app_event,
-    _favorite_key,
-    _is_favorite,
-    _favorite_type,
-    _toggle_favorite,
-)
+from . import api as _api_routes  # noqa: F401 — import triggers route registration
+from .css import _install_css
 from .helpers import (
     _CADENCE_LABELS,
     _DAY_LABELS,
@@ -65,64 +30,77 @@ from .helpers import (
     INLINE_IMAGE_EXTENSIONS,
     OFFICE_PREVIEW_EXTENSIONS,
     PAGE_SIZE,
-    SYSTEM_FILE_EXTENSIONS,
-    _file_url,
-    _folder_url,
-    _viewer_file_url,
-    _schedule_display_label,
-    _resolve_catalog_file,
-    _preview_file,
-    _preview_office_file,
-    _db_query_dicts,
-    _read_log_tail,
-    _read_log_tail_lines,
-    _filter_log_text,
-    _dedupe_queries,
-    _my_recent_queries,
-    _popular_queries,
-    _search_suggestions,
-    _telegram_deeplink,
-    _remember_query,
-    _normalize_search_results,
-    _run_catalog_search,
-    _run_quick_name_search,
-    _count_exact_name_matches,
-    _merge_search_results,
-    _format_file_size,
-    _clean_text,
-    _format_bytes,
-    _format_duration_seconds,
-    _format_relative_time,
-    _duration_between,
-    _directory_children,
-    _open_os_path,
-    _within_catalog,
-    _safe_explorer_path,
-    _cd_get_service,
-    _cd_list_children,
+    _apply_explorer_filter_input,
     _cd_breadcrumb_chain,
     _cd_file_size,
+    _cd_get_service,
+    _cd_list_children,
     _cd_search_by_name,
+    _clean_text,
+    _count_exact_name_matches,
+    _db_query_dicts,
+    _dedupe_queries,
+    _directory_children,
+    _ensure_searcher,
+    _file_icon_svg,
+    _file_rows,
+    _filter_log_text,
+    _format_bytes,
+    _format_duration_seconds,
+    _format_file_size,
+    _format_relative_time,
+    _is_admin,
+    _is_system_file,
+    _load_user_state,
+    _merge_search_results,
+    _my_recent_queries,
+    _open_os_path,
+    _popular_queries,
+    _preview_file,
+    _preview_office_file,
     _read_index_stats,
     _read_index_telemetry,
-    _ensure_searcher,
-    _is_admin,
-    _show_system_files,
-    _is_system_file,
-    _result_kind,
+    _read_log_tail_lines,
+    _remember_query,
+    _resolve_catalog_file,
     _result_group,
-    _grouped_results,
-    _file_icon_svg,
-    _path_sort_key,
-    _file_rows,
-    _event_input_value,
-    _apply_explorer_filter_input,
-    _load_user_state,
-    _save_ui_settings,
+    _result_kind,
+    _run_catalog_search,
+    _run_quick_name_search,
+    _safe_explorer_path,
     _save_explorer_settings,
+    _save_ui_settings,
+    _schedule_display_label,
+    _search_suggestions,
+    _telegram_deeplink,
+    _viewer_file_url,
 )
-from .css import _install_css
-from . import api as _api_routes  # noqa: F401 — import triggers route registration
+from .state import (
+    CONFIG_PATH_KEYS,
+    PageState,
+    _get_auth_db,
+    _get_telemetry,
+    _is_favorite,
+    _log_app_event,
+    _refresh_current_user,
+    _save_config_patch,
+    _toggle_favorite,
+    _username,
+)
+from .system import (
+    _STAGE_LABELS,
+    _find_live_running_index_run,
+    _launch_indexer,
+    _launch_ocr,
+    _read_cloud_bootstrap_status,
+    _recover_cloud_drive_jobs,
+    _run_recovery_cycle,
+    _safe_int,
+    _start_global_scheduler,
+    _start_recovery_watchdog,
+    _stop_managed_timer,
+    _telemetry_db_path,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 APP_ICON_PATH = PROJECT_ROOT / "assets" / "brand" / "ico" / "favicon.ico"
@@ -1152,7 +1130,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def _render_cd_explorer(page_state: PageState, svc: "CloudDriveService") -> None:  # noqa: PLR0912,PLR0915
         """Registry-backed Cloud Drive explorer screen."""
-        from rag_catalog.core.cloud_drive.models import CloudDriveFolder, CloudDriveFile  # noqa: PLC0415
+        from rag_catalog.core.cloud_drive.models import CloudDriveFile, CloudDriveFolder  # noqa: PLC0415
 
         def _cd_open_folder(cd_path: str) -> None:
             page_state.explorer_cd_path = cd_path
@@ -3989,8 +3967,8 @@ def _build_page(initial_screen: str = "search") -> None:
         def _fetch_ollama_models(ollama_url: str) -> List[str]:
             """Запросить список моделей из Ollama /api/tags. Возвращает [] при ошибке."""
             try:
-                import urllib.request as _ur  # noqa: PLC0415
                 import json as _json  # noqa: PLC0415
+                import urllib.request as _ur  # noqa: PLC0415
                 req = _ur.Request(f"{ollama_url.rstrip('/')}/api/tags", method="GET")
                 with _ur.urlopen(req, timeout=4) as resp:
                     data = _json.loads(resp.read().decode())

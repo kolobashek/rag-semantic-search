@@ -7,13 +7,13 @@ windows_app.py — Нативное Windows-приложение (PyQt6) для 
 
 import logging
 import re
+import sys
 from collections import defaultdict
 from difflib import get_close_matches
 from pathlib import Path, PurePath
-import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,

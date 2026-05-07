@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ._platform_compat import apply_windows_platform_workarounds
+
 apply_windows_platform_workarounds()
 
 from docx import Document
@@ -775,8 +776,8 @@ class RAGIndexer:
     def _ocr_pdf(self, filepath: Path) -> str:
         """OCR сканированного PDF через pytesseract + pdf2image."""
         try:
-            import pytesseract  # type: ignore
             import pdf2image.pdf2image as pdf2image_impl  # type: ignore
+            import pytesseract  # type: ignore
             from pdf2image import convert_from_path  # type: ignore
         except ImportError:
             logger.warning(

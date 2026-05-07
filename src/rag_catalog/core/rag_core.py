@@ -17,12 +17,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ._platform_compat import apply_windows_platform_workarounds
+
 apply_windows_platform_workarounds()
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
+
 from .index_state_db import IndexStateDB
 from .telemetry_db import TelemetryDB
+
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
 # НЕ импортировать здесь — import тянет torch (~5 сек, 500+ МБ RAM).
 

@@ -4,20 +4,19 @@ user_auth_db.py — SQLite-хранилище пользователей и Tele
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import re
 import secrets
 import sqlite3
 import threading
-import hashlib
-import hmac
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .db_contract import ensure_schema_version
-
 
 DEFAULT_SESSION_TTL_DAYS = 7
 MIN_SESSION_TTL_DAYS = 1

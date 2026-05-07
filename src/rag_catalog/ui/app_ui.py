@@ -5,13 +5,13 @@ app_ui.py — Streamlit веб-интерфейс для RAG Каталога.
     streamlit run app_ui.py
 """
 
+import base64
 import html
 import json
 import logging
 import re
 import sqlite3
 import time
-import base64
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
