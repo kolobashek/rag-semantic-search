@@ -370,7 +370,7 @@ Claude:
 - [x] file actions UI (rename/move/delete) — контекстное меню на каждой строке файла/папки;
 - [x] move-to-folder dialog — список всех папок реестра, ui.select picker, вызов svc.move_node();
 - [x] drag-and-drop upload — постоянная зона в нижней части проводника, авто-загрузка через tempfile;
-- [ ] search UX adaptation (ждёт Codex search/index integration).
+- [ ] search UX adaptation (Claude/UI; Codex search/index integration готова).
 
 ### Sprint 4
 
