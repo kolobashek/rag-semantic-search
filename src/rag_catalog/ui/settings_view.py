@@ -1190,12 +1190,19 @@ def render_settings_screen(
                 ui.separator()
 
                 ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
-                with ui.row().classes("gap-2 items-center"):
-                    _dl_token_holder: list[str] = [""]
-                    _dl_href = ui.link(
-                        "rag_sync_client.py",
-                        target="_blank",
-                    ).classes("rag-path text-sm underline")
+                with ui.row().classes("gap-3 items-center flex-wrap"):
+                    _dl_win_link = ui.link("Windows (.exe)", target="#", new_tab=True)
+                    _dl_win_link.classes("rag-path text-sm")
+                    with _dl_win_link:
+                        ui.icon("window", size="14px")
+                    _dl_py_link = ui.link("Python (.py)", target="#", new_tab=True)
+                    _dl_py_link.classes("rag-meta text-sm")
+                    with _dl_py_link:
+                        ui.icon("code", size="14px")
+                ui.label(
+                    "Windows: установщик с мастером настройки. "
+                    "Python: мультиплатформенный скрипт (pip install requests watchdog)."
+                ).classes("rag-meta text-xs")
 
                 ui.label("Шаг 2 — установить зависимости").classes("font-semibold text-sm mt-1")
                 with ui.row().classes("w-full gap-1 items-center"):
@@ -1227,10 +1234,12 @@ def render_settings_screen(
                 except Exception:
                     origin = "http://localhost:8080"
                 tok = str(app.storage.user.get("auth_token") or "…").strip()
+                _base = f"{origin}/api/cloud-drive/sync/client-download?auth_token={tok}"
+                _dl_win_link.target = f"{_base}&format=exe"
+                _dl_py_link.target = f"{_base}&format=py"
                 _run_cmd_input.set_value(
                     f"python rag_sync_client.py --server {origin} --token {tok}"
                 )
-                _dl_href.target = f"{origin}/api/cloud-drive/sync/client-download?auth_token={tok}"
                 _install_dlg.open()
 
             with ui.row().classes("w-full justify-end"):

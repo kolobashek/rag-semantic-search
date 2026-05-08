@@ -335,22 +335,40 @@ def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, 
 
 
 @app.get("/api/cloud-drive/sync/client-download")
-def api_cloud_drive_sync_client_download(auth_token: str = "", authorization: AuthHeader = ""):
+def api_cloud_drive_sync_client_download(
+    format: str = "auto",
+    auth_token: str = "",
+    authorization: AuthHeader = "",
+):
     cfg = load_config()
     _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
-    candidates = [
-        Path(__file__).parents[3] / "rag_sync_client.py",
-        Path(__file__).parents[2] / "rag_sync_client.py",
-    ]
-    script_path = next((p for p in candidates if p.is_file()), None)
-    if script_path is None:
-        raise HTTPException(status_code=404, detail="rag_sync_client.py не найден на сервере.")
-    return FileResponse(
-        path=str(script_path),
-        media_type="text/x-python",
-        filename="rag_sync_client.py",
-        headers={"Content-Disposition": "attachment; filename=rag_sync_client.py"},
-    )
+    root = Path(__file__).parents[3]
+    packaging = root / "packaging" / "dist"
+    fmt = str(format or "auto").strip().lower()
+    if fmt == "py":
+        candidates = [
+            (root / "rag_sync_client.py", "text/x-python", "rag_sync_client.py"),
+        ]
+    elif fmt == "exe":
+        candidates = [
+            (packaging / "RAGSyncClientSetup.exe", "application/octet-stream", "RAGSyncClientSetup.exe"),
+            (packaging / "rag_sync_client.exe", "application/octet-stream", "rag_sync_client.exe"),
+        ]
+    else:  # auto: installer > exe > py
+        candidates = [
+            (packaging / "RAGSyncClientSetup.exe", "application/octet-stream", "RAGSyncClientSetup.exe"),
+            (packaging / "rag_sync_client.exe", "application/octet-stream", "rag_sync_client.exe"),
+            (root / "rag_sync_client.py", "text/x-python", "rag_sync_client.py"),
+        ]
+    for path, mime, filename in candidates:
+        if path.is_file():
+            return FileResponse(
+                path=str(path),
+                media_type=mime,
+                filename=filename,
+                headers={"Content-Disposition": f"attachment; filename={filename}"},
+            )
+    raise HTTPException(status_code=404, detail="Sync-клиент не найден. Соберите установщик командой packaging/build.ps1.")
 
 
 @app.post("/api/cloud-drive/sync/heartbeat")
