@@ -378,6 +378,15 @@ def render_explorer_screen(
                 ui.notify(f"Ошибка: {exc}", type="negative")
             render_fn()
 
+        async def _cd_restore_node(node_path: str) -> None:
+            try:
+                await run.io_bound(svc.restore_node, path=node_path)
+                _log_app_event(page_state, "cd_explorer", "restore", details={"path": node_path})
+                ui.notify("Объект восстановлен.", type="positive")
+                render_fn()
+            except Exception as exc:
+                ui.notify(f"Ошибка восстановления: {exc}", type="negative")
+
         # ── Layout skeleton ───────────────────────────────────────────────
         with ui.row().classes("rag-explorer-v2-layout w-full gap-3 items-start"):
             tree_col = ui.column().classes("rag-explorer-tree rag-card p-3 gap-2")
@@ -506,7 +515,7 @@ def render_explorer_screen(
             ).props("flat align=left no-caps dense").classes(
                 "rag-nav-button rag-tree-button w-full" + (" active" if _is_trash else "")
             )
-            trash_btn.tooltip("Удалённые файлы (функция в разработке)")
+            trash_btn.tooltip("Удалённые файлы и папки. Можно восстановить, пока объект есть в реестре.")
 
         # ── Details column ────────────────────────────────────────────────
         with details_col:
@@ -551,14 +560,48 @@ def render_explorer_screen(
         # ── Main column ───────────────────────────────────────────────────
         with main_col:
             if _is_trash_view:
-                with ui.column().classes("w-full items-center justify-center py-12 gap-4"):
-                    ui.icon("delete_outline", size="56px").classes("text-slate-300 dark:text-slate-600")
-                    ui.label("Корзина").classes("text-xl font-semibold text-slate-500")
-                    ui.label("Soft delete ещё не реализован в backend.").classes("rag-meta text-sm")
-                    ui.label("Когда функция будет готова, здесь появятся удалённые файлы с возможностью восстановления.").classes(
-                        "rag-meta text-xs text-center max-w-sm"
-                    )
-                    ui.button("В корневую папку", icon="arrow_back", on_click=lambda: _cd_open_folder("")).props("flat no-caps")
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.icon("delete_outline", size="22px").classes("text-slate-500")
+                    ui.label("Корзина").classes("text-xl font-semibold flex-1")
+                    ui.button("В корень", icon="arrow_back", on_click=lambda: _cd_open_folder("")).props("flat dense no-caps")
+                    ui.button(icon="refresh", on_click=render_fn, color=None).props("flat round dense").tooltip("Обновить")
+                try:
+                    trash_result = svc.list_trash(limit=250)
+                    trash_items = list(trash_result.get("items") or [])
+                except Exception as exc:
+                    ui.label(f"Не удалось прочитать корзину: {exc}").classes("text-negative rag-card p-3")
+                    return
+                if not trash_items:
+                    with ui.column().classes("w-full items-center justify-center py-12 gap-3"):
+                        ui.icon("delete_outline", size="56px").classes("text-slate-300 dark:text-slate-600")
+                        ui.label("Корзина пуста").classes("text-xl font-semibold text-slate-500")
+                        ui.label("Удалённые файлы и папки появятся здесь для восстановления.").classes(
+                            "rag-meta text-xs text-center max-w-sm"
+                        )
+                    return
+                with ui.column().classes("w-full gap-2"):
+                    for item in trash_items:
+                        node_type = str(item.get("node_type") or "")
+                        is_folder = node_type == "folder"
+                        path = str(item.get("path") or "")
+                        name = str(item.get("name") or path.rsplit("/", 1)[-1] or "/")
+                        deleted_at = str(item.get("deleted_at") or "")
+                        with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                            ui.icon("folder" if is_folder else "description", size="24px").classes(
+                                "text-yellow-500" if is_folder else "text-slate-500"
+                            )
+                            with ui.column().classes("flex-1 min-w-0 gap-0"):
+                                ui.label(name).classes("text-sm font-medium truncate")
+                                ui.label(path or "/").classes("rag-path text-xs truncate")
+                                ui.label(f"Удалено: {deleted_at[:19].replace('T', ' ') if deleted_at else 'неизвестно'}").classes("rag-meta text-xs")
+                            if not is_folder:
+                                ui.label(_cd_file_size(int(item.get("size_bytes") or 0))).classes("rag-meta text-xs")
+                            ui.button(
+                                "Восстановить",
+                                icon="restore_from_trash",
+                                on_click=lambda p=path: _cd_restore_node(p),
+                                color=None,
+                            ).props("outline dense no-caps")
                 return
 
             # Breadcrumbs toolbar

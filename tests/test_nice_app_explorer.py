@@ -41,6 +41,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_move,
     api_cloud_drive_reindex,
     api_cloud_drive_rename,
+    api_cloud_drive_restore,
     api_cloud_drive_upload,
     api_cloud_drive_list,
     api_cloud_drive_node,
@@ -56,6 +57,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_sync_pairs,
     api_cloud_drive_sync_selective,
     api_cloud_drive_sync_selective_set,
+    api_cloud_drive_trash,
 )
 import rag_catalog.ui.api as cloud_api
 import rag_catalog.ui.state as ui_state
@@ -783,11 +785,15 @@ def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
     renamed = api_cloud_drive_rename(path="Folder A/hello.txt", new_name="renamed.txt")
     moved = api_cloud_drive_move(source_path="Folder A", dest_parent_path="", new_name="Archive")
     deleted = api_cloud_drive_delete(path="Archive")
+    trash = api_cloud_drive_trash()
+    restored = api_cloud_drive_restore(path="Archive")
 
     assert renamed["path"] == "Folder A/renamed.txt"
     assert moved["path"] == "Archive"
     assert deleted["node_type"] == "folder"
-    assert service.registry.get_folder_by_path("Archive") is None
+    assert any(item["path"] == "Archive" and item["node_type"] == "folder" for item in trash["items"])
+    assert restored["node_type"] == "folder"
+    assert service.registry.get_folder_by_path("Archive") is not None
     events = TelemetryDB(cfg["telemetry_db_path"]).fetch_dicts(
         "SELECT username, feature, action, ok FROM app_events ORDER BY id"
     )
@@ -795,6 +801,8 @@ def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
         ("user", "cloud_drive", "rename", 1),
         ("user", "cloud_drive", "move", 1),
         ("user", "cloud_drive", "delete", 1),
+        ("user", "cloud_drive", "trash", 1),
+        ("user", "cloud_drive", "restore", 1),
     ]
 
 

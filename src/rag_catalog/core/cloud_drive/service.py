@@ -597,6 +597,13 @@ class CloudDriveService:
             }
         raise RuntimeError(f'Удалённый узел не найден: {path}')
 
+    def list_trash(self, *, limit: int = 200) -> dict:
+        items = self.registry.list_deleted_nodes(limit=limit)
+        return {
+            'items': items,
+            'count': len(items),
+        }
+
     def cancel_job(self, job_id: str) -> CloudDriveJob:
         job = self.registry.get_job(job_id)
         if job is None:

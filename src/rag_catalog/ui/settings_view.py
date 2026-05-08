@@ -955,212 +955,297 @@ def render_settings_screen(
 
             ui.separator()
 
+            svc = _cd_get_service(state.cfg)
+            if svc is None:
+                with ui.element("div").classes("cd-empty-state w-full py-4"):
+                    ui.icon("cloud_off", size="28px").classes("opacity-30")
+                    ui.label("Cloud Drive не инициализирован. Сначала создайте реестр.").classes("text-center")
+                return
+
+            policy_labels = {
+                "ask": "Спрашивать",
+                "cloud_wins": "Cloud Drive приоритетнее",
+                "local_wins": "Локальная версия приоритетнее",
+                "newest_wins": "Более новая версия",
+            }
+            conflict_resolution_labels = {
+                "cloud_wins": "Оставить Cloud Drive",
+                "local_wins": "Оставить локальную",
+                "newest_wins": "Оставить более новую",
+                "keep_both": "Оставить обе",
+                "ignore": "Игнорировать",
+            }
+
+            def _load_clients() -> list[dict]:
+                try:
+                    return svc.list_sync_clients(limit=100)
+                except Exception as exc:
+                    ui.notify(f"Не удалось прочитать sync-клиенты: {exc}", type="negative")
+                    return []
+
+            def _load_pairs(client_id: str = "") -> list[dict]:
+                try:
+                    return svc.list_sync_pairs(client_id=client_id)
+                except Exception as exc:
+                    ui.notify(f"Не удалось прочитать пары синхронизации: {exc}", type="negative")
+                    return []
+
+            def _register_manual_client() -> None:
+                import platform as _platform  # noqa: PLC0415
+                import socket as _socket  # noqa: PLC0415
+                host = _socket.gethostname() or "local"
+                username = _username(state) or "admin"
+                try:
+                    svc.register_sync_client(
+                        username=username,
+                        device_id=f"manual-{username}-{host}".lower(),
+                        display_name=f"{host} (ручная настройка)",
+                        platform=_platform.system() or "manual",
+                        status="offline",
+                        metadata={"source": "web-settings"},
+                    )
+                    ui.notify("Sync-клиент добавлен в реестр.", type="positive")
+                    render_fn()
+                except Exception as exc:
+                    ui.notify(f"Не удалось добавить клиента: {exc}", type="negative")
+
+            clients = _load_clients()
+            selected_client = str(clients[0].get("id") or "") if clients else ""
+
             # ── Подключённые клиенты ──────────────────────────────────────
             with ui.expansion("Подключённые клиенты", icon="computer", value=True).classes("w-full"):
-                with ui.element("div").classes("cd-empty-state w-full py-4"):
-                    ui.icon("sync_disabled", size="28px").classes("opacity-30")
-                    ui.label("Нет подключённых sync-клиентов.").classes("text-center")
-                    ui.label(
-                        "Desktop sync-агент будет доступен в следующем релизе. "
-                        "Клиент подключается автоматически по токену пользователя."
-                    ).classes("text-center rag-meta text-xs")
+                if not clients:
+                    with ui.element("div").classes("cd-empty-state w-full py-4"):
+                        ui.icon("sync_disabled", size="28px").classes("opacity-30")
+                        ui.label("Нет подключённых sync-клиентов.").classes("text-center")
+                        ui.label("До установки desktop-агента можно создать ручную запись клиента для настройки пар.").classes("text-center rag-meta text-xs")
+                        ui.button("Добавить текущий компьютер", icon="add", on_click=_register_manual_client).props("outline dense")
+                else:
+                    with ui.column().classes("w-full gap-2"):
+                        for client in clients:
+                            status = str(client.get("status") or "offline")
+                            with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                ui.icon("computer", size="20px").classes("text-indigo-400")
+                                with ui.column().classes("flex-1 min-w-0 gap-0"):
+                                    ui.label(str(client.get("display_name") or client.get("device_id") or "Sync client")).classes("text-sm font-medium truncate")
+                                    ui.label(
+                                        f"{client.get('username') or ''} · {client.get('platform') or 'unknown'} · last seen: {str(client.get('last_seen_at') or '')[:19].replace('T', ' ')}"
+                                    ).classes("rag-meta text-xs truncate")
+                                color = "positive" if status == "online" else "warning" if status in {"paused", "error"} else "grey-4"
+                                ui.badge(status, color=color).classes("text-xs")
+                        ui.button("Добавить текущий компьютер", icon="add", on_click=_register_manual_client).props("outline dense")
 
             ui.separator()
 
             # ── Пары папок ────────────────────────────────────────────────
-            sync_pairs_raw = state.cfg.get("cloud_sync_folder_pairs") or []
-            if not isinstance(sync_pairs_raw, list):
-                sync_pairs_raw = []
-            sync_pairs: list = [dict(p) for p in sync_pairs_raw if isinstance(p, dict)]
-
-            pairs_dirty = [False]
-            pairs_container = ui.column().classes("w-full gap-2")
-
-            def _save_sync_pairs() -> None:
-                cfg_copy = dict(state.cfg)
-                cfg_copy["cloud_sync_folder_pairs"] = sync_pairs
-                try:
-                    save_config(cfg_copy)
-                    state.cfg = cfg_copy
-                    ui.notify("Пары папок сохранены.", type="positive")
-                except Exception as exc:
-                    ui.notify(f"Ошибка сохранения: {exc}", type="negative")
-                pairs_dirty[0] = False
-                render_fn()
-
-            def _render_pairs() -> None:
-                pairs_container.clear()
-                with pairs_container:
-                    if not sync_pairs:
-                        with ui.element("div").classes("cd-empty-state w-full py-3"):
-                            ui.icon("folder_copy", size="24px").classes("opacity-30")
-                            ui.label("Нет настроенных пар для синхронизации.").classes("text-center")
-                    else:
-                        for idx, pair in enumerate(sync_pairs):
+            with ui.expansion("Пары папок", icon="folder_copy", value=True).classes("w-full"):
+                pairs = _load_pairs()
+                if not pairs:
+                    with ui.element("div").classes("cd-empty-state w-full py-3"):
+                        ui.icon("folder_copy", size="24px").classes("opacity-30")
+                        ui.label("Нет настроенных пар для синхронизации.").classes("text-center")
+                else:
+                    with ui.column().classes("w-full gap-2"):
+                        for pair in pairs:
                             with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
                                 ui.icon("folder_copy", size="20px").classes("text-indigo-400")
-                                with ui.column().classes("flex-1 gap-0"):
-                                    ui.label(str(pair.get("local_path") or "(не задано)")).classes("text-sm font-medium")
-                                    cd_target = str(pair.get("cd_path") or "/")
-                                    ui.label(f"→ Cloud Drive: {cd_target}").classes("rag-meta text-xs")
+                                with ui.column().classes("flex-1 min-w-0 gap-0"):
+                                    ui.label(str(pair.get("local_path") or "(не задано)")).classes("text-sm font-medium truncate")
+                                    cloud_path = str(pair.get("cloud_path") or "")
+                                    ui.label(f"→ Cloud Drive: {cloud_path or 'Корень'}").classes("rag-meta text-xs truncate")
                                 policy = str(pair.get("conflict_policy") or "ask")
-                                policy_labels = {"ask": "Спрашивать", "server_wins": "Сервер приоритетнее", "local_wins": "Локальная приоритетнее"}
                                 ui.badge(policy_labels.get(policy, policy), color="grey-4").classes("text-xs")
+                                if not bool(pair.get("enabled", True)):
+                                    ui.badge("выключено", color="warning").classes("text-xs")
                                 ui.button(
                                     icon="delete",
                                     color=None,
-                                    on_click=lambda i=idx: (sync_pairs.pop(i), _render_pairs()),
+                                    on_click=lambda pair_id=str(pair.get("id") or ""), client_id=str(pair.get("client_id") or ""): (
+                                        svc.delete_sync_pair(pair_id, client_id=client_id), ui.notify("Пара удалена.", type="positive"), render_fn()
+                                    ),
                                 ).props("flat round dense").tooltip("Удалить пару").classes("text-negative")
 
-            _render_pairs()
+                async def _add_pair_dialog() -> None:
+                    if not clients:
+                        ui.notify("Сначала добавьте sync-клиент.", type="warning")
+                        return
+                    with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-[520px]"):
+                        ui.label("Добавить пару синхронизации").classes("text-lg font-semibold")
+                        client_options = {
+                            str(c.get("id") or ""): f"{c.get('display_name') or c.get('device_id')} · {c.get('username')}"
+                            for c in clients
+                            if c.get("id")
+                        }
+                        client_sel = ui.select(
+                            options=client_options,
+                            value=selected_client,
+                            label="Sync-клиент",
+                        ).props("dense outlined emit-value map-options").classes("w-full")
+                        local_input = ui.input(
+                            "Локальная папка",
+                            placeholder="C:\\Users\\Иван\\Documents\\Рабочие",
+                        ).props("dense outlined").classes("w-full")
+                        try:
+                            with svc.registry._connect() as _c:
+                                _frows = _c.execute("SELECT * FROM cloud_folders WHERE deleted_at='' ORDER BY path").fetchall()
+                            folder_options = {
+                                fo.path: (fo.path or "Корень")
+                                for fo in [svc.registry._folder_from_row(r) for r in _frows]
+                            }
+                        except Exception:
+                            folder_options = {"": "Корень"}
+                        if "" not in folder_options:
+                            folder_options = {"": "Корень", **folder_options}
+                        cloud_sel = ui.select(
+                            options=folder_options,
+                            value="",
+                            label="Папка в Cloud Drive",
+                        ).props("dense outlined emit-value map-options").classes("w-full")
+                        policy_sel = ui.select(
+                            options=policy_labels,
+                            value="ask",
+                            label="Политика конфликтов",
+                        ).props("dense outlined emit-value map-options").classes("w-full")
 
-            # Add pair dialog
-            async def _add_pair_dialog() -> None:
-                with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-[480px]"):
-                    ui.label("Добавить пару синхронизации").classes("text-lg font-semibold")
-                    local_input = ui.input(
-                        "Локальная папка",
-                        placeholder="C:\\Users\\Иван\\Documents\\Рабочие",
-                    ).props("dense outlined").classes("w-full")
-                    local_input.tooltip("Путь к локальной папке на компьютере пользователя (заполняется sync-агентом).")
+                        def _do_add() -> None:
+                            client_id = str(client_sel.value or "").strip()
+                            local_path = str(local_input.value or "").strip()
+                            if not client_id:
+                                ui.notify("Выберите sync-клиент.", type="warning")
+                                return
+                            if not local_path:
+                                ui.notify("Укажите локальную папку.", type="warning")
+                                return
+                            try:
+                                svc.upsert_sync_pair(
+                                    client_id=client_id,
+                                    local_path=local_path,
+                                    cloud_path=str(cloud_sel.value or ""),
+                                    conflict_policy=str(policy_sel.value or "ask"),
+                                    enabled=True,
+                                )
+                                dlg.close()
+                                ui.notify("Пара синхронизации сохранена.", type="positive")
+                                render_fn()
+                            except Exception as exc:
+                                ui.notify(f"Не удалось сохранить пару: {exc}", type="negative")
 
-                    # Cloud Drive folder picker
-                    try:
-                        _cd_svc = _cd_get_service(state.cfg)
-                        if _cd_svc is not None:
-                            with _cd_svc.registry._connect() as _c:
-                                _frows = _c.execute("SELECT * FROM cloud_folders ORDER BY path").fetchall()
-                            _cd_folders = {fo.path: (fo.path or "Корень") for fo in [_cd_svc.registry._folder_from_row(r) for r in _frows]}
-                        else:
-                            _cd_folders = {"/": "Корень"}
-                    except Exception:
-                        _cd_folders = {"/": "Корень"}
+                        with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                            ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                            ui.button("Добавить", icon="add", on_click=_do_add).props("unelevated dense")
+                    dlg.open()
 
-                    cd_sel = ui.select(
-                        options=_cd_folders,
-                        value=list(_cd_folders.keys())[0] if _cd_folders else "",
-                        label="Папка в Cloud Drive",
-                    ).props("dense outlined emit-value map-options").classes("w-full")
-
-                    conflict_sel = ui.select(
-                        options={
-                            "ask": "Спрашивать при конфликте",
-                            "server_wins": "Сервер приоритетнее",
-                            "local_wins": "Локальная версия приоритетнее",
-                        },
-                        value="ask",
-                        label="Политика конфликтов",
-                    ).props("dense outlined emit-value map-options").classes("w-full")
-
-                    def _do_add() -> None:
-                        lp = str(local_input.value or "").strip()
-                        cdp = str(cd_sel.value or "").strip() or "/"
-                        pol = str(conflict_sel.value or "ask")
-                        if not lp:
-                            ui.notify("Укажите локальную папку.", type="warning")
-                            return
-                        sync_pairs.append({"local_path": lp, "cd_path": cdp, "conflict_policy": pol})
-                        dlg.close()
-                        _render_pairs()
-
-                    with ui.row().classes("w-full justify-end gap-2 mt-2"):
-                        ui.button("Отмена", on_click=dlg.close).props("flat dense")
-                        ui.button("Добавить", icon="add", on_click=_do_add).props("unelevated dense")
-                dlg.open()
-
-            with ui.row().classes("w-full gap-2 mt-1"):
                 ui.button("Добавить пару", icon="add_link", on_click=_add_pair_dialog).props("outline dense")
-                ui.button("Сохранить", icon="save", on_click=_save_sync_pairs).props("unelevated dense")
-
-            ui.separator()
-
-            # ── Глобальная политика конфликтов ────────────────────────────
-            with ui.expansion("Глобальная политика конфликтов", icon="merge", value=False).classes("w-full"):
-                ui.label(
-                    "Эти настройки применяются по умолчанию ко всем парам папок, "
-                    "если для них не задана индивидуальная политика."
-                ).classes("rag-meta text-xs")
-                global_policy = str(state.cfg.get("cloud_sync_conflict_policy") or "ask")
-                policy_sel = ui.select(
-                    options={
-                        "ask": "Всегда спрашивать пользователя",
-                        "server_wins": "Серверная версия приоритетнее",
-                        "local_wins": "Локальная версия приоритетнее",
-                        "newest_wins": "Более новая версия приоритетнее (по времени модификации)",
-                    },
-                    value=global_policy,
-                    label="Политика конфликтов",
-                ).props("dense outlined emit-value map-options").classes("w-full max-w-sm")
-
-                def _save_conflict_policy() -> None:
-                    cfg_copy = dict(state.cfg)
-                    cfg_copy["cloud_sync_conflict_policy"] = str(policy_sel.value or "ask")
-                    try:
-                        save_config(cfg_copy)
-                        state.cfg = cfg_copy
-                        ui.notify("Политика конфликтов сохранена.", type="positive")
-                    except Exception as exc:
-                        ui.notify(f"Ошибка: {exc}", type="negative")
-
-                ui.button("Сохранить политику", icon="save", on_click=_save_conflict_policy).props("outline dense").classes("mt-1")
 
             ui.separator()
 
             # ── Выборочная синхронизация ──────────────────────────────────
-            with ui.expansion("Выборочная синхронизация (Selective Sync)", icon="checklist", value=False).classes("w-full"):
-                ui.label(
-                    "Укажите, какие папки Cloud Drive включать в синхронизацию. "
-                    "Остальные папки будут доступны только через web-интерфейс."
-                ).classes("rag-meta text-xs")
-
-                try:
-                    _cd_svc2 = _cd_get_service(state.cfg)
-                    if _cd_svc2 is not None:
-                        with _cd_svc2.registry._connect() as _c2:
-                            _frows2 = _c2.execute(
-                                "SELECT * FROM cloud_folders WHERE depth <= 2 AND is_root=0 ORDER BY path"
-                            ).fetchall()
-                        _top_folders = [_cd_svc2.registry._folder_from_row(r) for r in _frows2]
-                    else:
-                        _top_folders = []
-                except Exception:
-                    _top_folders = []
-
-                excluded_raw = state.cfg.get("cloud_sync_excluded_paths") or []
-                excluded_set: set = set(excluded_raw if isinstance(excluded_raw, list) else [])
-
-                if not _top_folders:
-                    with ui.element("div").classes("cd-empty-state w-full py-3"):
-                        ui.icon("folder_off", size="24px").classes("opacity-30")
-                        ui.label("Нет папок в реестре. Запустите импорт в Cloud Drive.").classes("text-center")
+            with ui.expansion("Выборочная синхронизация", icon="checklist", value=False).classes("w-full"):
+                if not clients:
+                    ui.label("Нет sync-клиентов для настройки selective sync.").classes("rag-meta text-sm")
                 else:
-                    checkboxes: Dict[str, Any] = {}
-                    with ui.column().classes("w-full gap-1"):
-                        for _fo in _top_folders:
-                            _cb = ui.checkbox(_fo.path, value=(_fo.path not in excluded_set))
-                            checkboxes[_fo.path] = _cb
+                    client_options = {
+                        str(c.get("id") or ""): f"{c.get('display_name') or c.get('device_id')} · {c.get('username')}"
+                        for c in clients
+                        if c.get("id")
+                    }
+                    client_sel = ui.select(
+                        options=client_options,
+                        value=selected_client,
+                        label="Sync-клиент",
+                    ).props("dense outlined emit-value map-options").classes("w-full max-w-xl")
+                    try:
+                        with svc.registry._connect() as _c2:
+                            _frows2 = _c2.execute(
+                                "SELECT * FROM cloud_folders WHERE deleted_at='' AND depth <= 2 AND is_root=0 ORDER BY path"
+                            ).fetchall()
+                        top_folders = [svc.registry._folder_from_row(r) for r in _frows2]
+                    except Exception:
+                        top_folders = []
+                    if not top_folders:
+                        with ui.element("div").classes("cd-empty-state w-full py-3"):
+                            ui.icon("folder_off", size="24px").classes("opacity-30")
+                            ui.label("Нет папок в реестре. Запустите импорт в Cloud Drive.").classes("text-center")
+                    else:
+                        mode_sel = ui.select(
+                            options={"exclude": "Исключить выбранные", "include": "Синхронизировать только выбранные"},
+                            value="exclude",
+                            label="Режим",
+                        ).props("dense outlined emit-value map-options").classes("w-full max-w-sm")
+                        existing = svc.list_selective_sync_paths(client_id=selected_client).get("paths", []) if selected_client else []
+                        existing_paths = {str(item.get("cloud_path") or "") for item in existing}
+                        checkboxes: Dict[str, Any] = {}
+                        with ui.column().classes("w-full gap-1"):
+                            for folder in top_folders:
+                                cb = ui.checkbox(folder.path, value=(folder.path in existing_paths))
+                                checkboxes[folder.path] = cb
 
-                    def _save_selective_sync() -> None:
-                        new_excluded = [p for p, cb in checkboxes.items() if not cb.value]
-                        cfg_copy = dict(state.cfg)
-                        cfg_copy["cloud_sync_excluded_paths"] = new_excluded
-                        try:
-                            save_config(cfg_copy)
-                            state.cfg = cfg_copy
-                            ui.notify("Выборочная синхронизация сохранена.", type="positive")
-                        except Exception as exc:
-                            ui.notify(f"Ошибка: {exc}", type="negative")
+                        def _save_selective_sync() -> None:
+                            client_id = str(client_sel.value or "").strip()
+                            if not client_id:
+                                ui.notify("Выберите sync-клиент.", type="warning")
+                                return
+                            paths = [p for p, cb in checkboxes.items() if bool(cb.value)]
+                            try:
+                                svc.set_selective_sync_paths(
+                                    client_id=client_id,
+                                    paths=paths,
+                                    mode=str(mode_sel.value or "exclude"),
+                                    replace=True,
+                                )
+                                ui.notify("Выборочная синхронизация сохранена.", type="positive")
+                                render_fn()
+                            except Exception as exc:
+                                ui.notify(f"Ошибка: {exc}", type="negative")
 
-                    ui.button("Сохранить", icon="save", on_click=_save_selective_sync).props("outline dense").classes("mt-1")
+                        ui.button("Сохранить", icon="save", on_click=_save_selective_sync).props("outline dense")
 
             ui.separator()
 
-            # ── История конфликтов ────────────────────────────────────────
-            with ui.expansion("Журнал конфликтов", icon="history_toggle_off", value=False).classes("w-full"):
-                with ui.element("div").classes("cd-empty-state w-full py-3"):
-                    ui.icon("history_toggle_off", size="24px").classes("opacity-30")
-                    ui.label("Конфликтов не зафиксировано.").classes("text-center")
-                    ui.label("История конфликтов появится после подключения sync-клиента.").classes("text-center rag-meta text-xs")
+            # ── Журнал конфликтов ────────────────────────────────────────
+            with ui.expansion("Журнал конфликтов", icon="history_toggle_off", value=True).classes("w-full"):
+                try:
+                    open_conflicts = svc.list_sync_conflicts(status="open", limit=100)
+                    resolved_conflicts = svc.list_sync_conflicts(status="resolved", limit=20)
+                except Exception as exc:
+                    ui.label(f"Не удалось прочитать конфликты: {exc}").classes("text-negative text-sm")
+                    open_conflicts = []
+                    resolved_conflicts = []
+                if not open_conflicts:
+                    with ui.element("div").classes("cd-empty-state w-full py-3"):
+                        ui.icon("check_circle", size="24px").classes("opacity-30")
+                        ui.label("Открытых конфликтов нет.").classes("text-center")
+                else:
+                    with ui.column().classes("w-full gap-2"):
+                        for conflict in open_conflicts:
+                            with ui.column().classes("rag-explorer-item w-full p-3 gap-2"):
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.icon("merge", size="20px").classes("text-orange-500")
+                                    with ui.column().classes("flex-1 min-w-0 gap-0"):
+                                        ui.label(str(conflict.get("path") or conflict.get("cloud_path") or conflict.get("local_path") or "Конфликт")).classes("text-sm font-medium truncate")
+                                        ui.label(
+                                            f"{conflict.get('conflict_type') or 'unknown'} · {str(conflict.get('created_at') or '')[:19].replace('T', ' ')}"
+                                        ).classes("rag-meta text-xs")
+                                    ui.badge("open", color="warning").classes("text-xs")
+                                with ui.row().classes("w-full gap-2 flex-wrap"):
+                                    for resolution, label in conflict_resolution_labels.items():
+                                        ui.button(
+                                            label,
+                                            on_click=lambda cid=str(conflict.get("id") or ""), res=resolution: (
+                                                svc.resolve_sync_conflict(cid, resolution=res, resolved_by=_username(state)),
+                                                ui.notify("Конфликт закрыт.", type="positive"),
+                                                render_fn(),
+                                            ),
+                                        ).props("outline dense no-caps")
+                if resolved_conflicts:
+                    ui.separator()
+                    ui.label("Последние закрытые").classes("font-semibold text-sm")
+                    with ui.column().classes("w-full gap-1"):
+                        for conflict in resolved_conflicts:
+                            with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-2"):
+                                ui.icon("done", size="18px").classes("text-green-500")
+                                ui.label(str(conflict.get("path") or "")).classes("text-sm flex-1 truncate")
+                                ui.badge(str(conflict.get("resolution") or "resolved"), color="positive").classes("text-xs")
 
     def render_admin_llm_settings() -> None:
         def _fetch_ollama_models(ollama_url: str) -> List[str]:
@@ -1655,36 +1740,50 @@ def render_settings_screen(
                             ui.icon("cloud_off", size="28px").classes("opacity-30")
                             ui.label("Cloud Drive не включён — обратитесь к администратору.").classes("text-center")
                     else:
-                        # Status card
+                        svc = _cd_get_service(state.cfg)
+                        username = str(user.get("username") or "").strip().lower()
+                        clients = svc.list_sync_clients(username=username, limit=20) if svc is not None else []
+                        pairs = svc.list_sync_pairs(username=username) if svc is not None else []
+                        conflicts = svc.list_sync_conflicts(username=username, status="open", limit=20) if svc is not None else []
+                        connected = any(str(c.get("status") or "") == "online" for c in clients)
                         with ui.row().classes("w-full items-center gap-3 p-3 rag-explorer-item"):
-                            ui.icon("sync_disabled", size="24px").classes("text-slate-400")
+                            ui.icon("sync" if connected else "sync_disabled", size="24px").classes(
+                                "text-green-500" if connected else "text-slate-400"
+                            )
                             with ui.column().classes("flex-1 gap-0"):
-                                ui.label("Sync-клиент не подключён").classes("font-medium")
-                                ui.label("Установите desktop sync-агент, чтобы автоматически синхронизировать файлы.").classes("rag-meta text-xs")
-                            ui.badge("Не подключён", color="grey-4").classes("text-xs")
+                                ui.label("Sync-клиент подключён" if connected else "Sync-клиент не подключён").classes("font-medium")
+                                ui.label(
+                                    f"Клиентов: {len(clients)} · папок: {len(pairs)} · открытых конфликтов: {len(conflicts)}"
+                                ).classes("rag-meta text-xs")
+                            ui.badge("online" if connected else "offline", color="positive" if connected else "grey-4").classes("text-xs")
 
                         ui.separator()
                         ui.label("Мои папки синхронизации").classes("font-semibold")
 
-                        user_pairs_raw = state.cfg.get("cloud_sync_folder_pairs") or []
-                        user_pairs = [p for p in (user_pairs_raw if isinstance(user_pairs_raw, list) else []) if isinstance(p, dict)]
-
-                        if not user_pairs:
+                        if not pairs:
                             with ui.element("div").classes("cd-empty-state w-full py-3"):
                                 ui.icon("folder_copy", size="24px").classes("opacity-30")
                                 ui.label("Нет настроенных папок для синхронизации.").classes("text-center")
                                 ui.label("Добавьте пары папок в Настройках → Sync клиент (доступно администраторам).").classes("text-center rag-meta text-xs")
                         else:
                             with ui.column().classes("w-full gap-1"):
-                                for _pair in user_pairs:
+                                for _pair in pairs:
                                     with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
                                         ui.icon("folder_copy", size="20px").classes("text-indigo-400")
                                         with ui.column().classes("flex-1 gap-0"):
                                             ui.label(str(_pair.get("local_path") or "(не задано)")).classes("text-sm font-medium")
-                                            ui.label(f"→ Cloud Drive: {_pair.get('cd_path', '/')}").classes("rag-meta text-xs")
+                                            ui.label(f"→ Cloud Drive: {_pair.get('cloud_path') or 'Корень'}").classes("rag-meta text-xs")
                                         _pol = str(_pair.get("conflict_policy") or "ask")
-                                        _pol_lbl = {"ask": "Спрашивать", "server_wins": "Сервер", "local_wins": "Локальная"}.get(_pol, _pol)
+                                        _pol_lbl = {"ask": "Спрашивать", "cloud_wins": "Cloud Drive", "local_wins": "Локальная", "newest_wins": "Новая"}.get(_pol, _pol)
                                         ui.badge(_pol_lbl, color="grey-4").classes("text-xs")
+                        if conflicts:
+                            ui.separator()
+                            ui.label("Открытые конфликты").classes("font-semibold")
+                            for conflict in conflicts:
+                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-2"):
+                                    ui.icon("merge", size="18px").classes("text-orange-500")
+                                    ui.label(str(conflict.get("path") or conflict.get("cloud_path") or "")).classes("text-sm flex-1 truncate")
+                                    ui.badge(str(conflict.get("conflict_type") or "conflict"), color="warning").classes("text-xs")
 
             elif sec == "explorer":
                 with ui.column().classes("rag-card w-full p-4 gap-3"):

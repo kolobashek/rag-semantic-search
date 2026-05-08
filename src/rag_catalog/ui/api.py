@@ -643,6 +643,22 @@ def api_cloud_drive_delete(path: str = "", auth_token: str = "", authorization: 
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.get("/api/cloud-drive/trash")
+def api_cloud_drive_trash(limit: int = 200, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    result = service.list_trash(limit=limit)
+    items = [
+        item
+        for item in result.get("items", [])
+        if _cd_acl_allows(cfg, user, str(item.get("path") or ""))
+    ]
+    payload = {"items": items, "count": len(items)}
+    _audit_cloud_drive_api_event(cfg, user, "trash", details={"count": len(items)})
+    return payload
+
+
 @app.post("/api/cloud-drive/restore")
 def api_cloud_drive_restore(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()

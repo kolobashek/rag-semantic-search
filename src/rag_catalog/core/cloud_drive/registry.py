@@ -478,6 +478,66 @@ class CloudDriveRegistryDB:
             for row in rows[-max_rows:]
         ]
 
+    def list_deleted_nodes(self, *, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return soft-deleted files and folders ordered by deletion time."""
+        max_rows = max(1, min(int(limit or 200), 1000))
+        with self._connect() as conn:
+            folder_rows = conn.execute(
+                """
+                SELECT
+                    'folder' AS node_type,
+                    id,
+                    path,
+                    name,
+                    source_path,
+                    0 AS size_bytes,
+                    updated_at,
+                    deleted_at,
+                    '' AS mime_type
+                FROM cloud_folders
+                WHERE deleted_at!='' AND is_root=0
+                """
+            ).fetchall()
+            file_rows = conn.execute(
+                """
+                SELECT
+                    'file' AS node_type,
+                    id,
+                    path,
+                    name,
+                    source_path,
+                    size_bytes,
+                    updated_at,
+                    deleted_at,
+                    mime_type
+                FROM cloud_files
+                WHERE deleted_at!=''
+                """
+            ).fetchall()
+        rows = [*folder_rows, *file_rows]
+        rows.sort(
+            key=lambda row: (
+                str(row['deleted_at'] or ''),
+                str(row['node_type'] or ''),
+                str(row['path'] or ''),
+            ),
+            reverse=True,
+        )
+        return [
+            {
+                'node_type': str(row['node_type']),
+                'id': str(row['id']),
+                'path': str(row['path'] or ''),
+                'name': str(row['name'] or ''),
+                'source_path': str(row['source_path'] or ''),
+                'size_bytes': int(row['size_bytes'] or 0),
+                'mime_type': str(row['mime_type'] or ''),
+                'updated_at': str(row['updated_at'] or ''),
+                'deleted_at': str(row['deleted_at'] or ''),
+            }
+            for row in rows[:max_rows]
+        ]
+
     def rename_move_file(self, *, source_path: str, dest_parent_path: str = '', new_name: str = '') -> CloudDriveFile:
         clean_source = self._normalize_path(source_path)
         file_row = self.get_file_by_path(clean_source)
@@ -664,19 +724,6 @@ class CloudDriveRegistryDB:
             raise RuntimeError('Корневой каталог нельзя удалить.')
         with self._lock:
             with self._connect() as conn:
-                file_ids = [
-                    str(row['id'])
-                    for row in conn.execute(
-                        "SELECT id FROM cloud_files WHERE path LIKE ? OR path=?",
-                        (f"{clean_path}/%", clean_path),
-                    ).fetchall()
-                ]
-                if file_ids:
-                    placeholders = ",".join("?" for _ in file_ids)
-                    conn.execute(
-                        f"DELETE FROM cloud_file_versions WHERE file_id IN ({placeholders})",
-                        file_ids,
-                    )
                 now = _utc_now()
                 conn.execute(
                     "UPDATE cloud_files SET deleted_at=?, updated_at=? WHERE path LIKE ? OR path=?",

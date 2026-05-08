@@ -141,6 +141,10 @@ def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     deleted_child = registry.get_file_by_path('Archive/hello.txt')
     assert deleted_child is not None
     assert deleted_child.deleted_at != ''
+    trash = service.list_trash()
+    trash_paths = {item['path'] for item in trash['items']}
+    assert {'renamed.txt', 'Archive', 'Archive/hello.txt'} <= trash_paths
+    assert registry.list_file_versions(path='Archive/hello.txt')
 
     restored_folder = service.restore_node('Archive')
     assert restored_folder['node_type'] == 'folder'

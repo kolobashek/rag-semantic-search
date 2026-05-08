@@ -301,7 +301,7 @@ _Коммит: 487abb8 (feat(ui): Cloud Drive search hints — registry name mat
 - Спроектировать UX для будущего desktop sync client:
   - [x] что видит пользователь — статус клиента (connected/disconnected), список пар папок;
   - [x] как настраивает локальную папку — диалог добавления пары (local path + Cloud Drive picker + conflict policy);
-  - [x] как отображаются конфликты — журнал конфликтов в admin settings (placeholder для backend);
+  - [x] как отображаются конфликты — журнал конфликтов в admin settings с реальным backend resolution flow;
   - [x] как работает выборочная синхронизация — checkbox list всех top-level папок реестра.
 - [x] Подготовить UI admin/user flows для этого ещё до реализации клиента.
 
@@ -370,7 +370,7 @@ Claude:
 - [x] file actions UI (rename/move/delete) — контекстное меню на каждой строке файла/папки;
 - [x] move-to-folder dialog — список всех папок реестра, ui.select picker, вызов svc.move_node();
 - [x] drag-and-drop upload — постоянная зона в нижней части проводника, авто-загрузка через tempfile;
-- [ ] search UX adaptation (Claude/UI; Codex search/index integration готова).
+- [x] search UX adaptation (Claude/UI; Codex search/index integration готова) — быстрые Cloud Drive hints подключены, файлы/папки открываются из выдачи.
 
 ### Sprint 4
 
@@ -380,9 +380,9 @@ Codex:
 - audit/conflict contracts.
 
 Claude:
-- [x] sync UX — scaffold: connected clients panel, empty states, status badge;
-- [x] admin sync settings — `render_admin_cloud_sync_settings()`: folder pairs, conflict policy, selective sync, conflict journal;
-- [x] user sync settings — `cloud_sync_user` section в панели настроек: статус клиента, список пар папок;
+- [x] sync UX — connected clients panel, empty states, status badge;
+- [x] admin sync settings — `render_admin_cloud_sync_settings()`: реальные clients/pairs, selective sync, conflict journal и resolve actions;
+- [x] user sync settings — `cloud_sync_user` section в панели настроек: реальный статус клиента, список пар папок и открытые конфликты;
 - [x] product polish для cloud workflows — drop zone CSS, search hints улучшены (parent path + "Show in Explorer"), context-menu delete highlight.
 
 ## External Review Backlog
@@ -480,8 +480,8 @@ Codex:
 - [x] Добавить cleanup job для удалённых/старых Qdrant points.
 
 Claude:
-- [ ] Добавить trash/restore UX.
-- [ ] Добавить sync conflict resolution UX.
+- [x] Добавить trash/restore UX — выполнено Codex после исчерпания лимитов Claude: explorer trash view, restore action, `/api/cloud-drive/trash`.
+- [x] Добавить sync conflict resolution UX — выполнено Codex после исчерпания лимитов Claude: admin settings читает registry, resolve actions закрывают конфликты.
 - [x] Добавить saved searches, favorites и collections после стабилизации ACL/search.
 
 ## Definition of Done
