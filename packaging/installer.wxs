@@ -30,8 +30,8 @@
     <MediaTemplate EmbedCab="yes" />
 
     <!-- ── Install properties (can be overridden on command line) ── -->
+    <!-- Token is obtained at first launch via browser — no token needed here -->
     <Property Id="RAGSERVER"     Value="http://localhost:8080" />
-    <Property Id="RAGTOKEN"      Value="" />
     <Property Id="RAGAUTOSTART"  Value="1" />
     <Property Id="ALLUSERS"      Value="2" />
     <Property Id="MSIINSTALLPERUSER" Value="1" />
@@ -56,8 +56,8 @@
     <ComponentGroup Id="RegistryConfig" Directory="INSTALLFOLDER">
       <Component Id="RegConfig" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567891">
         <RegistryKey Root="HKCU" Key="Software\RAGSyncClient">
+          <!-- Token is obtained at first launch via browser auth flow -->
           <RegistryValue Name="Server"      Type="string" Value="[RAGSERVER]"  />
-          <RegistryValue Name="Token"       Type="string" Value="[RAGTOKEN]"   />
           <RegistryValue Name="DeviceId"    Type="string"
             Value="win-[%COMPUTERNAME]-msi" KeyPath="yes" />
           <RegistryValue Name="DisplayName" Type="string"

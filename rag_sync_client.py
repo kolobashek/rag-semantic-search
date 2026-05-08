@@ -25,6 +25,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import webbrowser
+
 import requests
 
 try:
@@ -96,6 +98,71 @@ def load_config(path: Path) -> Dict[str, Any]:
 def save_config(path: Path, cfg: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+# ─── Device Auth Flow ─────────────────────────────────────────────────────────
+
+def device_auth_flow(server: str) -> Optional[str]:
+    """
+    Perform browser-based device authorization (RFC 8628-style).
+    Opens the server's /auth/device page in the browser, displays the user
+    code, then polls until the user approves or the code expires.
+    Returns the session token on success, None on failure.
+    """
+    try:
+        r = requests.post(f"{server}/api/auth/device/code", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as exc:
+        log.error("Не удалось запросить код устройства: %s", exc)
+        return None
+
+    device_code = str(data.get("device_code") or "")
+    user_code   = str(data.get("user_code") or "")
+    verify_url  = str(data.get("verification_uri_complete") or data.get("verification_uri") or f"{server}/auth/device")
+    expires_in  = int(data.get("expires_in") or 300)
+    interval    = int(data.get("interval") or 5)
+
+    print()
+    print("━" * 55)
+    print("  Для подключения устройства откройте в браузере:")
+    print(f"  {verify_url}")
+    print()
+    print(f"  Код подтверждения:  {user_code}")
+    print(f"  Действителен:       {expires_in // 60} мин")
+    print("━" * 55)
+    print()
+
+    try:
+        webbrowser.open(verify_url)
+    except Exception:
+        pass
+
+    deadline = time.monotonic() + expires_in
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        try:
+            r = requests.get(
+                f"{server}/api/auth/device/token",
+                params={"device_code": device_code},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                token = str(r.json().get("token") or "")
+                if token:
+                    log.info("Авторизация выполнена успешно.")
+                    return token
+            elif r.status_code == 428:
+                log.debug("Ожидание подтверждения в браузере...")
+            else:
+                detail = r.json().get("detail", str(r.status_code))
+                log.error("Авторизация отклонена: %s", detail)
+                return None
+        except Exception as exc:
+            log.warning("Ошибка при проверке токена: %s", exc)
+
+    log.error("Время ожидания подтверждения истекло (5 мин). Перезапустите клиент.")
+    return None
+
 
 # ─── API client ───────────────────────────────────────────────────────────────
 
@@ -462,10 +529,10 @@ def main() -> None:
         cfg["display_name"] = args.display_name
 
     server = str(cfg.get("server") or "").rstrip("/")
-    token = str(cfg.get("token") or "")
+    token  = str(cfg.get("token") or "")
 
-    if not server or not token:
-        print("Ошибка: нужно указать --server и --token (или сохранить в конфиге).", file=sys.stderr)
+    if not server:
+        print("Ошибка: нужно указать --server (или сохранить в конфиге).", file=sys.stderr)
         sys.exit(1)
 
     if not cfg.get("device_id"):
@@ -474,16 +541,44 @@ def main() -> None:
     if not cfg.get("display_name"):
         cfg["display_name"] = f"{platform.node()} ({platform.system()})"
 
+    # ── Auth: device flow on first run or after token expiry ──────────────────
+    if not token:
+        log.info("Токен не найден — запускаем авторизацию через браузер...")
+        token = device_auth_flow(server)
+        if not token:
+            sys.exit(1)
+        cfg["token"] = token
+        save_config(config_path, cfg)
+
     api = SyncAPIClient(server, token)
 
     # Register / heartbeat ─────────────────────────────────────────────────────
-    log.info("Регистрация на сервере %s ...", server)
+    log.info("Подключение к серверу %s ...", server)
     try:
         client_info = api.register(
             device_id=cfg["device_id"],
             display_name=cfg["display_name"],
             platform_name=platform.system(),
         )
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 401:
+            log.warning("Токен недействителен или истёк — повторная авторизация...")
+            cfg.pop("token", None)
+            save_config(config_path, cfg)
+            token = device_auth_flow(server)
+            if not token:
+                sys.exit(1)
+            cfg["token"] = token
+            save_config(config_path, cfg)
+            api = SyncAPIClient(server, token)
+            client_info = api.register(
+                device_id=cfg["device_id"],
+                display_name=cfg["display_name"],
+                platform_name=platform.system(),
+            )
+        else:
+            log.error("Ошибка регистрации: %s", exc)
+            sys.exit(1)
     except Exception as exc:
         log.error("Ошибка регистрации: %s", exc)
         sys.exit(1)

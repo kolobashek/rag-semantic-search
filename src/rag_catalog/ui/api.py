@@ -131,6 +131,49 @@ def _serialize_cloud_drive_job(job: Any) -> Dict[str, Any]:
     }
 
 
+# ─────────────────────────── Device auth endpoints ───────────────────────────
+
+@app.post("/api/auth/device/code")
+def api_device_code(request: Any = None) -> Dict[str, Any]:
+    """Create a device code pair for browser-based auth. No credentials required."""
+    from . import device_auth as _da
+    from starlette.requests import Request as StarletteRequest
+    # Derive server base URL from the request
+    try:
+        import inspect
+        frame_locals = inspect.currentframe().f_back.f_locals if inspect.currentframe() else {}
+        scope = frame_locals.get("scope") or {}
+    except Exception:
+        scope = {}
+    try:
+        from nicegui import app as _napp
+        # Best-effort: use stored base or fall back
+        base = str(getattr(_napp, "_server_base_url", "") or "")
+    except Exception:
+        base = ""
+    if not base:
+        base = "http://localhost:8080"
+    return _da.create_code(base)
+
+
+@app.get("/api/auth/device/token")
+def api_device_token(device_code: str = "") -> Dict[str, Any]:
+    """Poll for device auth result. Returns 428 while pending, 200 with token when approved."""
+    from . import device_auth as _da
+    if not str(device_code or "").strip():
+        raise HTTPException(status_code=400, detail="Не задан device_code.")
+    result = _da.poll_token(device_code)
+    status = result["status"]
+    if status == "not_found":
+        raise HTTPException(status_code=404, detail="device_code не найден или истёк.")
+    if status == "pending":
+        raise HTTPException(status_code=428, detail="authorization_pending")
+    if status in ("expired", "denied"):
+        raise HTTPException(status_code=400, detail=status)
+    # approved
+    return {"token": result["token"], "username": result["username"]}
+
+
 # ─────────────────────────── API routes ─────────────────────────────────────
 
 @app.get("/api/view-file")

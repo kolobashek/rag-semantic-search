@@ -1766,6 +1766,115 @@ def stats_page() -> None:
     _build_page("stats")
 
 
+@ui.page("/auth/device")
+def device_auth_page() -> None:
+    """Browser approval page for sync client device auth flow."""
+    from . import device_auth as _da
+    from .state import PageState, _get_auth_db, _users_db_path
+
+    cfg = load_config()
+    state = PageState(cfg=cfg)
+
+    from .auth_session import complete_login_session, restore_session
+    restore_session(state)
+
+    _install_css()
+
+    # Pre-fill code from query string (?code=XXXX-YYYY)
+    code_param = ""
+    try:
+        request_url = str(ui.context.client.url or "")
+        if "code=" in request_url:
+            code_param = request_url.split("code=")[-1].split("&")[0].strip()
+    except Exception:
+        pass
+
+    with ui.column().classes("items-center justify-center min-h-screen gap-4 p-4"):
+        with ui.card().classes("p-8 gap-4 w-full max-w-sm"):
+            with ui.row().classes("items-center gap-3 mb-1"):
+                ui.icon("sync", size="28px").classes("text-indigo-400")
+                ui.label("Подключение устройства").classes("text-xl font-semibold")
+
+            if state.current_user is None:
+                ui.label(
+                    "Войдите в RAG Catalog, чтобы подтвердить подключение sync-клиента."
+                ).classes("rag-meta text-sm")
+                ui.separator()
+
+                username_in = ui.input("Логин").props("outlined dense")
+                password_in = ui.input("Пароль", password=True, password_toggle_button=True).props("outlined dense")
+                error_lbl = ui.label("").classes("text-negative text-sm")
+
+                def do_login() -> None:
+                    auth_db = _get_auth_db(state)
+                    result = auth_db.login_with_reason(
+                        username=str(username_in.value or "").strip(),
+                        password=str(password_in.value or ""),
+                    )
+                    reason = str(result.get("reason") or "")
+                    user = result.get("user")
+                    if reason == "ok" and user:
+                        complete_login_session(state, user, event_type="login")
+                        ui.navigate.reload()
+                    elif reason == "pending":
+                        error_lbl.set_text("Аккаунт ещё не активирован администратором.")
+                    elif reason == "blocked":
+                        error_lbl.set_text("Аккаунт заблокирован.")
+                    else:
+                        error_lbl.set_text("Неверный логин или пароль.")
+
+                password_in.on("keydown.enter", do_login)
+                ui.button("Войти", on_click=do_login).props("unelevated").classes("w-full")
+
+            else:
+                user = state.current_user
+                ui.label(
+                    f"Вы вошли как {user.get('display_name') or user.get('username')}."
+                ).classes("rag-meta text-sm")
+                ui.label(
+                    "Введите код, который показывает sync-клиент на вашем компьютере."
+                ).classes("text-sm")
+                ui.separator()
+
+                code_in = ui.input(
+                    "Код устройства",
+                    value=code_param,
+                    placeholder="ABCD-EFGH",
+                ).props("outlined dense")
+                result_row = ui.row().classes("items-center gap-2")
+                result_lbl = ui.label("").classes("text-sm")
+
+                def do_approve() -> None:
+                    code = str(code_in.value or "").strip()
+                    if not code:
+                        ui.notify("Введите код устройства.", type="warning")
+                        return
+                    tok = str(app.storage.user.get("auth_token") or "")
+                    username = str(user.get("username") or "")
+                    ok = _da.approve_code(code, tok, username)
+                    if ok:
+                        with result_row:
+                            ui.icon("check_circle", size="20px").classes("text-positive")
+                        result_lbl.set_text("Устройство подтверждено! Можете закрыть это окно.")
+                        result_lbl.classes("text-positive")
+                        ui.notify("Sync-клиент подключён.", type="positive")
+                    else:
+                        ui.notify(
+                            "Код не найден, уже использован или истёк. Перезапустите sync-клиент.",
+                            type="negative",
+                        )
+
+                code_in.on("keydown.enter", do_approve)
+                ui.button(
+                    "Подтвердить подключение", icon="link", on_click=do_approve
+                ).props("unelevated").classes("w-full")
+
+                ui.separator()
+                ui.label(
+                    "Код действителен 5 минут. Если истёк — перезапустите sync-клиент."
+                ).classes("rag-meta text-xs")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Запустить NiceGUI-интерфейс RAG Каталога.")
     parser.add_argument("--host", default="127.0.0.1")

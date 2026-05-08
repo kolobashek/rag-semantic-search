@@ -1201,7 +1201,7 @@ def render_settings_screen(
                     "EXE: мастер настройки. Python: Linux/macOS."
                 ).classes("rag-meta text-xs")
 
-                ui.label("Шаг 2 — установить зависимости").classes("font-semibold text-sm mt-1")
+                ui.label("Шаг 2 — только для Python-скрипта: зависимости").classes("font-semibold text-sm mt-1")
                 with ui.row().classes("w-full gap-1 items-center"):
                     _pip_cmd = ui.input(value="pip install requests watchdog").props(
                         'readonly dense outlined'
@@ -1211,7 +1211,7 @@ def render_settings_screen(
                     )).props("flat dense round").tooltip("Копировать")
 
                 ui.label("Шаг 3 — запустить").classes("font-semibold text-sm mt-1")
-                _run_cmd_input = ui.input(value="python rag_sync_client.py --server … --token …").props(
+                _run_cmd_input = ui.input(value="python rag_sync_client.py --server …").props(
                     'readonly dense outlined'
                 ).classes("w-full font-mono text-xs")
                 with ui.row().classes("w-full justify-end gap-2"):
@@ -1220,10 +1220,12 @@ def render_settings_screen(
                     )).props("flat dense round").tooltip("Копировать команду")
                     ui.button("Закрыть", on_click=_install_dlg.close).props("flat dense")
 
-                ui.label(
-                    "Токен — сессионный токен любого активного пользователя. "
-                    "Клиент сохранит его в ~/.rag_sync/config.json после первого запуска."
-                ).classes("rag-meta text-xs mt-1")
+                with ui.row().classes("gap-2 items-start mt-1"):
+                    ui.icon("info", size="16px").classes("text-indigo-400 mt-0.5")
+                    ui.label(
+                        "При первом запуске клиент откроет браузер — войдите в RAG Catalog "
+                        "обычным способом и введите код подтверждения. Токен сохранится автоматически."
+                    ).classes("rag-meta text-xs")
 
             async def open_install_dialog() -> None:
                 try:
@@ -1236,7 +1238,7 @@ def render_settings_screen(
                 _dl_win_link.target = f"{_base}&format=exe"
                 _dl_py_link.target = f"{_base}&format=py"
                 _run_cmd_input.set_value(
-                    f"python rag_sync_client.py --server {origin} --token {tok}"
+                    f"python rag_sync_client.py --server {origin}"
                 )
                 _install_dlg.open()
 
@@ -2056,12 +2058,12 @@ def render_settings_screen(
                                 except Exception:
                                     _origin = "http://localhost:8080"
                                 _tok = str(app.storage.user.get("auth_token") or "…").strip()
-                                _cmd = f"python rag_sync_client.py --server {_origin} --token {_tok}"
+                                _cmd = f"python rag_sync_client.py --server {_origin}"
                                 with ui.dialog() as _udlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
                                     ui.label("Установка sync-клиента").classes("text-base font-semibold")
                                     ui.label(
                                         "Скачайте установщик и запустите на своём компьютере. "
-                                        "Сервер и токен уже вписаны в установщик."
+                                        "При первом запуске откроется браузер для входа — токен не нужен."
                                     ).classes("rag-meta text-sm")
                                     ui.separator()
                                     ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
@@ -2077,7 +2079,7 @@ def render_settings_screen(
                                         "EXE: мастер настройки с полями сервера и токена."
                                     ).classes("rag-meta text-xs")
                                     ui.separator()
-                                    ui.label("Для Python-скрипта: запустить").classes("font-semibold text-sm")
+                                    ui.label("Python-скрипт: запустить (браузер откроется автоматически)").classes("font-semibold text-sm")
                                     with ui.row().classes("w-full gap-1 items-center"):
                                         _run2 = ui.input(value=_cmd).props("readonly dense outlined").classes("flex-1 font-mono text-xs")
                                         ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(f"navigator.clipboard.writeText({repr(_run2.value)})" )).props("flat dense round").tooltip("Копировать")

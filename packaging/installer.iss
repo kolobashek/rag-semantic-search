@@ -1,5 +1,7 @@
 ; RAG Sync Client — Inno Setup installer script
 ; Requires Inno Setup 6.x: https://jrsoftware.org/isinfo.php
+;
+; At first launch the client opens a browser for login — no token needed here.
 
 #define AppName "RAG Sync Client"
 #define AppVersion "1.0"
@@ -41,7 +43,6 @@ Name: "{group}\Удалить {#AppName}"; Filename: "{uninstallexe}"
 
 var
   ServerPage: TInputQueryWizardPage;
-  TokenPage: TInputQueryWizardPage;
   OptionsPage: TInputOptionWizardPage;
 
 function GetComputerName: String;
@@ -61,21 +62,14 @@ begin
     wpSelectDir,
     'Сервер RAG Catalog',
     'Укажите адрес сервера',
-    'Введите URL сервера RAG Catalog, к которому подключается этот компьютер.'
+    'Введите URL сервера RAG Catalog. Авторизация будет выполнена автоматически'
+    + ' через браузер при первом запуске.'
   );
   ServerPage.Add('Адрес сервера (например http://192.168.1.10:8080):', False);
   ServerPage.Values[0] := 'http://';
 
-  TokenPage := CreateInputQueryPage(
-    ServerPage.ID,
-    'Токен авторизации',
-    'Укажите токен для входа',
-    'Откройте веб-интерфейс RAG Catalog → профиль, скопируйте сессионный токен и вставьте сюда.'
-  );
-  TokenPage.Add('Токен:', False);
-
   OptionsPage := CreateInputOptionPage(
-    TokenPage.ID,
+    ServerPage.ID,
     'Параметры запуска',
     'Автозапуск и ярлык на рабочем столе',
     'Выберите дополнительные параметры установки:',
@@ -99,15 +93,9 @@ begin
       Result := False;
     end;
   end;
-  if CurPageID = TokenPage.ID then begin
-    if Trim(TokenPage.Values[0]) = '' then begin
-      MsgBox('Укажите токен авторизации.', mbError, MB_OK);
-      Result := False;
-    end;
-  end;
 end;
 
-procedure WriteConfigFile(Server, Token: String);
+procedure WriteConfigFile(Server: String);
 var
   ConfigDir, ConfigFile, DeviceId, Content: String;
 begin
@@ -120,7 +108,6 @@ begin
   Content :=
     '{' + #13#10 +
     '  "server": "' + Server + '",' + #13#10 +
-    '  "token": "' + Token + '",' + #13#10 +
     '  "device_id": "' + DeviceId + '",' + #13#10 +
     '  "display_name": "' + GetComputerName + ' (Windows)"' + #13#10 +
     '}';
@@ -162,10 +149,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
-    WriteConfigFile(
-      Trim(ServerPage.Values[0]),
-      Trim(TokenPage.Values[0])
-    );
+    WriteConfigFile(Trim(ServerPage.Values[0]));
     RegisterAutostart(OptionsPage.Values[0]);
     if OptionsPage.Values[1] then
       CreateDesktopShortcutEntry;
@@ -181,5 +165,5 @@ begin
 end;
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "Запустить {#AppName} сейчас"; \
-  Flags: nowait postinstall skipifsilent unchecked; Parameters: "--status"
+Filename: "{app}\{#AppExeName}"; Description: "Запустить {#AppName} сейчас (откроет браузер для входа)"; \
+  Flags: nowait postinstall skipifsilent unchecked
