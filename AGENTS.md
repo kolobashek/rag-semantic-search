@@ -8,7 +8,7 @@ This repository is shared by Codex, Claude, and the user. These rules apply to t
 - Small validated stages may be committed directly to `main` in the primary catalog.
 - Use a separate `codex/<task>` or `claude/<task>` branch only for risky, long-running, or conflicting work.
 - Do not keep parallel architecture experiments alive after a decision is made; archive or delete them.
-- `docs/cloud_drive_roadmap.md` is the source of truth for Cloud Drive task ownership and remaining work.
+- Completed roadmap/history lives in Git. Create a new roadmap only for a new large delivery phase; do not keep stale task lists as permanent docs.
 
 ## Agent Ownership
 
@@ -25,16 +25,16 @@ This repository is shared by Codex, Claude, and the user. These rules apply to t
   - admin/user settings;
   - visual states and copy;
   - client-side sync UX.
-- If an agent touches the other agent's area, keep the change narrow and update the roadmap/handoff notes.
+- If one agent touches the other agent's area, keep the change narrow and mention it in the commit message or final handoff.
 
 ## Commit Discipline
 
 - Commit after each coherent stage.
 - Push `main` after a successful stage unless the user explicitly asks to keep changes local.
 - Keep commits focused; do not mix runtime data, generated DBs, and source changes.
-- Do not commit `data/`, `runtime/`, logs, tokens, local DB WAL/SHM files, or machine-specific caches.
-- Update `docs/cloud_drive_roadmap.md` after every Cloud Drive stage.
+- Do not commit `data/`, `runtime/`, logs, tokens, local DB WAL/SHM files, storage objects, or machine-specific caches.
 - Update `README.md` only for user-facing operational changes, not for every internal refactor.
+- Keep markdown lean. Prefer updating `README.md` or this file over creating another `.md`.
 
 ## Sync Discipline
 
@@ -42,7 +42,7 @@ This repository is shared by Codex, Claude, and the user. These rules apply to t
   - `git status --short`
   - `git fetch`
   - compare local `main` with `origin/main` when needed.
-- Prefer fast-forward/pull only when the worktree is clean or the pending changes are understood.
+- Prefer fast-forward/pull only when the worktree is clean or pending changes are understood.
 - Never overwrite another agent's uncommitted work.
 - If a stash is created, immediately record why it exists and remove or archive it before ending the cleanup.
 
@@ -70,10 +70,12 @@ This repository is shared by Codex, Claude, and the user. These rules apply to t
 
 ## Handoff Notes
 
-- Use `WORKLOG.md` for significant handoffs, migrations, branch cleanup, or operational state that is not obvious from commits.
-- Record only facts that help the next agent continue:
-  - current branch/commit;
-  - active service state;
-  - known test failures;
-  - pending blockers;
-  - archived branches/stashes.
+Use commit messages and final responses for normal handoff. Create a new temporary markdown handoff only when it is genuinely needed for a long migration or incident, and delete or fold it into `README.md` when the work is complete.
+
+Record only facts that help the next agent continue:
+
+- current branch/commit;
+- active service state;
+- known test failures;
+- pending blockers;
+- archived branches/stashes.

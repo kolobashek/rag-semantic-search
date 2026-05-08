@@ -1,82 +1,156 @@
-# RAG Catalog
+# RAG Каталог
 
-Internal semantic search tool for DOCX, XLSX, XLS, and PDF catalogs.
+Внутренний каталог документов с семантическим поиском, Cloud Drive, OCR, Telegram-ботом и web-интерфейсом на NiceGUI.
 
-The project uses Qdrant for vector search, `sentence-transformers` for
-embeddings, NiceGUI for the main web UI, Streamlit as the legacy web UI, PyQt6
-for the Windows UI, and optional OCR for scanned PDF files.
+Основной стек:
 
-## Quick Start
+- Qdrant — векторная база.
+- `sentence-transformers` — embeddings.
+- NiceGUI — основной web UI на `http://127.0.0.1:8080`.
+- SQLite — telemetry, users, index state, Cloud Drive registry.
+- Tesseract + Poppler — OCR для сканов и PDF без текстового слоя.
+- Docker Compose — локальный/контейнерный запуск Qdrant, web и bot.
+
+## Быстрый Старт
 
 ```powershell
 pip install -r requirements.txt
-python index_rag.py --help
-python rag_search.py --help
-python nice_app.py
-# единый запуск сервисов (web + qdrant + telegram при необходимости)
+Copy-Item config.example.json config.json
 python -m rag_catalog.cli.launcher start
 ```
 
-Legacy Streamlit UI is still available with `streamlit run app_ui.py`.
-
-## Unified Launcher
-
-Unified launcher controls web UI, Qdrant, and Telegram bot from one command.
+Проверка статуса и остановка:
 
 ```powershell
 python -m rag_catalog.cli.launcher status
-python -m rag_catalog.cli.launcher start
 python -m rag_catalog.cli.launcher stop
 python -m rag_catalog.cli.launcher restart
 ```
 
-Behavior:
+Лаунчер поднимает:
 
-- starts web UI on `127.0.0.1:8080`
-- starts local Docker Qdrant only when `qdrant_url` points to local host and port is down
-- skips bot by default if `telegram_enabled=false` or token is empty
+- web UI на `127.0.0.1:8080`;
+- локальный Docker Qdrant, если `qdrant_url` указывает на localhost и порт не занят;
+- Telegram-бот, если `telegram_enabled=true` и задан токен.
 
-Use `config.example.json` as the template for local machine settings in
-`config.json`. Keep real tokens, paths, logs, databases, and build artifacts out
-of Git.
+Legacy entrypoints сохранены как совместимые shims:
 
-Docker deployment is available via `docker-compose.yml`; see `docs/DOCKER.md`.
+```powershell
+python nice_app.py
+python index_rag.py --help
+python rag_search.py --help
+python telegram_bot.py
+```
 
-## OCR Runtime (Bundled Tools)
+## Конфигурация
 
-OCR does not depend on global `PATH` anymore if binaries are placed in project
-`tools/`:
+Рабочий файл — `config.json`, шаблон — `config.example.json`.
 
-- `tools/tesseract/tesseract.exe` (or `tools/tesseract/bin/tesseract.exe`)
-- `tools/poppler/Library/bin` (or `tools/poppler/bin`)
+Минимально проверить:
 
-Optional explicit overrides in `config.json`:
+- `catalog_path` — исходный каталог документов.
+- `qdrant_url` — Qdrant endpoint, обычно `http://localhost:6333`.
+- `qdrant_db_path` — локальное состояние индекса.
+- `telemetry_db_path`, `user_db_path` — локальные SQLite БД.
+- `telegram_enabled`, `telegram_bot_token`, `telegram_bot_link` — если нужен бот.
+- `cloud_drive_enabled`, `cloud_drive_db_path`, `cloud_drive_storage_root` — если нужен Cloud Drive.
+
+Не коммитить реальные токены, локальные базы, storage, логи и runtime-state.
+
+## Архитектура
+
+Ключевая структура:
+
+```text
+src/rag_catalog/core/          search, indexing, OCR, auth, telemetry, cloud drive
+src/rag_catalog/core/indexing/ indexing stages and stage runner
+src/rag_catalog/core/retrieval retrieval v2, fusion, rerank path
+src/rag_catalog/ui/            NiceGUI screens, API routes, helpers
+src/rag_catalog/integrations/  Telegram integration
+src/rag_catalog/cli/           launcher and CLI entrypoints
+assets/brand/                  logo, favicon, brand assets and design notes
+scripts/                       maintenance scripts
+packaging/                     PyInstaller specs
+```
+
+Root-level Python files are compatibility shims. New code should import package modules directly, for example:
+
+```python
+from rag_catalog.core.rag_core import RAGSearcher, load_config
+from rag_catalog.core.cloud_drive import CloudDriveService
+```
+
+## Индексация
+
+Основные стадии:
+
+| Stage | Что делает | Когда использовать |
+|---|---|---|
+| `metadata` | имена, пути, размеры, даты | быстрый старт поиска по названиям |
+| `small` | содержимое DOCX/XLSX/XLS и небольших PDF | основной полнотекстовый слой |
+| `large` | большие PDF, сканы, OCR | полное покрытие тяжёлых файлов |
+| `all` | все стадии | первичный или полный прогон |
+
+Команды:
+
+```powershell
+python index_rag.py --stage metadata
+python index_rag.py --stage small
+python index_rag.py --stage large
+python index_rag.py --stage all
+python index_rag.py --cleanup
+python index_rag.py --recreate --stage all
+```
+
+Индексное состояние хранится в SQLite `index_state.db`, а не в JSON. Это снижает риск file-lock ошибок на Windows и позволяет безопаснее продолжать долгие прогоны.
+
+## OCR
+
+Рекомендуемый вариант — portable binaries внутри проекта:
+
+```text
+tools/tesseract/tesseract.exe
+tools/tesseract/bin/tesseract.exe
+tools/poppler/Library/bin/*
+tools/poppler/bin/*
+```
+
+Явные override в `config.json`:
 
 - `ocr_tesseract_cmd`
 - `ocr_poppler_bin`
 
+Или через env:
+
+- `RAG_TESSERACT_CMD`
+- `RAG_POPPLER_BIN`
+
+Проверка:
+
+```powershell
+tesseract --version
+pdftoppm -v
+python ocr_pdfs.py --url http://localhost:6333
+```
+
 ## Cloud Drive
 
-Cloud Drive adds a central registry of folders/files plus a managed storage backend.
+Cloud Drive — registry-backed файловый слой: папки, файлы, версии, storage backend, jobs, sync contracts и интеграция с поиском.
 
-Current supported backends:
+Поддержано:
 
-- `local`
-- `s3` / `minio` (backend contract and health-check; production rollout still in progress)
+- local storage;
+- S3/MinIO adapter contract, healthcheck, presigned download path;
+- bootstrap/import metadata and files;
+- upload/download/versions;
+- create folder, rename, move;
+- soft delete, trash, restore;
+- immutable storage keys and checksum dedup;
+- reindex and cleanup jobs;
+- sync clients, folder pairs, selective sync, conflicts;
+- Cloud Drive hints in search and registry-backed explorer.
 
-Main config keys in `config.json`:
-
-- `cloud_drive_enabled`
-- `cloud_drive_db_path`
-- `cloud_drive_storage`
-- `cloud_drive_storage_root`
-- `cloud_drive_bucket`
-- `cloud_drive_s3_endpoint`
-- `cloud_drive_s3_region`
-- `cloud_drive_s3_access_key`
-- `cloud_drive_s3_secret_key`
-
-Quick start:
+CLI:
 
 ```powershell
 python cloud_drive.py init --enable
@@ -86,38 +160,149 @@ python cloud_drive.py bootstrap --max-files 1000
 
 Admin UI:
 
-- `Settings -> Cloud Drive`
-- actions: `Инициализировать реестр`, `Статистика`, `Импортировать структуру`, `Импортировать структуру и файлы`
+- `Настройки -> Cloud Drive`
+- `Настройки -> Sync клиент`
 
-Current API endpoints:
+Основные API группы:
 
-- `GET /api/cloud-drive/node`
-- `GET /api/cloud-drive/list`
-- `POST /api/cloud-drive/folders`
-- `POST /api/cloud-drive/upload`
-- `GET /api/cloud-drive/download`
-- `GET /api/cloud-drive/versions`
-- `POST /api/cloud-drive/move`
-- `POST /api/cloud-drive/rename`
-- `POST /api/cloud-drive/delete`
-- `POST /api/cloud-drive/reindex`
-- `GET /api/cloud-drive/jobs`
-- `GET /api/cloud-drive/job`
-- `GET /api/cloud-drive/job-latest`
-- `GET /api/cloud-drive/bootstrap-status`
-- `GET /api/cloud-drive/bootstrap-jobs`
-- `GET /api/cloud-drive/storage-health`
+```text
+GET  /api/cloud-drive/node
+GET  /api/cloud-drive/list
+POST /api/cloud-drive/folders
+POST /api/cloud-drive/upload
+GET  /api/cloud-drive/download
+GET  /api/cloud-drive/versions
+POST /api/cloud-drive/move
+POST /api/cloud-drive/rename
+POST /api/cloud-drive/delete
+GET  /api/cloud-drive/trash
+POST /api/cloud-drive/restore
+POST /api/cloud-drive/reindex
+GET  /api/cloud-drive/jobs
+GET  /api/cloud-drive/changes
+GET  /api/cloud-drive/storage-health
+/api/cloud-drive/sync/*
+```
 
-## Documentation
+## Поиск И RAG
 
-- Full Russian operations guide: `ИНСТРУКЦИЯ.md`
-- Architecture notes: `docs/ARCHITECTURE.md`
-- Development checks: `docs/DEVELOPMENT.md`
+Доступно:
 
-## Checks
+- быстрые совпадения по именам папок/файлов;
+- semantic search через Qdrant;
+- retrieval v2 feature flags;
+- lexical/BM25 metadata channel;
+- RRF fusion;
+- optional reranker;
+- grouping by document;
+- query expansion через LLM feature flag;
+- RAG answer mode with citations and weak-source fallback;
+- Telegram assistant mode.
+
+CLI:
 
 ```powershell
-python -m pytest -q tests
-python -m py_compile app_ui.py nice_app.py rag_core.py index_rag.py telegram_bot.py windows_app.py run_automation.py
-python test_imports.py
+python rag_search.py --query "карточка предприятия" --limit 10
+python rag_search.py --query "паспорт" --type .pdf --limit 5
+python rag_search.py --url http://localhost:6333 --query "PC300"
 ```
+
+## Docker
+
+Подготовка:
+
+```powershell
+Copy-Item config.docker.example.json config.docker.json
+```
+
+Запуск web + Qdrant:
+
+```powershell
+docker compose up -d --build qdrant web
+```
+
+Telegram bot:
+
+```powershell
+docker compose --profile bot up -d --build bot
+```
+
+Indexer:
+
+```powershell
+docker compose --profile tools run --rm indexer
+```
+
+Логи и остановка:
+
+```powershell
+docker compose logs -f web
+docker compose down
+```
+
+Если каталог в контейнере монтируется не тем же путём, лучше переиндексировать из контейнера, чтобы пути в Qdrant соответствовали runtime окружению.
+
+## Runtime Данные
+
+Не коммитятся:
+
+```text
+data/
+runtime/
+logs/
+tools/tesseract/
+tools/poppler/
+*.db
+*.db-wal
+*.db-shm
+config.json
+config.docker.json
+```
+
+Типичные локальные данные:
+
+| Что | Где |
+|---|---|
+| telemetry/users/index state/cloud drive DB | `data/` |
+| launcher state and pid files | `runtime/` |
+| logs | `logs/` |
+| Cloud Drive local storage | `data/cloud_storage` |
+
+## Проверки
+
+Полный прогон:
+
+```powershell
+python -m pytest -q
+```
+
+Быстрая проверка entrypoints/modules:
+
+```powershell
+python -m py_compile app_ui.py nice_app.py rag_core.py index_rag.py telegram_bot.py windows_app.py run_automation.py
+python -m pytest -q tests\test_entrypoints.py
+```
+
+Cloud Drive focused tests:
+
+```powershell
+python -m pytest -q tests\test_cloud_drive_registry.py tests\test_cloud_drive_storage.py tests\test_nice_app_explorer.py
+```
+
+Cleanup локальных артефактов:
+
+```powershell
+.\scripts\clean_project.ps1
+```
+
+## Статус Roadmap
+
+Предыдущий Cloud Drive roadmap закрыт. История сохранена в Git. Новый roadmap стоит заводить только под следующий крупный этап, чтобы документация не дублировала выполненную работу.
+
+Кандидаты для следующего этапа:
+
+- production-hardening sync client;
+- deeper structural chunking for DOCX/PDF/XLSX;
+- Qdrant sparse vector path;
+- stronger RAG verifier for conflicting sources;
+- UI polish after реального использования Cloud Drive.

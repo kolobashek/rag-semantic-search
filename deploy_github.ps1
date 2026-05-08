@@ -39,7 +39,8 @@ $FILES = @(
     "monitor_index.ps1",
     "run_after_index.ps1",
     ".gitignore",
-    "ИНСТРУКЦИЯ.md"
+    "README.md",
+    "AGENTS.md"
 )
 foreach ($f in $FILES) {
     if (Test-Path $f) { git add $f }
