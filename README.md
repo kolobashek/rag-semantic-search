@@ -239,6 +239,28 @@ Copy-Item config.docker.example.json config.docker.json
 docker compose up -d --build qdrant web
 ```
 
+### Docker + MinIO (S3 storage for Cloud Drive)
+
+Если хочешь S3-совместимое хранилище “вместе с окружением”, подними MinIO через compose profile `storage`:
+
+```powershell
+docker compose --profile storage up -d minio minio-init
+```
+
+По умолчанию MinIO поднимается на:
+
+- S3 API: `http://localhost:9000`
+- Console: `http://localhost:9001` (логин/пароль берутся из `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`)
+
+Шаблон `config.docker.example.json` уже настроен на MinIO (`cloud_drive_storage=s3`, endpoint `http://minio:9000`, bucket `rag-catalog`).
+Скопируй его в `config.docker.json` и при необходимости переопредели credentials через env vars:
+
+```powershell
+$env:MINIO_ROOT_USER = "minioadmin"
+$env:MINIO_ROOT_PASSWORD = "minioadmin123"
+$env:MINIO_BUCKET = "rag-catalog"
+```
+
 Telegram bot:
 
 ```powershell
