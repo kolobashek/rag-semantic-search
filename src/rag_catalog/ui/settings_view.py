@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 from nicegui import app, run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
-from rag_catalog.core.rag_core import load_config
+from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .helpers import (
