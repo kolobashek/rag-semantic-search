@@ -62,7 +62,7 @@ _REGISTRY_KEY = r"Software\RAGSyncClient"
 
 
 def _read_registry_config() -> Dict[str, Any]:
-    """Read server/token written by MSI installer from HKCU registry (Windows only)."""
+    """Read values written by MSI installer from HKCU registry (Windows only)."""
     if platform.system() != "Windows":
         return {}
     try:
@@ -74,8 +74,8 @@ def _read_registry_config() -> Dict[str, Any]:
                 except FileNotFoundError:
                     return ""
             return {
-                "server": _val("Server"),
-                "token": _val("Token"),
+                "server": _val("Server"),          # may be empty — asked interactively
+                "local_sync_path": _val("LocalSyncPath"),
                 "device_id": _val("DeviceId"),
                 "display_name": _val("DisplayName"),
             }
@@ -101,12 +101,11 @@ def save_config(path: Path, cfg: Dict[str, Any]) -> None:
 
 # ─── Device Auth Flow ─────────────────────────────────────────────────────────
 
-def device_auth_flow(server: str) -> Optional[str]:
+def device_auth_flow(server: str) -> Dict[str, Any]:
     """
-    Perform browser-based device authorization (RFC 8628-style).
-    Opens the server's /auth/device page in the browser, displays the user
-    code, then polls until the user approves or the code expires.
-    Returns the session token on success, None on failure.
+    Browser-based device authorization (RFC 8628-style).
+    Returns {"token": ..., "server": ...} on success, {} on failure.
+    The server URL in the response is the canonical URL from the server itself.
     """
     try:
         r = requests.post(f"{server}/api/auth/device/code", timeout=10)
@@ -114,7 +113,7 @@ def device_auth_flow(server: str) -> Optional[str]:
         data = r.json()
     except Exception as exc:
         log.error("Не удалось запросить код устройства: %s", exc)
-        return None
+        return {}
 
     device_code = str(data.get("device_code") or "")
     user_code   = str(data.get("user_code") or "")
@@ -147,21 +146,25 @@ def device_auth_flow(server: str) -> Optional[str]:
                 timeout=10,
             )
             if r.status_code == 200:
-                token = str(r.json().get("token") or "")
+                body = r.json()
+                token = str(body.get("token") or "")
                 if token:
                     log.info("Авторизация выполнена успешно.")
-                    return token
+                    return {
+                        "token": token,
+                        "server": str(body.get("server") or server),
+                    }
             elif r.status_code == 428:
                 log.debug("Ожидание подтверждения в браузере...")
             else:
                 detail = r.json().get("detail", str(r.status_code))
                 log.error("Авторизация отклонена: %s", detail)
-                return None
+                return {}
         except Exception as exc:
             log.warning("Ошибка при проверке токена: %s", exc)
 
     log.error("Время ожидания подтверждения истекло (5 мин). Перезапустите клиент.")
-    return None
+    return {}
 
 
 # ─── API client ───────────────────────────────────────────────────────────────
@@ -495,6 +498,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--token", metavar="TOKEN", help="API-токен (сессионный токен пользователя)")
     p.add_argument("--device-id", metavar="ID", help="Уникальный ID устройства (создаётся автоматически)")
     p.add_argument("--display-name", metavar="NAME", help="Отображаемое имя устройства")
+    p.add_argument("--local-path", metavar="DIR", help="Папка для локального образа (создаётся автоматически)")
     p.add_argument("--config", metavar="PATH", default=str(DEFAULT_CONFIG_FILE), help="Путь к файлу конфигурации")
     p.add_argument("--status", action="store_true", help="Показать статус и выйти")
     p.add_argument("--verbose", "-v", action="store_true", help="Подробный вывод")
@@ -531,9 +535,19 @@ def main() -> None:
     server = str(cfg.get("server") or "").rstrip("/")
     token  = str(cfg.get("token") or "")
 
+    # ── If no server URL yet, ask once interactively ──────────────────────────
     if not server:
-        print("Ошибка: нужно указать --server (или сохранить в конфиге).", file=sys.stderr)
-        sys.exit(1)
+        print()
+        print("Адрес сервера RAG Catalog не настроен.")
+        try:
+            server = input("  Введите URL (например http://192.168.1.10:8080): ").strip().rstrip("/")
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(0)
+        if not server:
+            print("Отмена.", file=sys.stderr)
+            sys.exit(1)
+        cfg["server"] = server
+        save_config(config_path, cfg)
 
     if not cfg.get("device_id"):
         cfg["device_id"] = str(uuid.uuid4())
@@ -541,18 +555,25 @@ def main() -> None:
     if not cfg.get("display_name"):
         cfg["display_name"] = f"{platform.node()} ({platform.system()})"
 
+    def _do_device_auth() -> str:
+        log.info("Запускаем авторизацию через браузер...")
+        result = device_auth_flow(server)
+        if not result:
+            sys.exit(1)
+        # Update server to canonical URL returned by server
+        if result.get("server"):
+            cfg["server"] = result["server"]
+        cfg["token"] = result["token"]
+        save_config(config_path, cfg)
+        return result["token"]
+
     # ── Auth: device flow on first run or after token expiry ──────────────────
     if not token:
-        log.info("Токен не найден — запускаем авторизацию через браузер...")
-        token = device_auth_flow(server)
-        if not token:
-            sys.exit(1)
-        cfg["token"] = token
-        save_config(config_path, cfg)
+        token = _do_device_auth()
 
     api = SyncAPIClient(server, token)
 
-    # Register / heartbeat ─────────────────────────────────────────────────────
+    # Register — retry with fresh device auth on 401 ──────────────────────────
     log.info("Подключение к серверу %s ...", server)
     try:
         client_info = api.register(
@@ -562,14 +583,10 @@ def main() -> None:
         )
     except requests.HTTPError as exc:
         if exc.response is not None and exc.response.status_code == 401:
-            log.warning("Токен недействителен или истёк — повторная авторизация...")
+            log.warning("Токен истёк — повторная авторизация...")
             cfg.pop("token", None)
             save_config(config_path, cfg)
-            token = device_auth_flow(server)
-            if not token:
-                sys.exit(1)
-            cfg["token"] = token
-            save_config(config_path, cfg)
+            token = _do_device_auth()
             api = SyncAPIClient(server, token)
             client_info = api.register(
                 device_id=cfg["device_id"],
@@ -594,6 +611,31 @@ def main() -> None:
     except Exception as exc:
         log.error("Ошибка получения sync-пар: %s", exc)
         sys.exit(1)
+
+    # Auto-create a default pair if installer set a local path and no pairs exist
+    local_sync_path = str(cfg.get("local_sync_path") or args.local_path or "").strip()
+    if local_sync_path and not pairs:
+        lp = Path(local_sync_path)
+        try:
+            lp.mkdir(parents=True, exist_ok=True)
+            result = api.session.post(
+                f"{api.base}/api/cloud-drive/sync/pairs",
+                params={
+                    "client_id": client_id,
+                    "local_path": str(lp),
+                    "cloud_path": "",
+                    "conflict_policy": "ask",
+                    "enabled": True,
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            if result.ok:
+                pairs = api.get_pairs(client_id)
+                log.info("Создана пара синхронизации: %s ↔ (root)", lp)
+            else:
+                log.warning("Не удалось создать пару синхронизации: %s", result.text[:120])
+        except Exception as exc:
+            log.warning("Ошибка при создании пары синхронизации: %s", exc)
 
     if not pairs:
         log.warning("Sync-пары не настроены. Настройте их на сервере в разделе Cloud Drive → Clients.")

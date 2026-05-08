@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Dict, List
 
-from fastapi import File, Header, HTTPException, UploadFile
+from fastapi import File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from nicegui import app
 
@@ -134,25 +134,10 @@ def _serialize_cloud_drive_job(job: Any) -> Dict[str, Any]:
 # ─────────────────────────── Device auth endpoints ───────────────────────────
 
 @app.post("/api/auth/device/code")
-def api_device_code(request: Any = None) -> Dict[str, Any]:
+def api_device_code(request: Request) -> Dict[str, Any]:
     """Create a device code pair for browser-based auth. No credentials required."""
     from . import device_auth as _da
-    from starlette.requests import Request as StarletteRequest
-    # Derive server base URL from the request
-    try:
-        import inspect
-        frame_locals = inspect.currentframe().f_back.f_locals if inspect.currentframe() else {}
-        scope = frame_locals.get("scope") or {}
-    except Exception:
-        scope = {}
-    try:
-        from nicegui import app as _napp
-        # Best-effort: use stored base or fall back
-        base = str(getattr(_napp, "_server_base_url", "") or "")
-    except Exception:
-        base = ""
-    if not base:
-        base = "http://localhost:8080"
+    base = str(request.base_url).rstrip("/")
     return _da.create_code(base)
 
 
@@ -170,8 +155,12 @@ def api_device_token(device_code: str = "") -> Dict[str, Any]:
         raise HTTPException(status_code=428, detail="authorization_pending")
     if status in ("expired", "denied"):
         raise HTTPException(status_code=400, detail=status)
-    # approved
-    return {"token": result["token"], "username": result["username"]}
+    # approved — include canonical server URL so client can save it
+    return {
+        "token": result["token"],
+        "username": result["username"],
+        "server": result.get("server"),
+    }
 
 
 # ─────────────────────────── API routes ─────────────────────────────────────

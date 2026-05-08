@@ -29,6 +29,7 @@ def _cleanup() -> None:
 def create_code(server_base: str) -> Dict[str, Any]:
     _cleanup()
     device_code = secrets.token_urlsafe(24)
+    base = server_base.rstrip("/")
     with _lock:
         existing_ucs = {v["user_code"] for v in _store.values()}
         uc = _user_code()
@@ -39,9 +40,10 @@ def create_code(server_base: str) -> Dict[str, Any]:
             "status": "pending",   # pending | approved | denied | expired
             "token": None,
             "username": None,
+            "server_base": base,
             "expires_at": time.monotonic() + EXPIRE_SECONDS,
         }
-    verify_url = f"{server_base.rstrip('/')}/auth/device"
+    verify_url = f"{base}/auth/device"
     return {
         "device_code": device_code,
         "user_code": uc,
@@ -72,8 +74,10 @@ def poll_token(device_code: str) -> Dict[str, Any]:
             return {"status": "not_found"}
         if rec["status"] == "pending" and rec["expires_at"] < time.monotonic():
             rec["status"] = "expired"
+        approved = rec["status"] == "approved"
         return {
             "status": rec["status"],
-            "token": rec["token"] if rec["status"] == "approved" else None,
-            "username": rec["username"] if rec["status"] == "approved" else None,
+            "token": rec["token"] if approved else None,
+            "username": rec["username"] if approved else None,
+            "server": rec.get("server_base") if approved else None,
         }
