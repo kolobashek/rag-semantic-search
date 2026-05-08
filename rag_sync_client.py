@@ -2,7 +2,7 @@
 """
 rag_sync_client.py — Standalone sync agent for RAG Catalog Cloud Drive.
 
-Install deps:  pip install requests watchdog
+Install deps:  pip install requests watchdog pystray Pillow
 Run:           python rag_sync_client.py --server http://host:8080 --token TOKEN
                python rag_sync_client.py        # uses saved ~/.rag_sync/config.json
                python rag_sync_client.py --status  # print status and exit
@@ -17,6 +17,7 @@ import os
 import platform
 import queue
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -36,7 +37,16 @@ try:
 except ImportError:
     HAS_WATCHDOG = False
 
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    HAS_TRAY = True
+except ImportError:
+    HAS_TRAY = False
+
 # ─── Constants ────────────────────────────────────────────────────────────────
+
+CLIENT_VERSION = "1.1.0"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".rag_sync"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
@@ -46,6 +56,7 @@ HEARTBEAT_INTERVAL = 60   # seconds between heartbeats
 UPLOAD_DEBOUNCE = 2.0     # seconds after last FS event before uploading
 UPLOAD_WORKERS = 3        # parallel upload threads
 REQUEST_TIMEOUT = 30      # seconds per HTTP request
+UPDATE_CHECK_INTERVAL = 24 * 3600   # check for updates every 24 h
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -526,22 +537,276 @@ def changes_poll_loop(api: SyncAPIClient, pairs: List[Dict[str, Any]],
 
 # ─── Heartbeat loop ───────────────────────────────────────────────────────────
 
-def heartbeat_loop(api: SyncAPIClient, client_id: str, stop: threading.Event) -> None:
+def heartbeat_loop(api: SyncAPIClient, client_id: str, stop: threading.Event,
+                   on_status_change: Optional[Any] = None) -> None:
     consecutive_errors = 0
     while not stop.wait(HEARTBEAT_INTERVAL):
         try:
             api.heartbeat(client_id)
             if consecutive_errors > 0:
                 log.info("Соединение с сервером восстановлено.")
+                if on_status_change:
+                    on_status_change("online")
                 consecutive_errors = 0
             log.debug("Heartbeat OK")
         except (requests.ConnectionError, requests.Timeout):
             consecutive_errors += 1
             if consecutive_errors == 1:
                 log.warning("Сервер недоступен (heartbeat). Жду восстановления...")
+                if on_status_change:
+                    on_status_change("offline")
         except Exception as exc:
             consecutive_errors += 1
             log.warning("Heartbeat ошибка: %s", exc)
+
+# ─── Auto-update ──────────────────────────────────────────────────────────────
+
+def _version_gt(a: str, b: str) -> bool:
+    def _parts(v: str) -> tuple:
+        try:
+            return tuple(int(x) for x in v.split(".")[:3])
+        except ValueError:
+            return (0,)
+    return _parts(a) > _parts(b)
+
+
+def check_for_update(server: str) -> Optional[Dict[str, Any]]:
+    """Query server for latest client version. Returns update info or None."""
+    try:
+        r = requests.get(f"{server}/api/sync-client/version", timeout=10)
+        if not r.ok:
+            return None
+        data = r.json()
+        server_ver = str(data.get("version") or "")
+        if server_ver and _version_gt(server_ver, CLIENT_VERSION):
+            return {
+                "version": server_ver,
+                "download_url": str(
+                    data.get("download_url") or
+                    f"{server}/api/cloud-drive/sync/client-download?format=exe"
+                ),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def update_check_loop(server: str, stop: threading.Event,
+                      on_update_found: Any) -> None:
+    """Periodically check for updates and call on_update_found(info) when found."""
+    # First check shortly after startup
+    if stop.wait(30):
+        return
+    info = check_for_update(server)
+    if info:
+        on_update_found(info)
+    while not stop.wait(UPDATE_CHECK_INTERVAL):
+        info = check_for_update(server)
+        if info:
+            on_update_found(info)
+
+
+def do_self_update(download_url: str, token: str) -> bool:
+    """Download new exe, schedule replacement via batch script, return True if launched."""
+    log.info("Скачиваем обновление...")
+    try:
+        r = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=300,
+            stream=True,
+        )
+        r.raise_for_status()
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=".exe", dir=tempfile.gettempdir()
+        ) as tmp:
+            for chunk in r.iter_content(65536):
+                tmp.write(chunk)
+            new_exe = Path(tmp.name)
+        log.info("Обновление загружено: %s", new_exe)
+    except Exception as exc:
+        log.error("Ошибка загрузки обновления: %s", exc)
+        return False
+
+    # Path to the currently running executable
+    if getattr(sys, "frozen", False):
+        current_exe = Path(sys.executable)
+    else:
+        current_exe = Path(__file__).resolve()
+
+    if platform.system() == "Windows":
+        _launch_windows_updater(new_exe, current_exe)
+    else:
+        try:
+            import shutil
+            shutil.copy2(str(new_exe), str(current_exe))
+            new_exe.unlink(missing_ok=True)
+            log.info("Обновление установлено. Перезапустите клиент.")
+            return True
+        except Exception as exc:
+            log.error("Ошибка установки обновления: %s", exc)
+            return False
+    return True
+
+
+def _launch_windows_updater(new_exe: Path, current_exe: Path) -> None:
+    bat = Path(tempfile.gettempdir()) / "_rag_sync_update.bat"
+    pid = os.getpid()
+    bat.write_text(
+        "@echo off\n"
+        ":wait\n"
+        f"tasklist /FI \"PID eq {pid}\" 2>NUL | find \"{pid}\" >NUL\n"
+        "if not errorlevel 1 (timeout /t 1 /nobreak >NUL & goto wait)\n"
+        f"copy /y \"{new_exe}\" \"{current_exe}\"\n"
+        f"del \"{new_exe}\"\n"
+        f"start \"\" \"{current_exe}\"\n",
+        encoding="ascii",
+    )
+    subprocess.Popen(
+        ["cmd", "/c", str(bat)],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        close_fds=True,
+    )
+    log.info("Установщик обновления запущен. Клиент перезапустится автоматически.")
+
+# ─── Tray icon ────────────────────────────────────────────────────────────────
+
+_TRAY_COLORS: Dict[str, tuple] = {
+    "connecting": (245, 166,  35),   # orange
+    "online":     ( 39, 174,  96),   # green
+    "offline":    (231,  76,  60),   # red
+    "updating":   ( 52, 152, 219),   # blue
+}
+_TRAY_LABELS: Dict[str, str] = {
+    "connecting": "Подключение...",
+    "online":     "Подключён",
+    "offline":    "Нет связи",
+    "updating":   "Обновление...",
+}
+
+
+def _make_tray_image(status: str) -> "Image.Image":
+    size = 64
+    color = _TRAY_COLORS.get(status, (128, 128, 128))
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    # Outer circle — filled with status color
+    draw.ellipse([2, 2, size - 2, size - 2], fill=color)
+    # White "R" letter as simple shapes (no font dependency)
+    cx, cy = size // 2, size // 2
+    # Vertical bar of R
+    draw.rectangle([cx - 10, cy - 14, cx - 4, cy + 14], fill=(255, 255, 255))
+    # Top arch of R
+    draw.arc([cx - 10, cy - 14, cx + 10, cy + 2], start=270, end=90, fill=(255, 255, 255), width=6)
+    # Leg of R
+    draw.line([cx - 4, cy + 2, cx + 10, cy + 14], fill=(255, 255, 255), width=6)
+    return img
+
+
+class TrayManager:
+    """Manages the system-tray icon, status updates, and update notifications."""
+
+    def __init__(self, open_path: Optional[Path], get_token: Any, server: str) -> None:
+        self._open_path = open_path
+        self._get_token = get_token   # callable → str
+        self._server = server
+        self._status = "connecting"
+        self._update_info: Optional[Dict[str, Any]] = None
+        self._icon: Optional[Any] = None   # pystray.Icon
+
+    # ── Public API ───────────────────────────────────────────────────────────
+
+    def set_status(self, status: str) -> None:
+        self._status = status
+        if self._icon:
+            label = _TRAY_LABELS.get(status, status)
+            self._icon.icon = _make_tray_image(status)
+            self._icon.title = f"RAG Sync — {label}"
+            self._icon.update_menu()
+
+    def notify_update(self, info: Dict[str, Any]) -> None:
+        self._update_info = info
+        log.info("Доступно обновление: v%s → v%s", CLIENT_VERSION, info["version"])
+        if self._icon:
+            self._icon.update_menu()
+
+    def run(self, on_quit: Any) -> None:
+        """Start tray icon on the calling thread (blocks until exit)."""
+        self._on_quit = on_quit
+        self._icon = pystray.Icon(
+            "RAGSync",
+            _make_tray_image("connecting"),
+            f"RAG Sync — {_TRAY_LABELS['connecting']}",
+            menu=self._build_menu(),
+        )
+        self._icon.run()
+
+    def stop(self) -> None:
+        if self._icon:
+            self._icon.stop()
+
+    # ── Menu ─────────────────────────────────────────────────────────────────
+
+    def _build_menu(self) -> "pystray.Menu":
+        return pystray.Menu(
+            pystray.MenuItem(
+                lambda _: f"RAG Sync v{CLIENT_VERSION}  •  {_TRAY_LABELS.get(self._status, self._status)}",
+                None,
+                enabled=False,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                "Открыть папку синхронизации",
+                self._action_open_folder,
+                default=True,
+                enabled=lambda _: bool(self._open_path),
+            ),
+            pystray.MenuItem(
+                lambda _: (
+                    f"↑ Обновить до v{self._update_info['version']}"
+                    if self._update_info else "Нет обновлений"
+                ),
+                self._action_update,
+                enabled=lambda _: bool(self._update_info),
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Выйти", self._action_quit),
+        )
+
+    # ── Actions ──────────────────────────────────────────────────────────────
+
+    def _action_open_folder(self, icon: Any, item: Any) -> None:
+        if not self._open_path:
+            return
+        p = str(self._open_path)
+        try:
+            if platform.system() == "Windows":
+                subprocess.Popen(["explorer", p])
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", p])
+            else:
+                subprocess.Popen(["xdg-open", p])
+        except Exception as exc:
+            log.warning("Не удалось открыть папку: %s", exc)
+
+    def _action_update(self, icon: Any, item: Any) -> None:
+        if not self._update_info:
+            return
+        info = self._update_info
+        self._update_info = None
+        self.set_status("updating")
+        token = self._get_token()
+        ok = do_self_update(info["download_url"], token)
+        if ok and platform.system() == "Windows":
+            # Updater script will restart us after we exit
+            self._action_quit(icon, item)
+        else:
+            self.set_status(self._status if self._status != "updating" else "online")
+
+    def _action_quit(self, icon: Any, item: Any) -> None:
+        icon.stop()
+        if hasattr(self, "_on_quit"):
+            self._on_quit()
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -561,6 +826,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--status", action="store_true", help="Показать статус и выйти")
     p.add_argument("--verbose", "-v", action="store_true", help="Подробный вывод")
     p.add_argument("--log-file", metavar="PATH", help="Записывать лог в файл")
+    p.add_argument("--no-tray", action="store_true", help="Запустить без иконки в трее")
     return p.parse_args()
 
 
@@ -718,7 +984,19 @@ def main() -> None:
             print(f"  {p['local_path']} ↔ {p.get('cloud_path') or '(root)'} [{p.get('conflict_policy', 'ask')}]")
         return
 
-    # Start upload queue + watchdog ────────────────────────────────────────────
+    # ── Tray setup ────────────────────────────────────────────────────────────
+    use_tray = HAS_TRAY and not args.no_tray
+    open_path = Path(pairs[0]["local_path"]) if pairs else None
+    tray: Optional[TrayManager] = None
+
+    if use_tray:
+        tray = TrayManager(
+            open_path=open_path,
+            get_token=lambda: str(cfg.get("token") or ""),
+            server=server,
+        )
+
+    # ── Start upload queue + watchdog ─────────────────────────────────────────
     upload_q = UploadQueue(api)
     upload_q.start()
 
@@ -726,7 +1004,19 @@ def main() -> None:
 
     stop = threading.Event()
 
-    # Start background loops ───────────────────────────────────────────────────
+    # ── Heartbeat — reports online/offline to tray ────────────────────────────
+    def _on_hb_status_change(status: str) -> None:
+        if tray:
+            tray.set_status(status)
+
+    hb_thread = threading.Thread(
+        target=heartbeat_loop,
+        args=(api, client_id, stop, _on_hb_status_change),
+        daemon=True,
+        name="heartbeat",
+    )
+    hb_thread.start()
+
     poll_thread = threading.Thread(
         target=changes_poll_loop,
         args=(api, pairs, client_id, stop),
@@ -735,17 +1025,23 @@ def main() -> None:
     )
     poll_thread.start()
 
-    hb_thread = threading.Thread(
-        target=heartbeat_loop,
-        args=(api, client_id, stop),
+    # ── Update check ──────────────────────────────────────────────────────────
+    def _on_update_found(info: Dict[str, Any]) -> None:
+        if tray:
+            tray.notify_update(info)
+
+    upd_thread = threading.Thread(
+        target=update_check_loop,
+        args=(server, stop, _on_update_found),
         daemon=True,
-        name="heartbeat",
+        name="update-checker",
     )
-    hb_thread.start()
+    upd_thread.start()
 
-    log.info("Sync-агент запущен. Ctrl+C для остановки.")
+    log.info("Sync-агент запущен. %s",
+             "Иконка доступна в трее." if use_tray else "Ctrl+C для остановки.")
 
-    def _shutdown(signum: int, frame: Any) -> None:
+    def _shutdown(signum: int = 0, frame: Any = None) -> None:
         log.info("Остановка...")
         stop.set()
         if observer:
@@ -760,12 +1056,16 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Main thread waits ────────────────────────────────────────────────────────
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        _shutdown(0, None)
+    # ── Main thread: run tray (blocks) or simple wait loop ────────────────────
+    if use_tray and tray:
+        tray.set_status("online")
+        tray.run(on_quit=_shutdown)   # blocks until user clicks "Выйти"
+    else:
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            _shutdown()
 
 
 if __name__ == "__main__":

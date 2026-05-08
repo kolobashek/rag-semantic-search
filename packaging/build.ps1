@@ -74,8 +74,8 @@ if (-not $SkipPyInstaller) {
         if ($LASTEXITCODE -ne 0) { Write-Error "Failed to install PyInstaller"; exit 1 }
     }
 
-    # Ensure watchdog is installed (required by the client)
-    & $PythonExe -m pip install requests watchdog --quiet
+    # Ensure client dependencies are installed
+    & $PythonExe -m pip install requests watchdog pystray Pillow --quiet
 
     Push-Location $ProjectDir
     try {

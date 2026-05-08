@@ -10,11 +10,15 @@ a = Analysis(
         'watchdog.observers.winapi',
         'watchdog.observers.read_directory_changes',
         'watchdog.observers.polling',
+        'pystray._win32',
+        'PIL._imaging',
+        'PIL.Image',
+        'PIL.ImageDraw',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'numpy', 'PIL'],
+    excludes=['tkinter', 'matplotlib', 'numpy'],
     noarchive=False,
 )
 
@@ -33,7 +37,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,   # tray-only app — no console window
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

@@ -147,6 +147,28 @@ def api_ping() -> Dict[str, Any]:
     return {"ok": True, "service": "rag-catalog"}
 
 
+# Bump this whenever packaging/build.ps1 produces a new exe
+_SYNC_CLIENT_VERSION = "1.1.0"
+
+
+@app.get("/api/sync-client/version")
+def api_sync_client_version() -> Dict[str, Any]:
+    """
+    Return the latest sync-client version available on this server.
+    No auth required — clients check this before/after authentication.
+    """
+    root = Path(__file__).parents[3]
+    packaging = root / "packaging" / "dist"
+    has_exe = (packaging / "rag_sync_client.exe").is_file()
+    has_msi = (packaging / "RAGSyncClient.msi").is_file()
+    return {
+        "version": _SYNC_CLIENT_VERSION,
+        "has_exe": has_exe,
+        "has_msi": has_msi,
+        "download_url": "/api/cloud-drive/sync/client-download?format=exe",
+    }
+
+
 @app.get("/api/auth/device/token")
 def api_device_token(device_code: str = "") -> Dict[str, Any]:
     """Poll for device auth result. Returns 428 while pending, 200 with token when approved."""
