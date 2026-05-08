@@ -99,6 +99,41 @@ def save_config(path: Path, cfg: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
+# ─── Server availability ──────────────────────────────────────────────────────
+
+def wait_for_server(server: str, timeout: int = 600) -> bool:
+    """
+    Block until the server responds to /api/ping or timeout (seconds) expires.
+    Uses exponential backoff: 5 → 10 → 20 → 40 → 60 → 60 → ...
+    Returns True if server became available, False on timeout.
+    """
+    url = f"{server}/api/ping"
+    deadline = time.monotonic() + timeout
+    delay = 5
+    attempt = 0
+    while time.monotonic() < deadline:
+        try:
+            r = requests.get(url, timeout=5)
+            if r.ok:
+                if attempt > 0:
+                    log.info("Сервер доступен.")
+                return True
+        except (requests.ConnectionError, requests.Timeout):
+            pass
+        except Exception:
+            pass
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            break
+        wait = min(delay, remaining)
+        log.warning("Сервер недоступен (%s). Повтор через %ds... (осталось %ds)", server, wait, remaining)
+        time.sleep(wait)
+        delay = min(delay * 2, 60)
+        attempt += 1
+    log.error("Сервер так и не стал доступен за %d сек.", timeout)
+    return False
+
+
 # ─── Device Auth Flow ─────────────────────────────────────────────────────────
 
 def device_auth_flow(server: str) -> Dict[str, Any]:
@@ -349,6 +384,12 @@ class UploadQueue:
                     continue
                 log.info("Загрузка: %s → %s", task.local_path.name, task.cloud_parent)
                 self._api.upload(task.local_path, task.cloud_parent)
+            except (requests.ConnectionError, requests.Timeout):
+                # Server unavailable — re-queue with longer delay, no retry limit
+                delay = min(30 * (task.retry + 1), 300)
+                log.warning("Сервер недоступен, загрузка %s отложена на %ds.", task.local_path.name, delay)
+                time.sleep(delay)
+                self._q.put(_UploadTask(task.local_path, task.cloud_parent, task.retry + 1))
             except Exception as exc:
                 if task.retry < 3:
                     log.warning("Ошибка загрузки %s: %s (попытка %d)", task.local_path.name, exc, task.retry + 1)
@@ -461,6 +502,7 @@ def _apply_change(api: SyncAPIClient, change: Dict[str, Any],
 def changes_poll_loop(api: SyncAPIClient, pairs: List[Dict[str, Any]],
                       client_id: str, stop: threading.Event) -> None:
     cursor = ""
+    consecutive_errors = 0
     while not stop.wait(POLL_INTERVAL):
         try:
             result = api.get_changes(since=cursor)
@@ -469,22 +511,36 @@ def changes_poll_loop(api: SyncAPIClient, pairs: List[Dict[str, Any]],
                 log.info("Получено изменений с сервера: %d", len(changes))
                 for change in changes:
                     _apply_change(api, change, pairs, client_id)
-                # advance cursor to the latest updated_at
                 times = [c.get("updated_at") or c.get("created_at") or "" for c in changes]
                 new_cursor = max((t for t in times if t), default=cursor)
                 if new_cursor > cursor:
                     cursor = new_cursor
+            consecutive_errors = 0
+        except (requests.ConnectionError, requests.Timeout):
+            consecutive_errors += 1
+            if consecutive_errors == 1:
+                log.warning("Сервер недоступен — продолжаю отслеживать локальные изменения...")
         except Exception as exc:
+            consecutive_errors += 1
             log.warning("Ошибка опроса изменений: %s", exc)
 
 # ─── Heartbeat loop ───────────────────────────────────────────────────────────
 
 def heartbeat_loop(api: SyncAPIClient, client_id: str, stop: threading.Event) -> None:
+    consecutive_errors = 0
     while not stop.wait(HEARTBEAT_INTERVAL):
         try:
             api.heartbeat(client_id)
+            if consecutive_errors > 0:
+                log.info("Соединение с сервером восстановлено.")
+                consecutive_errors = 0
             log.debug("Heartbeat OK")
+        except (requests.ConnectionError, requests.Timeout):
+            consecutive_errors += 1
+            if consecutive_errors == 1:
+                log.warning("Сервер недоступен (heartbeat). Жду восстановления...")
         except Exception as exc:
+            consecutive_errors += 1
             log.warning("Heartbeat ошибка: %s", exc)
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -500,6 +556,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--display-name", metavar="NAME", help="Отображаемое имя устройства")
     p.add_argument("--local-path", metavar="DIR", help="Папка для локального образа (создаётся автоматически)")
     p.add_argument("--config", metavar="PATH", default=str(DEFAULT_CONFIG_FILE), help="Путь к файлу конфигурации")
+    p.add_argument("--wait-server", metavar="SEC", type=int, default=600,
+                   help="Ждать доступности сервера N секунд при старте (0 = не ждать, -1 = бесконечно; по умолчанию 600)")
     p.add_argument("--status", action="store_true", help="Показать статус и выйти")
     p.add_argument("--verbose", "-v", action="store_true", help="Подробный вывод")
     p.add_argument("--log-file", metavar="PATH", help="Записывать лог в файл")
@@ -555,12 +613,18 @@ def main() -> None:
     if not cfg.get("display_name"):
         cfg["display_name"] = f"{platform.node()} ({platform.system()})"
 
+    # ── Wait for server ───────────────────────────────────────────────────────
+    wait_sec = args.wait_server
+    if wait_sec != 0:
+        effective_wait = 86400 * 365 if wait_sec < 0 else wait_sec  # -1 = ~forever
+        if not wait_for_server(server, timeout=effective_wait):
+            sys.exit(1)
+
     def _do_device_auth() -> str:
         log.info("Запускаем авторизацию через браузер...")
         result = device_auth_flow(server)
         if not result:
             sys.exit(1)
-        # Update server to canonical URL returned by server
         if result.get("server"):
             cfg["server"] = result["server"]
         cfg["token"] = result["token"]
@@ -573,14 +637,18 @@ def main() -> None:
 
     api = SyncAPIClient(server, token)
 
-    # Register — retry with fresh device auth on 401 ──────────────────────────
+    # ── Register — retry auth on 401, retry connection on network error ───────
     log.info("Подключение к серверу %s ...", server)
-    try:
-        client_info = api.register(
+
+    def _register() -> Dict[str, Any]:
+        return api.register(
             device_id=cfg["device_id"],
             display_name=cfg["display_name"],
             platform_name=platform.system(),
         )
+
+    try:
+        client_info = _register()
     except requests.HTTPError as exc:
         if exc.response is not None and exc.response.status_code == 401:
             log.warning("Токен истёк — повторная авторизация...")
@@ -588,14 +656,15 @@ def main() -> None:
             save_config(config_path, cfg)
             token = _do_device_auth()
             api = SyncAPIClient(server, token)
-            client_info = api.register(
-                device_id=cfg["device_id"],
-                display_name=cfg["display_name"],
-                platform_name=platform.system(),
-            )
+            client_info = _register()
         else:
             log.error("Ошибка регистрации: %s", exc)
             sys.exit(1)
+    except (requests.ConnectionError, requests.Timeout):
+        log.warning("Сервер недоступен при регистрации — ожидание...")
+        if not wait_for_server(server, timeout=300):
+            sys.exit(1)
+        client_info = _register()
     except Exception as exc:
         log.error("Ошибка регистрации: %s", exc)
         sys.exit(1)

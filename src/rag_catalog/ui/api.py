@@ -141,6 +141,12 @@ def api_device_code(request: Request) -> Dict[str, Any]:
     return _da.create_code(base)
 
 
+@app.get("/api/ping")
+def api_ping() -> Dict[str, Any]:
+    """Health check — no auth required. Used by sync clients to test connectivity."""
+    return {"ok": True, "service": "rag-catalog"}
+
+
 @app.get("/api/auth/device/token")
 def api_device_token(device_code: str = "") -> Dict[str, Any]:
     """Poll for device auth result. Returns 428 while pending, 200 with token when approved."""
