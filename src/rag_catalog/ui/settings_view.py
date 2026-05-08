@@ -1180,6 +1180,66 @@ def render_settings_screen(
 
             ui.separator()
 
+            # ── Client download ──────────────────────────────────────────
+            with ui.dialog() as _install_dlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
+                ui.label("Установка sync-клиента").classes("text-base font-semibold")
+                ui.label(
+                    "Скачайте скрипт на компьютер пользователя, установите зависимости "
+                    "и запустите с параметрами сервера и токена."
+                ).classes("rag-meta text-sm")
+                ui.separator()
+
+                ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
+                with ui.row().classes("gap-2 items-center"):
+                    _dl_token_holder: list[str] = [""]
+                    _dl_href = ui.link(
+                        "rag_sync_client.py",
+                        target="_blank",
+                    ).classes("rag-path text-sm underline")
+
+                ui.label("Шаг 2 — установить зависимости").classes("font-semibold text-sm mt-1")
+                with ui.row().classes("w-full gap-1 items-center"):
+                    _pip_cmd = ui.input(value="pip install requests watchdog").props(
+                        'readonly dense outlined'
+                    ).classes("flex-1 font-mono text-xs")
+                    ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(
+                        f"navigator.clipboard.writeText({repr(_pip_cmd.value)})"
+                    )).props("flat dense round").tooltip("Копировать")
+
+                ui.label("Шаг 3 — запустить").classes("font-semibold text-sm mt-1")
+                _run_cmd_input = ui.input(value="python rag_sync_client.py --server … --token …").props(
+                    'readonly dense outlined'
+                ).classes("w-full font-mono text-xs")
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(
+                        f"navigator.clipboard.writeText({repr(_run_cmd_input.value)})"
+                    )).props("flat dense round").tooltip("Копировать команду")
+                    ui.button("Закрыть", on_click=_install_dlg.close).props("flat dense")
+
+                ui.label(
+                    "Токен — сессионный токен любого активного пользователя. "
+                    "Клиент сохранит его в ~/.rag_sync/config.json после первого запуска."
+                ).classes("rag-meta text-xs mt-1")
+
+            async def open_install_dialog() -> None:
+                try:
+                    origin = await ui.run_javascript("window.location.origin")
+                except Exception:
+                    origin = "http://localhost:8080"
+                tok = str(app.storage.user.get("auth_token") or "…").strip()
+                _run_cmd_input.set_value(
+                    f"python rag_sync_client.py --server {origin} --token {tok}"
+                )
+                _dl_href.target = f"{origin}/api/cloud-drive/sync/client-download?auth_token={tok}"
+                _install_dlg.open()
+
+            with ui.row().classes("w-full justify-end"):
+                ui.button(
+                    "Скачать клиент", icon="download", on_click=open_install_dialog
+                ).props("outline dense").classes("text-indigo-400")
+
+            ui.separator()
+
             svc = _cd_get_service(state.cfg)
             if svc is None:
                 with ui.element("div").classes("cd-empty-state w-full py-4"):
@@ -1981,6 +2041,35 @@ def render_settings_screen(
                                     f"Клиентов: {len(clients)} · папок: {len(pairs)} · открытых конфликтов: {len(conflicts)}"
                                 ).classes("rag-meta text-xs")
                             ui.badge("online" if connected else "offline", color="positive" if connected else "grey-4").classes("text-xs")
+
+                        with ui.row().classes("w-full justify-end mt-1"):
+                            async def _open_user_install_dlg() -> None:
+                                try:
+                                    _origin = await ui.run_javascript("window.location.origin")
+                                except Exception:
+                                    _origin = "http://localhost:8080"
+                                _tok = str(app.storage.user.get("auth_token") or "…").strip()
+                                _cmd = f"python rag_sync_client.py --server {_origin} --token {_tok}"
+                                with ui.dialog() as _udlg, ui.card().classes("p-5 gap-3 w-full max-w-lg"):
+                                    ui.label("Установка sync-клиента").classes("text-base font-semibold")
+                                    ui.label(
+                                        "Скачайте скрипт, установите зависимости и запустите на своём компьютере."
+                                    ).classes("rag-meta text-sm")
+                                    ui.separator()
+                                    ui.label("1. Скачать скрипт").classes("font-semibold text-sm")
+                                    _dl_url = f"{_origin}/api/cloud-drive/sync/client-download?auth_token={_tok}"
+                                    ui.link("rag_sync_client.py", target=_dl_url).classes("rag-path text-sm underline")
+                                    ui.label("2. Установить зависимости").classes("font-semibold text-sm mt-1")
+                                    with ui.row().classes("w-full gap-1 items-center"):
+                                        _pip2 = ui.input(value="pip install requests watchdog").props("readonly dense outlined").classes("flex-1 font-mono text-xs")
+                                        ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(f"navigator.clipboard.writeText({repr(_pip2.value)})" )).props("flat dense round").tooltip("Копировать")
+                                    ui.label("3. Запустить").classes("font-semibold text-sm mt-1")
+                                    with ui.row().classes("w-full gap-1 items-center"):
+                                        _run2 = ui.input(value=_cmd).props("readonly dense outlined").classes("flex-1 font-mono text-xs")
+                                        ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(f"navigator.clipboard.writeText({repr(_run2.value)})" )).props("flat dense round").tooltip("Копировать")
+                                    ui.button("Закрыть", on_click=_udlg.close).props("flat dense")
+                                _udlg.open()
+                            ui.button("Скачать клиент", icon="download", on_click=_open_user_install_dlg).props("outline dense").classes("text-indigo-400")
 
                         ui.separator()
                         ui.label("Мои папки синхронизации").classes("font-semibold")

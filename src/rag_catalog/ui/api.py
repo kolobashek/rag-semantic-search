@@ -334,6 +334,25 @@ def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, 
     return pairs
 
 
+@app.get("/api/cloud-drive/sync/client-download")
+def api_cloud_drive_sync_client_download(auth_token: str = "", authorization: AuthHeader = ""):
+    cfg = load_config()
+    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    candidates = [
+        Path(__file__).parents[3] / "rag_sync_client.py",
+        Path(__file__).parents[2] / "rag_sync_client.py",
+    ]
+    script_path = next((p for p in candidates if p.is_file()), None)
+    if script_path is None:
+        raise HTTPException(status_code=404, detail="rag_sync_client.py не найден на сервере.")
+    return FileResponse(
+        path=str(script_path),
+        media_type="text/x-python",
+        filename="rag_sync_client.py",
+        headers={"Content-Disposition": "attachment; filename=rag_sync_client.py"},
+    )
+
+
 @app.post("/api/cloud-drive/sync/heartbeat")
 def api_cloud_drive_sync_heartbeat(
     client_id: str = "",
