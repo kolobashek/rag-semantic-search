@@ -1191,17 +1191,14 @@ def render_settings_screen(
 
                 ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
                 with ui.row().classes("gap-3 items-center flex-wrap"):
-                    _dl_win_link = ui.link("Windows (.exe)", target="#", new_tab=True)
-                    _dl_win_link.classes("rag-path text-sm")
-                    with _dl_win_link:
-                        ui.icon("window", size="14px")
-                    _dl_py_link = ui.link("Python (.py)", target="#", new_tab=True)
-                    _dl_py_link.classes("rag-meta text-sm")
-                    with _dl_py_link:
-                        ui.icon("code", size="14px")
+                    _dl_msi_link = ui.link("Windows MSI", target="#", new_tab=True).classes("rag-path text-sm")
+                    ui.label("·").classes("rag-meta")
+                    _dl_win_link = ui.link("Windows EXE (установщик)", target="#", new_tab=True).classes("rag-path text-sm")
+                    ui.label("·").classes("rag-meta")
+                    _dl_py_link = ui.link("Python .py", target="#", new_tab=True).classes("rag-meta text-sm")
                 ui.label(
-                    "Windows: установщик с мастером настройки. "
-                    "Python: мультиплатформенный скрипт (pip install requests watchdog)."
+                    "MSI: тихая установка, поддержка групповых политик. "
+                    "EXE: мастер настройки. Python: Linux/macOS."
                 ).classes("rag-meta text-xs")
 
                 ui.label("Шаг 2 — установить зависимости").classes("font-semibold text-sm mt-1")
@@ -1235,6 +1232,7 @@ def render_settings_screen(
                     origin = "http://localhost:8080"
                 tok = str(app.storage.user.get("auth_token") or "…").strip()
                 _base = f"{origin}/api/cloud-drive/sync/client-download?auth_token={tok}"
+                _dl_msi_link.target = f"{_base}&format=msi"
                 _dl_win_link.target = f"{_base}&format=exe"
                 _dl_py_link.target = f"{_base}&format=py"
                 _run_cmd_input.set_value(
@@ -2059,20 +2057,27 @@ def render_settings_screen(
                                     _origin = "http://localhost:8080"
                                 _tok = str(app.storage.user.get("auth_token") or "…").strip()
                                 _cmd = f"python rag_sync_client.py --server {_origin} --token {_tok}"
-                                with ui.dialog() as _udlg, ui.card().classes("p-5 gap-3 w-full max-w-lg"):
+                                with ui.dialog() as _udlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
                                     ui.label("Установка sync-клиента").classes("text-base font-semibold")
                                     ui.label(
-                                        "Скачайте скрипт, установите зависимости и запустите на своём компьютере."
+                                        "Скачайте установщик и запустите на своём компьютере. "
+                                        "Сервер и токен уже вписаны в установщик."
                                     ).classes("rag-meta text-sm")
                                     ui.separator()
-                                    ui.label("1. Скачать скрипт").classes("font-semibold text-sm")
-                                    _dl_url = f"{_origin}/api/cloud-drive/sync/client-download?auth_token={_tok}"
-                                    ui.link("rag_sync_client.py", target=_dl_url).classes("rag-path text-sm underline")
-                                    ui.label("2. Установить зависимости").classes("font-semibold text-sm mt-1")
-                                    with ui.row().classes("w-full gap-1 items-center"):
-                                        _pip2 = ui.input(value="pip install requests watchdog").props("readonly dense outlined").classes("flex-1 font-mono text-xs")
-                                        ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(f"navigator.clipboard.writeText({repr(_pip2.value)})" )).props("flat dense round").tooltip("Копировать")
-                                    ui.label("3. Запустить").classes("font-semibold text-sm mt-1")
+                                    ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
+                                    _base_url = f"{_origin}/api/cloud-drive/sync/client-download?auth_token={_tok}"
+                                    with ui.row().classes("gap-3 items-center flex-wrap"):
+                                        ui.link("Windows MSI", target=f"{_base_url}&format=msi", new_tab=True).classes("rag-path text-sm")
+                                        ui.label("·").classes("rag-meta")
+                                        ui.link("Windows EXE (установщик)", target=f"{_base_url}&format=exe", new_tab=True).classes("rag-path text-sm")
+                                        ui.label("·").classes("rag-meta")
+                                        ui.link("Python .py (Linux/Mac)", target=f"{_base_url}&format=py", new_tab=True).classes("rag-meta text-sm")
+                                    ui.label(
+                                        "MSI: тихая установка, поддержка групповых политик. "
+                                        "EXE: мастер настройки с полями сервера и токена."
+                                    ).classes("rag-meta text-xs")
+                                    ui.separator()
+                                    ui.label("Для Python-скрипта: запустить").classes("font-semibold text-sm")
                                     with ui.row().classes("w-full gap-1 items-center"):
                                         _run2 = ui.input(value=_cmd).props("readonly dense outlined").classes("flex-1 font-mono text-xs")
                                         ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(f"navigator.clipboard.writeText({repr(_run2.value)})" )).props("flat dense round").tooltip("Копировать")

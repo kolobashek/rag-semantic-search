@@ -1,27 +1,37 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Build RAGSyncClientSetup.exe
+    Build RAG Sync Client — exe installer (Inno Setup) + MSI (WiX 4)
 
 .DESCRIPTION
-    1. Runs PyInstaller to produce rag_sync_client.exe
-    2. Runs Inno Setup compiler to wrap it in an installer
+    Step 1: PyInstaller → rag_sync_client.exe
+    Step 2: Inno Setup  → dist/RAGSyncClientSetup.exe  (wizard installer)
+    Step 3: WiX 4       → dist/RAGSyncClient.msi       (silent/enterprise MSI)
 
 .PARAMETER InnoSetupPath
-    Path to iscc.exe. Defaults to the standard Inno Setup 6 install location.
+    Path to iscc.exe. Default: standard Inno Setup 6 location.
 
 .PARAMETER SkipPyInstaller
-    Skip PyInstaller step (use existing dist\rag_sync_client.exe).
+    Skip PyInstaller (use existing dist\rag_sync_client.exe).
+
+.PARAMETER SkipInno
+    Skip Inno Setup step.
+
+.PARAMETER SkipWix
+    Skip WiX MSI step.
 
 .EXAMPLE
     .\build.ps1
-    .\build.ps1 -InnoSetupPath "C:\Tools\innosetup\iscc.exe"
-    .\build.ps1 -SkipPyInstaller
+    .\build.ps1 -SkipPyInstaller          # rebuild installers only
+    .\build.ps1 -SkipInno                 # PyInstaller + WiX only
+    msiexec /i dist\RAGSyncClient.msi RAGSERVER=http://host:8080 RAGTOKEN=abc123
 #>
 
 param(
     [string]$InnoSetupPath = "C:\Program Files (x86)\Inno Setup 6\iscc.exe",
-    [switch]$SkipPyInstaller
+    [switch]$SkipPyInstaller,
+    [switch]$SkipInno,
+    [switch]$SkipWix
 )
 
 Set-StrictMode -Version Latest
@@ -29,87 +39,111 @@ $ErrorActionPreference = "Stop"
 
 $PackagingDir = $PSScriptRoot
 $ProjectDir   = Split-Path -Parent $PackagingDir
+$DistDir      = Join-Path $PackagingDir "dist"
 
-Write-Host "=== RAG Sync Client — build installer ===" -ForegroundColor Cyan
-Write-Host "Project : $ProjectDir"
-Write-Host "Output  : $PackagingDir\dist\RAGSyncClientSetup.exe"
+Write-Host "=== RAG Sync Client — build ===" -ForegroundColor Cyan
+Write-Host "Project   : $ProjectDir"
+Write-Host "Output    : $DistDir"
 Write-Host ""
 
 # ── Step 1: PyInstaller ──────────────────────────────────────────────────────
 if (-not $SkipPyInstaller) {
-    Write-Host "Step 1/2 — PyInstaller" -ForegroundColor Yellow
+    Write-Host "Step 1/3 — PyInstaller" -ForegroundColor Yellow
 
     $specFile = Join-Path $PackagingDir "rag_sync_client.spec"
-    if (-not (Test-Path $specFile)) {
-        Write-Error "Spec file not found: $specFile"
-        exit 1
-    }
+    if (-not (Test-Path $specFile)) { Write-Error "Spec not found: $specFile"; exit 1 }
 
     Push-Location $ProjectDir
     try {
         pyinstaller $specFile `
-            --distpath "$PackagingDir\dist" `
-            --workpath "$PackagingDir\build" `
+            --distpath $DistDir `
+            --workpath (Join-Path $PackagingDir "build") `
             --noconfirm
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "PyInstaller failed (exit code $LASTEXITCODE)"
-            exit 1
-        }
-    } finally {
-        Pop-Location
-    }
+        if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller failed"; exit 1 }
+    } finally { Pop-Location }
 
-    $exePath = Join-Path $PackagingDir "dist\rag_sync_client.exe"
-    if (-not (Test-Path $exePath)) {
-        Write-Error "Expected exe not found: $exePath"
-        exit 1
-    }
-
+    $exePath = Join-Path $DistDir "rag_sync_client.exe"
+    if (-not (Test-Path $exePath)) { Write-Error "Exe not found: $exePath"; exit 1 }
     $sizeMB = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
-    Write-Host "  Built: $exePath ($sizeMB MB)" -ForegroundColor Green
+    Write-Host "  OK: rag_sync_client.exe ($sizeMB MB)" -ForegroundColor Green
 } else {
-    Write-Host "Step 1/2 — PyInstaller skipped" -ForegroundColor DarkGray
+    Write-Host "Step 1/3 — PyInstaller skipped" -ForegroundColor DarkGray
 }
 
-# ── Step 2: Inno Setup ───────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "Step 2/2 — Inno Setup" -ForegroundColor Yellow
-
-if (-not (Test-Path $InnoSetupPath)) {
-    # Try to find iscc.exe in PATH
-    $found = Get-Command iscc -ErrorAction SilentlyContinue
-    if ($found) {
-        $InnoSetupPath = $found.Source
-    } else {
-        Write-Warning "Inno Setup compiler not found at: $InnoSetupPath"
-        Write-Warning "Install Inno Setup 6 from https://jrsoftware.org/isinfo.php"
-        Write-Warning "or pass -InnoSetupPath to this script."
-        Write-Host ""
-        Write-Host "Standalone exe is available at:" -ForegroundColor Cyan
-        Write-Host "  $PackagingDir\dist\rag_sync_client.exe"
-        exit 0
-    }
-}
-
-$issFile = Join-Path $PackagingDir "installer.iss"
-Push-Location $PackagingDir
-try {
-    & $InnoSetupPath $issFile
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Inno Setup failed (exit code $LASTEXITCODE)"
-        exit 1
-    }
-} finally {
-    Pop-Location
-}
-
-$installerPath = Join-Path $PackagingDir "dist\RAGSyncClientSetup.exe"
-if (Test-Path $installerPath) {
-    $sizeMB = [math]::Round((Get-Item $installerPath).Length / 1MB, 1)
-    Write-Host ""
-    Write-Host "=== Done ===" -ForegroundColor Green
-    Write-Host "Installer : $installerPath ($sizeMB MB)" -ForegroundColor Green
-} else {
-    Write-Error "Installer not found after build: $installerPath"
+$exePath = Join-Path $DistDir "rag_sync_client.exe"
+if (-not (Test-Path $exePath)) {
+    Write-Error "rag_sync_client.exe not found in $DistDir. Run without -SkipPyInstaller first."
     exit 1
 }
+
+# ── Step 2: Inno Setup (.exe wizard installer) ───────────────────────────────
+if (-not $SkipInno) {
+    Write-Host ""
+    Write-Host "Step 2/3 — Inno Setup (.exe installer)" -ForegroundColor Yellow
+
+    if (-not (Test-Path $InnoSetupPath)) {
+        $found = Get-Command iscc -ErrorAction SilentlyContinue
+        if ($found) { $InnoSetupPath = $found.Source }
+    }
+
+    if (Test-Path $InnoSetupPath) {
+        Push-Location $PackagingDir
+        try {
+            & $InnoSetupPath "installer.iss"
+            if ($LASTEXITCODE -ne 0) { Write-Error "Inno Setup failed"; exit 1 }
+        } finally { Pop-Location }
+
+        $innoOut = Join-Path $DistDir "RAGSyncClientSetup.exe"
+        if (Test-Path $innoOut) {
+            $sizeMB = [math]::Round((Get-Item $innoOut).Length / 1MB, 1)
+            Write-Host "  OK: RAGSyncClientSetup.exe ($sizeMB MB)" -ForegroundColor Green
+        }
+    } else {
+        Write-Warning "Inno Setup not found. Download from https://jrsoftware.org/isinfo.php"
+        Write-Warning "Skipping EXE installer."
+    }
+} else {
+    Write-Host "Step 2/3 — Inno Setup skipped" -ForegroundColor DarkGray
+}
+
+# ── Step 3: WiX 4 (.msi enterprise installer) ────────────────────────────────
+if (-not $SkipWix) {
+    Write-Host ""
+    Write-Host "Step 3/3 — WiX 4 (.msi installer)" -ForegroundColor Yellow
+
+    $wixCmd = Get-Command wix -ErrorAction SilentlyContinue
+    if (-not $wixCmd) {
+        Write-Warning "WiX 4 not found. Install with:"
+        Write-Warning "  dotnet tool install --global wix"
+        Write-Warning "  wix extension add WixToolset.UI.wixext"
+        Write-Warning "Skipping MSI."
+    } else {
+        Push-Location $PackagingDir
+        try {
+            wix build installer.wxs `
+                -ext WixToolset.UI.wixext `
+                -o "$DistDir\RAGSyncClient.msi"
+            if ($LASTEXITCODE -ne 0) { Write-Error "WiX build failed"; exit 1 }
+        } finally { Pop-Location }
+
+        $msiPath = Join-Path $DistDir "RAGSyncClient.msi"
+        if (Test-Path $msiPath) {
+            $sizeMB = [math]::Round((Get-Item $msiPath).Length / 1MB, 1)
+            Write-Host "  OK: RAGSyncClient.msi ($sizeMB MB)" -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Host "Step 3/3 — WiX skipped" -ForegroundColor DarkGray
+}
+
+Write-Host ""
+Write-Host "=== Build complete ===" -ForegroundColor Green
+Write-Host ""
+Write-Host "Files in $DistDir :" -ForegroundColor Cyan
+Get-ChildItem $DistDir -Filter "RAGSync*" | ForEach-Object {
+    $mb = [math]::Round($_.Length / 1MB, 1)
+    Write-Host "  $($_.Name) — $mb MB"
+}
+Write-Host ""
+Write-Host "Silent MSI install example:" -ForegroundColor Cyan
+Write-Host '  msiexec /i RAGSyncClient.msi /quiet RAGSERVER=http://host:8080 RAGTOKEN=abc123'

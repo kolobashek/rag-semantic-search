@@ -349,13 +349,18 @@ def api_cloud_drive_sync_client_download(
         candidates = [
             (root / "rag_sync_client.py", "text/x-python", "rag_sync_client.py"),
         ]
+    elif fmt == "msi":
+        candidates = [
+            (packaging / "RAGSyncClient.msi", "application/x-msi", "RAGSyncClient.msi"),
+        ]
     elif fmt == "exe":
         candidates = [
             (packaging / "RAGSyncClientSetup.exe", "application/octet-stream", "RAGSyncClientSetup.exe"),
             (packaging / "rag_sync_client.exe", "application/octet-stream", "rag_sync_client.exe"),
         ]
-    else:  # auto: installer > exe > py
+    else:  # auto: msi > exe installer > bare exe > py
         candidates = [
+            (packaging / "RAGSyncClient.msi", "application/x-msi", "RAGSyncClient.msi"),
             (packaging / "RAGSyncClientSetup.exe", "application/octet-stream", "RAGSyncClientSetup.exe"),
             (packaging / "rag_sync_client.exe", "application/octet-stream", "rag_sync_client.exe"),
             (root / "rag_sync_client.py", "text/x-python", "rag_sync_client.py"),

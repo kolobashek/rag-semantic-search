@@ -56,13 +56,41 @@ log = logging.getLogger("rag_sync")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
+_REGISTRY_KEY = r"Software\RAGSyncClient"
+
+
+def _read_registry_config() -> Dict[str, Any]:
+    """Read server/token written by MSI installer from HKCU registry (Windows only)."""
+    if platform.system() != "Windows":
+        return {}
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REGISTRY_KEY) as key:
+            def _val(name: str) -> str:
+                try:
+                    return str(winreg.QueryValueEx(key, name)[0] or "")
+                except FileNotFoundError:
+                    return ""
+            return {
+                "server": _val("Server"),
+                "token": _val("Token"),
+                "device_id": _val("DeviceId"),
+                "display_name": _val("DisplayName"),
+            }
+    except Exception:
+        return {}
+
+
 def load_config(path: Path) -> Dict[str, Any]:
+    # Registry values are the baseline (written by MSI); file overrides them
+    cfg = _read_registry_config()
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            file_cfg = json.loads(path.read_text(encoding="utf-8"))
+            cfg.update({k: v for k, v in file_cfg.items() if v})
         except Exception:
-            return {}
-    return {}
+            pass
+    return cfg
 
 
 def save_config(path: Path, cfg: Dict[str, Any]) -> None:

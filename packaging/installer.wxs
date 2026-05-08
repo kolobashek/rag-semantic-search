@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RAG Sync Client — WiX 4 MSI installer
+  Build: wix build installer.wxs -ext WixToolset.UI.wixext -o dist\RAGSyncClient.msi
+
+  Silent install example:
+    msiexec /i RAGSyncClient.msi /quiet RAGSERVER=http://host:8080 RAGTOKEN=abc123
+    msiexec /i RAGSyncClient.msi /quiet RAGSERVER=http://host:8080 RAGTOKEN=abc123 RAGAUTOSTART=0
+
+  Per-user install (no elevation needed):
+    msiexec /i RAGSyncClient.msi MSIINSTALLPERUSER=1 ALLUSERS=2
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+    Name="RAG Sync Client"
+    Manufacturer="RAG Catalog"
+    Version="1.0.0.0"
+    UpgradeCode="B3F2A1C4-9E7D-4F88-A2B1-C3D4E5F60033"
+    Language="1049"
+    Codepage="1251"
+    InstallerVersion="500"
+    Scope="perUser">
+
+    <SummaryInformation Description="RAG Catalog sync agent for Windows" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="Уже установлена более новая версия RAG Sync Client." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ── Install properties (can be overridden on command line) ── -->
+    <Property Id="RAGSERVER"     Value="http://localhost:8080" />
+    <Property Id="RAGTOKEN"      Value="" />
+    <Property Id="RAGAUTOSTART"  Value="1" />
+    <Property Id="ALLUSERS"      Value="2" />
+    <Property Id="MSIINSTALLPERUSER" Value="1" />
+
+    <!-- ── Directories ── -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="RAG Sync Client" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StartMenuDir" Name="RAG Sync Client" />
+    </StandardDirectory>
+
+    <!-- ── Files ── -->
+    <ComponentGroup Id="MainFiles" Directory="INSTALLFOLDER">
+      <Component Id="SyncExe">
+        <File Source="dist\rag_sync_client.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Registry: server + token written for the exe to read ── -->
+    <ComponentGroup Id="RegistryConfig" Directory="INSTALLFOLDER">
+      <Component Id="RegConfig" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567891">
+        <RegistryKey Root="HKCU" Key="Software\RAGSyncClient">
+          <RegistryValue Name="Server"      Type="string" Value="[RAGSERVER]"  />
+          <RegistryValue Name="Token"       Type="string" Value="[RAGTOKEN]"   />
+          <RegistryValue Name="DeviceId"    Type="string"
+            Value="win-[%COMPUTERNAME]-msi" KeyPath="yes" />
+          <RegistryValue Name="DisplayName" Type="string"
+            Value="[%COMPUTERNAME] (Windows)" />
+          <RegistryValue Name="InstallDir"  Type="string" Value="[INSTALLFOLDER]" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Autostart (conditional on RAGAUTOSTART property) ── -->
+    <ComponentGroup Id="AutostartGroup" Directory="INSTALLFOLDER">
+      <Component Id="AutostartReg" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678902">
+        <Condition>RAGAUTOSTART = "1"</Condition>
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="RAGSyncClient"
+          Type="string"
+          Value='"[INSTALLFOLDER]rag_sync_client.exe"'
+          KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Start Menu shortcut ── -->
+    <ComponentGroup Id="Shortcuts" Directory="StartMenuDir">
+      <Component Id="StartMenuShortcut" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789013">
+        <Shortcut
+          Id="AppShortcut"
+          Name="RAG Sync Client"
+          Description="Синхронизация файлов с RAG Catalog Cloud Drive"
+          Target="[INSTALLFOLDER]rag_sync_client.exe"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveStartMenuDir" Directory="StartMenuDir" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\RAGSyncClient"
+          Name="StartMenuInstalled"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Feature ── -->
+    <Feature Id="ProductFeature" Title="RAG Sync Client" Level="1">
+      <ComponentGroupRef Id="MainFiles" />
+      <ComponentGroupRef Id="RegistryConfig" />
+      <ComponentGroupRef Id="AutostartGroup" />
+      <ComponentGroupRef Id="Shortcuts" />
+    </Feature>
+
+    <!-- ── Minimal UI (just progress + finish) ── -->
+    <ui:WixUI Id="WixUI_Minimal" />
+
+  </Package>
+</Wix>
