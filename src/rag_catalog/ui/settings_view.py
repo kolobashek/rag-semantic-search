@@ -555,6 +555,11 @@ def render_settings_screen(
                 "cloud_drive_db_path": str(state.cfg.get("cloud_drive_db_path") or default_db_path).strip(),
                 "cloud_drive_storage": str(state.cfg.get("cloud_drive_storage") or "local").strip() or "local",
                 "cloud_drive_storage_root": str(state.cfg.get("cloud_drive_storage_root") or default_storage_root).strip(),
+                "cloud_drive_bucket": str(state.cfg.get("cloud_drive_bucket") or "").strip(),
+                "cloud_drive_s3_endpoint": str(state.cfg.get("cloud_drive_s3_endpoint") or "").strip(),
+                "cloud_drive_s3_region": str(state.cfg.get("cloud_drive_s3_region") or "").strip(),
+                "cloud_drive_s3_access_key": str(state.cfg.get("cloud_drive_s3_access_key") or "").strip(),
+                "cloud_drive_s3_secret_key": str(state.cfg.get("cloud_drive_s3_secret_key") or "").strip(),
                 "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
             }
             stats_ref: Dict[str, Any] = {"value": None}
@@ -580,6 +585,19 @@ def render_settings_screen(
             storage_root_input = ui.input("Папка хранения файлов", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("w-full")
             storage_root_input.tooltip("Корневая папка, куда сохраняются физические файлы при использовании local storage. Должна существовать и быть доступна для записи.")
 
+            s3_box = ui.column().classes("w-full gap-2")
+            with s3_box:
+                s3_bucket_input = ui.input("S3 bucket (обязателен)", value=initial_cloud["cloud_drive_bucket"]).props("dense outlined").classes("w-full max-w-xl")
+                s3_bucket_input.tooltip("Имя bucket в S3/MinIO. Это контейнер объектов, куда Cloud Drive складывает файлы.")
+                s3_endpoint_input = ui.input("S3 endpoint (MinIO)", value=initial_cloud["cloud_drive_s3_endpoint"]).props("dense outlined").classes("w-full max-w-xl")
+                s3_endpoint_input.tooltip("URL endpoint для MinIO/S3. Для MinIO обычно http://127.0.0.1:9000. Для AWS S3 можно оставить пустым.")
+                s3_region_input = ui.input("S3 region", value=initial_cloud["cloud_drive_s3_region"]).props("dense outlined").classes("w-full max-w-sm")
+                s3_region_input.tooltip("Регион S3. Для MinIO обычно достаточно us-east-1.")
+                s3_access_input = ui.input("S3 access key", value=initial_cloud["cloud_drive_s3_access_key"]).props("dense outlined").classes("w-full max-w-xl")
+                s3_access_input.tooltip("Access key для S3/MinIO. Хранится в config.json.")
+                s3_secret_input = ui.input("S3 secret key", value=initial_cloud["cloud_drive_s3_secret_key"], password=True, password_toggle_button=True).props("dense outlined").classes("w-full max-w-xl")
+                s3_secret_input.tooltip("Secret key для S3/MinIO. Хранится в config.json.")
+
             catalog_input = ui.input("Источник импорта", value=initial_cloud["catalog_path"]).props("dense outlined").classes("w-full")
             catalog_input.tooltip("Каталог источника для импорта: bootstrap сканирует его дерево папок и файлов и заносит в реестр. Обычно совпадает с основным каталогом документов.")
 
@@ -598,12 +616,19 @@ def render_settings_screen(
                     "cloud_drive_db_path": str(db_input.value or "").strip(),
                     "cloud_drive_storage": str(storage_kind.value or "local").strip() or "local",
                     "cloud_drive_storage_root": str(storage_root_input.value or "").strip(),
+                    "cloud_drive_bucket": str(s3_bucket_input.value or "").strip(),
+                    "cloud_drive_s3_endpoint": str(s3_endpoint_input.value or "").strip(),
+                    "cloud_drive_s3_region": str(s3_region_input.value or "").strip(),
+                    "cloud_drive_s3_access_key": str(s3_access_input.value or "").strip(),
+                    "cloud_drive_s3_secret_key": str(s3_secret_input.value or "").strip(),
                     "catalog_path": str(catalog_input.value or "").strip(),
                 }
 
             def refresh_cloud_visibility() -> None:
-                is_local = str(storage_kind.value or "local") == "local"
+                kind = str(storage_kind.value or "local")
+                is_local = kind == "local"
                 storage_root_input.set_visibility(is_local)
+                s3_box.set_visibility(kind == "s3")
 
             def refresh_cloud_dirty() -> None:
                 action_row.set_visibility(current_cloud_values() != initial_cloud)
@@ -613,6 +638,11 @@ def render_settings_screen(
                 db_input.set_value(initial_cloud["cloud_drive_db_path"])
                 storage_kind.set_value(initial_cloud["cloud_drive_storage"])
                 storage_root_input.set_value(initial_cloud["cloud_drive_storage_root"])
+                s3_bucket_input.set_value(initial_cloud["cloud_drive_bucket"])
+                s3_endpoint_input.set_value(initial_cloud["cloud_drive_s3_endpoint"])
+                s3_region_input.set_value(initial_cloud["cloud_drive_s3_region"])
+                s3_access_input.set_value(initial_cloud["cloud_drive_s3_access_key"])
+                s3_secret_input.set_value(initial_cloud["cloud_drive_s3_secret_key"])
                 catalog_input.set_value(initial_cloud["catalog_path"])
                 refresh_cloud_visibility()
                 action_row.set_visibility(False)
@@ -792,6 +822,13 @@ def render_settings_screen(
                 if values["cloud_drive_storage"] == "local" and not values["cloud_drive_storage_root"]:
                     ui.notify("Укажите папку хранения файлов для локального хранилища.", type="warning")
                     return
+                if values["cloud_drive_storage"] == "s3":
+                    if not values["cloud_drive_bucket"]:
+                        ui.notify("Для S3/MinIO требуется cloud_drive_bucket (имя bucket).", type="warning")
+                        return
+                    if not values["cloud_drive_s3_access_key"] or not values["cloud_drive_s3_secret_key"]:
+                        ui.notify("Для S3/MinIO укажите access key и secret key.", type="warning")
+                        return
                 try:
                     persist_cloud_values(values)
                     refresh_cloud_visibility()
@@ -913,6 +950,11 @@ def render_settings_screen(
             db_input.on_value_change(lambda _: refresh_cloud_dirty())
             storage_kind.on_value_change(lambda _: (refresh_cloud_visibility(), refresh_cloud_dirty()))
             storage_root_input.on_value_change(lambda _: refresh_cloud_dirty())
+            s3_bucket_input.on_value_change(lambda _: refresh_cloud_dirty())
+            s3_endpoint_input.on_value_change(lambda _: refresh_cloud_dirty())
+            s3_region_input.on_value_change(lambda _: refresh_cloud_dirty())
+            s3_access_input.on_value_change(lambda _: refresh_cloud_dirty())
+            s3_secret_input.on_value_change(lambda _: refresh_cloud_dirty())
             catalog_input.on_value_change(lambda _: refresh_cloud_dirty())
 
             with action_row:
