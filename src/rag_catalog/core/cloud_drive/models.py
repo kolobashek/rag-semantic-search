@@ -13,6 +13,7 @@ class CloudDriveFolder:
     depth: int
     source_path: str = ""
     is_root: bool = False
+    source_mtime: float = 0.0
     created_at: str = ""
     updated_at: str = ""
     deleted_at: str = ""
@@ -29,6 +30,7 @@ class CloudDriveFile:
     size_bytes: int
     checksum: str = ""
     source_path: str = ""
+    source_mtime: float = 0.0
     current_version_id: str = ""
     created_at: str = ""
     updated_at: str = ""

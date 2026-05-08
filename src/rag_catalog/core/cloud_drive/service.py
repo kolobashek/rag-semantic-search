@@ -885,11 +885,23 @@ class CloudDriveService:
             )
 
         emit_progress('start', current_path=str(root))
+        skipped_files = 0
 
-        for dirpath, dirnames, filenames in __import__('os').walk(root):
+        import os as _os  # noqa: PLC0415
+
+        for dirpath, dirnames, filenames in _os.walk(root):
             if should_continue is not None and not should_continue():
                 raise CloudDriveJobCancelled('cancelled_by_user')
             base = Path(dirpath)
+
+            # ── Level 1: directory mtime check ──────────────────────────────
+            # If the directory's mtime hasn't changed since last scan, no file
+            # inside it was added, deleted, or renamed → skip the whole subtree.
+            try:
+                dir_mtime = base.stat().st_mtime
+            except OSError:
+                dir_mtime = 0.0
+
             base_id = folder_cache.get(base)
             if base_id is None:
                 rel_base = base.relative_to(root)
@@ -907,6 +919,16 @@ class CloudDriveService:
                 imported_folders += 1
                 if imported_folders % 25 == 0:
                     emit_progress('folder', current_path=str(base))
+            else:
+                stored_dir_mtime = self.registry.get_folder_source_mtime(base_id)
+                if stored_dir_mtime != 0.0 and abs(dir_mtime - stored_dir_mtime) < 1e-3:
+                    # Directory unchanged — skip all files, but still recurse
+                    # into subdirs (os.walk continues naturally; subdir mtimes
+                    # are checked individually when we reach them).
+                    skipped_files += len(filenames)
+                    continue
+                # Directory changed — update stored mtime after processing files
+                # (done below after the file loop)
 
             for dirname in sorted(dirnames):
                 child = base / dirname
@@ -923,11 +945,36 @@ class CloudDriveService:
                 if imported_folders % 25 == 0:
                     emit_progress('folder', current_path=str(child))
 
+            # ── Level 2: file mtime + size check ────────────────────────────
+            # Fetch all known mtime/size for files in this folder in one query.
+            known_mtimes = self.registry.get_file_mtimes_in_folder(base_id)
+
             for filename in sorted(filenames):
                 if should_continue is not None and not should_continue():
                     raise CloudDriveJobCancelled('cancelled_by_user')
                 file_path = base / filename
                 rel_file = file_path.relative_to(root)
+
+                try:
+                    st = file_path.stat()
+                    file_mtime = st.st_mtime
+                    file_size = st.st_size
+                except OSError:
+                    file_mtime, file_size = 0.0, 0
+
+                known = known_mtimes.get(filename)
+                if known is not None:
+                    stored_mtime, stored_size = known
+                    if (
+                        stored_mtime != 0.0
+                        and abs(file_mtime - stored_mtime) < 1e-3
+                        and file_size == stored_size
+                    ):
+                        # File unchanged — skip content read and upsert entirely
+                        skipped_files += 1
+                        continue
+
+                # File is new or modified — compute checksum and upsert
                 checksum = compute_file_checksum(file_path)
                 storage_key = self._immutable_storage_key(checksum=checksum, filename=filename)
                 if import_files and not self.storage.exists(storage_key):
@@ -938,9 +985,10 @@ class CloudDriveService:
                     name=filename,
                     storage_key=storage_key,
                     mime_type=guess_mime_type(file_path),
-                    size_bytes=file_path.stat().st_size,
+                    size_bytes=file_size,
                     checksum=checksum,
                     source_path=str(file_path),
+                    source_mtime=file_mtime,
                 )
                 imported += 1
                 if imported == 1 or imported % 25 == 0:
@@ -948,6 +996,10 @@ class CloudDriveService:
                 if max_files is not None and imported >= max_files:
                     emit_progress('done', current_path=str(file_path), done=True)
                     return self.registry.stats()
+
+            # Update stored dir mtime so next scan can skip this directory if unchanged
+            if base_id is not None:
+                self.registry.update_folder_mtime(base_id, dir_mtime)
         emit_progress('done', current_path=str(root), done=True)
         return self.registry.stats()
 

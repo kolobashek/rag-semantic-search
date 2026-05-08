@@ -69,6 +69,7 @@ class CloudDriveRegistryDB:
                         depth INTEGER NOT NULL DEFAULT 0,
                         source_path TEXT NOT NULL DEFAULT '',
                         is_root INTEGER NOT NULL DEFAULT 0,
+                        source_mtime REAL NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         deleted_at TEXT NOT NULL DEFAULT '',
@@ -85,6 +86,7 @@ class CloudDriveRegistryDB:
                         size_bytes INTEGER NOT NULL DEFAULT 0,
                         checksum TEXT NOT NULL DEFAULT '',
                         source_path TEXT NOT NULL DEFAULT '',
+                        source_mtime REAL NOT NULL DEFAULT 0,
                         current_version_id TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
@@ -240,8 +242,13 @@ class CloudDriveRegistryDB:
             conn.execute("ALTER TABLE cloud_jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
         if current_version <= 2 and not self._has_column(conn, "cloud_folders", "deleted_at"):
             conn.execute("ALTER TABLE cloud_folders ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''")
+        if current_version <= 3:
+            if not self._has_column(conn, "cloud_folders", "source_mtime"):
+                conn.execute("ALTER TABLE cloud_folders ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
+            if not self._has_column(conn, "cloud_files", "source_mtime"):
+                conn.execute("ALTER TABLE cloud_files ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
 
-    def ensure_root_folder(self, *, root_name: str, source_path: str = '') -> CloudDriveFolder:
+    def ensure_root_folder(self, *, root_name: str, source_path: str = '', source_mtime: float = 0.0) -> CloudDriveFolder:
         clean_name = str(root_name or '').strip() or 'root'
         now = _utc_now()
         with self._lock:
@@ -252,10 +259,10 @@ class CloudDriveRegistryDB:
                 folder_id = str(uuid.uuid4())
                 conn.execute(
                     '''
-                    INSERT INTO cloud_folders (id, parent_id, name, path, depth, source_path, is_root, created_at, updated_at)
-                    VALUES (?, NULL, ?, '', 0, ?, 1, ?, ?)
+                    INSERT INTO cloud_folders (id, parent_id, name, path, depth, source_path, is_root, source_mtime, created_at, updated_at)
+                    VALUES (?, NULL, ?, '', 0, ?, 1, ?, ?, ?)
                     ''',
-                    (folder_id, clean_name, source_path, now, now),
+                    (folder_id, clean_name, source_path, float(source_mtime), now, now),
                 )
                 row = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder_id,)).fetchone()
                 assert row is not None
@@ -291,7 +298,7 @@ class CloudDriveRegistryDB:
             is_root=False,
         )
 
-    def upsert_folder(self, *, path: str, name: str, parent_id: Optional[str], depth: int, source_path: str = '', is_root: bool = False) -> CloudDriveFolder:
+    def upsert_folder(self, *, path: str, name: str, parent_id: Optional[str], depth: int, source_path: str = '', is_root: bool = False, source_mtime: float = 0.0) -> CloudDriveFolder:
         clean_path = self._normalize_path(path)
         now = _utc_now()
         with self._lock:
@@ -300,18 +307,19 @@ class CloudDriveRegistryDB:
                 folder_id = str(row['id']) if row else str(uuid.uuid4())
                 conn.execute(
                     '''
-                    INSERT INTO cloud_folders (id, parent_id, name, path, depth, source_path, is_root, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO cloud_folders (id, parent_id, name, path, depth, source_path, is_root, source_mtime, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(path) DO UPDATE SET
                         parent_id=excluded.parent_id,
                         name=excluded.name,
                         depth=excluded.depth,
                         source_path=excluded.source_path,
                         is_root=excluded.is_root,
+                        source_mtime=excluded.source_mtime,
                         updated_at=excluded.updated_at,
                         deleted_at=''
                     ''',
-                    (folder_id, parent_id, name, clean_path, int(depth), source_path, 1 if is_root else 0, now, now),
+                    (folder_id, parent_id, name, clean_path, int(depth), source_path, 1 if is_root else 0, float(source_mtime), now, now),
                 )
                 saved = conn.execute('SELECT * FROM cloud_folders WHERE path=?', (clean_path,)).fetchone()
                 assert saved is not None
@@ -333,7 +341,7 @@ class CloudDriveRegistryDB:
                 rows = conn.execute("SELECT * FROM cloud_folders WHERE parent_id=? AND deleted_at='' ORDER BY name", (parent_id,)).fetchall()
             return [self._folder_from_row(row) for row in rows]
 
-    def upsert_file(self, *, folder_id: str, path: str, name: str, storage_key: str, mime_type: str, size_bytes: int, checksum: str = '', source_path: str = '') -> CloudDriveFile:
+    def upsert_file(self, *, folder_id: str, path: str, name: str, storage_key: str, mime_type: str, size_bytes: int, checksum: str = '', source_path: str = '', source_mtime: float = 0.0) -> CloudDriveFile:
         clean_path = self._normalize_path(path)
         now = _utc_now()
         with self._lock:
@@ -350,8 +358,8 @@ class CloudDriveRegistryDB:
                 )
                 conn.execute(
                     '''
-                    INSERT INTO cloud_files (id, folder_id, name, path, storage_key, mime_type, size_bytes, checksum, source_path, current_version_id, created_at, updated_at, deleted_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                    INSERT INTO cloud_files (id, folder_id, name, path, storage_key, mime_type, size_bytes, checksum, source_path, source_mtime, current_version_id, created_at, updated_at, deleted_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
                     ON CONFLICT(path) DO UPDATE SET
                         folder_id=excluded.folder_id,
                         name=excluded.name,
@@ -360,15 +368,42 @@ class CloudDriveRegistryDB:
                         size_bytes=excluded.size_bytes,
                         checksum=excluded.checksum,
                         source_path=excluded.source_path,
+                        source_mtime=excluded.source_mtime,
                         current_version_id=excluded.current_version_id,
                         updated_at=excluded.updated_at,
                         deleted_at=''
                     ''',
-                    (file_id, folder_id, name, clean_path, storage_key, mime_type, int(size_bytes), checksum, source_path, version_id, now, now),
+                    (file_id, folder_id, name, clean_path, storage_key, mime_type, int(size_bytes), checksum, source_path, float(source_mtime), version_id, now, now),
                 )
                 saved = conn.execute('SELECT * FROM cloud_files WHERE path=?', (clean_path,)).fetchone()
                 assert saved is not None
                 return self._file_from_row(saved)
+
+    def update_folder_mtime(self, folder_id: str, source_mtime: float) -> None:
+        """Cheaply update only the source_mtime of a folder after a successful scan."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE cloud_folders SET source_mtime=? WHERE id=?",
+                    (float(source_mtime), folder_id),
+                )
+
+    def get_folder_source_mtime(self, folder_id: str) -> float:
+        """Return the stored source_mtime for a folder (0 if unknown)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT source_mtime FROM cloud_folders WHERE id=?", (folder_id,)
+            ).fetchone()
+            return float(row["source_mtime"] or 0) if row else 0.0
+
+    def get_file_mtimes_in_folder(self, folder_id: str) -> Dict[str, tuple]:
+        """Return {name: (source_mtime, size_bytes)} for all non-deleted files in a folder."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT name, source_mtime, size_bytes FROM cloud_files WHERE folder_id=? AND deleted_at=''",
+                (folder_id,),
+            ).fetchall()
+        return {str(r["name"]): (float(r["source_mtime"] or 0), int(r["size_bytes"] or 0)) for r in rows}
 
     def get_file_by_path(self, path: str) -> Optional[CloudDriveFile]:
         with self._connect() as conn:
@@ -1308,6 +1343,7 @@ class CloudDriveRegistryDB:
         return value
 
     def _folder_from_row(self, row: sqlite3.Row) -> CloudDriveFolder:
+        keys = row.keys()
         return CloudDriveFolder(
             id=str(row['id']),
             parent_id=str(row['parent_id']) if row['parent_id'] is not None else None,
@@ -1316,12 +1352,14 @@ class CloudDriveRegistryDB:
             depth=int(row['depth'] or 0),
             source_path=str(row['source_path'] or ''),
             is_root=bool(int(row['is_root'] or 0)),
+            source_mtime=float(row['source_mtime'] or 0) if 'source_mtime' in keys else 0.0,
             created_at=str(row['created_at'] or ''),
             updated_at=str(row['updated_at'] or ''),
-            deleted_at=str(row['deleted_at'] or '') if 'deleted_at' in row.keys() else '',
+            deleted_at=str(row['deleted_at'] or '') if 'deleted_at' in keys else '',
         )
 
     def _file_from_row(self, row: sqlite3.Row) -> CloudDriveFile:
+        keys = row.keys()
         return CloudDriveFile(
             id=str(row['id']),
             folder_id=str(row['folder_id']),
@@ -1332,6 +1370,7 @@ class CloudDriveRegistryDB:
             size_bytes=int(row['size_bytes'] or 0),
             checksum=str(row['checksum'] or ''),
             source_path=str(row['source_path'] or ''),
+            source_mtime=float(row['source_mtime'] or 0) if 'source_mtime' in keys else 0.0,
             current_version_id=str(row['current_version_id'] or ''),
             created_at=str(row['created_at'] or ''),
             updated_at=str(row['updated_at'] or ''),
