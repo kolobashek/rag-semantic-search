@@ -1337,6 +1337,139 @@ class CloudDriveRegistryDB:
             root_path = str(root_row['path']) if root_row else ''
         return CloudDriveStats(folders=folders, files=files, versions=versions, pending_jobs=pending_jobs, root_path=root_path)
 
+    # ── Analytics queries ────────────────────────────────────────────────────
+
+    def get_top_changed_files(self, *, limit: int = 20, since: str = '') -> List[Dict[str, Any]]:
+        """Return top N files by version count, optionally filtered by created_at >= since."""
+        params: tuple = (since,) if since else ()
+        where = "WHERE v.created_at >= ?" if since else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT f.path, f.name, f.size_bytes, f.mime_type,
+                       COUNT(v.id) AS version_count,
+                       MIN(v.created_at) AS first_change,
+                       MAX(v.created_at) AS last_change,
+                       GROUP_CONCAT(DISTINCT v.created_by) AS changed_by
+                FROM cloud_file_versions v
+                JOIN cloud_files f ON f.id = v.file_id
+                {where}
+                GROUP BY v.file_id
+                ORDER BY version_count DESC
+                LIMIT ?
+                """,
+                (*params, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "path": str(r["path"] or ""),
+                "name": str(r["name"] or ""),
+                "size_bytes": int(r["size_bytes"] or 0),
+                "mime_type": str(r["mime_type"] or ""),
+                "version_count": int(r["version_count"] or 0),
+                "first_change": str(r["first_change"] or ""),
+                "last_change": str(r["last_change"] or ""),
+                "changed_by": [u for u in str(r["changed_by"] or "").split(",") if u.strip()],
+            }
+            for r in rows
+        ]
+
+    def get_change_timeline(self, *, bucket: str = "day", since: str = '', limit: int = 90) -> List[Dict[str, Any]]:
+        """Return version counts grouped by time bucket.
+
+        bucket: 'minute' | 'hour' | 'day' | 'week' | 'month'
+        Returns list of {bucket, count, unique_files, changed_by_count}.
+        """
+        _BUCKET_EXPR = {
+            "minute": "substr(v.created_at, 1, 16)",
+            "hour":   "substr(v.created_at, 1, 13)",
+            "day":    "substr(v.created_at, 1, 10)",
+            "week":   "strftime('%Y-W%W', v.created_at)",
+            "month":  "substr(v.created_at, 1, 7)",
+        }
+        bucket_expr = _BUCKET_EXPR.get(bucket, _BUCKET_EXPR["day"])
+        where = "WHERE v.created_at >= ?" if since else ""
+        params = (since,) if since else ()
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {bucket_expr} AS bucket,
+                       COUNT(v.id) AS count,
+                       COUNT(DISTINCT v.file_id) AS unique_files,
+                       COUNT(DISTINCT v.created_by) AS changed_by_count
+                FROM cloud_file_versions v
+                {where}
+                GROUP BY bucket
+                ORDER BY bucket DESC
+                LIMIT ?
+                """,
+                (*params, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "bucket": str(r["bucket"] or ""),
+                "count": int(r["count"] or 0),
+                "unique_files": int(r["unique_files"] or 0),
+                "changed_by_count": int(r["changed_by_count"] or 0),
+            }
+            for r in reversed(rows)
+        ]
+
+    def find_duplicates(self, *, min_size_bytes: int = 0) -> List[Dict[str, Any]]:
+        """Return groups of files sharing the same checksum (content duplicates).
+
+        Each group: {checksum, file_count, size_bytes, wasted_bytes, files: [{path, name}]}
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT checksum, COUNT(*) AS file_count, MAX(size_bytes) AS size_bytes
+                FROM cloud_files
+                WHERE deleted_at='' AND checksum != '' AND size_bytes >= ?
+                GROUP BY checksum
+                HAVING COUNT(*) > 1
+                ORDER BY (COUNT(*) - 1) * MAX(size_bytes) DESC
+                LIMIT 500
+                """,
+                (int(min_size_bytes),),
+            ).fetchall()
+            groups = []
+            for r in rows:
+                checksum = str(r["checksum"])
+                size = int(r["size_bytes"] or 0)
+                count = int(r["file_count"] or 0)
+                file_rows = conn.execute(
+                    "SELECT path, name FROM cloud_files WHERE checksum=? AND deleted_at='' ORDER BY path",
+                    (checksum,),
+                ).fetchall()
+                groups.append({
+                    "checksum": checksum[:16] + "…",
+                    "file_count": count,
+                    "size_bytes": size,
+                    "wasted_bytes": size * (count - 1),
+                    "files": [{"path": str(fr["path"]), "name": str(fr["name"])} for fr in file_rows],
+                })
+        return groups
+
+    def get_storage_savings(self) -> Dict[str, Any]:
+        """Return storage deduplication stats."""
+        with self._connect() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS c, SUM(size_bytes) AS s FROM cloud_files WHERE deleted_at=''"
+            ).fetchone()
+            unique = conn.execute(
+                "SELECT COUNT(DISTINCT storage_key) AS c, SUM(DISTINCT size_bytes) AS s FROM cloud_files WHERE deleted_at=''"
+            ).fetchone()
+        total_files = int((total or {})["c"] or 0)
+        total_bytes = int((total or {})["s"] or 0)
+        unique_keys = int((unique or {})["c"] or 0)
+        return {
+            "total_files": total_files,
+            "total_logical_bytes": total_bytes,
+            "unique_storage_keys": unique_keys,
+            "saved_bytes": max(0, total_bytes - int((unique or {})["s"] or 0)),
+        }
+
     def _normalize_path(self, path: str) -> str:
         value = str(path or '').strip().replace('\\', '/')
         value = '/'.join(part for part in value.split('/') if part not in {'', '.'})

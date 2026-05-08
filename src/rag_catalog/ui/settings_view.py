@@ -794,6 +794,18 @@ def render_settings_screen(
                     root_path = str(getattr(stats_obj, "root_path", "") or "")
                     if root_path:
                         ui.label(f"Корень: {root_path}").classes("rag-path text-xs")
+                    try:
+                        _savings = CloudDriveService.from_config(build_cloud_config()).registry.get_storage_savings()
+                        _saved = int(_savings.get("saved_bytes") or 0)
+                        _dups = max(0, int(_savings.get("total_files") or 0) - int(_savings.get("unique_storage_keys") or 0))
+                        if _saved > 0 or _dups > 0:
+                            _mb = _saved / 1_048_576
+                            _lbl = f"Дедупликация: сэкономлено {_mb:.1f} МБ"
+                            if _dups > 0:
+                                _lbl += f" · {_dups} дублей"
+                            ui.label(_lbl).classes("rag-meta text-xs text-green-700")
+                    except Exception:
+                        pass
 
             _CD_STATUS_META = {
                 "pending":   ("schedule",     "cd-status-pending",   "Ожидание"),

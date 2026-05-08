@@ -10,13 +10,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from nicegui import ui
+from nicegui import run, ui
 
+from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.search_eval import evaluate_search, load_golden_queries
 
 from .helpers import (
+    _cd_get_service,
     _db_query_dicts,
     _ensure_searcher,
+    _format_bytes,
     _run_catalog_search,
 )
 from .state import (
@@ -81,6 +84,7 @@ def render_stats_screen(
         tab_queries = ui.tab("Запросы", icon="manage_search")
         tab_benchmark = ui.tab("Бенчмарк", icon="assessment")
         tab_audit = ui.tab("Аудит", icon="security")
+        tab_cd = ui.tab("Cloud Drive", icon="cloud") if bool(state.cfg.get("cloud_drive_enabled")) else None
 
     with ui.tab_panels(tabs, value=tab_overview).classes("w-full"):
 
@@ -715,3 +719,148 @@ def render_stats_screen(
 
                 cd_action_filter.on_value_change(lambda e: refresh_cd_audit())
                 cd_user_filter2.on_value_change(lambda e: refresh_cd_audit())
+
+        # ── Cloud Drive — аналитика ───────────────────────────────────────
+        if tab_cd is not None:
+            with ui.tab_panel(tab_cd):
+                cd_svc = _cd_get_service(state.cfg)
+                if cd_svc is None:
+                    with ui.element("div").classes("cd-empty-state w-full py-8"):
+                        ui.icon("cloud_off", size="36px").classes("opacity-30")
+                        ui.label("Cloud Drive не инициализирован. Сначала настройте и инициализируйте реестр.").classes("text-center")
+                else:
+                    # ── Controls ─────────────────────────────────────────
+                    with ui.row().classes("w-full gap-2 items-center flex-wrap"):
+                        period_select = ui.select(
+                            {"day": "По дням", "hour": "По часам", "week": "По неделям", "month": "По месяцам"},
+                            value="day",
+                            label="Детализация",
+                        ).props("dense outlined").classes("w-44")
+                        top_n_select = ui.select(
+                            {10: "Топ 10", 20: "Топ 20", 50: "Топ 50"},
+                            value=20,
+                            label="Топ N файлов",
+                        ).props("dense outlined").classes("w-36")
+                        min_size_select = ui.select(
+                            {0: "Любой размер", 1024: "> 1 КБ", 1048576: "> 1 МБ", 10485760: "> 10 МБ"},
+                            value=0,
+                            label="Мин. размер дублей",
+                        ).props("dense outlined").classes("w-44")
+                        ui.button(icon="refresh", on_click=lambda: ui.timer(0.05, refresh_cd_analytics, once=True)).props("flat dense round").classes("text-indigo-400").tooltip("Обновить")
+
+                    cd_analytics_box = ui.column().classes("w-full gap-4")
+
+                    async def refresh_cd_analytics() -> None:
+                        bucket = str(period_select.value or "day")
+                        top_n = int(top_n_select.value or 20)
+                        min_sz = int(min_size_select.value or 0)
+                        try:
+                            timeline = await run.io_bound(
+                                cd_svc.registry.get_change_timeline, bucket=bucket, limit=120
+                            )
+                            top_changed = await run.io_bound(
+                                cd_svc.registry.get_top_changed_files, limit=top_n
+                            )
+                            duplicates = await run.io_bound(
+                                cd_svc.registry.find_duplicates, min_size_bytes=min_sz
+                            )
+                            savings = await run.io_bound(cd_svc.registry.get_storage_savings)
+                        except Exception as exc:
+                            cd_analytics_box.clear()
+                            with cd_analytics_box:
+                                ui.label(f"Ошибка загрузки: {exc}").classes("text-negative text-sm")
+                            return
+
+                        cd_analytics_box.clear()
+                        with cd_analytics_box:
+                            # ── Storage savings KPIs ──────────────────────
+                            saved = int(savings.get("saved_bytes") or 0)
+                            total_files = int(savings.get("total_files") or 0)
+                            unique_keys = int(savings.get("unique_storage_keys") or 0)
+                            dup_files = total_files - unique_keys
+                            with ui.row().classes("w-full gap-3 flex-wrap"):
+                                for lbl, val, ico, clr in [
+                                    ("Всего файлов", str(total_files), "description", ""),
+                                    ("Уникальных блобов", str(unique_keys), "fingerprint", ""),
+                                    ("Дублей", str(max(0, dup_files)), "content_copy", "text-amber-600" if dup_files > 0 else ""),
+                                    ("Сэкономлено", _format_bytes(saved), "savings", "text-green-600" if saved > 0 else ""),
+                                ]:
+                                    with ui.column().classes("rag-card p-3 gap-0 items-center flex-1 min-w-28"):
+                                        ui.icon(ico, size="20px").classes(f"text-indigo-400 {clr}".strip())
+                                        ui.label(val).classes(f"text-lg font-semibold leading-tight {clr}".strip())
+                                        ui.label(lbl).classes("rag-meta text-xs")
+
+                            # ── Timeline chart ────────────────────────────
+                            if timeline:
+                                ui.label("Хронология изменений").classes("font-semibold text-sm mt-2")
+                                labels = [r["bucket"] for r in timeline]
+                                counts = [r["count"] for r in timeline]
+                                unique_files_series = [r["unique_files"] for r in timeline]
+                                ui.echart({
+                                    "tooltip": {"trigger": "axis"},
+                                    "legend": {"data": ["Версий", "Уникальных файлов"]},
+                                    "xAxis": {"type": "category", "data": labels, "axisLabel": {"rotate": 30, "fontSize": 10}},
+                                    "yAxis": {"type": "value", "minInterval": 1},
+                                    "series": [
+                                        {"name": "Версий", "type": "bar", "data": counts, "itemStyle": {"color": "#6366f1"}},
+                                        {"name": "Уникальных файлов", "type": "line", "data": unique_files_series, "itemStyle": {"color": "#f59e0b"}, "smooth": True},
+                                    ],
+                                    "grid": {"left": "3%", "right": "4%", "bottom": "15%", "containLabel": True},
+                                }).classes("w-full").style("height: 260px")
+                            else:
+                                with ui.element("div").classes("cd-empty-state w-full"):
+                                    ui.icon("history", size="28px").classes("opacity-30")
+                                    ui.label("Нет данных об изменениях — запустите импорт.").classes("text-center")
+
+                            # ── Top changed files ─────────────────────────
+                            if top_changed:
+                                ui.label(f"Топ {top_n} файлов по количеству изменений").classes("font-semibold text-sm mt-2")
+                                ui.table(
+                                    rows=[
+                                        {
+                                            "name": r["name"],
+                                            "path": r["path"],
+                                            "versions": r["version_count"],
+                                            "last_change": r["last_change"][:19].replace("T", " ") if r["last_change"] else "",
+                                            "changed_by": ", ".join(r["changed_by"]) or "system",
+                                            "size": _format_bytes(r["size_bytes"]),
+                                        }
+                                        for r in top_changed
+                                    ],
+                                    columns=[
+                                        {"name": "name", "label": "Файл", "field": "name", "align": "left"},
+                                        {"name": "versions", "label": "Версий", "field": "versions", "sortable": True},
+                                        {"name": "last_change", "label": "Последнее изменение", "field": "last_change", "sortable": True},
+                                        {"name": "changed_by", "label": "Кто менял", "field": "changed_by"},
+                                        {"name": "size", "label": "Размер", "field": "size"},
+                                    ],
+                                    pagination=10,
+                                ).classes("w-full")
+                            else:
+                                ui.label("Топ файлов пуст — версии ещё не накоплены.").classes("rag-meta text-sm")
+
+                            # ── Duplicates ────────────────────────────────
+                            ui.separator()
+                            with ui.row().classes("w-full items-center gap-2 mt-1"):
+                                ui.icon("content_copy", size="18px").classes("text-indigo-400")
+                                ui.label("Дубли файлов").classes("font-semibold text-sm")
+                                ui.label("(одинаковое содержимое, разные пути)").classes("rag-meta text-xs")
+                            if not duplicates:
+                                ui.label("Дублей не найдено. Содержимое всех файлов уникально.").classes("rag-meta text-sm")
+                            else:
+                                total_wasted = sum(d["wasted_bytes"] for d in duplicates)
+                                ui.label(
+                                    f"{len(duplicates)} групп дублей · можно освободить {_format_bytes(total_wasted)}"
+                                ).classes("rag-meta text-xs mb-1")
+                                for dup in duplicates[:30]:
+                                    with ui.expansion(
+                                        f"{dup['file_count']} копии · {_format_bytes(dup['size_bytes'])} каждая · экономия {_format_bytes(dup['wasted_bytes'])}",
+                                        icon="content_copy",
+                                    ).classes("w-full rag-card"):
+                                        for finfo in dup["files"]:
+                                            ui.label(finfo["path"]).classes("rag-path text-xs")
+                                if len(duplicates) > 30:
+                                    ui.label(f"…ещё {len(duplicates) - 30} групп").classes("rag-meta text-xs")
+
+                    ui.timer(0.3, refresh_cd_analytics, once=True)
+
