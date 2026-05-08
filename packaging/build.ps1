@@ -46,6 +46,19 @@ Write-Host "Project   : $ProjectDir"
 Write-Host "Output    : $DistDir"
 Write-Host ""
 
+# ── Resolve python executable ─────────────────────────────────────────────────
+$PythonExe = $null
+foreach ($candidate in @("python", "python3", "py")) {
+    if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+        $PythonExe = $candidate; break
+    }
+}
+if (-not $PythonExe) {
+    Write-Error "Python not found. Install Python 3.10+ and add it to PATH."
+    exit 1
+}
+Write-Host "Python    : $(& $PythonExe --version 2>&1)" -ForegroundColor DarkGray
+
 # ── Step 1: PyInstaller ──────────────────────────────────────────────────────
 if (-not $SkipPyInstaller) {
     Write-Host "Step 1/3 — PyInstaller" -ForegroundColor Yellow
@@ -53,9 +66,20 @@ if (-not $SkipPyInstaller) {
     $specFile = Join-Path $PackagingDir "rag_sync_client.spec"
     if (-not (Test-Path $specFile)) { Write-Error "Spec not found: $specFile"; exit 1 }
 
+    # Ensure PyInstaller is installed
+    $piCheck = & $PythonExe -m PyInstaller --version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  PyInstaller not found — installing..." -ForegroundColor DarkYellow
+        & $PythonExe -m pip install pyinstaller --quiet
+        if ($LASTEXITCODE -ne 0) { Write-Error "Failed to install PyInstaller"; exit 1 }
+    }
+
+    # Ensure watchdog is installed (required by the client)
+    & $PythonExe -m pip install requests watchdog --quiet
+
     Push-Location $ProjectDir
     try {
-        pyinstaller $specFile `
+        & $PythonExe -m PyInstaller $specFile `
             --distpath $DistDir `
             --workpath (Join-Path $PackagingDir "build") `
             --noconfirm
