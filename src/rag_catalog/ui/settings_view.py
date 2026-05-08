@@ -587,8 +587,25 @@ def render_settings_screen(
 
             s3_box = ui.column().classes("w-full gap-2")
             with s3_box:
+                ui.label(
+                    "S3/MinIO параметры относятся к инфраструктуре. "
+                    "Обычно их выдаёт администратор хранилища: endpoint, bucket и ключи доступа."
+                ).classes("rag-meta text-sm")
+
+                s3_warning = ui.element("div").classes(
+                    "rag-card w-full p-3 border border-orange-200 bg-orange-50"
+                )
+                s3_warning.set_visibility(False)
+                with s3_warning:
+                    ui.icon("warning", size="18px").classes("text-orange-600")
+                    ui.label(
+                        "Внимание: изменение S3/MinIO настроек может привести к тому, что Cloud Drive "
+                        "перестанет видеть ранее загруженные файлы (другой bucket/endpoint = другой storage namespace). "
+                        "Меняйте только если понимаете последствия."
+                    ).classes("text-sm text-orange-900")
+
                 s3_bucket_input = ui.input("S3 bucket (обязателен)", value=initial_cloud["cloud_drive_bucket"]).props("dense outlined").classes("w-full max-w-xl")
-                s3_bucket_input.tooltip("Имя bucket в S3/MinIO. Это контейнер объектов, куда Cloud Drive складывает файлы.")
+                s3_bucket_input.tooltip("Bucket — контейнер объектов в S3/MinIO. Без него Cloud Drive не знает, куда писать/откуда читать файлы.")
                 s3_endpoint_input = ui.input("S3 endpoint (MinIO)", value=initial_cloud["cloud_drive_s3_endpoint"]).props("dense outlined").classes("w-full max-w-xl")
                 s3_endpoint_input.tooltip("URL endpoint для MinIO/S3. Для MinIO обычно http://127.0.0.1:9000. Для AWS S3 можно оставить пустым.")
                 s3_region_input = ui.input("S3 region", value=initial_cloud["cloud_drive_s3_region"]).props("dense outlined").classes("w-full max-w-sm")
@@ -632,6 +649,18 @@ def render_settings_screen(
 
             def refresh_cloud_dirty() -> None:
                 action_row.set_visibility(current_cloud_values() != initial_cloud)
+                # S3 warnings: show only when storage=s3 and any S3 field differs from initial
+                if str(storage_kind.value or "local") != "s3":
+                    s3_warning.set_visibility(False)
+                    return
+                s3_changed = (
+                    str(s3_bucket_input.value or "").strip() != initial_cloud.get("cloud_drive_bucket", "")
+                    or str(s3_endpoint_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_endpoint", "")
+                    or str(s3_region_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_region", "")
+                    or str(s3_access_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_access_key", "")
+                    or str(s3_secret_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_secret_key", "")
+                )
+                s3_warning.set_visibility(bool(s3_changed))
 
             def reset_cloud_settings() -> None:
                 enabled_input.set_value(initial_cloud["cloud_drive_enabled"])
