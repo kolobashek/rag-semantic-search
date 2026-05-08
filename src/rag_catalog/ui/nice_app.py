@@ -260,6 +260,8 @@ def _build_page(initial_screen: str = "search") -> None:
         state.expanded_query = ""
         state.rag_answer_text = ""
         state.rag_answer_loading = False
+        state.rag_answer_ok = True
+        state.rag_answer_sources = []
         state.doc_explain_path = ""
         state.doc_explain_text = ""
         state.doc_explain_loading = False
@@ -409,23 +411,30 @@ def _build_page(initial_screen: str = "search") -> None:
 
         # RAG Q&A — только после полной догрузки
         if llm_enabled and state.results and not state.search_error and state.search_request_id == request_id:
-            state.rag_answer_loading = True
-            render()
-            try:
-                from rag_catalog.core.llm import rag_answer  # noqa: PLC0415
-                answer = await run.io_bound(
-                    rag_answer, query, state.results, model=rag_model, ollama_url=ollama_url
-                )
-                if state.search_request_id != request_id:
-                    return
-                state.rag_answer_text = answer or ""
-            except Exception as exc:
-                if state.search_request_id != request_id:
-                    return
-                state.rag_answer_text = f"Ошибка LLM: {exc}"
-            finally:
-                if state.search_request_id == request_id:
-                    state.rag_answer_loading = False
+            searcher_for_answer = _ensure_searcher(state)
+            if searcher_for_answer is not None:
+                state.rag_answer_loading = True
+                render()
+                try:
+                    ans = await run.io_bound(
+                        searcher_for_answer.answer_documents,
+                        query,
+                        file_type=state.file_type,
+                    )
+                    if state.search_request_id != request_id:
+                        return
+                    state.rag_answer_text = str(ans.get("answer") or "")
+                    state.rag_answer_ok = bool(ans.get("ok", True))
+                    state.rag_answer_sources = list(ans.get("sources") or [])
+                except Exception as exc:
+                    if state.search_request_id != request_id:
+                        return
+                    state.rag_answer_text = f"Ошибка LLM: {exc}"
+                    state.rag_answer_ok = False
+                    state.rag_answer_sources = []
+                finally:
+                    if state.search_request_id == request_id:
+                        state.rag_answer_loading = False
 
         if state.search_request_id == request_id:
             state.search_lazy_loading = False
@@ -1165,26 +1174,34 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.spinner(size="sm")
                 ui.label("Анализирую документы…").classes("rag-meta")
         elif state.rag_answer_text:
-            _body, _sources = _parse_rag_answer(state.rag_answer_text)
             with ui.column().classes("rag-card w-full p-3 gap-2"):
-                with ui.row().classes("items-center gap-1"):
-                    ui.icon("smart_toy", size="18px").classes("text-indigo-500")
-                    ui.label("Ответ ИИ").classes("font-semibold text-sm text-indigo-700")
-                ui.label(_body).classes("text-sm whitespace-pre-wrap")
-                if _sources:
+                with ui.row().classes("items-center justify-between w-full"):
+                    with ui.row().classes("items-center gap-1"):
+                        ui.icon("smart_toy", size="18px").classes("text-indigo-500")
+                        ui.label("Ответ ИИ").classes("font-semibold text-sm text-indigo-700")
+                    if not state.rag_answer_ok:
+                        ui.label("⚠ ответ может быть неточным").classes("rag-chip text-xs text-amber-700 bg-amber-50")
+                ui.label(state.rag_answer_text).classes("text-sm whitespace-pre-wrap")
+                if state.rag_answer_sources:
                     ui.separator()
-                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                    with ui.column().classes("gap-1"):
                         ui.label("Источники:").classes("rag-meta text-xs font-medium")
-                        for _src in _sources:
-                            _src_result = next(
-                                (r for r in state.results if str(r.get("filename") or "").lower() == _src.lower()),
-                                None,
-                            )
-                            _src_path = Path(str(_src_result.get("full_path") or "")) if _src_result else None
-                            if _src_path and _src_path.exists() and _src_path.is_file():
-                                ui.button(_src, icon="description", on_click=lambda p=_src_path: open_file_viewer(p)).props("outline dense no-caps").classes("text-xs")
-                            else:
-                                ui.label(_src).classes("rag-chip text-xs")
+                        with ui.row().classes("items-start gap-2 flex-wrap"):
+                            for _src in state.rag_answer_sources:
+                                _fname = str(_src.get("filename") or "")
+                                _fpath = Path(str(_src.get("full_path") or ""))
+                                _page = _src.get("page")
+                                _section = str(_src.get("section") or "")
+                                _prov_label = ""
+                                if _page is not None:
+                                    _prov_label = f" · стр.{_page}"
+                                elif _section:
+                                    _prov_label = f" · {_section[:20]}"
+                                _btn_label = _fname + _prov_label
+                                if _fpath.exists() and _fpath.is_file():
+                                    ui.button(_btn_label, icon="description", on_click=lambda p=_fpath: open_file_viewer(p)).props("outline dense no-caps").classes("text-xs")
+                                else:
+                                    ui.label(_btn_label).classes("rag-chip text-xs")
 
         # Сводка по выбранным
         if state.selection_summary_loading:

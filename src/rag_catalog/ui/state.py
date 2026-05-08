@@ -43,6 +43,8 @@ class PageState:
     ai_search_expand: bool = True
     rag_answer_text: str = ""
     rag_answer_loading: bool = False
+    rag_answer_ok: bool = True
+    rag_answer_sources: List[Dict[str, Any]] = field(default_factory=list)
     doc_explain_path: str = ""
     doc_explain_text: str = ""
     doc_explain_loading: bool = False
