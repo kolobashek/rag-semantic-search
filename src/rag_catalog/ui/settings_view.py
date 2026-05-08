@@ -7,6 +7,7 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import threading
@@ -40,6 +41,46 @@ from .system import (
     _safe_int,
     _stop_managed_timer,
 )
+
+
+def _pick_folder_dialog(input_widget: Any, *, title: str = "Выберите папку") -> None:
+    """Open OS native folder-picker dialog (local server only) and populate input_widget."""
+    import threading as _threading  # noqa: PLC0415
+    def _run() -> None:
+        try:
+            import tkinter as _tk  # noqa: PLC0415
+            from tkinter import filedialog as _fd  # noqa: PLC0415
+            root = _tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            chosen = _fd.askdirectory(title=title, parent=root)
+            root.destroy()
+            if chosen:
+                input_widget.set_value(chosen)
+                input_widget.run_method("focus")
+        except Exception:
+            pass
+    _threading.Thread(target=_run, daemon=True).start()
+
+
+def _pick_file_dialog(input_widget: Any, *, title: str = "Выберите файл") -> None:
+    """Open OS native file-picker dialog (local server only) and populate input_widget."""
+    import threading as _threading  # noqa: PLC0415
+    def _run() -> None:
+        try:
+            import tkinter as _tk  # noqa: PLC0415
+            from tkinter import filedialog as _fd  # noqa: PLC0415
+            root = _tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            chosen = _fd.askopenfilename(title=title, parent=root)
+            root.destroy()
+            if chosen:
+                input_widget.set_value(chosen)
+                input_widget.run_method("focus")
+        except Exception:
+            pass
+    _threading.Thread(target=_run, daemon=True).start()
 
 
 def render_settings_screen(
@@ -465,6 +506,19 @@ def render_settings_screen(
                                     ui.element("td").classes("p-2 rag-meta font-mono truncate max-w-xs").text = path
 
     def render_admin_path_settings() -> None:
+        def _path_row(label: str, value: str, *, folder: bool = True) -> ui.input:
+            with ui.row().classes("w-full items-center gap-1"):
+                inp = ui.input(label, value=value).props("dense outlined").classes("flex-1")
+                icon = "folder_open" if folder else "description"
+                tip = "Выбрать папку" if folder else "Выбрать файл"
+                btn = ui.button(icon=icon).props("flat dense round").classes("text-indigo-400 mt-1")
+                btn.tooltip(tip)
+                if folder:
+                    btn.on_click(lambda _inp=inp: _pick_folder_dialog(_inp))
+                else:
+                    btn.on_click(lambda _inp=inp: _pick_file_dialog(_inp))
+            return inp
+
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             initial_paths = {
                 "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
@@ -476,12 +530,12 @@ def render_settings_screen(
             }
             ui.label("Пути и подключение").classes("text-xl font-semibold")
             ui.label("Эти настройки видны только администратору. После сохранения поиск переподключается к Qdrant с новыми значениями.").classes("rag-meta")
-            catalog_input = ui.input("Каталог документов", value=str(state.cfg.get("catalog_path") or "")).props("dense outlined").classes("w-full")
+            catalog_input = _path_row("Каталог документов", str(state.cfg.get("catalog_path") or ""), folder=True)
             qdrant_url_input = ui.input("Qdrant URL", value=str(state.cfg.get("qdrant_url") or "")).props("dense outlined").classes("w-full")
-            qdrant_db_input = ui.input("Локальный путь Qdrant", value=str(state.cfg.get("qdrant_db_path") or "")).props("dense outlined").classes("w-full")
+            qdrant_db_input = _path_row("Локальный путь Qdrant", str(state.cfg.get("qdrant_db_path") or ""), folder=True)
             collection_input = ui.input("Коллекция", value=str(state.cfg.get("collection_name") or "catalog")).props("dense outlined").classes("w-full")
-            telemetry_input = ui.input("БД телеметрии", value=str(state.cfg.get("telemetry_db_path") or "")).props("dense outlined").classes("w-full")
-            log_input = ui.input("Лог автоматизации", value=str(state.cfg.get("log_file") or "")).props("dense outlined").classes("w-full")
+            telemetry_input = _path_row("БД телеметрии", str(state.cfg.get("telemetry_db_path") or ""), folder=False)
+            log_input = _path_row("Лог автоматизации", str(state.cfg.get("log_file") or ""), folder=False)
 
             with ui.row().classes("w-full gap-2"):
                 ui.label(f"Текущий каталог: {state.cfg.get('catalog_path') or '-'}").classes("rag-path")
@@ -549,6 +603,19 @@ def render_settings_screen(
     def render_admin_cloud_drive_settings() -> None:
         default_db_path = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_drive.db").resolve())
         default_storage_root = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_storage").resolve())
+
+        def _path_row_cd(label: str, value: str, *, folder: bool = True) -> ui.input:
+            with ui.row().classes("w-full items-center gap-1"):
+                inp = ui.input(label, value=value).props("dense outlined").classes("flex-1")
+                icon = "folder_open" if folder else "description"
+                btn = ui.button(icon=icon).props("flat dense round").classes("text-indigo-400 mt-1")
+                btn.tooltip("Выбрать папку" if folder else "Выбрать файл")
+                if folder:
+                    btn.on_click(lambda _inp=inp: _pick_folder_dialog(_inp))
+                else:
+                    btn.on_click(lambda _inp=inp: _pick_file_dialog(_inp))
+            return inp
+
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             initial_cloud = {
                 "cloud_drive_enabled": bool(state.cfg.get("cloud_drive_enabled")),
@@ -561,8 +628,11 @@ def render_settings_screen(
                 "cloud_drive_s3_access_key": str(state.cfg.get("cloud_drive_s3_access_key") or "").strip(),
                 "cloud_drive_s3_secret_key": str(state.cfg.get("cloud_drive_s3_secret_key") or "").strip(),
                 "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
+                "cloud_drive_autosync_minutes": int(state.cfg.get("cloud_drive_autosync_minutes") or 0),
             }
             stats_ref: Dict[str, Any] = {"value": None}
+            autosync_last_run: Dict[str, Any] = {"ts": None}
+
             ui.label("Cloud Drive").classes("text-xl font-semibold")
             ui.label(
                 "Централизованный реестр файлов и папок: дерево каталогов, версии, фоновые задачи. "
@@ -570,56 +640,83 @@ def render_settings_screen(
             ).classes("rag-meta")
 
             enabled_input = ui.checkbox("Включить Cloud Drive", value=initial_cloud["cloud_drive_enabled"])
-            enabled_input.tooltip("Включает реестр файлов и хранилище Cloud Drive. После включения в проводнике используется реестр вместо прямого обхода файловой системы.")
+            enabled_input.tooltip("Включает реестр файлов и хранилище Cloud Drive.")
 
-            db_input = ui.input("База реестра Cloud Drive", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("w-full")
-            db_input.tooltip("SQLite-база реестра: хранит структуру папок, метаданные файлов, версии и историю фоновых задач.")
+            with ui.row().classes("w-full items-center gap-1"):
+                db_input = ui.input("База реестра Cloud Drive", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("flex-1")
+                db_input.tooltip("SQLite-база реестра: хранит структуру папок, метаданные файлов, версии и историю задач.")
+                btn_db = ui.button(icon="folder_open").props("flat dense round").classes("text-indigo-400 mt-1")
+                btn_db.tooltip("Выбрать файл базы данных")
+                btn_db.on_click(lambda: _pick_file_dialog(db_input))
 
             storage_kind = ui.select(
                 {"local": "Local storage", "s3": "S3 / MinIO"},
                 value=initial_cloud["cloud_drive_storage"],
                 label="Хранилище файлов",
-            ).props("dense outlined").classes("w-full max-w-sm")
-            storage_kind.tooltip("Место физического хранения содержимого файлов. Local — локальная папка на сервере; S3/MinIO — объектное хранилище.")
+            ).props("dense outlined").classes("w-full")
+            storage_kind.tooltip("Место физического хранения содержимого файлов.")
 
-            storage_root_input = ui.input("Папка хранения файлов", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("w-full")
-            storage_root_input.tooltip("Корневая папка, куда сохраняются физические файлы при использовании local storage. Должна существовать и быть доступна для записи.")
+            storage_root_row = ui.row().classes("w-full items-center gap-1")
+            with storage_root_row:
+                storage_root_input = ui.input("Папка хранения файлов", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("flex-1")
+                storage_root_input.tooltip("Корневая папка для local storage.")
+                btn_root = ui.button(icon="folder_open").props("flat dense round").classes("text-indigo-400 mt-1")
+                btn_root.tooltip("Выбрать папку")
+                btn_root.on_click(lambda: _pick_folder_dialog(storage_root_input))
 
-            s3_box = ui.column().classes("w-full gap-2")
-            with s3_box:
+            s3_summary_row = ui.row().classes("w-full items-center gap-2")
+            with s3_summary_row:
+                s3_chip_label = ui.label("").classes("rag-meta text-xs bg-indigo-50 px-2 py-1 rounded")
+
+            with ui.dialog() as s3_dialog, ui.card().classes("w-full max-w-lg gap-3 p-4"):
+                ui.label("S3 / MinIO настройки").classes("text-lg font-semibold")
                 ui.label(
-                    "S3/MinIO параметры относятся к инфраструктуре. "
-                    "Обычно их выдаёт администратор хранилища: endpoint, bucket и ключи доступа."
+                    "Параметры относятся к инфраструктуре. Меняйте только если знаете "
+                    "что делаете — смена bucket/endpoint делает ранее загруженные файлы недоступными."
                 ).classes("rag-meta text-sm")
+                with ui.element("div").classes("w-full p-3 rounded border border-orange-200 bg-orange-50"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("warning", size="16px").classes("text-orange-600")
+                        ui.label("Изменение этих настроек может привести к потере доступа к уже загруженным файлам.").classes("text-sm text-orange-900")
+                s3_bucket_input = ui.input("S3 bucket (обязателен)", value=initial_cloud["cloud_drive_bucket"]).props("dense outlined").classes("w-full")
+                s3_bucket_input.tooltip("Bucket — контейнер объектов. Без него Cloud Drive не знает куда писать/читать файлы.")
+                s3_endpoint_input = ui.input("S3 endpoint (MinIO)", value=initial_cloud["cloud_drive_s3_endpoint"]).props("dense outlined").classes("w-full")
+                s3_endpoint_input.tooltip("URL для MinIO (напр. http://127.0.0.1:9000). Для AWS S3 оставьте пустым.")
+                s3_region_input = ui.input("S3 region", value=initial_cloud["cloud_drive_s3_region"]).props("dense outlined").classes("w-full")
+                s3_region_input.tooltip("Регион. Для MinIO обычно us-east-1.")
+                s3_access_input = ui.input("S3 access key", value=initial_cloud["cloud_drive_s3_access_key"]).props("dense outlined").classes("w-full")
+                s3_secret_input = ui.input("S3 secret key", value=initial_cloud["cloud_drive_s3_secret_key"], password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                with ui.row().classes("w-full justify-end gap-2 pt-2"):
+                    ui.button("Отмена", on_click=s3_dialog.close).props("flat dense")
+                    ui.button("Применить", icon="check", on_click=s3_dialog.close).props("unelevated dense")
 
-                s3_warning = ui.element("div").classes(
-                    "rag-card w-full p-3 border border-orange-200 bg-orange-50"
-                )
-                s3_warning.set_visibility(False)
-                with s3_warning:
-                    ui.icon("warning", size="18px").classes("text-orange-600")
-                    ui.label(
-                        "Внимание: изменение S3/MinIO настроек может привести к тому, что Cloud Drive "
-                        "перестанет видеть ранее загруженные файлы (другой bucket/endpoint = другой storage namespace). "
-                        "Меняйте только если понимаете последствия."
-                    ).classes("text-sm text-orange-900")
+            with s3_summary_row:
+                btn_s3_configure = ui.button("Настроить S3 / MinIO...", icon="settings", on_click=s3_dialog.open).props("outline dense size=sm")  # noqa: F841
 
-                s3_bucket_input = ui.input("S3 bucket (обязателен)", value=initial_cloud["cloud_drive_bucket"]).props("dense outlined").classes("w-full max-w-xl")
-                s3_bucket_input.tooltip("Bucket — контейнер объектов в S3/MinIO. Без него Cloud Drive не знает, куда писать/откуда читать файлы.")
-                s3_endpoint_input = ui.input("S3 endpoint (MinIO)", value=initial_cloud["cloud_drive_s3_endpoint"]).props("dense outlined").classes("w-full max-w-xl")
-                s3_endpoint_input.tooltip("URL endpoint для MinIO/S3. Для MinIO обычно http://127.0.0.1:9000. Для AWS S3 можно оставить пустым.")
-                s3_region_input = ui.input("S3 region", value=initial_cloud["cloud_drive_s3_region"]).props("dense outlined").classes("w-full max-w-sm")
-                s3_region_input.tooltip("Регион S3. Для MinIO обычно достаточно us-east-1.")
-                s3_access_input = ui.input("S3 access key", value=initial_cloud["cloud_drive_s3_access_key"]).props("dense outlined").classes("w-full max-w-xl")
-                s3_access_input.tooltip("Access key для S3/MinIO. Хранится в config.json.")
-                s3_secret_input = ui.input("S3 secret key", value=initial_cloud["cloud_drive_s3_secret_key"], password=True, password_toggle_button=True).props("dense outlined").classes("w-full max-w-xl")
-                s3_secret_input.tooltip("Secret key для S3/MinIO. Хранится в config.json.")
+            catalog_input = _path_row_cd("Источник импорта", initial_cloud["catalog_path"], folder=True)
+            catalog_input.tooltip("Каталог источника для импорта. Обычно совпадает с основным каталогом документов.")
 
-            catalog_input = ui.input("Источник импорта", value=initial_cloud["catalog_path"]).props("dense outlined").classes("w-full")
-            catalog_input.tooltip("Каталог источника для импорта: bootstrap сканирует его дерево папок и файлов и заносит в реестр. Обычно совпадает с основным каталогом документов.")
+            bootstrap_limit = ui.number("Лимит импорта файлов (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full")
+            bootstrap_limit.tooltip("Ограничивает количество файлов при пробном запуске. 0 — без ограничения.")
 
-            bootstrap_limit = ui.number("Лимит импорта файлов (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full max-w-sm")
-            bootstrap_limit.tooltip("Ограничивает количество файлов при пробном запуске импорта. 0 — без ограничения, импортируются все файлы из каталога источника.")
+            ui.separator()
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("schedule", size="18px").classes("text-indigo-400")
+                ui.label("Автосинхронизация").classes("font-semibold text-sm")
+            ui.label(
+                "Фоновый таймер автоматически добавляет новые и изменённые файлы в реестр. "
+                "Уже существующие файлы пропускаются (upsert). Рекомендуется для каталогов с несколькими пользователями."
+            ).classes("rag-meta text-xs")
+            autosync_options = {0: "Выключено", 15: "Каждые 15 мин", 30: "Каждые 30 мин",
+                                60: "Каждый час", 120: "Каждые 2 часа", 240: "Каждые 4 часа"}
+            autosync_select = ui.select(
+                autosync_options,
+                value=int(state.cfg.get("cloud_drive_autosync_minutes") or 0),
+                label="Интервал автосинхронизации",
+            ).props("dense outlined").classes("w-full max-w-xs")
+            autosync_status_label = ui.label("").classes("rag-meta text-xs")
+
+            ui.separator()
 
             status_box = ui.column().classes("w-full gap-1")
             bootstrap_box = ui.column().classes("w-full gap-1")
@@ -639,28 +736,21 @@ def render_settings_screen(
                     "cloud_drive_s3_access_key": str(s3_access_input.value or "").strip(),
                     "cloud_drive_s3_secret_key": str(s3_secret_input.value or "").strip(),
                     "catalog_path": str(catalog_input.value or "").strip(),
+                    "cloud_drive_autosync_minutes": int(autosync_select.value or 0),
                 }
 
             def refresh_cloud_visibility() -> None:
                 kind = str(storage_kind.value or "local")
-                is_local = kind == "local"
-                storage_root_input.set_visibility(is_local)
-                s3_box.set_visibility(kind == "s3")
+                storage_root_row.set_visibility(kind == "local")
+                s3_summary_row.set_visibility(kind == "s3")
+                if kind == "s3":
+                    bucket = str(s3_bucket_input.value or "").strip()
+                    endpoint = str(s3_endpoint_input.value or "").strip()
+                    parts = [p for p in [endpoint, bucket] if p]
+                    s3_chip_label.set_text(" · ".join(parts) if parts else "Не настроено")
 
             def refresh_cloud_dirty() -> None:
                 action_row.set_visibility(current_cloud_values() != initial_cloud)
-                # S3 warnings: show only when storage=s3 and any S3 field differs from initial
-                if str(storage_kind.value or "local") != "s3":
-                    s3_warning.set_visibility(False)
-                    return
-                s3_changed = (
-                    str(s3_bucket_input.value or "").strip() != initial_cloud.get("cloud_drive_bucket", "")
-                    or str(s3_endpoint_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_endpoint", "")
-                    or str(s3_region_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_region", "")
-                    or str(s3_access_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_access_key", "")
-                    or str(s3_secret_input.value or "").strip() != initial_cloud.get("cloud_drive_s3_secret_key", "")
-                )
-                s3_warning.set_visibility(bool(s3_changed))
 
             def reset_cloud_settings() -> None:
                 enabled_input.set_value(initial_cloud["cloud_drive_enabled"])
@@ -673,6 +763,7 @@ def render_settings_screen(
                 s3_access_input.set_value(initial_cloud["cloud_drive_s3_access_key"])
                 s3_secret_input.set_value(initial_cloud["cloud_drive_s3_secret_key"])
                 catalog_input.set_value(initial_cloud["catalog_path"])
+                autosync_select.set_value(initial_cloud["cloud_drive_autosync_minutes"])
                 refresh_cloud_visibility()
                 action_row.set_visibility(False)
 
@@ -680,7 +771,10 @@ def render_settings_screen(
                 stats_ref["value"] = stats_obj
                 status_box.clear()
                 with status_box:
-                    ui.label(title).classes("font-semibold text-sm")
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(title).classes("font-semibold text-sm")
+                        ui.space()
+                        ui.button(icon="refresh", on_click=lambda: ui.timer(0.05, refresh_registry_stats, once=True)).props("flat dense round size=sm").classes("text-indigo-400").tooltip("Обновить статистику")
                     if not stats_obj:
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("cloud_off", size="28px").classes("opacity-30")
@@ -688,10 +782,10 @@ def render_settings_screen(
                         return
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         for icon_name, lbl, val in [
-                            ("folder",      "Папок",  f"{int(getattr(stats_obj, 'folders', 0)):,}".replace(",", " ")),
-                            ("description", "Файлов", f"{int(getattr(stats_obj, 'files', 0)):,}".replace(",", " ")),
-                            ("history",     "Версий", f"{int(getattr(stats_obj, 'versions', 0)):,}".replace(",", " ")),
-                            ("pending",     "Jobs",   f"{int(getattr(stats_obj, 'pending_jobs', 0)):,}".replace(",", " ")),
+                            ("folder",      "Папок",  f"{int(getattr(stats_obj, 'folders', 0)):,}".replace(",", " ")),
+                            ("description", "Файлов", f"{int(getattr(stats_obj, 'files', 0)):,}".replace(",", " ")),
+                            ("history",     "Версий", f"{int(getattr(stats_obj, 'versions', 0)):,}".replace(",", " ")),
+                            ("pending",     "Jobs",   f"{int(getattr(stats_obj, 'pending_jobs', 0)):,}".replace(",", " ")),
                         ]:
                             with ui.column().classes("rag-card p-2 gap-0 items-center min-w-20 flex-1"):
                                 ui.icon(icon_name, size="18px").classes("text-indigo-400")
@@ -706,17 +800,22 @@ def render_settings_screen(
                 "running":   ("sync",         "cd-status-running",   "Выполняется"),
                 "done":      ("check_circle", "cd-status-done",      "Завершён"),
                 "error":     ("error",        "cd-status-error",     "Ошибка"),
-                "stale":     ("warning",      "cd-status-error",     "Состояние устарело"),
+                "stale":     ("warning",      "cd-status-error",     "Устарело"),
                 "cancelled": ("cancel",       "cd-status-cancelled", "Отменён"),
             }
 
             def _cd_status_badge(status: str) -> None:
-                icon_name, css_cls, label_ru = _CD_STATUS_META.get(
-                    status, ("help", "cd-status-cancelled", status)
-                )
+                icon_name, css_cls, label_ru = _CD_STATUS_META.get(status, ("help", "cd-status-cancelled", status))
                 with ui.element("span").classes(f"cd-status-badge {css_cls}"):
                     ui.icon(icon_name, size="14px")
                     ui.label(label_ru)
+
+            _JOB_TYPE_LABELS: Dict[str, str] = {
+                "bootstrap": "Импорт реестра",
+                "reindex": "Реиндексация",
+                "scan": "Сканирование структуры",
+                "cleanup": "Очистка",
+            }
 
             def render_bootstrap_status() -> None:
                 bootstrap_state = _read_cloud_bootstrap_status(build_cloud_config())
@@ -724,31 +823,24 @@ def render_settings_screen(
                 with bootstrap_box:
                     ui.label("Статус импорта").classes("font-semibold text-sm")
                     raw_status = str(bootstrap_state.get("status") or bootstrap_state.get("job_status") or "idle")
-                    status = {
-                        "pending": "pending",
-                        "running": "running",
-                        "completed": "done",
-                        "failed": "error",
-                        "cancelled": "cancelled",
-                    }.get(raw_status, raw_status)
+                    status = {"pending": "pending", "running": "running", "completed": "done", "failed": "error", "cancelled": "cancelled"}.get(raw_status, raw_status)
                     if status == "idle":
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("cloud_upload", size="24px").classes("opacity-30")
-                            ui.label("Импорт не запущен. Нажмите «Импортировать в реестр» ниже.").classes("text-center")
+                            ui.label("Импорт не запускался. Нажмите «Добавить новые файлы» ниже.").classes("text-center")
                         return
                     _cd_status_badge(status)
                     imported_files = _safe_int(bootstrap_state.get("imported_files"), 0)
-                    imported_folders = _safe_int(bootstrap_state.get("imported_folders"), 0)
                     total_files = _safe_int(bootstrap_state.get("total_files"), 0)
                     if total_files > 0:
                         ratio = max(0.0, min(1.0, imported_files / total_files))
                         ui.linear_progress(value=ratio).classes("w-full")
-                        ui.label(
-                            f"Файлы: {imported_files:,} / {total_files:,} ({round(ratio * 100)}%)".replace(",", " ")
-                        ).classes("rag-meta")
-                    else:
-                        ui.label(f"Файлы: {imported_files:,}".replace(",", " ")).classes("rag-meta")
-                    ui.label(f"Папки: {imported_folders:,}".replace(",", " ")).classes("rag-meta")
+                        ui.label(f"Файлы: {imported_files:,} / {total_files:,} ({round(ratio * 100)}%)".replace(",", " ")).classes("rag-meta")
+                    elif imported_files:
+                        ui.label(f"Файлы: {imported_files:,}".replace(",", " ")).classes("rag-meta")
+                    imported_folders = _safe_int(bootstrap_state.get("imported_folders"), 0)
+                    if imported_folders:
+                        ui.label(f"Папки: {imported_folders:,}".replace(",", " ")).classes("rag-meta")
                     current_path = str(bootstrap_state.get("current_path") or "").strip()
                     if current_path:
                         ui.label(f"Текущий путь: {current_path}").classes("rag-path")
@@ -758,9 +850,9 @@ def render_settings_screen(
                     started_at = str(bootstrap_state.get("started_at") or "").strip()
                     finished_at = str(bootstrap_state.get("finished_at") or "").strip()
                     if started_at:
-                        ui.label(f"Старт: {started_at[:19].replace('T', ' ')}").classes("rag-meta")
+                        ui.label(f"Старт: {started_at[:19].replace(chr(84), chr(32))}").classes("rag-meta")
                     if finished_at:
-                        ui.label(f"Финиш: {finished_at[:19].replace('T', ' ')}").classes("rag-meta")
+                        ui.label(f"Финиш: {finished_at[:19].replace(chr(84), chr(32))}").classes("rag-meta")
 
             def render_bootstrap_jobs() -> None:
                 jobs_box.clear()
@@ -780,7 +872,7 @@ def render_settings_screen(
                         ui.label("Последние задачи").classes("font-semibold text-sm")
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("error_outline", size="24px").classes("text-red-400 opacity-70")
-                            ui.label(f"Не удалось прочитать jobs: {exc}").classes("text-center text-red-600 text-xs")
+                            ui.label(f"Не удалось прочитать задачи: {exc}").classes("text-center text-red-600 text-xs")
                     return
                 with jobs_box:
                     ui.label("Последние задачи").classes("font-semibold text-sm")
@@ -792,42 +884,46 @@ def render_settings_screen(
                     for job in jobs:
                         progress = dict(job.progress or {})
                         raw_status = str(job.status or progress.get("status") or "")
-                        norm_status = {
-                            "pending": "pending", "running": "running",
-                            "completed": "done", "failed": "error", "cancelled": "cancelled",
-                        }.get(raw_status, raw_status)
+                        norm_status = {"pending": "pending", "running": "running", "completed": "done", "failed": "error", "cancelled": "cancelled"}.get(raw_status, raw_status)
                         imported_files = _safe_int(progress.get("imported_files"), 0)
                         total_files = _safe_int(progress.get("total_files"), 0)
-                        current_path = str(progress.get("current_path") or progress.get("catalog") or "").strip()
+                        catalog_src = str(progress.get("catalog") or progress.get("current_path") or "").strip()
                         error_text = str(job.last_error or progress.get("error") or "").strip()
+                        import_files_flag = bool(progress.get("import_files", True))
+                        job_type_raw = str(getattr(job, "job_type", "") or "bootstrap")
+                        job_label = _JOB_TYPE_LABELS.get(job_type_raw, job_type_raw)
+                        if job_type_raw == "bootstrap":
+                            job_label = "Импорт файлов" if import_files_flag else "Сканирование структуры"
+                        started_at = str(progress.get("started_at") or "").strip()
+                        finished_at = str(progress.get("finished_at") or "").strip()
                         with ui.element("div").classes("cd-jobs-card w-full"):
                             with ui.row().classes("w-full items-center gap-2"):
                                 _cd_status_badge(norm_status)
+                                ui.label(job_label).classes("text-xs font-medium")
                                 ui.space()
                                 ui.label(job.id[:8]).classes("font-mono text-xs rag-meta")
+                            if catalog_src:
+                                ui.label(catalog_src).classes("rag-path text-xs truncate")
                             if total_files > 0:
                                 ratio = max(0.0, min(1.0, imported_files / total_files))
                                 ui.linear_progress(value=ratio, size="4px", show_value=False).classes("w-full my-1").props("color=indigo")
-                                ui.label(
-                                    f"{imported_files:,} / {total_files:,} файлов ({round(ratio * 100)}%)".replace(",", " ")
-                                ).classes("rag-meta text-xs")
+                                ui.label(f"{imported_files:,} / {total_files:,} файлов ({round(ratio * 100)}%)".replace(",", " ")).classes("rag-meta text-xs")
                             elif imported_files:
-                                ui.label(f"{imported_files:,} файлов".replace(",", " ")).classes("rag-meta text-xs")
-                            if current_path:
-                                ui.label(current_path).classes("rag-path text-xs truncate")
+                                ui.label(f"{imported_files:,} файлов".replace(",", " ")).classes("rag-meta text-xs")
+                            if started_at or finished_at:
+                                time_parts = []
+                                if started_at:
+                                    time_parts.append(f"Старт: {started_at[:19].replace(chr(84), chr(32))}")
+                                if finished_at:
+                                    time_parts.append(f"Финиш: {finished_at[:19].replace(chr(84), chr(32))}")
+                                ui.label(" · ".join(time_parts)).classes("rag-meta text-xs")
                             if error_text and norm_status in ("error", "cancelled"):
                                 ui.label(error_text).classes("text-red-600 text-xs mt-1 truncate")
                             with ui.row().classes("gap-1 mt-1"):
                                 if raw_status in {"running", "pending"}:
-                                    ui.button(
-                                        "Отменить", icon="close",
-                                        on_click=lambda _e=None, job_id=job.id: cancel_bootstrap_job(job_id),
-                                    ).props("outline dense size=sm")
+                                    ui.button(icon="close", on_click=lambda _e=None, jid=job.id: cancel_bootstrap_job(jid)).props("flat dense round size=sm color=negative").tooltip("Отменить задачу")
                                 if raw_status in {"failed", "cancelled", "completed"}:
-                                    ui.button(
-                                        "Повторить", icon="replay",
-                                        on_click=lambda _e=None, job_id=job.id: retry_bootstrap_job(job_id),
-                                    ).props("outline dense size=sm")
+                                    ui.button(icon="replay", on_click=lambda _e=None, jid=job.id: retry_bootstrap_job(jid)).props("flat dense round size=sm").tooltip("Повторить задачу")
 
             def build_cloud_config() -> Dict[str, Any]:
                 values = current_cloud_values()
@@ -853,7 +949,7 @@ def render_settings_screen(
                     return
                 if values["cloud_drive_storage"] == "s3":
                     if not values["cloud_drive_bucket"]:
-                        ui.notify("Для S3/MinIO требуется cloud_drive_bucket (имя bucket).", type="warning")
+                        ui.notify("Для S3/MinIO требуется cloud_drive_bucket.", type="warning")
                         return
                     if not values["cloud_drive_s3_access_key"] or not values["cloud_drive_s3_secret_key"]:
                         ui.notify("Для S3/MinIO укажите access key и secret key.", type="warning")
@@ -867,6 +963,27 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось сохранить настройки: {exc}", type="negative")
 
+            async def refresh_registry_stats() -> None:
+                try:
+                    cfg = build_cloud_config()
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    stats_obj = await run.io_bound(service.registry.stats)
+                    render_cloud_stats(stats_obj, title="Статистика реестра")
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                except Exception:
+                    render_cloud_stats(None, title="Статистика реестра")
+
+            with ui.dialog() as init_confirm_dialog, ui.card().classes("p-4 gap-3 max-w-sm"):
+                ui.label("Инициализировать реестр?").classes("text-base font-semibold")
+                ui.label(
+                    "Создаёт схему базы данных Cloud Drive. Если реестр уже существует, данные не удаляются. "
+                    "Нажмите Создать только если настраиваете Cloud Drive впервые или после удаления базы."
+                ).classes("rag-meta text-sm")
+                with ui.row().classes("w-full justify-end gap-2 pt-1"):
+                    ui.button("Отмена", on_click=init_confirm_dialog.close).props("flat dense")
+                    ui.button("Создать", icon="database", on_click=lambda: (init_confirm_dialog.close(), ui.timer(0.05, init_registry, once=True))).props("unelevated dense")
+
             async def init_registry() -> None:
                 try:
                     cfg = persist_cloud_values(current_cloud_values())
@@ -878,17 +995,6 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось инициализировать реестр: {exc}", type="negative")
 
-            async def refresh_registry_stats() -> None:
-                try:
-                    cfg = persist_cloud_values(current_cloud_values())
-                    service = await run.io_bound(CloudDriveService.from_config, cfg)
-                    stats_obj = await run.io_bound(service.registry.stats)
-                    render_cloud_stats(stats_obj, title="Статистика реестра")
-                    render_bootstrap_status()
-                    render_bootstrap_jobs()
-                except Exception as exc:
-                    ui.notify(f"Не удалось прочитать stats: {exc}", type="negative")
-
             def _run_bootstrap_background(cfg: Dict[str, Any], *, job_id: str) -> None:
                 try:
                     service = CloudDriveService.from_config(cfg)
@@ -896,7 +1002,7 @@ def render_settings_screen(
                 except Exception:
                     pass
 
-            async def bootstrap_registry(*, import_files: bool) -> None:
+            async def bootstrap_registry(*, import_files: bool = True) -> None:
                 catalog = str(catalog_input.value or "").strip()
                 if not catalog:
                     ui.notify("Укажите источник импорта.", type="warning")
@@ -918,21 +1024,16 @@ def render_settings_screen(
                         max_files=None if limit_value <= 0 else limit_value,
                         import_files=import_files,
                     )
-                    thread = threading.Thread(
+                    threading.Thread(
                         target=_run_bootstrap_background,
                         kwargs={"cfg": cfg, "job_id": job.id},
                         name="cloud-drive-bootstrap",
                         daemon=True,
-                    )
-                    thread.start()
+                    ).start()
+                    autosync_last_run["ts"] = datetime.datetime.now()
                     render_bootstrap_status()
                     render_bootstrap_jobs()
-                    _log_app_event(
-                        state,
-                        "cloud_drive",
-                        "bootstrap",
-                        details={"catalog": catalog, "import_files": import_files, "limit": limit_value},
-                    )
+                    _log_app_event(state, "cloud_drive", "bootstrap", details={"catalog": catalog, "import_files": import_files, "limit": limit_value})
                     ui.notify("Импорт запущен в фоне.", type="positive")
                 except Exception as exc:
                     ui.notify(f"Не удалось запустить импорт: {exc}", type="negative")
@@ -957,49 +1058,90 @@ def render_settings_screen(
                         return
                     service = await run.io_bound(CloudDriveService.from_config, cfg)
                     job = await run.io_bound(service.retry_bootstrap_job, job_id)
-                    thread = threading.Thread(
+                    threading.Thread(
                         target=_run_bootstrap_background,
                         kwargs={"cfg": cfg, "job_id": job.id},
                         name="cloud-drive-bootstrap",
                         daemon=True,
-                    )
-                    thread.start()
+                    ).start()
+                    autosync_last_run["ts"] = datetime.datetime.now()
                     render_bootstrap_status()
                     render_bootstrap_jobs()
                     ui.notify("Импорт перезапущен.", type="positive")
                 except Exception as exc:
                     ui.notify(f"Не удалось повторить импорт: {exc}", type="negative")
 
+            def _autosync_tick() -> None:
+                interval_min = int(autosync_select.value or 0)
+                if interval_min <= 0:
+                    autosync_status_label.set_text("")
+                    return
+                last = autosync_last_run.get("ts")
+                now = datetime.datetime.now()
+                if last is None:
+                    autosync_last_run["ts"] = now
+                    autosync_status_label.set_text(f"Автосинхронизация включена, первый запуск через {interval_min} мин")
+                    return
+                elapsed = (now - last).total_seconds() / 60
+                remaining = interval_min - elapsed
+                if remaining <= 0:
+                    cfg_now = build_cloud_config()
+                    catalog = str(cfg_now.get("catalog_path") or "").strip()
+                    if catalog and Path(catalog).exists():
+                        current_state = _read_cloud_bootstrap_status(cfg_now)
+                        if str(current_state.get("job_status") or current_state.get("status") or "") not in {"running", "pending"}:
+                            try:
+                                service = CloudDriveService.from_config(cfg_now)
+                                job = service.create_bootstrap_job(catalog_root=catalog, import_files=True)
+                                threading.Thread(
+                                    target=_run_bootstrap_background,
+                                    kwargs={"cfg": cfg_now, "job_id": job.id},
+                                    name="cloud-drive-autosync",
+                                    daemon=True,
+                                ).start()
+                                autosync_last_run["ts"] = now
+                                autosync_status_label.set_text(f"Автосинхронизация: запущена в {now.strftime(chr(37) + chr(72) + chr(58) + chr(37) + chr(77) + chr(58) + chr(37) + chr(83))}")
+                                render_bootstrap_status()
+                                render_bootstrap_jobs()
+                                return
+                            except Exception:
+                                pass
+                    autosync_last_run["ts"] = now
+                else:
+                    next_in = int(remaining) + 1
+                    last_str = last.strftime(chr(37) + chr(72) + chr(58) + chr(37) + chr(77))
+                    autosync_status_label.set_text(f"Автосинхронизация: последний запуск в {last_str}, следующий через ~{next_in} мин")
+
             refresh_cloud_visibility()
             render_cloud_stats(None, title="Статистика реестра")
             render_bootstrap_status()
             render_bootstrap_jobs()
+            ui.timer(0.2, refresh_registry_stats, once=True)
 
             enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
             db_input.on_value_change(lambda _: refresh_cloud_dirty())
             storage_kind.on_value_change(lambda _: (refresh_cloud_visibility(), refresh_cloud_dirty()))
             storage_root_input.on_value_change(lambda _: refresh_cloud_dirty())
-            s3_bucket_input.on_value_change(lambda _: refresh_cloud_dirty())
-            s3_endpoint_input.on_value_change(lambda _: refresh_cloud_dirty())
+            s3_bucket_input.on_value_change(lambda _: (refresh_cloud_visibility(), refresh_cloud_dirty()))
+            s3_endpoint_input.on_value_change(lambda _: (refresh_cloud_visibility(), refresh_cloud_dirty()))
             s3_region_input.on_value_change(lambda _: refresh_cloud_dirty())
             s3_access_input.on_value_change(lambda _: refresh_cloud_dirty())
             s3_secret_input.on_value_change(lambda _: refresh_cloud_dirty())
             catalog_input.on_value_change(lambda _: refresh_cloud_dirty())
+            autosync_select.on_value_change(lambda _: refresh_cloud_dirty())
 
             with action_row:
                 with ui.row().classes("rag-dirty-actions-inner"):
                     ui.button("Отменить", icon="close", on_click=reset_cloud_settings).props("flat dense")
                     ui.button("Сохранить настройки", icon="save", on_click=save_cloud_settings).props("outline dense")
 
-            with ui.row().classes("w-full gap-2 flex-wrap"):
-                ui.button("Инициализировать реестр", icon="database", on_click=init_registry).props("outline")
-                ui.button("Обновить статистику", icon="monitoring", on_click=refresh_registry_stats).props("outline")
-                ui.button("Сканировать структуру", icon="sync", on_click=lambda: bootstrap_registry(import_files=False)).props("outline")
-                ui.button("Импортировать в реестр", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
-            bootstrap_box
-            jobs_box
+            ui.separator()
+            with ui.row().classes("w-full gap-2 flex-wrap items-center"):
+                ui.button("Инициализировать реестр", icon="database", on_click=init_confirm_dialog.open).props("outline")
+                ui.button("Добавить новые файлы", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
+
             _stop_managed_timer(state.cloud_drive_timer)
-            state.cloud_drive_timer = ui.timer(3.0, lambda: (render_bootstrap_status(), render_bootstrap_jobs()))
+            state.cloud_drive_timer = ui.timer(3.0, lambda: (render_bootstrap_status(), render_bootstrap_jobs(), _autosync_tick()))
 
     def render_admin_cloud_sync_settings() -> None:  # noqa: PLR0912,PLR0915
         """Sprint 4: Sync client admin settings — folder pairs, policies, connected clients."""
