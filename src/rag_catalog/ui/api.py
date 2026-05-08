@@ -334,6 +334,24 @@ def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, 
     return pairs
 
 
+@app.post("/api/cloud-drive/sync/heartbeat")
+def api_cloud_drive_sync_heartbeat(
+    client_id: str = "",
+    status: str = "online",
+    auth_token: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    _require_sync_client_access(service, user, client_id)
+    ok = service.registry.update_sync_client_status(client_id, status)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Sync-клиент не найден: {client_id}")
+    _audit_cloud_drive_api_event(cfg, user, "sync_heartbeat", details={"client_id": client_id, "status": status})
+    return {"ok": True, "client_id": client_id, "status": status}
+
+
 @app.post("/api/cloud-drive/sync/pairs")
 def api_cloud_drive_sync_pair_upsert(
     client_id: str = "",

@@ -1016,6 +1016,20 @@ class CloudDriveRegistryDB:
         assert saved is not None
         return self._sync_client_from_row(saved)
 
+    def update_sync_client_status(self, client_id: str, status: str = 'online') -> bool:
+        valid = {'online', 'offline', 'paused', 'error'}
+        clean_status = str(status or 'online').strip().lower()
+        if clean_status not in valid:
+            clean_status = 'online'
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    'UPDATE cloud_sync_clients SET status=?, last_seen_at=?, updated_at=? WHERE id=?',
+                    (clean_status, now, now, str(client_id or '').strip()),
+                )
+                return cur.rowcount > 0
+
     def get_sync_client(self, client_id: str) -> Optional[CloudDriveSyncClient]:
         with self._connect() as conn:
             row = conn.execute('SELECT * FROM cloud_sync_clients WHERE id=?', (str(client_id),)).fetchone()
