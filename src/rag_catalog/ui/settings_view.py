@@ -1919,14 +1919,15 @@ def render_settings_screen(
                 for key, icon, label, _ in filtered:
                     is_active = active[0] == key
                     bg = "background:#eef2ff;" if is_active else ""
-                    with ui.row().classes("w-full items-center gap-2 px-2 py-1 rounded cursor-pointer").style(
+                    with ui.row().classes("w-full items-start gap-2 px-2 py-1 rounded cursor-pointer").style(
                         bg + "user-select:none"
                     ).on("click", lambda k=key: navigate(k)):
                         ui.icon(icon, size="16px").classes(
-                            "text-indigo-600" if is_active else "text-gray-400"
+                            ("text-indigo-600" if is_active else "text-gray-400") + " mt-px shrink-0"
                         )
                         ui.label(label).classes(
-                            "text-sm font-medium text-indigo-700" if is_active else "text-sm text-gray-700"
+                            ("text-sm font-medium text-indigo-700" if is_active else "text-sm text-gray-700")
+                            + " leading-snug"
                         )
 
     # ── Контент секции ───────────────────────────────────────────────
