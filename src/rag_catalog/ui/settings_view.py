@@ -1884,7 +1884,14 @@ def render_settings_screen(
             search_box = ui.input(
                 placeholder="Поиск настроек…",
                 on_change=lambda e: (q_ref.__setitem__(0, str(e.value or "").lower()), render_nav()),
-            ).props("dense outlined clearable autocomplete='off'").classes("w-full")
+            ).props("dense outlined clearable").classes("w-full settings-search-input")
+            # Browsers ignore autocomplete="off" on Quasar wrappers — set directly on the native input
+            ui.run_javascript(
+                "setTimeout(()=>{"
+                "  document.querySelectorAll('.settings-search-input .q-field__native,.settings-search-input input')"
+                "  .forEach(el=>{el.setAttribute('autocomplete','off');el.setAttribute('name','settings-search-'+Date.now());})"
+                "},150)"
+            )
 
             nav_col = ui.column().classes("w-full gap-0")
 
