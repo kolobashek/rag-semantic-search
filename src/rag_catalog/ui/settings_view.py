@@ -1881,17 +1881,13 @@ def render_settings_screen(
             "width:220px; min-width:220px; border-right:1px solid #e5e7eb; padding-right:12px; margin-right:16px"
         ):
             ui.label("Настройки").classes("text-xl font-semibold mb-2")
-            search_box = ui.input(
-                placeholder="Поиск настроек…",
-                on_change=lambda e: (q_ref.__setitem__(0, str(e.value or "").lower()), render_nav()),
-            ).props("dense outlined clearable").classes("w-full settings-search-input")
-            # Browsers ignore autocomplete="off" on Quasar wrappers — set directly on the native input
-            ui.run_javascript(
-                "setTimeout(()=>{"
-                "  document.querySelectorAll('.settings-search-input .q-field__native,.settings-search-input input')"
-                "  .forEach(el=>{el.setAttribute('autocomplete','off');el.setAttribute('name','settings-search-'+Date.now());})"
-                "},150)"
-            )
+            # type=search prevents credential autofill in all major browsers;
+            # form[autocomplete=off] adds an extra layer for older browsers
+            with ui.element("form").props('autocomplete="off"').style("width:100%;margin:0"):
+                search_box = ui.input(
+                    placeholder="Поиск настроек…",
+                    on_change=lambda e: (q_ref.__setitem__(0, str(e.value or "").lower()), render_nav()),
+                ).props('dense outlined clearable type="search"').classes("w-full")
 
             nav_col = ui.column().classes("w-full gap-0")
 
