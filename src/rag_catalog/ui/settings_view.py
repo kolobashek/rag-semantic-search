@@ -1884,7 +1884,7 @@ def render_settings_screen(
             search_box = ui.input(
                 placeholder="Поиск настроек…",
                 on_change=lambda e: (q_ref.__setitem__(0, str(e.value or "").lower()), render_nav()),
-            ).props("dense outlined clearable").classes("w-full")
+            ).props("dense outlined clearable autocomplete='off'").classes("w-full")
 
             nav_col = ui.column().classes("w-full gap-0")
 
@@ -2177,9 +2177,9 @@ def render_settings_screen(
             elif sec == "password":
                 with ui.column().classes("rag-card w-full p-4 gap-3"):
                     ui.label("Смена пароля").classes("text-xl font-semibold")
-                    old_pw = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-                    new_pw = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-                    new_pw2 = ui.input("Повторите пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                    old_pw = ui.input("Текущий пароль", password=True, password_toggle_button=True).props("dense outlined autocomplete='new-password'").classes("w-full")
+                    new_pw = ui.input("Новый пароль", password=True, password_toggle_button=True).props("dense outlined autocomplete='new-password'").classes("w-full")
+                    new_pw2 = ui.input("Повторите пароль", password=True, password_toggle_button=True).props("dense outlined autocomplete='new-password'").classes("w-full")
                     _focus_next_js = (
                         "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
                         "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
@@ -2242,11 +2242,30 @@ def render_settings_screen(
     def navigate(key: str) -> None:
         active[0] = key
         state.settings_section = key
+        ui.run_javascript(
+            f"history.replaceState(null,'',location.pathname+location.search+'#settings-{key}')"
+        )
         render_nav()
         render_section()
 
+    # ── Инициализация из URL-хэша (поддержка прямых ссылок) ─────────────────
+    _all_section_keys = {s[0] for s in user_sections + admin_sections}
+
+    async def _init_from_hash() -> None:
+        try:
+            raw = await ui.run_javascript(
+                "return window.location.hash.replace(/^#settings-/, '')",
+                timeout=3.0,
+            )
+            key = str(raw or "").strip()
+            if key and key in _all_section_keys and key != active[0]:
+                navigate(key)
+        except Exception:
+            pass
+
     render_nav()
     render_section()
+    ui.timer(0.05, _init_from_hash, once=True)
 
 def render_telegram_screen() -> None:
     enabled = bool(state.cfg.get("telegram_enabled"))

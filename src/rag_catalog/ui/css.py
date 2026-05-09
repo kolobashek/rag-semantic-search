@@ -227,10 +227,9 @@ def _install_css() -> None:
           border-radius: 8px;
           box-shadow: var(--rag-shadow);
           backdrop-filter: none;
-          transition: transform 0.2s ease, box-shadow 0.2s ease;
+          transition: box-shadow 0.2s ease;
         }
         .rag-card:hover {
-          transform: translateY(-2px);
           box-shadow: 0 14px 30px -18px rgba(20, 20, 26, 0.36);
         }
         .rag-search-shell { position: relative; z-index: 5; }
@@ -316,7 +315,6 @@ def _install_css() -> None:
         }
         .rag-result:hover {
           background: var(--rag-surface-strong);
-          transform: translateY(-2px) scale(1.005);
           box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.1);
           border-color: rgba(59, 130, 246, 0.3);
         }
@@ -351,7 +349,6 @@ def _install_css() -> None:
           background: var(--rag-surface-strong);
           color: var(--rag-accent);
           border-color: var(--rag-accent);
-          transform: translateY(-1px);
           box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.1);
         }
         .rag-chip-active {
@@ -362,7 +359,6 @@ def _install_css() -> None:
           box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
         }
         .rag-chip-active:hover {
-          transform: translateY(-1px);
           box-shadow: 0 6px 14px rgba(59, 130, 246, 0.4);
         }
         .rag-search-toolbar {
@@ -740,7 +736,6 @@ def _install_css() -> None:
         .rag-explorer-item:hover {
           background: var(--rag-surface-strong);
           border-color: rgba(59, 130, 246, 0.3);
-          transform: translateY(-2px);
           box-shadow: 0 10px 20px -10px rgba(59, 130, 246, 0.15);
         }
         .rag-explorer-item.system {
