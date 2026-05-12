@@ -22,6 +22,20 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _pid_alive(pid: int) -> bool:
+    """Вернуть True если процесс с pid жив."""
+    import os as _os
+    if pid <= 0:
+        return False
+    try:
+        _os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True  # процесс жив, нет прав послать сигнал
+    except OSError:
+        return False
+
+
 DEFAULT_SEARCH_ALIAS_GROUPS: List[Dict[str, Any]] = [
     {
         "key": "company_card",
@@ -308,6 +322,19 @@ class TelemetryDB:
                         updated_at TEXT NOT NULL,
                         last_run_at TEXT
                     );
+
+                    CREATE TABLE IF NOT EXISTS ocr_file_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        file_path TEXT NOT NULL,
+                        file_mtime REAL NOT NULL,
+                        extracted_text TEXT NOT NULL DEFAULT '',
+                        pages INTEGER NOT NULL DEFAULT 0,
+                        char_count INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'ok',
+                        error_text TEXT NOT NULL DEFAULT '',
+                        ts_processed TEXT NOT NULL,
+                        UNIQUE(file_path)
+                    );
                     """
                 )
                 self._migrate_schema(conn)
@@ -351,6 +378,8 @@ class TelemetryDB:
                       ON ocr_runs(status);
                     CREATE INDEX IF NOT EXISTS idx_index_schedules_enabled
                       ON index_schedules(enabled);
+                    CREATE INDEX IF NOT EXISTS idx_ocr_file_results_path
+                      ON ocr_file_results(file_path);
                     """
                 )
 
@@ -938,15 +967,23 @@ class TelemetryDB:
         *,
         status: str = "cancelled",
         note: str = "",
+        skip_alive_pids: bool = True,
     ) -> int:
-        """Завершить все зависшие index_runs со status='running'."""
+        """Завершить зависшие index_runs со status='running'.
+
+        Если skip_alive_pids=True (по умолчанию), runs с живым worker_pid не трогаются.
+        """
         now = _utc_now()
         with self._lock:
             with self._connect() as conn:
                 run_rows = conn.execute(
-                    "SELECT run_id FROM index_runs WHERE status='running'"
+                    "SELECT run_id, worker_pid FROM index_runs WHERE status='running'"
                 ).fetchall()
-                run_ids = [str(row["run_id"]) for row in run_rows if row["run_id"]]
+                run_ids = [
+                    str(row["run_id"])
+                    for row in run_rows
+                    if row["run_id"] and not (skip_alive_pids and _pid_alive(int(row["worker_pid"] or 0)))
+                ]
                 if not run_ids:
                     return 0
                 placeholders = ",".join("?" for _ in run_ids)
@@ -1239,15 +1276,23 @@ class TelemetryDB:
         *,
         status: str = "cancelled",
         note: str = "",
+        skip_alive_pids: bool = True,
     ) -> int:
-        """Завершить все зависшие ocr_runs со status='running'."""
+        """Завершить зависшие ocr_runs со status='running'.
+
+        Если skip_alive_pids=True (по умолчанию), runs с живым worker_pid не трогаются.
+        """
         now = _utc_now()
         with self._lock:
             with self._connect() as conn:
                 run_rows = conn.execute(
-                    "SELECT ocr_run_id FROM ocr_runs WHERE status='running'"
+                    "SELECT ocr_run_id, worker_pid FROM ocr_runs WHERE status='running'"
                 ).fetchall()
-                run_ids = [str(row["ocr_run_id"]) for row in run_rows if row["ocr_run_id"]]
+                run_ids = [
+                    str(row["ocr_run_id"])
+                    for row in run_rows
+                    if row["ocr_run_id"] and not (skip_alive_pids and _pid_alive(int(row["worker_pid"] or 0)))
+                ]
                 if not run_ids:
                     return 0
                 placeholders = ",".join("?" for _ in run_ids)
@@ -1282,6 +1327,49 @@ class TelemetryDB:
             "SELECT * FROM ocr_runs ORDER BY ts_started DESC LIMIT ?",
             [int(limit)],
         )
+
+    # ── single-file OCR results cache ────────────────────────────────
+
+    def get_ocr_file_result(self, file_path: str, file_mtime: float) -> Optional[Dict[str, Any]]:
+        """Вернуть кэшированный результат OCR для файла, если mtime совпадает (±1 сек)."""
+        rows = self.fetch_dicts(
+            "SELECT * FROM ocr_file_results WHERE file_path=? AND ABS(file_mtime-?)<1.0",
+            [file_path, float(file_mtime)],
+        )
+        return rows[0] if rows else None
+
+    def save_ocr_file_result(
+        self,
+        file_path: str,
+        file_mtime: float,
+        *,
+        text: str = "",
+        pages: int = 0,
+        chars: int = 0,
+        status: str = "ok",
+        error: str = "",
+    ) -> None:
+        """Сохранить (или обновить) результат OCR для файла."""
+        with self._lock:
+            with self._connect() as conn:
+                self._prepare_connection(conn)
+                conn.execute(
+                    """
+                    INSERT INTO ocr_file_results
+                        (file_path, file_mtime, extracted_text, pages, char_count, status, error_text, ts_processed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(file_path) DO UPDATE SET
+                        file_mtime   = excluded.file_mtime,
+                        extracted_text = excluded.extracted_text,
+                        pages        = excluded.pages,
+                        char_count   = excluded.char_count,
+                        status       = excluded.status,
+                        error_text   = excluded.error_text,
+                        ts_processed = excluded.ts_processed
+                    """,
+                    (file_path, float(file_mtime), text, int(pages), int(chars), status, error, _utc_now()),
+                )
+                conn.commit()
 
     # ── index schedules ───────────────────────────────────────────────
 

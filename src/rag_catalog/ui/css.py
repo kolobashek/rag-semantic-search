@@ -490,9 +490,7 @@ def _install_css() -> None:
           align-items: center;
           gap: 8px;
         }
-        .rag-progressbar .q-linear-progress__text {
-          display: none !important;
-        }
+        .rag-progressbar { height: 6px; }
         .rag-pipeline-row > * {
           min-width: 0;
         }

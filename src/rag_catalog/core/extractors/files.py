@@ -212,9 +212,15 @@ def ocr_pdf(filepath: Path, *, tesseract_cmd: str = "", poppler_bin: str = "") -
         parts: list[str] = []
         for i, page_img in enumerate(pages):
             text = pytesseract.image_to_string(page_img, lang="rus+eng")
+            chars = len(text.strip())
             if text.strip():
                 parts.append(f"Страница: {i + 1}\n{text}")
-            logger.debug("OCR страница %d/%d — %s", i + 1, len(pages), filepath.name)
+            logger.info("OCR страница %d/%d — %d симв. — %s", i + 1, len(pages), chars, filepath.name)
+        total_chars = sum(len(p) for p in parts)
+        if parts:
+            logger.info("OCR завершён: %s — %d стр., %d симв.", filepath.name, len(pages), total_chars)
+        else:
+            logger.warning("OCR не извлёк текст ни на одной странице: %s", filepath.name)
         return "\n".join(parts)
     except Exception as exc:
         logger.warning("OCR не удался для %s: %s", filepath, exc)
@@ -264,7 +270,7 @@ def extract_image(filepath: Path, *, tesseract_cmd: str = "", max_pages: int = 5
                 page_text = pytesseract.image_to_string(frame, lang="rus+eng").strip()
                 if page_text:
                     parts.append(page_text)
-                logger.debug(
+                logger.info(
                     "OCR %s стр.%d/%d: %d симв.",
                     filepath.name,
                     frame_idx + 1,
@@ -273,7 +279,9 @@ def extract_image(filepath: Path, *, tesseract_cmd: str = "", max_pages: int = 5
                 )
         result = "\n".join(parts).strip()
         if result:
-            logger.debug("OCR итого %s: %d симв., %d стр.", filepath.name, len(result), n_frames)
+            logger.info("OCR завершён: %s — %d симв., %d стр.", filepath.name, len(result), n_frames)
+        else:
+            logger.warning("OCR не извлёк текст: %s", filepath.name)
         return result
     except Exception as exc:
         logger.warning("OCR изображения не удался для %s: %s", filepath, exc)

@@ -7,8 +7,10 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -20,14 +22,15 @@ from .helpers import (
     _CADENCE_LABELS,
     _DAY_LABELS,
     _DAY_RU,
-    _filter_log_text,
     _format_bytes,
     _format_duration_seconds,
+    _format_log_entries_html,
+    _format_log_entries_text,
     _format_relative_time,
     _is_admin,
     _read_index_stats,
     _read_index_telemetry,
-    _read_log_tail_lines,
+    _read_log_entries,
     _schedule_display_label,
 )
 from .state import (
@@ -65,7 +68,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         if telemetry.get("active_ocr"):
             active_stage_names.append("OCR")
         active_label = "Запущено: " + ", ".join(active_stage_names) if active_stage_names else "Нет активных задач"
-        ui.label(active_label).classes("rag-chip")
+        header_active_chip = ui.label(active_label).classes("rag-chip")
         ui.space()
         if active_stage_names:
             ui.button("Пауза", icon="pause", on_click=lambda: ui.notify("Пауза будет доступна после добавления cooperative-cancel в worker.", type="warning")).props("outline dense")
@@ -119,6 +122,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 return
             _log_app_event(state, "index", "run_now", details={"stage": stage_key, "pid": pid})
             ui.notify(f"Индексация «{_STAGE_LABELS.get(stage_key, stage_key)}» запущена (PID {pid}).", type="positive")
+            ui.timer(1.5, _refresh_progress, once=True)
 
         return handler
 
@@ -139,7 +143,11 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         "row": {},
         "log_path": PROJECT_ROOT / "logs" / "indexer.log",
     }
-    with ui.dialog() as stage_status_dialog, ui.card().classes("w-[min(1200px,96vw)] max-h-[90vh] overflow-auto p-4 gap-3"):
+    _phase_refs: Dict[str, Any] = {}
+    _progress_rendered = [False]
+    _current_log_entries: List[Dict[str, Any]] = []
+
+    with ui.dialog() as stage_status_dialog, ui.card().classes("w-[min(1200px,96vw)] max-h-[90vh] flex flex-col p-4 gap-3"):
         stage_status_title = ui.label("Статус этапа").classes("text-lg font-semibold")
         stage_status_run = ui.label("Run ID: -").classes("rag-meta")
         stage_status_note_title = ui.label("Сообщение рана").classes("font-semibold")
@@ -148,18 +156,19 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         with ui.row().classes("w-full items-end gap-3 flex-wrap"):
             stage_status_lines = ui.number("Записей", value=200, min=20, max=5000, step=20).props("dense outlined").classes("w-32")
             stage_status_level = ui.select(
-                options={
-                    "all": "Все",
-                    "info": "INFO",
-                    "warning": "WARNING",
-                    "error": "ERROR",
-                    "debug": "DEBUG",
-                },
+                options={"all": "Все уровни", "INFO": "INFO", "WARNING": "WARNING", "ERROR": "ERROR", "DEBUG": "DEBUG", "CRITICAL": "CRITICAL"},
                 value="all",
                 label="Уровень",
-            ).props("dense outlined").classes("w-40")
+            ).props("dense outlined").classes("w-44")
+            stage_status_date_from = ui.input("Дата с (ГГГГ-ММ-ДД)").props("dense outlined clearable").classes("w-44")
+            stage_status_date_to = ui.input("Дата по (ГГГГ-ММ-ДД)").props("dense outlined clearable").classes("w-44")
             stage_status_autorefresh = ui.checkbox("Автообновление", value=True)
-        stage_status_log = ui.textarea().props("readonly outlined autogrow").classes("w-full text-xs font-mono")
+        with ui.element("div").style(
+            "flex:1;min-height:300px;max-height:55vh;overflow-y:auto;"
+            "border:1px solid #e5e7eb;border-radius:6px;padding:4px;"
+            "font-family:var(--rag-font-mono,monospace);font-size:12px;background:#fff"
+        ):
+            stage_status_log_html = ui.html("")
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("Обновить", icon="refresh", on_click=lambda: _refresh_stage_status_log(force=True)).props("outline")
             ui.button("Копировать", icon="content_copy", on_click=lambda: _copy_stage_status_log()).props("outline")
@@ -173,25 +182,29 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         if not force and not bool(stage_status_autorefresh.value):
             return
         log_path = Path(stage_status_ctx.get("log_path") or PROJECT_ROOT / "logs" / "indexer.log")
-        line_count = max(20, _safe_int(stage_status_lines.value, 200))
-        raw_tail = _read_log_tail_lines(log_path, max_lines=line_count)
-        filtered = _filter_log_text(raw_tail, str(stage_status_level.value or "all"))
-        stage_status_log.set_value(filtered)
-        stage_status_log_path.set_text(f"Лог: {log_path}")
+        entry_count = max(20, _safe_int(stage_status_lines.value, 200))
+        level = str(stage_status_level.value or "all")
+        date_from = str(stage_status_date_from.value or "").strip()
+        date_to = str(stage_status_date_to.value or "").strip()
+        entries = _read_log_entries(log_path, max_entries=entry_count, level=level, date_from=date_from, date_to=date_to)
+        _current_log_entries.clear()
+        _current_log_entries.extend(entries)
+        stage_status_log_html.set_content(_format_log_entries_html(entries))
+        stage_status_log_path.set_text(f"Лог: {log_path}  |  показано {len(entries)} записей")
 
     def _copy_stage_status_log() -> None:
-        text = str(stage_status_log.value or "")
-        if not text.strip():
+        if not _current_log_entries:
             ui.notify("Нечего копировать.", type="warning")
             return
+        text = _format_log_entries_text(_current_log_entries)
         ui.run_javascript(f"navigator.clipboard && navigator.clipboard.writeText({json.dumps(text)})")
         ui.notify("Лог скопирован в буфер.", type="positive")
 
     def _download_stage_status_log() -> None:
-        text = str(stage_status_log.value or "")
-        if not text.strip():
+        if not _current_log_entries:
             ui.notify("Нечего скачивать.", type="warning")
             return
+        text = _format_log_entries_text(_current_log_entries)
         export_dir = PROJECT_ROOT / "logs" / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
         run_id = str((stage_status_ctx.get("row") or {}).get("run_id") or "unknown")
@@ -203,26 +216,33 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
 
     _stop_managed_timer(state.stage_status_timer)
     state.stage_status_timer = ui.timer(1.5, lambda: _refresh_stage_status_log())
+    stage_status_level.on_value_change(lambda _: _refresh_stage_status_log(force=True))
+    stage_status_lines.on_value_change(lambda _: _refresh_stage_status_log(force=True))
+    stage_status_date_from.on_value_change(lambda _: _refresh_stage_status_log(force=True))
+    stage_status_date_to.on_value_change(lambda _: _refresh_stage_status_log(force=True))
 
     def show_stage_status_details(row: Dict[str, Any]) -> None:
-        stage = str(row.get("stage") or "-")
-        status = str(row.get("status") or "-")
-        run_id = str(row.get("run_id") or row.get("ocr_run_id") or "-")
-        run_note = str(row.get("run_note") or "").strip()
-        stage_status_ctx["row"] = dict(row)
-        stage_status_ctx["log_path"] = row.get("_log_path") or PROJECT_ROOT / "logs" / "indexer.log"
-        stage_status_title.set_text(f"Статус этапа: {stage} / {status}")
-        stage_status_run.set_text(f"Run ID: {run_id}")
-        if run_note:
-            stage_status_note_title.set_visibility(True)
-            stage_status_note_value.set_visibility(True)
-            stage_status_note_value.set_text(run_note)
-        else:
-            stage_status_note_title.set_visibility(False)
-            stage_status_note_value.set_visibility(False)
-            stage_status_note_value.set_text("")
-        stage_status_dialog.open()
-        _refresh_stage_status_log(force=True)
+        try:
+            stage = str(row.get("stage") or "-")
+            status = str(row.get("status") or "-")
+            run_id = str(row.get("run_id") or row.get("ocr_run_id") or "-")
+            run_note = str(row.get("run_note") or "").strip()
+            stage_status_ctx["row"] = dict(row)
+            stage_status_ctx["log_path"] = row.get("_log_path") or PROJECT_ROOT / "logs" / "indexer.log"
+            stage_status_title.set_text(f"Статус этапа: {stage} / {status}")
+            stage_status_run.set_text(f"Run ID: {run_id}")
+            if run_note:
+                stage_status_note_title.set_visibility(True)
+                stage_status_note_value.set_visibility(True)
+                stage_status_note_value.set_text(run_note)
+            else:
+                stage_status_note_title.set_visibility(False)
+                stage_status_note_value.set_visibility(False)
+                stage_status_note_value.set_text("")
+            stage_status_dialog.open()
+            _refresh_stage_status_log(force=True)
+        except Exception as exc:
+            ui.notify(f"Ошибка открытия лога этапа: {exc}", type="negative")
 
     with ui.column().classes("rag-card w-full p-4 gap-3"):
         with ui.row().classes("w-full items-center gap-2"):
@@ -251,19 +271,12 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         def stop_phase(label: str) -> None:
             ui.notify(f"Остановка для «{label}» будет доступна после cooperative-cancel в worker.", type="warning")
 
-        def render_phase_row(
-            *,
-            key: str,
-            label: str,
-            row: Dict[str, Any],
-            is_ocr: bool = False,
-        ) -> None:
+        def _phase_row_data(row: Dict[str, Any], *, label: str, is_ocr: bool) -> Dict[str, Any]:
             status_str = str(row.get("status") or "idle")
             is_running = status_str == "running"
             processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
             total_f = int(row.get("total_files") or row.get("found_scanned") or 0)
             pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if status_str not in {"running", "idle"} else 0.0)
-            pct_label = f"{pct * 100:.0f}%"
             duration_value = row.get("duration_sec", row.get("last_duration_sec"))
             last_ts = row.get("ts_finished") or row.get("ts_updated") or row.get("ts_started")
             status_cls = "running" if is_running else status_str
@@ -274,7 +287,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 f"пропущено {int(row.get('skipped_files') or 0):,} · ошибок {int(row.get('error_files') or 0):,} · "
                 f"точек {int(row.get('points_added') or 0):,}"
             ).replace(",", " ")
-            status_icon = (
+            status_icon_name = (
                 "sync" if is_running else
                 "check_circle" if status_str == "completed" else
                 "error" if status_str == "failed" else
@@ -288,38 +301,123 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 "cancelled": "Отменено",
                 "idle": "Не запускалось",
             }.get(status_str, status_str)
-            row_for_dialog = dict(row)
-            row_for_dialog["stage"] = label
+            shared_row = dict(row)
+            shared_row["stage"] = label
             if is_ocr:
-                row_for_dialog["_log_path"] = PROJECT_ROOT / "logs" / "ocr.log"
-            with ui.element("div").classes(f"rag-pipeline-row rag-pipeline-row-card {status_cls}"):
+                shared_row["_log_path"] = PROJECT_ROOT / "logs" / "ocr.log"
+            return {
+                "status_str": status_str,
+                "is_running": is_running,
+                "processed": processed,
+                "total_f": total_f,
+                "pct": pct,
+                "pct_label": f"{pct * 100:.0f}%",
+                "duration_value": duration_value,
+                "last_ts": last_ts,
+                "status_cls": status_cls,
+                "stats_text": stats_text,
+                "status_icon_name": status_icon_name,
+                "status_title": status_title,
+                "shared_row": shared_row,
+            }
+
+        def render_phase_row(
+            *,
+            key: str,
+            label: str,
+            row: Dict[str, Any],
+            is_ocr: bool = False,
+        ) -> None:
+            d = _phase_row_data(row, label=label, is_ocr=is_ocr)
+            shared_row = d["shared_row"]
+            with ui.element("div").classes(f"rag-pipeline-row rag-pipeline-row-card {d['status_cls']}"):
                 with ui.row().classes("items-center gap-2 min-w-0"):
-                    ui.icon(status_icon).classes(f"rag-phase-status {status_cls}")
+                    icon_e = ui.icon(d["status_icon_name"]).classes(f"rag-phase-status {d['status_cls']}")
                     with ui.column().classes("gap-0 min-w-0"):
                         ui.label(label).classes("font-semibold truncate")
-                        ui.label(_format_relative_time(last_ts)).classes("rag-meta")
+                        time_e = ui.label(_format_relative_time(d["last_ts"])).classes("rag-meta")
                 with ui.column().classes("rag-progress-stack min-w-0"):
                     with ui.row().classes("rag-progress-topline w-full items-center gap-2"):
-                        ui.button(status_title, on_click=lambda r=row_for_dialog: show_stage_status_details(r), color=None).props("flat dense no-caps").classes(f"rag-chip rag-status-chip {status_cls}")
-                        ui.label(f"{processed:,} / {total_f:,}".replace(",", " ")).classes("rag-meta")
+                        chip_e = ui.button(
+                            d["status_title"],
+                            on_click=lambda r=shared_row: show_stage_status_details(r),
+                            color=None,
+                        ).props("flat dense no-caps").classes(f"rag-chip rag-status-chip {d['status_cls']}")
+                        count_e = ui.label(f"{d['processed']:,} / {d['total_f']:,}".replace(",", " ")).classes("rag-meta")
                         ui.space()
-                        ui.label(pct_label).classes("rag-meta")
-                        ui.label(_format_duration_seconds(duration_value)).classes("rag-meta")
-                    ui.linear_progress(value=pct).props("color=indigo-5" if is_running else "").classes("w-full rag-progressbar")
-                ui.label(stats_text).classes("rag-meta")
+                        pct_e = ui.label(d["pct_label"]).classes("rag-meta")
+                        dur_e = ui.label(_format_duration_seconds(d["duration_value"])).classes("rag-meta")
+                    prog_e = ui.linear_progress(value=d["pct"], show_value=False).props("color=indigo-5" if d["is_running"] else "").classes("w-full rag-progressbar")
+                stats_e = ui.label(d["stats_text"]).classes("rag-meta")
                 with ui.row().classes("rag-pipeline-actions"):
-                    if is_running:
-                        if is_ocr:
-                            ui.button(icon="restart_alt", on_click=run_ocr_now).props("flat dense round").tooltip("Рестарт")
-                        else:
-                            ui.button(icon="restart_alt", on_click=make_run_handler(key)).props("flat dense round").tooltip("Рестарт")
-                        ui.button(icon="pause", on_click=lambda l=label: pause_phase(l)).props("flat dense round").tooltip("Пауза")
-                        ui.button(icon="stop", on_click=lambda l=label: stop_phase(l)).props("flat dense round").tooltip("Остановить")
+                    if is_ocr:
+                        play_e = ui.button(icon="play_arrow", on_click=run_ocr_now).props("flat dense round").tooltip("Запустить")
+                        restart_e = ui.button(icon="restart_alt", on_click=run_ocr_now).props("flat dense round").tooltip("Рестарт")
                     else:
-                        if is_ocr:
-                            ui.button(icon="play_arrow", on_click=run_ocr_now).props("flat dense round").tooltip("Запустить")
-                        else:
-                            ui.button(icon="play_arrow", on_click=make_run_handler(key)).props("flat dense round").tooltip("Запустить")
+                        play_e = ui.button(icon="play_arrow", on_click=make_run_handler(key)).props("flat dense round").tooltip("Запустить")
+                        restart_e = ui.button(icon="restart_alt", on_click=make_run_handler(key)).props("flat dense round").tooltip("Рестарт")
+                    pause_e = ui.button(icon="pause", on_click=lambda l=label: pause_phase(l)).props("flat dense round").tooltip("Пауза")
+                    stop_e = ui.button(icon="stop", on_click=lambda l=label: stop_phase(l)).props("flat dense round").tooltip("Остановить")
+                    play_e.set_visibility(not d["is_running"])
+                    restart_e.set_visibility(d["is_running"])
+                    pause_e.set_visibility(d["is_running"])
+                    stop_e.set_visibility(d["is_running"])
+            _phase_refs[key] = {
+                "shared_row": shared_row,
+                "icon_e": icon_e,
+                "time_e": time_e,
+                "chip_e": chip_e,
+                "count_e": count_e,
+                "pct_e": pct_e,
+                "dur_e": dur_e,
+                "prog_e": prog_e,
+                "stats_e": stats_e,
+                "play_e": play_e,
+                "restart_e": restart_e,
+                "pause_e": pause_e,
+                "stop_e": stop_e,
+            }
+
+        def update_phase_row(*, key: str, label: str, row: Dict[str, Any], is_ocr: bool = False) -> None:
+            if key not in _phase_refs:
+                return
+            refs = _phase_refs[key]
+            d = _phase_row_data(row, label=label, is_ocr=is_ocr)
+            refs["shared_row"].clear()
+            refs["shared_row"].update(d["shared_row"])
+            refs["icon_e"]._props["name"] = d["status_icon_name"]
+            refs["icon_e"].update()
+            refs["time_e"].set_text(_format_relative_time(d["last_ts"]))
+            refs["chip_e"].set_text(d["status_title"])
+            refs["count_e"].set_text(f"{d['processed']:,} / {d['total_f']:,}".replace(",", " "))
+            refs["pct_e"].set_text(d["pct_label"])
+            refs["dur_e"].set_text(_format_duration_seconds(d["duration_value"]))
+            refs["prog_e"].set_value(d["pct"])
+            refs["stats_e"].set_text(d["stats_text"])
+            refs["play_e"].set_visibility(not d["is_running"])
+            refs["restart_e"].set_visibility(d["is_running"])
+            refs["pause_e"].set_visibility(d["is_running"])
+            refs["stop_e"].set_visibility(d["is_running"])
+
+        def _get_stage_rows(fresh: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+            active_by_stage = {str(r.get("stage") or ""): r for r in (fresh.get("active_stages") or [])}
+            latest_by_stage = {str(r.get("stage") or ""): r for r in (fresh.get("latest_stages") or [])}
+            summary_by_stage = {str(r.get("stage") or ""): r for r in (fresh.get("stage_summary") or [])}
+            result: Dict[str, Dict[str, Any]] = {}
+            for stage_key in ["metadata", "small", "large"]:
+                row = dict(summary_by_stage.get(stage_key) or {})
+                row.update(latest_by_stage.get(stage_key) or {})
+                row.update(active_by_stage.get(stage_key) or {})
+                if not row and stage_key == "metadata":
+                    live_index = _find_live_running_index_run(_get_telemetry(state))
+                    if live_index:
+                        row = {"stage": stage_key, "status": "running", "processed_files": 0, "total_files": 0, "duration_sec": 0}
+                result[stage_key] = row
+            ocr_row = dict(fresh.get("last_ocr") or {})
+            if fresh.get("active_ocr"):
+                ocr_row.update(fresh.get("active_ocr") or {})
+            result["ocr"] = ocr_row
+            return result
 
         def _refresh_progress() -> None:
             fresh = _read_index_telemetry(state.cfg)
@@ -328,9 +426,19 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or ""))
                 for row in (fresh.get("active_stages") or [])
             ]
+            if not active_names:
+                # Fallback: check latest_stages for any stage still marked running
+                # (happens when index_runs row lags behind index_stage_progress)
+                active_names = [
+                    _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or ""))
+                    for row in (fresh.get("latest_stages") or [])
+                    if str(row.get("status") or "") == "running"
+                ]
             if fresh.get("active_ocr"):
                 active_names.append("OCR")
-            active_chip.set_text("Запущено: " + ", ".join(active_names) if active_names else "Нет активных задач")
+            chip_text = "Запущено: " + ", ".join(active_names) if active_names else "Нет активных задач"
+            active_chip.set_text(chip_text)
+            header_active_chip.set_text(chip_text)
             by_stage = dict(stats.get("by_stage") or {})
             total_files = int(stats.get("total") or 0)
             content_files = int(by_stage.get("content") or 0)
@@ -349,48 +457,27 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                         "Файлы со stage=content уже имеют проиндексированное содержимое. "
                         "Остальные пока представлены метаданными или ждут фаз small/large/OCR."
                     ).classes("rag-meta")
-            active_by_stage = {str(row.get("stage") or ""): row for row in (fresh.get("active_stages") or [])}
-            latest_by_stage = {str(row.get("stage") or ""): row for row in (fresh.get("latest_stages") or [])}
-            summary_by_stage = {str(row.get("stage") or ""): row for row in (fresh.get("stage_summary") or [])}
-            progress_area.clear()
-            with progress_area:
-                with ui.element("div").classes("rag-pipeline-row rag-pipeline-row-card rag-pipeline-head"):
-                    ui.label("Этап").classes("rag-meta font-semibold")
-                    ui.label("Прогресс").classes("rag-meta font-semibold")
-                    ui.label("Статистика").classes("rag-meta font-semibold")
-                    ui.label("Действия").classes("rag-meta font-semibold text-right")
+            stage_rows = _get_stage_rows(fresh)
+            if not _progress_rendered[0]:
+                _progress_rendered[0] = True
+                progress_area.clear()
+                with progress_area:
+                    with ui.element("div").classes("rag-pipeline-row rag-pipeline-row-card rag-pipeline-head"):
+                        ui.label("Этап").classes("rag-meta font-semibold")
+                        ui.label("Прогресс").classes("rag-meta font-semibold")
+                        ui.label("Статистика").classes("rag-meta font-semibold")
+                        ui.label("Действия").classes("rag-meta font-semibold text-right")
+                    for stage_key in ["metadata", "small", "large"]:
+                        render_phase_row(key=stage_key, label=_STAGE_LABELS.get(stage_key, stage_key), row=stage_rows[stage_key])
+                    render_phase_row(key="ocr", label="OCR", row=stage_rows["ocr"], is_ocr=True)
+            else:
                 for stage_key in ["metadata", "small", "large"]:
-                    row = dict(summary_by_stage.get(stage_key) or {})
-                    row.update(latest_by_stage.get(stage_key) or {})
-                    row.update(active_by_stage.get(stage_key) or {})
-                    if not row and stage_key == "metadata":
-                        live_index = _find_live_running_index_run(_get_telemetry(state))
-                        if live_index:
-                            row = {
-                                "stage": stage_key,
-                                "status": "running",
-                                "processed_files": 0,
-                                "total_files": 0,
-                                "duration_sec": 0,
-                            }
-                    render_phase_row(
-                        key=stage_key,
-                        label=_STAGE_LABELS.get(stage_key, stage_key),
-                        row=row,
-                    )
-                ocr_row = dict(fresh.get("last_ocr") or {})
-                if fresh.get("active_ocr"):
-                    ocr_row.update(fresh.get("active_ocr") or {})
-                render_phase_row(
-                    key="ocr",
-                    label="OCR",
-                    row=ocr_row,
-                    is_ocr=True,
-                )
+                    update_phase_row(key=stage_key, label=_STAGE_LABELS.get(stage_key, stage_key), row=stage_rows[stage_key])
+                update_phase_row(key="ocr", label="OCR", row=stage_rows["ocr"], is_ocr=True)
 
         # Initial render
         _refresh_progress()
-        # Auto-refresh every 5 seconds while indexing may be running
+        # Auto-refresh every 5 seconds
         _stop_managed_timer(state.index_progress_timer)
         state.index_progress_timer = ui.timer(5.0, _refresh_progress)
 

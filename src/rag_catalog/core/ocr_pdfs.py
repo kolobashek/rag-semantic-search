@@ -384,8 +384,9 @@ def main() -> int:
         cmd += ["--catalog", cfg["catalog_path"]]
     if args.qdrant_url:
         cmd += ["--url", args.qdrant_url]
+    else:
+        cmd += ["--db", cfg["qdrant_db_path"]]
     cmd += [
-        "--db",         cfg["qdrant_db_path"],
         "--collection", args.collection,
         "--workers",    str(workers_effective),
         "--stage",      "large",  # сканированные PDF — этап large
@@ -403,7 +404,9 @@ def main() -> int:
     try:
         run_kwargs: Dict[str, Any] = {"check": False}
         if os.name == "nt":
-            run_kwargs["creationflags"] = _windows_detached_creationflags()
+            # CREATE_NO_WINDOW suppresses console popup; no DETACHED_PROCESS so that
+            # stdout/stderr are inherited from this process (→ ocr.log).
+            run_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
         result = subprocess.run(cmd, **run_kwargs)
         exit_code = result.returncode
         status = "completed" if exit_code == 0 else "failed"

@@ -509,8 +509,8 @@ class RAGIndexer:
         # можем пропустить: мета-запись у файла уже есть.
         if self.current_stage == "metadata":
             return True
-        # Для small/large пропускаем только если у файла уже есть "content"
-        return existing_stage == "content"
+        # Для small/large пропускаем если у файла уже есть "content" или тот же этап
+        return existing_stage in ("content", self.current_stage)
 
     def _save_state(self) -> None:
         """Compatibility shim for legacy JSON state (no-op with SQLite)."""
@@ -602,12 +602,37 @@ class RAGIndexer:
         return extract_pdf(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
 
     def _ocr_pdf(self, filepath: Path) -> str:
-        """OCR сканированного PDF через pytesseract + pdf2image."""
-        return ocr_pdf(
+        """OCR сканированного PDF через pytesseract + pdf2image, с кэшем в telemetry DB."""
+        try:
+            mtime = float(filepath.stat().st_mtime)
+            cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
+            if cached is not None:
+                logger.info("OCR из кэша: %s", filepath.name)
+                return str(cached.get("extracted_text") or "")
+        except Exception:
+            pass
+
+        text = ocr_pdf(
             filepath,
             tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
             poppler_bin=getattr(self, "ocr_poppler_bin", ""),
         )
+
+        try:
+            mtime = float(filepath.stat().st_mtime)
+            pages = text.count("Страница:") if text else 0
+            if pages == 0 and text.strip():
+                pages = 1
+            chars = len(text.strip())
+            self.telemetry.save_ocr_file_result(
+                str(filepath), mtime,
+                text=text, pages=pages, chars=chars,
+                status="ok" if chars > 0 else "empty",
+            )
+        except Exception:
+            pass
+
+        return text
 
     def _extract_image(self, filepath: Path) -> str:
         """
@@ -615,11 +640,33 @@ class RAGIndexer:
         Поддерживает JPEG, PNG, GIF, BMP, TIFF, WEBP.
         Возвращает пустую строку если pytesseract не установлен или текст не найден.
         """
-        return extract_image(
+        try:
+            mtime = float(filepath.stat().st_mtime)
+            cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
+            if cached is not None:
+                logger.info("OCR из кэша: %s", filepath.name)
+                return str(cached.get("extracted_text") or "")
+        except Exception:
+            pass
+
+        text = extract_image(
             filepath,
             tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
             max_pages=MAX_IMAGE_PAGES,
         )
+
+        try:
+            mtime = float(filepath.stat().st_mtime)
+            chars = len(text.strip())
+            self.telemetry.save_ocr_file_result(
+                str(filepath), mtime,
+                text=text, pages=1 if chars > 0 else 0, chars=chars,
+                status="ok" if chars > 0 else "empty",
+            )
+        except Exception:
+            pass
+
+        return text
 
     # ── chunking ───────────────────────────────────────────────────────
 

@@ -30,7 +30,13 @@ from .state import (
     _log_app_event,
     _username,
 )
-from .system import _STAGE_LABELS, _telemetry_db_path
+from .system import (
+    _STAGE_LABELS,
+    _telemetry_db_path,
+    PROJECT_ROOT,
+    _is_process_alive,
+    _find_module_process_pids,
+)
 
 # ─────────────────────────── constants ──────────────────────────────────────
 
@@ -214,9 +220,10 @@ def _preview_office_file(path: Path, limit: int = 12000) -> str:
 def _db_query_dicts(db_path: Path, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
     if not db_path.exists():
         return []
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA journal_mode=WAL;")
         cur = conn.execute(query, params or ())
         return [dict(row) for row in cur.fetchall()]
     except Exception:
@@ -262,6 +269,136 @@ def _filter_log_text(text: str, level: str) -> str:
     token = f" - {level_key.upper()} - "
     lines = [line for line in str(text or "").splitlines() if token in line.upper()]
     return "\n".join(lines) if lines else "Записей для выбранного уровня не найдено."
+
+
+_LOG_LINE_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}[.,]\d+) - (DEBUG|INFO|WARNING|ERROR|CRITICAL) - (.*)$"
+)
+
+
+def _parse_log_lines(text: str) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    for line in text.splitlines():
+        m = _LOG_LINE_RE.match(line)
+        if m:
+            if current is not None:
+                entries.append(current)
+            current = {
+                "date": m.group(1),
+                "time": m.group(2),
+                "level": m.group(3),
+                "message": m.group(4),
+            }
+        elif current is not None:
+            current["message"] += "\n" + line
+    if current is not None:
+        entries.append(current)
+    return entries
+
+
+def _read_log_entries(
+    path: Path,
+    *,
+    max_entries: int = 200,
+    level: str = "all",
+    date_from: str = "",
+    date_to: str = "",
+    max_read_chars: int = 4_000_000,
+) -> List[Dict[str, Any]]:
+    """Read log entries from end of file, scan back until max_entries matching entries found."""
+    try:
+        if not path.exists():
+            return []
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not text:
+            return []
+        if len(text) > max_read_chars:
+            text = text[-max_read_chars:]
+            nl = text.find("\n")
+            if nl >= 0:
+                text = text[nl + 1:]
+        all_entries = _parse_log_lines(text)
+        level_key = str(level or "all").strip().upper()
+        date_from = str(date_from or "").strip()
+        date_to = str(date_to or "").strip()
+        collected: List[Dict[str, Any]] = []
+        for entry in reversed(all_entries):
+            if level_key not in {"", "ALL"}:
+                if entry["level"] != level_key:
+                    continue
+            if date_from and entry["date"] < date_from:
+                continue
+            if date_to and entry["date"] > date_to:
+                continue
+            collected.append(entry)
+            if len(collected) >= max_entries:
+                break
+        return list(reversed(collected))
+    except Exception:
+        return []
+
+
+_LEVEL_ROW_STYLE: Dict[str, str] = {
+    "DEBUG":    "color:#6b7280",
+    "INFO":     "color:#1e293b",
+    "WARNING":  "color:#92400e;background:#fffbeb",
+    "ERROR":    "color:#991b1b;background:#fef2f2",
+    "CRITICAL": "color:#7c2d12;background:#fee2e2;font-weight:700",
+}
+_LEVEL_BADGE_COLOR: Dict[str, str] = {
+    "DEBUG":    "#9ca3af",
+    "INFO":     "#6366f1",
+    "WARNING":  "#d97706",
+    "ERROR":    "#dc2626",
+    "CRITICAL": "#7c2d12",
+}
+
+
+def _format_log_entries_html(entries: List[Dict[str, Any]]) -> str:
+    if not entries:
+        return '<div style="color:#9ca3af;padding:16px;text-align:center">Нет записей для выбранных фильтров.</div>'
+    parts: List[str] = []
+    last_date = ""
+    for entry in entries:
+        date = entry.get("date", "")
+        if date != last_date:
+            last_date = date
+            esc_date = html.escape(date)
+            parts.append(
+                f'<div style="display:flex;align-items:center;gap:8px;margin:8px 2px 4px">'
+                f'<div style="flex:1;height:1px;background:#e5e7eb"></div>'
+                f'<span style="font-size:10px;color:#9ca3af;white-space:nowrap">{esc_date}</span>'
+                f'<div style="flex:1;height:1px;background:#e5e7eb"></div>'
+                f'</div>'
+            )
+        level = entry.get("level", "INFO")
+        row_style = _LEVEL_ROW_STYLE.get(level, "color:#1e293b")
+        badge_color = _LEVEL_BADGE_COLOR.get(level, "#6b7280")
+        time_str = html.escape(entry.get("time", ""))
+        msg = html.escape(entry.get("message", "")).replace("\n", "<br>&nbsp;&nbsp;")
+        level_esc = html.escape(level)
+        parts.append(
+            f'<div style="padding:2px 6px;border-radius:3px;margin-bottom:1px;line-height:1.5;{row_style}">'
+            f'<span style="color:#9ca3af;font-size:10px;user-select:none">{time_str}</span> '
+            f'<span style="display:inline-block;padding:0 4px;border-radius:3px;font-size:10px;'
+            f'font-weight:600;color:#fff;background:{badge_color};user-select:none">{level_esc}</span> '
+            f'<span>{msg}</span>'
+            f'</div>'
+        )
+    return "".join(parts)
+
+
+def _format_log_entries_text(entries: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    last_date = ""
+    for entry in entries:
+        date = entry.get("date", "")
+        if date != last_date:
+            last_date = date
+            lines.append(f"──── {date} ────")
+        lines.append(f"{entry.get('time', '')} [{entry.get('level', '')}] {entry.get('message', '')}")
+    return "\n".join(lines)
 
 
 # ─────────────────────────── query history helpers ──────────────────────────
@@ -840,6 +977,55 @@ def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
+    """Return stage-progress rows for a live headless indexer (PID alive but DB status='cancelled')."""
+    import json as _json
+
+    live_pid = 0
+    marker_path = PROJECT_ROOT / "runtime" / "index_active.json"
+    if marker_path.exists():
+        try:
+            data = _json.loads(marker_path.read_text(encoding="utf-8"))
+            pid = int(data.get("pid") or 0)
+            if pid > 0 and _is_process_alive(pid):
+                live_pid = pid
+        except Exception:
+            pass
+
+    if not live_pid:
+        pids = _find_module_process_pids("rag_catalog.core.index_rag")
+        if pids:
+            live_pid = pids[0]
+
+    if not live_pid:
+        return []
+
+    rows = _db_query_dicts(
+        db_path,
+        "SELECT run_id FROM index_runs WHERE worker_pid=? ORDER BY ts_started DESC LIMIT 1",
+        (live_pid,),
+    )
+    if not rows:
+        return []
+    run_id = str(rows[0].get("run_id") or "")
+    if not run_id:
+        return []
+
+    return _db_query_dicts(
+        db_path,
+        """
+        SELECT isp.*,
+               'running' AS run_status,
+               'headless' AS run_note,
+               CAST((julianday(COALESCE(isp.ts_finished, CURRENT_TIMESTAMP)) - julianday(isp.ts_started)) * 86400 AS INTEGER) AS duration_sec
+        FROM index_stage_progress AS isp
+        WHERE isp.run_id=?
+        ORDER BY CASE isp.stage WHEN 'metadata' THEN 1 WHEN 'small' THEN 2 WHEN 'large' THEN 3 WHEN 'content' THEN 4 ELSE 9 END
+        """,
+        (run_id,),
+    )
+
+
 def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
     db_path = _telemetry_db_path(cfg)
     last_run = _db_query_dicts(
@@ -881,6 +1067,9 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
             """,
             tuple(active_run_ids),
         )
+    if not active_stages:
+        active_stages = _find_headless_active_stages(db_path)
+
     latest_stages = _db_query_dicts(
         db_path,
         """

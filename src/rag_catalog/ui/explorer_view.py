@@ -7,6 +7,8 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
+import html as _html
+import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -950,6 +952,82 @@ def render_explorer_screen(
         ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(str(path))})")
         ui.notify("Путь скопирован.", type="positive")
 
+    _OCR_EXTS = frozenset({".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff", ".tif", ".webp"})
+
+    async def open_recognize_dialog(path: Path) -> None:
+        from rag_catalog.core.ocr_runtime import recognize_single_file  # noqa: PLC0415
+
+        _text_holder: List[str] = [""]
+
+        with ui.dialog() as dlg, ui.card().classes("w-[min(960px,96vw)] max-h-[90vh] flex flex-col p-4 gap-3"):
+            with ui.row().classes("w-full items-center gap-2"):
+                with ui.column().classes("flex-1 gap-0 min-w-0"):
+                    ui.label("Распознавание текста").classes("text-lg font-semibold")
+                    ui.label(path.name).classes("font-medium truncate")
+                    ui.label(str(path)).classes("rag-path text-xs")
+                ui.button(icon="close", on_click=dlg.close, color=None).props("flat round dense")
+
+            with ui.row().classes("w-full items-center gap-3") as spinner_row:
+                ui.spinner("dots", size="1.8em").classes("text-indigo-500")
+                ui.label("Распознаю…").classes("rag-meta")
+
+            meta_label = ui.label("").classes("rag-meta")
+            meta_label.set_visibility(False)
+
+            with ui.element("div").style(
+                "flex:1;min-height:240px;max-height:52vh;overflow-y:auto;"
+                "border:1px solid #e5e7eb;border-radius:6px;padding:8px;"
+                "font-family:var(--rag-font-mono,monospace);font-size:12px;background:#f9fafb"
+            ) as result_box:
+                result_html = ui.html("")
+            result_box.set_visibility(False)
+
+            with ui.row().classes("w-full justify-end gap-2"):
+                copy_btn = ui.button("Копировать", icon="content_copy").props("outline")
+                copy_btn.set_visibility(False)
+                copy_btn.on("click", lambda: ui.run_javascript(
+                    f"navigator.clipboard&&navigator.clipboard.writeText({json.dumps(_text_holder[0])})"
+                ))
+                ui.button("Закрыть", on_click=dlg.close).props("unelevated")
+
+        dlg.open()
+
+        result = await run.io_bound(recognize_single_file, path, state.cfg)
+
+        spinner_row.set_visibility(False)
+        text = str(result.get("text") or "")
+        pages = int(result.get("pages") or 0)
+        chars = int(result.get("chars") or 0)
+        from_cache = bool(result.get("from_cache"))
+        r_status = str(result.get("status") or "ok")
+        error = str(result.get("error") or "")
+
+        _text_holder[0] = text
+
+        if r_status in ("error", "unsupported"):
+            meta_label.set_text(f"Ошибка: {error}" if error else "Не удалось распознать файл")
+            meta_label.classes(add="text-red-600")
+        elif r_status == "empty" or not text.strip():
+            meta_label.set_text("Текст не обнаружен — возможно, изображение не содержит читаемых символов")
+        else:
+            cache_note = " · из кэша" if from_cache else ""
+            meta_label.set_text(f"{chars:,} символов · {pages} стр.{cache_note}".replace(",", " "))
+            # Render text with page separators
+            html_parts: List[str] = []
+            for line in text.split("\n"):
+                if line.startswith("Страница:"):
+                    html_parts.append(
+                        f'<div style="color:#6366f1;font-weight:600;border-top:1px solid #e5e7eb;'
+                        f'margin:6px 0 3px;padding-top:4px">{_html.escape(line)}</div>'
+                    )
+                else:
+                    html_parts.append(f'<div style="margin-bottom:1px">{_html.escape(line) or "&nbsp;"}</div>')
+            result_html.set_content("".join(html_parts))
+            result_box.set_visibility(True)
+            copy_btn.set_visibility(True)
+
+        meta_label.set_visibility(True)
+
     def explorer_context_props(path: Path, *, is_dir: bool) -> str:
         item_type = "folder" if is_dir else "file"
         item_url = "" if is_dir else _viewer_file_url(str(path))
@@ -1023,6 +1101,8 @@ def render_explorer_screen(
             if not compact:
                 if not is_dir:
                     ui.button("Скачать", icon="download", on_click=lambda p=path: (_log_app_event(state, "explorer", "download", details={"path": str(p)}), ui.download(p, filename=p.name))).props("outline dense")
+                    if path.suffix.lower() in _OCR_EXTS:
+                        ui.button("Распознать", icon="document_scanner", on_click=lambda p=path: open_recognize_dialog(p)).props("outline dense").tooltip("Распознать текст (OCR)")
                 _os_fn = (lambda p=path: _open_os_path(str(p))) if is_dir else (lambda p=path: _select_in_os_explorer(str(p)))
                 ui.button("ОС", icon="open_in_new", on_click=_os_fn).props("flat dense data-rag-os").tooltip("Открыть в проводнике Windows" if is_dir else "Выделить файл в проводнике Windows")
             else:
