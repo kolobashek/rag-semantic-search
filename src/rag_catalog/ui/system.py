@@ -383,7 +383,14 @@ def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             hh, mm = int(sched_time[:2]), int(sched_time[3:5])
         except (ValueError, IndexError):
             hh, mm = 3, 0
-        days = sched.get("days") or []
+
+        # days_json column stores a JSON array string, e.g. '["Mon","Wed"]'
+        raw_days = sched.get("days_json") or sched.get("days") or "[]"
+        try:
+            days: List[str] = json.loads(raw_days) if isinstance(raw_days, str) else list(raw_days or [])
+        except (ValueError, TypeError):
+            days = []
+
         day_name = now.strftime("%a")
         if cadence == "weekly" and day_name not in days:
             continue
@@ -395,11 +402,13 @@ def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         else:
             if now.hour != hh or abs(now.minute - mm) > 1:
                 continue
+
+        # Dedup window: at least as wide as the trigger window (3 min) to prevent double-firing
         last_run = str(sched.get("last_run_at") or "")
         if last_run:
             try:
                 lr = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                if (now - lr).total_seconds() < 90:
+                if (now - lr).total_seconds() < 300:
                     continue
             except ValueError:
                 pass
@@ -408,7 +417,14 @@ def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
-    tdb = TelemetryDB(str(_telemetry_db_path(cfg)))
+    # Reload config each tick so catalog_path and other settings are always current
+    from rag_catalog.core.rag_core import load_config as _load_cfg
+    try:
+        live_cfg = _load_cfg()
+    except Exception:
+        live_cfg = cfg
+
+    tdb = TelemetryDB(str(_telemetry_db_path(live_cfg)))
     if not hasattr(tdb, "list_index_schedules"):
         return
     schedules = tdb.list_index_schedules()
@@ -419,10 +435,10 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
     for sched in due:
         try:
             _launch_indexer(
-                cfg,
+                live_cfg,
                 stage=str(sched.get("stage") or "all"),
-                workers=int(cfg_settings.get("workers") or cfg.get("index_read_workers") or 4),
-                max_chunks=int(cfg_settings.get("max_chunks") or cfg.get("index_max_chunks") or 2000),
+                workers=int(cfg_settings.get("workers") or live_cfg.get("index_read_workers") or 4),
+                max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 2000),
                 skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
             )
         except RuntimeError:
