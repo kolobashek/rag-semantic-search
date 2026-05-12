@@ -88,6 +88,7 @@ def render_settings_screen(
     *,
     render_fn: Callable,
     query_handler: Callable,
+    index_dashboard_fn: Optional[Callable] = None,
 ) -> None:
 
     def render_admin_users(auth_db: UserAuthDB) -> None:
@@ -2222,7 +2223,12 @@ def render_settings_screen(
             elif sec == "aliases":
                 render_admin_search_aliases()
             elif sec == "indexing":
-                render_index_dashboard()
+                if index_dashboard_fn:
+                    index_dashboard_fn()
+                else:
+                    with ui.column().classes("rag-card w-full p-4 gap-2"):
+                        ui.label("Индексация").classes("text-xl font-semibold")
+                        ui.label("Панель индексации недоступна.").classes("rag-meta")
             elif sec == "security":
                 render_admin_security_settings(auth_db)
             elif sec == "users":
