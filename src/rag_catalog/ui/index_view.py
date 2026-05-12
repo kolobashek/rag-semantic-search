@@ -256,7 +256,20 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             "Покрытие содержимым показано отдельно, это агрегат state DB, а не отдельная команда запуска."
         ).classes("rag-meta")
 
-        coverage_area = ui.column().classes("w-full gap-1")
+        _coverage_refs: Dict[str, Any] = {}
+        with ui.element("div").classes("rag-content-coverage w-full"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("article").classes("text-indigo-500")
+                ui.label("Покрытие содержимым").classes("font-semibold")
+                _coverage_refs["count"] = ui.label("").classes("rag-meta")
+                ui.space()
+                _coverage_refs["pct"] = ui.label("").classes("rag-meta")
+            _coverage_refs["bar"] = ui.linear_progress(value=0).props("color=indigo-5").classes("w-full mt-1")
+            ui.label(
+                "Файлы со stage=content уже имеют проиндексированное содержимое. "
+                "Остальные пока представлены метаданными или ждут фаз small/large/OCR."
+            ).classes("rag-meta")
+
         progress_area = ui.column().classes("w-full gap-2")
         with progress_area:
             with ui.element("div").classes("rag-pipeline-row rag-pipeline-head"):
@@ -443,20 +456,9 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             total_files = int(stats.get("total") or 0)
             content_files = int(by_stage.get("content") or 0)
             coverage_pct = min(1.0, content_files / total_files) if total_files > 0 else 0.0
-            coverage_area.clear()
-            with coverage_area:
-                with ui.element("div").classes("rag-content-coverage w-full"):
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.icon("article").classes("text-indigo-500")
-                        ui.label("Покрытие содержимым").classes("font-semibold")
-                        ui.label(f"{content_files:,} / {total_files:,}".replace(",", " ")).classes("rag-meta")
-                        ui.space()
-                        ui.label(f"{coverage_pct * 100:.0f}%").classes("rag-meta")
-                    ui.linear_progress(value=coverage_pct).props("color=indigo-5").classes("w-full mt-1")
-                    ui.label(
-                        "Файлы со stage=content уже имеют проиндексированное содержимое. "
-                        "Остальные пока представлены метаданными или ждут фаз small/large/OCR."
-                    ).classes("rag-meta")
+            _coverage_refs["count"].set_text(f"{content_files:,} / {total_files:,}".replace(",", " "))
+            _coverage_refs["pct"].set_text(f"{coverage_pct * 100:.0f}%")
+            _coverage_refs["bar"].set_value(coverage_pct)
             stage_rows = _get_stage_rows(fresh)
             if not _progress_rendered[0]:
                 _progress_rendered[0] = True
