@@ -1399,7 +1399,7 @@ class TelemetryDB:
         """Создать или обновить расписание. Возвращает сохранённую запись."""
         sched_id = str(id or uuid.uuid4())
         clean_cadence = cadence if cadence in {"hourly", "daily", "weekly"} else "daily"
-        clean_stage = stage if stage in {"all", "metadata", "small", "large", "content"} else "all"
+        clean_stage = stage if stage in {"all", "metadata", "small", "large", "content", "ocr"} else "all"
         clean_days = [str(d) for d in (days or []) if str(d).strip()]
         clean_time = "" if clean_cadence == "hourly" else str(time or "03:00").strip()
         clean_label = str(label or "").strip() or _default_schedule_label(clean_stage, clean_cadence)

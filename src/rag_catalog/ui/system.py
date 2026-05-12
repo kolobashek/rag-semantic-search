@@ -24,6 +24,7 @@ _STAGE_LABELS: Dict[str, str] = {
     "metadata": "metadata",
     "small": "small chunks",
     "large": "large chunks",
+    "ocr": "OCR",
 }
 
 # ── Module-level globals ───────────────────────────────────────────────────
@@ -434,15 +435,20 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
     if not due:
         return
     cfg_settings = tdb.get_index_settings() if hasattr(tdb, "get_index_settings") else {}
+    workers = int(cfg_settings.get("workers") or live_cfg.get("index_read_workers") or 4)
     for sched in due:
+        stage = str(sched.get("stage") or "all")
         try:
-            _launch_indexer(
-                live_cfg,
-                stage=str(sched.get("stage") or "all"),
-                workers=int(cfg_settings.get("workers") or live_cfg.get("index_read_workers") or 4),
-                max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 2000),
-                skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
-            )
+            if stage == "ocr":
+                _launch_ocr(live_cfg, workers=workers)
+            else:
+                _launch_indexer(
+                    live_cfg,
+                    stage=stage,
+                    workers=workers,
+                    max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 2000),
+                    skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
+                )
         except RuntimeError:
             continue
         tdb.touch_index_schedule(id=str(sched["id"]))
