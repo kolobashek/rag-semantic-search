@@ -1600,7 +1600,7 @@ def _build_page(initial_screen: str = "search") -> None:
             state,
             render_fn=render,
             query_handler=choose_query_handler,
-            index_dashboard_fn=render_index_dashboard,
+            index_dashboard_fn=render_index_screen,
         )
 
     # ── Analytics / stats screen ───────────────────────────────────────────
