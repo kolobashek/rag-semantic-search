@@ -23,6 +23,7 @@ from .helpers import (
     _filter_log_text,
     _format_bytes,
     _format_duration_seconds,
+    _format_relative_time,
     _is_admin,
     _read_index_stats,
     _read_index_telemetry,
