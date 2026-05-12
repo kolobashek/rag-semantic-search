@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
 from nicegui import run, ui
 
 from .helpers import (
