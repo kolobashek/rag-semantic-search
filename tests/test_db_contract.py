@@ -7,7 +7,8 @@ import pytest
 
 from rag_catalog.core import rag_core
 from rag_catalog.core.db_contract import SchemaMismatchError
-from rag_catalog.core.telemetry_db import SCHEMA_VERSION as TELEMETRY_SCHEMA_VERSION, TelemetryDB
+from rag_catalog.core.telemetry_db import SCHEMA_VERSION as TELEMETRY_SCHEMA_VERSION
+from rag_catalog.core.telemetry_db import TelemetryDB
 
 
 def test_load_config_uses_nearest_ancestor_config(monkeypatch, tmp_path: Path) -> None:

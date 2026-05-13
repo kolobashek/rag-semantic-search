@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from rag_core import RAGSearcher
 from rag_catalog.core.telemetry_db import TelemetryDB
+from rag_core import RAGSearcher
 
 
 def _searcher_with_catalog(root: Path) -> RAGSearcher:

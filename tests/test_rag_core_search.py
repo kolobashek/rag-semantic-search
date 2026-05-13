@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from qdrant_client.models import Filter
 
-from rag_core import MAX_QUERY_LEN, RAGSearcher
 from rag_catalog.core.index_state_db import IndexStateDB
+from rag_core import MAX_QUERY_LEN, RAGSearcher
 
 
 class _FakeTelemetry:

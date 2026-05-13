@@ -1,3 +1,4 @@
+import telegram_bot
 from telegram_bot import (
     _clean_tg_text,
     _file_uri,
@@ -7,14 +8,12 @@ from telegram_bot import (
     build_interactive_search_response,
     chat_action,
     format_fact_answer,
-    format_rag_answer,
     process_contact_message,
     process_message,
     process_query,
     send_chat_action,
     set_bot_commands,
 )
-import telegram_bot
 
 
 class _FakeSearcher:

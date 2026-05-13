@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,10 +22,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from rag_catalog.core.index_rag import (
     IMAGE_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
-    _generate_tags,
     _file_category,
+    _generate_tags,
 )
-
 
 # ═══════════════════════════ _generate_tags ════════════════════════════════════
 
@@ -820,7 +818,6 @@ class TestSynonymMapIntegrity:
 
     def test_no_duplicate_keys(self):
         """В DEFAULT_SYNONYM_MAP нет дублирующихся ключей."""
-        from rag_catalog.core.index_rag import DEFAULT_SYNONYM_MAP
         # Python dict не хранит дубли, но мы проверяем через исходник
         import ast
         from pathlib import Path

@@ -4,7 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -41,6 +40,7 @@ def test_cli_entrypoint_help_commands() -> None:
 
 def test_legacy_import_shims_alias_package_modules() -> None:
     import index_rag as root_index_rag
+    import nice_app as root_nice_app
     import ocr_pdfs as root_ocr_pdfs
     import rag_core as root_rag_core
     import rag_search as root_rag_search
@@ -49,7 +49,6 @@ def test_legacy_import_shims_alias_package_modules() -> None:
     import telemetry_db as root_telemetry_db
     import user_auth_db as root_user_auth_db
     import windows_app as root_windows_app
-    import nice_app as root_nice_app
     from rag_catalog.cli import rag_search as package_rag_search
     from rag_catalog.cli import rag_search_fixed as package_rag_search_fixed
     from rag_catalog.core import index_rag as package_index_rag
@@ -58,8 +57,8 @@ def test_legacy_import_shims_alias_package_modules() -> None:
     from rag_catalog.core import telemetry_db as package_telemetry_db
     from rag_catalog.core import user_auth_db as package_user_auth_db
     from rag_catalog.integrations import telegram_bot as package_telegram_bot
-    from rag_catalog.ui import windows_app as package_windows_app
     from rag_catalog.ui import nice_app as package_nice_app
+    from rag_catalog.ui import windows_app as package_windows_app
 
     assert root_rag_search.main is package_rag_search.main
     assert root_rag_search_fixed.main is package_rag_search_fixed.main

@@ -1,51 +1,37 @@
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass
 from tempfile import SpooledTemporaryFile
 
 import pytest
 from fastapi import HTTPException
+from starlette.datastructures import UploadFile
 
-from rag_catalog.ui.state import (
-    PageState,
-    _save_config_patch,
-)
-from rag_catalog.ui.helpers import (
-    _apply_explorer_filter_input,
-    _cd_acl_allows,
-    _file_rows,
-    _file_icon_svg,
-    _is_system_file,
-    _read_index_stats,
-    _read_index_telemetry,
-    _normalize_search_results,
-    _run_catalog_search,
-)
-from rag_catalog.ui.system import (
-    _recover_background_tasks,
-    _resolve_index_recovery_stage,
-)
+import rag_catalog.ui.api as cloud_api
+import rag_catalog.ui.state as ui_state
+import rag_catalog.ui.system as ui_system
+from rag_catalog.core.cloud_drive.service import CloudDriveService
+from rag_catalog.core.index_state_db import IndexStateDB
+from rag_catalog.core.telemetry_db import TelemetryDB
+from rag_catalog.core.user_auth_db import UserAuthDB
 from rag_catalog.ui.api import (
     api_cloud_drive_bootstrap_jobs,
     api_cloud_drive_bootstrap_status,
     api_cloud_drive_create_folder,
-    api_cloud_drive_download,
     api_cloud_drive_delete,
-    api_cloud_drive_job,
+    api_cloud_drive_download,
     api_cloud_drive_file_statuses,
+    api_cloud_drive_job,
     api_cloud_drive_job_latest,
-    api_cloud_drive_job_run,
     api_cloud_drive_job_retry,
+    api_cloud_drive_job_run,
     api_cloud_drive_jobs,
+    api_cloud_drive_list,
     api_cloud_drive_move,
+    api_cloud_drive_node,
     api_cloud_drive_reindex,
     api_cloud_drive_rename,
     api_cloud_drive_restore,
-    api_cloud_drive_upload,
-    api_cloud_drive_list,
-    api_cloud_drive_node,
-    api_cloud_drive_versions,
     api_cloud_drive_storage_health,
     api_cloud_drive_sync_client_register,
     api_cloud_drive_sync_clients,
@@ -58,15 +44,28 @@ from rag_catalog.ui.api import (
     api_cloud_drive_sync_selective,
     api_cloud_drive_sync_selective_set,
     api_cloud_drive_trash,
+    api_cloud_drive_upload,
+    api_cloud_drive_versions,
 )
-import rag_catalog.ui.api as cloud_api
-import rag_catalog.ui.state as ui_state
-import rag_catalog.ui.system as ui_system
-from rag_catalog.core.index_state_db import IndexStateDB
-from rag_catalog.core.telemetry_db import TelemetryDB
-from rag_catalog.core.cloud_drive.service import CloudDriveService
-from rag_catalog.core.user_auth_db import UserAuthDB
-from starlette.datastructures import UploadFile
+from rag_catalog.ui.helpers import (
+    _apply_explorer_filter_input,
+    _cd_acl_allows,
+    _file_icon_svg,
+    _file_rows,
+    _is_system_file,
+    _normalize_search_results,
+    _read_index_stats,
+    _read_index_telemetry,
+    _run_catalog_search,
+)
+from rag_catalog.ui.state import (
+    PageState,
+    _save_config_patch,
+)
+from rag_catalog.ui.system import (
+    _recover_background_tasks,
+    _resolve_index_recovery_stage,
+)
 
 
 @dataclass
@@ -814,7 +813,7 @@ def test_cloud_drive_reindex_api_queues_job(monkeypatch, tmp_path) -> None:
     }
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
-    folder = service.registry.upsert_folder(
+    service.registry.upsert_folder(
         path="Folder A",
         name="Folder A",
         parent_id=root.id,
