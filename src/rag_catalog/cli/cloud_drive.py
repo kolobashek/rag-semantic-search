@@ -33,6 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap_cmd.add_argument('--import-files', action='store_true', help='Copy files into storage backend')
 
     sub.add_parser('stats', help='Show current cloud drive registry stats')
+    sub.add_parser('compact-versions', help='Remove duplicate unchanged Cloud Drive version rows')
     return parser
 
 
@@ -93,6 +94,24 @@ def _stats_cloud(cfg: Dict[str, Any]) -> int:
     return 0
 
 
+def _compact_versions(cfg: Dict[str, Any]) -> int:
+    db_path, storage_root = _default_cloud_paths(cfg)
+    cfg['cloud_drive_db_path'] = str(cfg.get('cloud_drive_db_path') or db_path)
+    cfg.setdefault('cloud_drive_storage', 'local')
+    if str(cfg.get('cloud_drive_storage') or 'local') == 'local':
+        cfg['cloud_drive_storage_root'] = str(cfg.get('cloud_drive_storage_root') or storage_root)
+    service = CloudDriveService.from_config(cfg)
+    before = service.registry.stats()
+    deleted = service.registry.compact_duplicate_versions()
+    after = service.registry.stats()
+    print(json.dumps({
+        'deleted_versions': deleted,
+        'before': asdict(before),
+        'after': asdict(after),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -103,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
         return _bootstrap_cloud(cfg, args)
     if args.command == 'stats':
         return _stats_cloud(cfg)
+    if args.command == 'compact-versions':
+        return _compact_versions(cfg)
     parser.error(f'Unknown command: {args.command}')
     return 2
 

@@ -175,6 +175,7 @@ CLI:
 python cloud_drive.py init --enable
 python cloud_drive.py stats
 python cloud_drive.py bootstrap --max-files 1000
+python cloud_drive.py compact-versions
 ```
 
 Admin UI:

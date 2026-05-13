@@ -45,3 +45,39 @@ def test_cloud_drive_cli_bootstrap(tmp_path: Path, monkeypatch) -> None:
     assert row is not None
     assert row.storage_key.startswith('objects/sha256/')
     assert (tmp_path / 'state' / 'storage' / row.storage_key).exists()
+
+
+def test_cloud_drive_cli_compact_versions(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / 'state'
+    config = {
+        'qdrant_db_path': str(state_dir),
+        'cloud_drive_db_path': str(state_dir / 'cloud_drive.db'),
+        'cloud_drive_storage': 'local',
+        'cloud_drive_storage_root': str(state_dir / 'storage'),
+    }
+    monkeypatch.setattr(cloud_drive, 'load_config', lambda: dict(config))
+    monkeypatch.setattr(cloud_drive, 'save_config', lambda cfg: None)
+    registry = CloudDriveRegistryDB(str(state_dir / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='root')
+    file_row = registry.upsert_file(
+        folder_id=root.id,
+        path='hello.txt',
+        name='hello.txt',
+        storage_key='objects/sha256/aa/bb/aabb.txt',
+        mime_type='text/plain',
+        size_bytes=5,
+        checksum='aabb',
+    )
+    with registry._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO cloud_file_versions (id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at)
+            VALUES ('duplicate-version', ?, ?, ?, ?, '', '', '2026-05-13T00:00:00+00:00')
+            """,
+            (file_row.id, file_row.storage_key, file_row.checksum, file_row.size_bytes),
+        )
+
+    rc = cloud_drive.main(['compact-versions'])
+
+    assert rc == 0
+    assert len(registry.list_file_versions(path='hello.txt')) == 1
