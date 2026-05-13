@@ -9,8 +9,9 @@ Depends on: .state, .system, .helpers, core modules.
 
 from __future__ import annotations
 
-import mimetypes
 import json
+import mimetypes
+import os
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Dict, List
@@ -50,7 +51,10 @@ def _require_cloud_drive_api_user(
         token = header[7:].strip()
     elif header:
         token = header
-    if not token:
+    allow_query_token = bool(cfg.get("allow_auth_token_query")) or str(
+        os.environ.get("RAG_ALLOW_AUTH_TOKEN_QUERY") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not token and allow_query_token:
         token = str(auth_token or "").strip()
     if not token:
         try:
@@ -835,4 +839,3 @@ def api_cloud_drive_job_retry(job_id: str, auth_token: str = "", authorization: 
         raise HTTPException(status_code=400, detail=str(exc))
     _audit_cloud_drive_api_event(cfg, user, "job_retry", details={"job_id": job_id, "new_job_id": job.id, "job_type": job.job_type})
     return _serialize_cloud_drive_job(job)
-

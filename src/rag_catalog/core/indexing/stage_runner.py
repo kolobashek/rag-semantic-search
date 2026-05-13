@@ -424,14 +424,13 @@ class IndexStageRunner:
                     pending_texts.append(chunk)
                     pending_payloads.append(cpayload)
                 file_stage = "metadata" if stage == "metadata" else (
-                    "content" if result.get("has_content") else stage
+                    "content" if result.get("has_content") else "metadata"
                 )
                 if stage in ("small", "large") and not result.get("has_content"):
                     self._logger.warning(
-                        "Этап %s: файл %s без контента, сохраняю stage=%s",
+                        "Этап %s: файл %s без контента, сохраняю stage=metadata",
                         stage,
                         result["filepath"].name,
-                        stage,
                     )
                 pending_states.append(
                     (
@@ -490,4 +489,3 @@ class IndexStageRunner:
                 points_added=stage_stats["points_added"],
             )
         return stage_stats
-

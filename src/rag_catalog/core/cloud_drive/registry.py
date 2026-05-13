@@ -875,6 +875,33 @@ class CloudDriveRegistryDB:
                 ).fetchall()
             return [self._job_from_row(row) for row in rows]
 
+    def list_pending_jobs(self, *, job_types: Optional[List[str]] = None, limit: int = 20) -> List[CloudDriveJob]:
+        clean_limit = max(1, int(limit))
+        clean_types = [str(item or '').strip() for item in (job_types or []) if str(item or '').strip()]
+        with self._connect() as conn:
+            if clean_types:
+                placeholders = ','.join('?' for _ in clean_types)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM cloud_jobs
+                    WHERE status='pending' AND job_type IN ({placeholders})
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (*clean_types, clean_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM cloud_jobs
+                    WHERE status='pending'
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (clean_limit,),
+                ).fetchall()
+            return [self._job_from_row(row) for row in rows]
+
     def list_latest_jobs_for_files(
         self,
         file_ids: List[str],

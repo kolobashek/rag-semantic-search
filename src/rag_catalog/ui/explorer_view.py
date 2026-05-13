@@ -7,46 +7,40 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
-import html as _html
+import html
 import json
-import re
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List, Optional
+from urllib.parse import quote
 
 from nicegui import events, run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 
 from .helpers import (
-    FILE_PREVIEW_EXTENSIONS,
-    INLINE_IMAGE_EXTENSIONS,
-    OFFICE_PREVIEW_EXTENSIONS,
     PAGE_SIZE,
     _apply_explorer_filter_input,
-    _cd_acl_allows,
     _cd_breadcrumb_chain,
     _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
     _cd_list_children,
-    _directory_children,
     _file_icon_svg,
     _file_rows,
     _format_file_size,
-    _format_relative_time,
     _is_admin,
     _is_system_file,
     _open_os_path,
-    _preview_file,
-    _preview_office_file,
-    _resolve_catalog_file,
     _safe_explorer_path,
     _save_explorer_settings,
+    _save_ui_settings,
     _select_in_os_explorer,
     _viewer_file_url,
 )
 from .state import (
     PageState,
+    _get_auth_db,
     _is_favorite,
     _log_app_event,
     _toggle_favorite,
@@ -59,6 +53,9 @@ def render_explorer_screen(
     *,
     render_fn: Callable,
     go_explorer_fn: Callable,
+    open_file_viewer_fn: Callable,
+    choose_query_fn: Callable,
+    query_handler: Callable,
 ) -> None:
     def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
         active = _is_favorite(state, str(path))
@@ -104,7 +101,7 @@ def render_explorer_screen(
                         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                             tmp.write(content.read())
                             tmp_path = tmp.name
-                        result = await run.io_bound(
+                        await run.io_bound(
                             svc.upload_file,
                             parent_path=page_state.explorer_cd_path or "",
                             filename=filename,
@@ -122,7 +119,7 @@ def render_explorer_screen(
                         upload_results.append({"name": filename, "ok": False, "err": str(exc)})
                         ui.notify(f"Ошибка загрузки «{filename}»: {exc}", type="negative")
 
-                uploader = ui.upload(
+                ui.upload(
                     multiple=True,
                     on_upload=_handle_upload,
                     auto_upload=True,
@@ -367,7 +364,7 @@ def render_explorer_screen(
                 p = Path(src)
                 if p.exists() and p.is_file():
                     _log_app_event(page_state, "cd_explorer", "open_file", details={"path": src})
-                    open_file_viewer(p)
+                    open_file_viewer_fn(p)
                     return
             ui.notify("Исходный файл недоступен на диске.", type="warning")
 
@@ -546,7 +543,7 @@ def render_explorer_screen(
             if cd_path:
                 ui.button(
                     "Найти в этой папке", icon="search",
-                    on_click=choose_query_handler(f"path:{cd_path}"), color=None,
+                    on_click=query_handler(f"path:{cd_path}"), color=None,
                 ).props("flat dense no-caps align=left").classes("w-full")
             ui.separator()
             ui.label("Фильтры").classes("font-semibold text-sm")
@@ -946,7 +943,7 @@ def render_explorer_screen(
         if path.exists() and path.is_file():
             _get_auth_db(state).touch_favorite(username=_username(state), path=str(path))
             _log_app_event(state, "explorer", "open_file", details={"path": str(path)})
-            open_file_viewer(path)
+            open_file_viewer_fn(path)
 
     def copy_path(path: Path) -> None:
         ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(str(path))})")
@@ -1018,10 +1015,10 @@ def render_explorer_screen(
                 if line.startswith("Страница:"):
                     html_parts.append(
                         f'<div style="color:#6366f1;font-weight:600;border-top:1px solid #e5e7eb;'
-                        f'margin:6px 0 3px;padding-top:4px">{_html.escape(line)}</div>'
+                        f'margin:6px 0 3px;padding-top:4px">{html.escape(line)}</div>'
                     )
                 else:
-                    html_parts.append(f'<div style="margin-bottom:1px">{_html.escape(line) or "&nbsp;"}</div>')
+                    html_parts.append(f'<div style="margin-bottom:1px">{html.escape(line) or "&nbsp;"}</div>')
             result_html.set_content("".join(html_parts))
             result_box.set_visibility(True)
             copy_btn.set_visibility(True)
@@ -1360,7 +1357,7 @@ def render_explorer_screen(
             async def _run_folder_search(_: events.GenericEventArguments | None = None) -> None:
                 q = str(_folder_search_input.value or "").strip()
                 if q:
-                    await choose_query(f"{q} path:{current_for_toolbar}")
+                    await choose_query_fn(f"{q} path:{current_for_toolbar}")
 
             _folder_search_input.on("keyup.enter", _run_folder_search)
             ui.button(icon="search", on_click=_run_folder_search, color=None).props("flat round dense")

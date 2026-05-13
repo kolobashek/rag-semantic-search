@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import types
 
-from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter, compute_file_checksum, guess_mime_type
+from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter, S3StorageAdapter, compute_file_checksum, guess_mime_type
 from rag_catalog.core.cloud_drive.service import CloudDriveService
 from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
 
@@ -53,6 +54,38 @@ def test_cloud_drive_service_storage_health(tmp_path: Path) -> None:
     assert health.backend == "local"
     assert health.ok is True
     assert health.writable is True
+
+
+def test_s3_storage_ensure_container_creates_missing_bucket(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class _MissingBucket(Exception):
+        response = {"Error": {"Code": "NoSuchBucket"}, "ResponseMetadata": {"HTTPStatusCode": 404}}
+
+    class _FakeS3Client:
+        def head_bucket(self, **kwargs):
+            calls.append(("head_bucket", kwargs))
+            raise _MissingBucket()
+
+        def create_bucket(self, **kwargs):
+            calls.append(("create_bucket", kwargs))
+
+        def put_object(self, **kwargs):
+            calls.append(("put_object", kwargs))
+
+        def delete_object(self, **kwargs):
+            calls.append(("delete_object", kwargs))
+
+    fake_boto3 = types.SimpleNamespace(client=lambda *_args, **_kwargs: _FakeS3Client())
+    monkeypatch.setitem(__import__("sys").modules, "boto3", fake_boto3)
+
+    storage = S3StorageAdapter(bucket="rag", endpoint_url="http://127.0.0.1:9000", region="us-east-1", access_key="ak", secret_key="sk")
+    result = storage.ensure_container()
+
+    assert result["backend"] == "s3"
+    assert result["ok"] is True
+    assert result["created"] is True
+    assert ("create_bucket", {"Bucket": "rag"}) in calls
 
 
 def test_cloud_drive_upload_uses_content_addressed_dedup_storage(tmp_path: Path) -> None:

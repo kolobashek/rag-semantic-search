@@ -8,11 +8,10 @@ Imported by: nice_app.py.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict
 
 from nicegui import run, ui
 
-from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.search_eval import evaluate_search, load_golden_queries
 
 from .helpers import (

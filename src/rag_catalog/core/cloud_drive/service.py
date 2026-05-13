@@ -76,6 +76,12 @@ class CloudDriveService:
             error=str(result.get('error') or ''),
         )
 
+    def ensure_storage_container(self) -> dict:
+        ensure = getattr(self.storage, 'ensure_container', None)
+        if callable(ensure):
+            return dict(ensure())
+        return dict(self.storage.healthcheck())
+
     @staticmethod
     def _immutable_storage_key(*, checksum: str, filename: str) -> str:
         clean_checksum = str(checksum or '').strip().lower()
@@ -684,7 +690,7 @@ class CloudDriveService:
                 'started_at': datetime.now(timezone.utc).isoformat(),
             }
         )
-        self.registry.update_job(job.id, status='running', payload={'progress': progress})
+        self.registry.update_job(job.id, status='running', payload={'progress': progress}, attempts=int(job.attempts or 0) + 1)
 
         try:
             if job.job_type == 'cleanup':
@@ -751,6 +757,12 @@ class CloudDriveService:
             )
             self.registry.update_job(job.id, status='failed', payload={'progress': progress}, last_error=str(exc))
             raise
+
+    def run_pending_reindex_jobs(self, *, index_config: Optional[Dict[str, object]] = None, limit: int = 5) -> list[CloudDriveJob]:
+        completed: list[CloudDriveJob] = []
+        for job in self.registry.list_pending_jobs(job_types=['reindex', 'cleanup'], limit=max(1, int(limit or 1))):
+            completed.append(self.run_reindex_job(job.id, index_config=index_config))
+        return completed
 
     def run_bootstrap_job(self, job_id: str) -> CloudDriveStats:
         job = self.registry.get_job(job_id)

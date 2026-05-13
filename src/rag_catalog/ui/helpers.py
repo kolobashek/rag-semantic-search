@@ -32,10 +32,10 @@ from .state import (
 )
 from .system import (
     _STAGE_LABELS,
-    _telemetry_db_path,
     PROJECT_ROOT,
-    _is_process_alive,
     _find_module_process_pids,
+    _is_process_alive,
+    _telemetry_db_path,
 )
 
 # ─────────────────────────── constants ──────────────────────────────────────

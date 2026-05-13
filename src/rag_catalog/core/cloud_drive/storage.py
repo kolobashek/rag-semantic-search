@@ -72,6 +72,9 @@ class LocalStorageAdapter:
                 "error": str(exc),
             }
 
+    def ensure_container(self) -> dict:
+        return self.healthcheck()
+
 
 class S3StorageAdapter:
     def __init__(self, *, bucket: str, endpoint_url: str = '', region: str = '', access_key: str = '', secret_key: str = '') -> None:
@@ -146,6 +149,27 @@ class S3StorageAdapter:
                 "target": self.resolve_path(""),
                 "error": str(exc),
             }
+
+    def ensure_container(self) -> dict:
+        created = False
+        try:
+            self._client.head_bucket(Bucket=self.bucket)
+        except Exception as exc:
+            response = getattr(exc, "response", {}) or {}
+            error = response.get("Error", {}) if isinstance(response, dict) else {}
+            code = str(error.get("Code") or "")
+            status = int((response.get("ResponseMetadata", {}) or {}).get("HTTPStatusCode") or 0) if isinstance(response, dict) else 0
+            if code not in {"404", "NoSuchBucket", "NotFound"} and status != 404:
+                raise RuntimeError(f"Не удалось проверить S3 bucket {self.bucket}: {exc}") from exc
+            kwargs = {"Bucket": self.bucket}
+            if self.region and self.region != "us-east-1":
+                kwargs["CreateBucketConfiguration"] = {"LocationConstraint": self.region}
+            self._client.create_bucket(**kwargs)
+            created = True
+        health = self.healthcheck()
+        health["bucket"] = self.bucket
+        health["created"] = created
+        return health
 
 
 def resolve_storage_adapter(config: dict) -> StorageAdapter:

@@ -40,6 +40,8 @@ _FAILED_RESTART_RESTARTED_IDS: Dict[str, set[str]] = {"index": set(), "ocr": set
 _RUNTIME_DIR = PROJECT_ROOT / "runtime"
 _GLOBAL_SCHEDULER_STARTED = False
 _CLOUD_BOOTSTRAP_LOCK = threading.Lock()
+_CLOUD_JOB_WORKER_STARTED = False
+_CLOUD_JOB_WORKER_INTERVAL_SEC = 15
 
 
 # ── Primitive helpers (no nicegui/state deps) ──────────────────────────────
@@ -141,6 +143,30 @@ def _recover_cloud_drive_jobs(cfg: Dict[str, Any]) -> None:
         service.recover_bootstrap_jobs()
     except Exception as exc:
         print(f"[nice_app] cloud drive recovery skipped: {exc}", file=sys.stderr)
+
+
+def _start_cloud_drive_job_worker(cfg: Dict[str, Any]) -> None:
+    global _CLOUD_JOB_WORKER_STARTED
+    if _CLOUD_JOB_WORKER_STARTED:
+        return
+    if not bool(cfg.get("cloud_drive_enabled")):
+        return
+    _CLOUD_JOB_WORKER_STARTED = True
+
+    def _loop() -> None:
+        from rag_catalog.core.rag_core import load_config  # local import avoids a startup cycle
+
+        while True:
+            try:
+                cfg_now = load_config()
+                if bool(cfg_now.get("cloud_drive_enabled")):
+                    service = CloudDriveService.from_config(cfg_now)
+                    service.run_pending_reindex_jobs(index_config=cfg_now, limit=3)
+            except Exception as exc:
+                print(f"[nice_app] cloud drive job worker skipped cycle: {exc}", file=sys.stderr)
+            time.sleep(_CLOUD_JOB_WORKER_INTERVAL_SEC)
+
+    threading.Thread(target=_loop, name="cloud-drive-job-worker", daemon=True).start()
 
 
 def _read_runtime_marker(kind: str) -> Optional[Dict[str, Any]]:

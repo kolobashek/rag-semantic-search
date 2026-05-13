@@ -8,15 +8,13 @@ Imported by: nice_app.py.
 from __future__ import annotations
 
 import json
-import re
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-from nicegui import run, ui
+from nicegui import ui
 
 from .helpers import (
     _CADENCE_LABELS,
@@ -37,8 +35,6 @@ from .state import (
     PageState,
     _get_telemetry,
     _log_app_event,
-    _save_config_patch,
-    _username,
 )
 from .system import (
     _STAGE_LABELS,
@@ -103,10 +99,6 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
     chunks_now = int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000)
     skip_ocr_now = bool(settings.get("skip_inline_ocr"))
     ocr_min_len_now = int(settings.get("ocr_min_text_len") or 50)
-    active_ocr = telemetry.get("active_ocr")
-    last_ocr = telemetry.get("last_ocr")
-    ocr_summary = telemetry.get("ocr_summary") or {}
-
     def make_run_handler(stage_key: str) -> Any:
         def handler() -> None:
             try:
@@ -258,7 +250,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             ui.label("Pipeline индексации").classes("text-xl font-semibold")
             active_chip = ui.label(active_label).classes("rag-chip")
             ui.space()
-            refresh_btn = ui.button(icon="refresh", on_click=lambda: _refresh_progress()).props("flat dense round").tooltip("Обновить")
+            ui.button(icon="refresh", on_click=lambda: _refresh_progress()).props("flat dense round").tooltip("Обновить")
         ui.label(
             "Запускаемые фазы: metadata, small chunks, large chunks и OCR. "
             "Покрытие содержимым показано отдельно, это агрегат state DB, а не отдельная команда запуска."

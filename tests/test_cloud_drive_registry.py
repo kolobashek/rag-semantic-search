@@ -350,6 +350,50 @@ def test_service_reindex_job_passes_cloud_identity_to_indexer(tmp_path: Path, mo
     assert process_kwargs['payload_extra']['cloud_path'] == 'Folder A/hello.txt'
 
 
+def test_service_runs_pending_reindex_jobs_fifo(tmp_path: Path, monkeypatch) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    first_source = tmp_path / 'a.txt'
+    second_source = tmp_path / 'b.txt'
+    first_source.write_text('a', encoding='utf-8')
+    second_source.write_text('b', encoding='utf-8')
+    first = service.upload_file(parent_path='Folder A', filename='a.txt', source_path=str(first_source), mime_type='text/plain')
+    second = service.upload_file(parent_path='Folder A', filename='b.txt', source_path=str(second_source), mime_type='text/plain')
+    seen: list[str] = []
+
+    class _FakeIndexer:
+        def __init__(self, **_kwargs):
+            self.point_count = 1
+
+        def _delete_file_vectors(self, filepath, *, payload_match=None):
+            pass
+
+        def process_file(self, filepath, **kwargs):
+            seen.append(str(kwargs.get('logical_path') or ''))
+
+        def _flush_buffer(self):
+            pass
+
+    import rag_catalog.core.index_rag as index_rag
+
+    monkeypatch.setattr(index_rag, 'RAGIndexer', _FakeIndexer)
+    completed = service.run_pending_reindex_jobs(
+        index_config={
+            'catalog_path': str(tmp_path / 'catalog'),
+            'qdrant_db_path': str(tmp_path / 'qdrant'),
+            'collection_name': 'catalog',
+        },
+        limit=10,
+    )
+
+    assert [job.file_id for job in completed] == [first['id'], second['id']]
+    assert seen == ['Folder A/a.txt', 'Folder A/b.txt']
+    assert all(job.status == 'completed' for job in completed)
+
+
 def test_service_retry_job_requeues_reindex(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     storage = LocalStorageAdapter(str(tmp_path / 'storage'))

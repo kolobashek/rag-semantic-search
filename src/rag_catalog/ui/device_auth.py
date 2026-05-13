@@ -4,7 +4,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 _store: Dict[str, Dict[str, Any]] = {}  # device_code → record
 _lock = threading.Lock()
@@ -15,7 +15,9 @@ POLL_INTERVAL = 5
 
 
 def _user_code() -> str:
-    half = lambda: "".join(secrets.choice(_CODE_CHARS) for _ in range(4))
+    def half() -> str:
+        return "".join(secrets.choice(_CODE_CHARS) for _ in range(4))
+
     return f"{half()}-{half()}"
 
 

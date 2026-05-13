@@ -7,7 +7,6 @@ import re
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Sequence
 
-
 _TOKEN_RE = re.compile(r"[a-zа-яё0-9\-]{2,}", flags=re.IGNORECASE)
 _STOPWORDS = {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
 

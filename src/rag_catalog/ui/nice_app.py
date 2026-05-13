@@ -7,17 +7,13 @@ import html
 import json
 import re
 import sys
-import threading
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 from nicegui import app, events, run, ui
 
-from rag_catalog.core.cloud_drive import CloudDriveService
-from rag_catalog.core.rag_core import load_config, save_config
+from rag_catalog.core.rag_core import load_config
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
 from . import explorer_view as _explorer_view
@@ -27,38 +23,23 @@ from . import stats_view as _stats_view
 from .auth_session import complete_login_session, logout_session, restore_session, touch_session
 from .css import _install_css
 from .helpers import (
-    _CADENCE_LABELS,
-    _DAY_LABELS,
-    _DAY_RU,
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
     OFFICE_PREVIEW_EXTENSIONS,
-    PAGE_SIZE,
-    _apply_explorer_filter_input,
     _cd_acl_allows,
-    _cd_breadcrumb_chain,
     _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
-    _cd_list_children,
     _cd_search_by_name,
     _clean_text,
     _cloud_query_set,
     _count_exact_name_matches,
-    _db_query_dicts,
     _dedupe_queries,
     _directory_children,
     _ensure_searcher,
     _file_icon_svg,
-    _file_rows,
-    _filter_log_text,
-    _format_bytes,
-    _format_duration_seconds,
-    _format_file_size,
-    _format_relative_time,
     _highlight_query_terms,
     _is_admin,
-    _is_system_file,
     _load_user_state,
     _merge_search_results,
     _my_recent_queries,
@@ -66,51 +47,35 @@ from .helpers import (
     _popular_queries,
     _preview_file,
     _preview_office_file,
-    _read_index_stats,
-    _read_index_telemetry,
-    _read_log_tail_lines,
     _remember_query,
     _resolve_catalog_file,
     _result_group,
     _result_kind,
     _run_catalog_search,
     _run_quick_name_search,
-    _safe_explorer_path,
-    _save_explorer_settings,
     _save_ui_settings,
-    _schedule_display_label,
     _search_suggestions,
     _select_in_os_explorer,
     _telegram_deeplink,
     _viewer_file_url,
 )
 from .state import (
-    CONFIG_PATH_KEYS,
     PageState,
     _get_auth_db,
     _get_telemetry,
-    _is_favorite,
     _is_saved_search,
     _log_app_event,
     _refresh_current_user,
-    _save_config_patch,
-    _toggle_favorite,
     _toggle_saved_search,
     _username,
 )
 from .system import (
-    _STAGE_LABELS,
-    _find_live_running_index_run,
-    _launch_indexer,
-    _launch_ocr,
-    _read_cloud_bootstrap_status,
     _recover_cloud_drive_jobs,
     _run_recovery_cycle,
-    _safe_int,
+    _start_cloud_drive_job_worker,
     _start_global_scheduler,
     _start_recovery_watchdog,
     _stop_managed_timer,
-    _telemetry_db_path,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -1384,6 +1349,9 @@ def _build_page(initial_screen: str = "search") -> None:
             state,
             render_fn=render,
             go_explorer_fn=go_explorer,
+            open_file_viewer_fn=open_file_viewer,
+            choose_query_fn=choose_query,
+            query_handler=choose_query_handler,
         )
 
     def render_index_screen() -> None:
@@ -1600,6 +1568,8 @@ def _build_page(initial_screen: str = "search") -> None:
             state,
             render_fn=render,
             query_handler=choose_query_handler,
+            go_explorer_fn=go_explorer,
+            open_file_viewer_fn=open_file_viewer,
             index_dashboard_fn=render_index_screen,
             logout_fn=do_logout,
         )
@@ -1772,7 +1742,7 @@ def stats_page() -> None:
 def device_auth_page() -> None:
     """Browser approval page for sync client device auth flow."""
     from . import device_auth as _da
-    from .state import PageState, _get_auth_db, _users_db_path
+    from .state import PageState, _get_auth_db
 
     cfg = load_config()
     state = PageState(cfg=cfg)
@@ -1893,6 +1863,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     except Exception as exc:
         print(f"[nice_app] background recovery skipped: {exc}", file=sys.stderr)
     _recover_cloud_drive_jobs(cfg)
+    _start_cloud_drive_job_worker(cfg)
     _start_recovery_watchdog(cfg)
     _start_global_scheduler(cfg)
     ui.run(

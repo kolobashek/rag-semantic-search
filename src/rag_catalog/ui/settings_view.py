@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import re
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -88,6 +87,8 @@ def render_settings_screen(
     *,
     render_fn: Callable,
     query_handler: Callable,
+    go_explorer_fn: Callable,
+    open_file_viewer_fn: Callable,
     index_dashboard_fn: Optional[Callable] = None,
     logout_fn: Optional[Callable] = None,
 ) -> None:
@@ -977,6 +978,42 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось сохранить настройки: {exc}", type="negative")
 
+            async def check_cloud_storage() -> None:
+                try:
+                    cfg = build_cloud_config()
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    health = await run.io_bound(service.get_storage_health)
+                    if health.ok:
+                        ui.notify(f"Хранилище доступно: {health.target}", type="positive")
+                    else:
+                        ui.notify(f"Хранилище недоступно: {health.error}", type="negative")
+                except Exception as exc:
+                    ui.notify(f"Не удалось проверить хранилище: {exc}", type="negative")
+
+            async def ensure_cloud_storage_container() -> None:
+                values = current_cloud_values()
+                if values["cloud_drive_storage"] != "s3":
+                    ui.notify("Создание bucket нужно только для S3/MinIO.", type="warning")
+                    return
+                if not values["cloud_drive_bucket"]:
+                    ui.notify("Укажите S3 bucket.", type="warning")
+                    return
+                if not values["cloud_drive_s3_access_key"] or not values["cloud_drive_s3_secret_key"]:
+                    ui.notify("Укажите access key и secret key.", type="warning")
+                    return
+                try:
+                    cfg = persist_cloud_values(values)
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    result = await run.io_bound(service.ensure_storage_container)
+                    if result.get("ok"):
+                        action = "создан" if result.get("created") else "уже существует"
+                        ui.notify(f"Bucket {values['cloud_drive_bucket']} {action}; запись проверена.", type="positive")
+                    else:
+                        ui.notify(f"Bucket найден, но запись недоступна: {result.get('error')}", type="negative")
+                    refresh_cloud_dirty()
+                except Exception as exc:
+                    ui.notify(f"Не удалось подготовить bucket: {exc}", type="negative")
+
             async def refresh_registry_stats() -> None:
                 try:
                     cfg = build_cloud_config()
@@ -1152,10 +1189,15 @@ def render_settings_screen(
             ui.separator()
             with ui.row().classes("w-full gap-2 flex-wrap items-center"):
                 ui.button("Инициализировать реестр", icon="database", on_click=init_confirm_dialog.open).props("outline")
+                ui.button("Проверить хранилище", icon="health_and_safety", on_click=check_cloud_storage).props("outline")
+                ensure_bucket_button = ui.button("Создать bucket", icon="create_new_folder", on_click=ensure_cloud_storage_container).props("outline")
                 ui.button("Добавить новые файлы", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
 
             _stop_managed_timer(state.cloud_drive_timer)
             state.cloud_drive_timer = ui.timer(3.0, lambda: (render_bootstrap_status(), render_bootstrap_jobs(), _autosync_tick()))
+
+            ensure_bucket_button.set_visibility(str(storage_kind.value or "local") == "s3")
+            storage_kind.on_value_change(lambda _: ensure_bucket_button.set_visibility(str(storage_kind.value or "local") == "s3"))
 
     def render_admin_cloud_sync_settings() -> None:  # noqa: PLR0912,PLR0915
         """Sprint 4: Sync client admin settings — folder pairs, policies, connected clients."""
@@ -1234,11 +1276,10 @@ def render_settings_screen(
                     origin = await ui.run_javascript("window.location.origin")
                 except Exception:
                     origin = "http://localhost:8080"
-                tok = str(app.storage.user.get("auth_token") or "…").strip()
-                _base = f"{origin}/api/cloud-drive/sync/client-download?auth_token={tok}"
-                _dl_msi_link.target = f"{_base}&format=msi"
-                _dl_win_link.target = f"{_base}&format=exe"
-                _dl_py_link.target = f"{_base}&format=py"
+                _base = f"{origin}/api/cloud-drive/sync/client-download"
+                _dl_msi_link.target = f"{_base}?format=msi"
+                _dl_win_link.target = f"{_base}?format=exe"
+                _dl_py_link.target = f"{_base}?format=py"
                 _run_cmd_input.set_value(
                     f"python rag_sync_client.py --server {origin}"
                 )
@@ -1886,7 +1927,7 @@ def render_settings_screen(
             # type=search prevents credential autofill in all major browsers;
             # form[autocomplete=off] adds an extra layer for older browsers
             with ui.element("form").props('autocomplete="off"').style("width:100%;margin:0"):
-                search_box = ui.input(
+                ui.input(
                     placeholder="Поиск настроек…",
                     on_change=lambda e: (q_ref.__setitem__(0, str(e.value or "").lower()), render_nav()),
                 ).props('dense outlined clearable type="search"').classes("w-full")
@@ -2063,7 +2104,6 @@ def render_settings_screen(
                                     _origin = await ui.run_javascript("window.location.origin")
                                 except Exception:
                                     _origin = "http://localhost:8080"
-                                _tok = str(app.storage.user.get("auth_token") or "…").strip()
                                 _cmd = f"python rag_sync_client.py --server {_origin}"
                                 with ui.dialog() as _udlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
                                     ui.label("Установка sync-клиента").classes("text-base font-semibold")
@@ -2073,13 +2113,13 @@ def render_settings_screen(
                                     ).classes("rag-meta text-sm")
                                     ui.separator()
                                     ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
-                                    _base_url = f"{_origin}/api/cloud-drive/sync/client-download?auth_token={_tok}"
+                                    _base_url = f"{_origin}/api/cloud-drive/sync/client-download"
                                     with ui.row().classes("gap-3 items-center flex-wrap"):
-                                        ui.link("Windows MSI", target=f"{_base_url}&format=msi", new_tab=True).classes("rag-path text-sm")
+                                        ui.link("Windows MSI", target=f"{_base_url}?format=msi", new_tab=True).classes("rag-path text-sm")
                                         ui.label("·").classes("rag-meta")
-                                        ui.link("Windows EXE (установщик)", target=f"{_base_url}&format=exe", new_tab=True).classes("rag-path text-sm")
+                                        ui.link("Windows EXE (установщик)", target=f"{_base_url}?format=exe", new_tab=True).classes("rag-path text-sm")
                                         ui.label("·").classes("rag-meta")
-                                        ui.link("Python .py (Linux/Mac)", target=f"{_base_url}&format=py", new_tab=True).classes("rag-meta text-sm")
+                                        ui.link("Python .py (Linux/Mac)", target=f"{_base_url}?format=py", new_tab=True).classes("rag-meta text-sm")
                                     ui.label(
                                         "MSI: тихая установка, поддержка групповых политик. "
                                         "EXE: мастер настройки с полями сервера и токена."
@@ -2154,9 +2194,9 @@ def render_settings_screen(
                             ui.label(str(fav.get("title") or fav_path.name or fav_path)).classes("font-medium")
                             ui.label(str(fav_path)).classes("rag-path flex-1")
                             if item_type == "folder":
-                                ui.button("Открыть", on_click=lambda p=fav_path: go_explorer(str(p))).props("outline dense")
+                                ui.button("Открыть", on_click=lambda p=fav_path: go_explorer_fn(str(p))).props("outline dense")
                             else:
-                                ui.button("Открыть", on_click=lambda p=fav_path: open_file_viewer(p)).props("outline dense")
+                                ui.button("Открыть", on_click=lambda p=fav_path: open_file_viewer_fn(p)).props("outline dense")
                             ui.button(icon="delete", on_click=lambda p=fav_path: (
                                 _toggle_favorite(state, p), render_section()
                             )).props("flat round dense")
@@ -2277,15 +2317,5 @@ def render_settings_screen(
     render_nav()
     render_section()
     ui.timer(0.05, _init_from_hash, once=True)
-
-def render_telegram_screen() -> None:
-    enabled = bool(state.cfg.get("telegram_enabled"))
-    token_set = bool(str(state.cfg.get("telegram_bot_token") or "").strip())
-    with ui.column().classes("rag-card w-full p-4 gap-2"):
-        ui.label(f"Статус: {'включен' if enabled else 'выключен'}").classes("text-lg font-semibold")
-        ui.label(f"Токен: {'задан' if token_set else 'не задан'}").classes("rag-meta")
-        bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-        if bot_link:
-            ui.link("Открыть бота", bot_link, new_tab=True)
 
 # ── Analytics / stats screen ───────────────────────────────────────────

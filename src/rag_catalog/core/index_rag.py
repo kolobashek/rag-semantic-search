@@ -13,10 +13,7 @@ import logging
 import os
 import re
 import sys
-import threading
-import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -28,7 +25,6 @@ apply_windows_platform_workarounds()
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
 
 from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
@@ -41,8 +37,8 @@ from .extractors import (
     extract_xlsx,
     ocr_pdf,
 )
-from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .index_state_db import IndexStateDB
+from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .ocr_runtime import resolve_ocr_runtime
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB

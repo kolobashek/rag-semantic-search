@@ -914,8 +914,11 @@ def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:
     token = auth_db.create_session(username="user")
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
 
-    user = cloud_api._require_cloud_drive_api_user(cfg, auth_token=token)
+    with pytest.raises(HTTPException) as exc:
+        cloud_api._require_cloud_drive_api_user(cfg, auth_token=token)
+    assert exc.value.status_code == 401
 
+    user = cloud_api._require_cloud_drive_api_user({**cfg, "allow_auth_token_query": True}, auth_token=token)
     assert user["username"] == "user"
     header_user = cloud_api._require_cloud_drive_api_user(cfg, authorization=f"Bearer {token}")
     assert header_user["username"] == "user"
@@ -968,6 +971,6 @@ def test_cloud_drive_api_admin_guard_rejects_non_admin(tmp_path) -> None:
     token = auth_db.create_session(username="user")
 
     with pytest.raises(HTTPException) as exc:
-        cloud_api._require_cloud_drive_api_user(cfg, auth_token=token, admin_only=True)
+        cloud_api._require_cloud_drive_api_user(cfg, authorization=f"Bearer {token}", admin_only=True)
 
     assert exc.value.status_code == 403
