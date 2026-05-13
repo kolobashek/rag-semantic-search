@@ -7,6 +7,7 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import threading
@@ -778,7 +779,7 @@ def render_settings_screen(
                     with ui.row().classes("w-full items-center gap-2"):
                         ui.label(title).classes("font-semibold text-sm")
                         ui.space()
-                        ui.button(icon="refresh", on_click=lambda: ui.timer(0.05, refresh_registry_stats, once=True)).props("flat dense round size=sm").classes("text-indigo-400").tooltip("Обновить статистику")
+                        ui.button(icon="refresh", on_click=lambda: _schedule_async(refresh_registry_stats)).props("flat dense round size=sm").classes("text-indigo-400").tooltip("Обновить статистику")
                     if not stats_obj:
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("cloud_off", size="28px").classes("opacity-30")
@@ -1028,6 +1029,14 @@ def render_settings_screen(
                 except Exception:
                     render_cloud_stats(None, title="Статистика реестра")
 
+            def _schedule_async(fn: Callable[[], Any]) -> None:
+                try:
+                    result = fn()
+                    if result is not None:
+                        asyncio.create_task(result)
+                except RuntimeError:
+                    ui.timer(0.05, fn, once=True)
+
             with ui.dialog() as init_confirm_dialog, ui.card().classes("p-4 gap-3 max-w-sm"):
                 ui.label("Инициализировать реестр?").classes("text-base font-semibold")
                 ui.label(
@@ -1036,7 +1045,7 @@ def render_settings_screen(
                 ).classes("rag-meta text-sm")
                 with ui.row().classes("w-full justify-end gap-2 pt-1"):
                     ui.button("Отмена", on_click=init_confirm_dialog.close).props("flat dense")
-                    ui.button("Создать", icon="database", on_click=lambda: (init_confirm_dialog.close(), ui.timer(0.05, init_registry, once=True))).props("unelevated dense")
+                    ui.button("Создать", icon="database", on_click=lambda: (init_confirm_dialog.close(), _schedule_async(init_registry))).props("unelevated dense")
 
             async def init_registry() -> None:
                 try:
@@ -1170,7 +1179,7 @@ def render_settings_screen(
             render_cloud_stats(None, title="Статистика реестра")
             render_bootstrap_status()
             render_bootstrap_jobs()
-            ui.timer(0.2, refresh_registry_stats, once=True)
+            _schedule_async(refresh_registry_stats)
 
             enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
             db_input.on_value_change(lambda _: refresh_cloud_dirty())
@@ -1978,6 +1987,8 @@ def render_settings_screen(
 
     # ── Контент секции ───────────────────────────────────────────────
     def render_section() -> None:
+        _stop_managed_timer(state.cloud_drive_timer)
+        state.cloud_drive_timer = None
         content_col.clear()
         with content_col:
             sec = active[0]
