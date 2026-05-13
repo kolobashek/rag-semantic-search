@@ -310,6 +310,24 @@ config.docker.json
 | logs | `logs/` |
 | Cloud Drive local storage | `data/cloud_storage` |
 
+## Логи И Диагностика
+
+Новые runtime-логи пишутся сегментами в:
+
+```text
+logs/history/<лог>/<YYYY-MM-DD>/*.log
+```
+
+Сегментация выполняется:
+
+- по новому запуску web/bot/index/OCR;
+- по дню;
+- по лимиту размера файла для Python logging handlers.
+
+UI читает историю бесшовно: новые сегменты и старые legacy-файлы (`logs/*.log`, `logs/runtime/*.log`, старый путь `log_file` из `config.json`) показываются как одна история. В модальном окне логов индекса доступны фильтры по уровню, датам и текстовый поиск по истории.
+
+SQLite runtime общий для telemetry/users/cloud registry: соединения включают `busy_timeout`, WAL и `synchronous=NORMAL`, но не валят процесс при временной гонке повторного `journal_mode=WAL` на Windows, если база уже в WAL.
+
 ## Проверки
 
 Полный прогон:
