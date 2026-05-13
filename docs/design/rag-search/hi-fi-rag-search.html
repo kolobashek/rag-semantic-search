@@ -1,0 +1,3419 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Hi-fi · Rag-search</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#0a0a0d;color:#f4f4f7;font-family:'Inter',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  #root{height:100vh}
+  /* skeleton until app boots */
+  .pre-boot{height:100%;display:grid;place-items:center;color:#5a5a64;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel">
+
+// ===== tweaks-panel.jsx =====
+
+// tweaks-panel.jsx
+// Reusable Tweaks shell + form-control helpers.
+//
+// Owns the host protocol (listens for __activate_edit_mode / __deactivate_edit_mode,
+// posts __edit_mode_available / __edit_mode_set_keys / __edit_mode_dismissed) so
+// individual prototypes don't re-roll it. Ships a consistent set of controls so you
+// don't hand-draw <input type="range">, segmented radios, steppers, etc.
+//
+// Usage (in an HTML file that loads React + Babel):
+//
+//   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+//     "primaryColor": "#D97757",
+//     "fontSize": 16,
+//     "density": "regular",
+//     "dark": false
+//   }/*EDITMODE-END*/;
+//
+//   function App() {
+//     const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+//     return (
+//       <div style={{ fontSize: t.fontSize, color: t.primaryColor }}>
+//         Hello
+//         <TweaksPanel>
+//           <TweakSection label="Typography" />
+//           <TweakSlider label="Font size" value={t.fontSize} min={10} max={32} unit="px"
+//                        onChange={(v) => setTweak('fontSize', v)} />
+//           <TweakRadio  label="Density" value={t.density}
+//                        options={['compact', 'regular', 'comfy']}
+//                        onChange={(v) => setTweak('density', v)} />
+//           <TweakSection label="Theme" />
+//           <TweakColor  label="Primary" value={t.primaryColor}
+//                        onChange={(v) => setTweak('primaryColor', v)} />
+//           <TweakToggle label="Dark mode" value={t.dark}
+//                        onChange={(v) => setTweak('dark', v)} />
+//         </TweaksPanel>
+//       </div>
+//     );
+//   }
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+const __TWEAKS_STYLE = `
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:280px;
+    max-height:calc(100vh - 32px);display:flex;flex-direction:column;
+    background:rgba(250,249,247,.78);color:#29261b;
+    -webkit-backdrop-filter:blur(24px) saturate(160%);backdrop-filter:blur(24px) saturate(160%);
+    border:.5px solid rgba(255,255,255,.6);border-radius:14px;
+    box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 12px 40px rgba(0,0,0,.18);
+    font:11.5px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;overflow:hidden}
+  .twk-hd{display:flex;align-items:center;justify-content:space-between;
+    padding:10px 8px 10px 14px;cursor:move;user-select:none}
+  .twk-hd b{font-size:12px;font-weight:600;letter-spacing:.01em}
+  .twk-x{appearance:none;border:0;background:transparent;color:rgba(41,38,27,.55);
+    width:22px;height:22px;border-radius:6px;cursor:default;font-size:13px;line-height:1}
+  .twk-x:hover{background:rgba(0,0,0,.06);color:#29261b}
+  .twk-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:10px;
+    overflow-y:auto;overflow-x:hidden;min-height:0;
+    scrollbar-width:thin;scrollbar-color:rgba(0,0,0,.15) transparent}
+  .twk-body::-webkit-scrollbar{width:8px}
+  .twk-body::-webkit-scrollbar-track{background:transparent;margin:2px}
+  .twk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:4px;
+    border:2px solid transparent;background-clip:content-box}
+  .twk-body::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.25);
+    border:2px solid transparent;background-clip:content-box}
+  .twk-row{display:flex;flex-direction:column;gap:5px}
+  .twk-row-h{flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
+  .twk-lbl{display:flex;justify-content:space-between;align-items:baseline;
+    color:rgba(41,38,27,.72)}
+  .twk-lbl>span:first-child{font-weight:500}
+  .twk-val{color:rgba(41,38,27,.5);font-variant-numeric:tabular-nums}
+
+  .twk-sect{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    color:rgba(41,38,27,.45);padding:10px 0 0}
+  .twk-sect:first-child{padding-top:0}
+
+  .twk-field{appearance:none;width:100%;height:26px;padding:0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;
+    background:rgba(255,255,255,.6);color:inherit;font:inherit;outline:none}
+  .twk-field:focus{border-color:rgba(0,0,0,.25);background:rgba(255,255,255,.85)}
+  select.twk-field{padding-right:22px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(0,0,0,.5)' d='M0 0h10L5 6z'/></svg>");
+    background-repeat:no-repeat;background-position:right 8px center}
+
+  .twk-slider{appearance:none;-webkit-appearance:none;width:100%;height:4px;margin:6px 0;
+    border-radius:999px;background:rgba(0,0,0,.12);outline:none}
+  .twk-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+    width:14px;height:14px;border-radius:50%;background:#fff;
+    border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+  .twk-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+    background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+
+  .twk-seg{position:relative;display:flex;padding:2px;border-radius:8px;
+    background:rgba(0,0,0,.06);user-select:none}
+  .twk-seg-thumb{position:absolute;top:2px;bottom:2px;border-radius:6px;
+    background:rgba(255,255,255,.9);box-shadow:0 1px 2px rgba(0,0,0,.12);
+    transition:left .15s cubic-bezier(.3,.7,.4,1),width .15s}
+  .twk-seg.dragging .twk-seg-thumb{transition:none}
+  .twk-seg button{appearance:none;position:relative;z-index:1;flex:1;border:0;
+    background:transparent;color:inherit;font:inherit;font-weight:500;min-height:22px;
+    border-radius:6px;cursor:default;padding:4px 6px;line-height:1.2;
+    overflow-wrap:anywhere}
+
+  .twk-toggle{position:relative;width:32px;height:18px;border:0;border-radius:999px;
+    background:rgba(0,0,0,.15);transition:background .15s;cursor:default;padding:0}
+  .twk-toggle[data-on="1"]{background:#34c759}
+  .twk-toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
+  .twk-toggle[data-on="1"] i{transform:translateX(14px)}
+
+  .twk-num{display:flex;align-items:center;height:26px;padding:0 0 0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;background:rgba(255,255,255,.6)}
+  .twk-num-lbl{font-weight:500;color:rgba(41,38,27,.6);cursor:ew-resize;
+    user-select:none;padding-right:8px}
+  .twk-num input{flex:1;min-width:0;height:100%;border:0;background:transparent;
+    font:inherit;font-variant-numeric:tabular-nums;text-align:right;padding:0 8px 0 0;
+    outline:none;color:inherit;-moz-appearance:textfield}
+  .twk-num input::-webkit-inner-spin-button,.twk-num input::-webkit-outer-spin-button{
+    -webkit-appearance:none;margin:0}
+  .twk-num-unit{padding-right:8px;color:rgba(41,38,27,.45)}
+
+  .twk-btn{appearance:none;height:26px;padding:0 12px;border:0;border-radius:7px;
+    background:rgba(0,0,0,.78);color:#fff;font:inherit;font-weight:500;cursor:default}
+  .twk-btn:hover{background:rgba(0,0,0,.88)}
+  .twk-btn.secondary{background:rgba(0,0,0,.06);color:inherit}
+  .twk-btn.secondary:hover{background:rgba(0,0,0,.1)}
+
+  .twk-swatch{appearance:none;-webkit-appearance:none;width:56px;height:22px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:6px;padding:0;cursor:default;
+    background:transparent;flex-shrink:0}
+  .twk-swatch::-webkit-color-swatch-wrapper{padding:0}
+  .twk-swatch::-webkit-color-swatch{border:0;border-radius:5.5px}
+  .twk-swatch::-moz-color-swatch{border:0;border-radius:5.5px}
+`;
+
+// ── useTweaks ───────────────────────────────────────────────────────────────
+// Single source of truth for tweak values. setTweak persists via the host
+// (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
+function useTweaks(defaults) {
+  const [values, setValues] = React.useState(defaults);
+  // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
+  // useState-style call doesn't write a "[object Object]" key into the persisted
+  // JSON block.
+  const setTweak = React.useCallback((keyOrEdits, val) => {
+    const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
+      ? keyOrEdits : { [keyOrEdits]: val };
+    setValues((prev) => ({ ...prev, ...edits }));
+    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
+  }, []);
+  return [values, setTweak];
+}
+
+// ── TweaksPanel ─────────────────────────────────────────────────────────────
+// Floating shell. Registers the protocol listener BEFORE announcing
+// availability — if the announce ran first, the host's activate could land
+// before our handler exists and the toolbar toggle would silently no-op.
+// The close button posts __edit_mode_dismissed so the host's toolbar toggle
+// flips off in lockstep; the host echoes __deactivate_edit_mode back which
+// is what actually hides the panel.
+function TweaksPanel({ title = 'Tweaks', children }) {
+  const [open, setOpen] = React.useState(false);
+  const dragRef = React.useRef(null);
+  const offsetRef = React.useRef({ x: 16, y: 16 });
+  const PAD = 16;
+
+  const clampToViewport = React.useCallback(() => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const w = panel.offsetWidth, h = panel.offsetHeight;
+    const maxRight = Math.max(PAD, window.innerWidth - w - PAD);
+    const maxBottom = Math.max(PAD, window.innerHeight - h - PAD);
+    offsetRef.current = {
+      x: Math.min(maxRight, Math.max(PAD, offsetRef.current.x)),
+      y: Math.min(maxBottom, Math.max(PAD, offsetRef.current.y)),
+    };
+    panel.style.right = offsetRef.current.x + 'px';
+    panel.style.bottom = offsetRef.current.y + 'px';
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    clampToViewport();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', clampToViewport);
+      return () => window.removeEventListener('resize', clampToViewport);
+    }
+    const ro = new ResizeObserver(clampToViewport);
+    ro.observe(document.documentElement);
+    return () => ro.disconnect();
+  }, [open, clampToViewport]);
+
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      const t = e?.data?.type;
+      if (t === '__activate_edit_mode') setOpen(true);
+      else if (t === '__deactivate_edit_mode') setOpen(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const dismiss = () => {
+    setOpen(false);
+    window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*');
+  };
+
+  const onDragStart = (e) => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const r = panel.getBoundingClientRect();
+    const sx = e.clientX, sy = e.clientY;
+    const startRight = window.innerWidth - r.right;
+    const startBottom = window.innerHeight - r.bottom;
+    const move = (ev) => {
+      offsetRef.current = {
+        x: startRight - (ev.clientX - sx),
+        y: startBottom - (ev.clientY - sy),
+      };
+      clampToViewport();
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  if (!open) return null;
+  return (
+    <>
+      <style>{__TWEAKS_STYLE}</style>
+      <div ref={dragRef} className="twk-panel" data-noncommentable=""
+           style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
+        <div className="twk-hd" onMouseDown={onDragStart}>
+          <b>{title}</b>
+          <button className="twk-x" aria-label="Close tweaks"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={dismiss}>✕</button>
+        </div>
+        <div className="twk-body">{children}</div>
+      </div>
+    </>
+  );
+}
+
+// ── Layout helpers ──────────────────────────────────────────────────────────
+
+function TweakSection({ label, children }) {
+  return (
+    <>
+      <div className="twk-sect">{label}</div>
+      {children}
+    </>
+  );
+}
+
+function TweakRow({ label, value, children, inline = false }) {
+  return (
+    <div className={inline ? 'twk-row twk-row-h' : 'twk-row'}>
+      <div className="twk-lbl">
+        <span>{label}</span>
+        {value != null && <span className="twk-val">{value}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ── Controls ────────────────────────────────────────────────────────────────
+
+function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
+  return (
+    <TweakRow label={label} value={`${value}${unit}`}>
+      <input type="range" className="twk-slider" min={min} max={max} step={step}
+             value={value} onChange={(e) => onChange(Number(e.target.value))} />
+    </TweakRow>
+  );
+}
+
+function TweakToggle({ label, value, onChange }) {
+  return (
+    <div className="twk-row twk-row-h">
+      <div className="twk-lbl"><span>{label}</span></div>
+      <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
+              role="switch" aria-checked={!!value}
+              onClick={() => onChange(!value)}><i /></button>
+    </div>
+  );
+}
+
+function TweakRadio({ label, value, options, onChange }) {
+  const trackRef = React.useRef(null);
+  const [dragging, setDragging] = React.useState(false);
+  const opts = options.map((o) => (typeof o === 'object' ? o : { value: o, label: o }));
+  const idx = Math.max(0, opts.findIndex((o) => o.value === value));
+  const n = opts.length;
+
+  // The active value is read by pointer-move handlers attached for the lifetime
+  // of a drag — ref it so a stale closure doesn't fire onChange for every move.
+  const valueRef = React.useRef(value);
+  valueRef.current = value;
+
+  const segAt = (clientX) => {
+    const r = trackRef.current.getBoundingClientRect();
+    const inner = r.width - 4;
+    const i = Math.floor(((clientX - r.left - 2) / inner) * n);
+    return opts[Math.max(0, Math.min(n - 1, i))].value;
+  };
+
+  const onPointerDown = (e) => {
+    setDragging(true);
+    const v0 = segAt(e.clientX);
+    if (v0 !== valueRef.current) onChange(v0);
+    const move = (ev) => {
+      if (!trackRef.current) return;
+      const v = segAt(ev.clientX);
+      if (v !== valueRef.current) onChange(v);
+    };
+    const up = () => {
+      setDragging(false);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  return (
+    <TweakRow label={label}>
+      <div ref={trackRef} role="radiogroup" onPointerDown={onPointerDown}
+           className={dragging ? 'twk-seg dragging' : 'twk-seg'}>
+        <div className="twk-seg-thumb"
+             style={{ left: `calc(2px + ${idx} * (100% - 4px) / ${n})`,
+                      width: `calc((100% - 4px) / ${n})` }} />
+        {opts.map((o) => (
+          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </TweakRow>
+  );
+}
+
+function TweakSelect({ label, value, options, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <select className="twk-field" value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((o) => {
+          const v = typeof o === 'object' ? o.value : o;
+          const l = typeof o === 'object' ? o.label : o;
+          return <option key={v} value={v}>{l}</option>;
+        })}
+      </select>
+    </TweakRow>
+  );
+}
+
+function TweakText({ label, value, placeholder, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <input className="twk-field" type="text" value={value} placeholder={placeholder}
+             onChange={(e) => onChange(e.target.value)} />
+    </TweakRow>
+  );
+}
+
+function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) {
+  const clamp = (n) => {
+    if (min != null && n < min) return min;
+    if (max != null && n > max) return max;
+    return n;
+  };
+  const startRef = React.useRef({ x: 0, val: 0 });
+  const onScrubStart = (e) => {
+    e.preventDefault();
+    startRef.current = { x: e.clientX, val: value };
+    const decimals = (String(step).split('.')[1] || '').length;
+    const move = (ev) => {
+      const dx = ev.clientX - startRef.current.x;
+      const raw = startRef.current.val + dx * step;
+      const snapped = Math.round(raw / step) * step;
+      onChange(clamp(Number(snapped.toFixed(decimals))));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  return (
+    <div className="twk-num">
+      <span className="twk-num-lbl" onPointerDown={onScrubStart}>{label}</span>
+      <input type="number" value={value} min={min} max={max} step={step}
+             onChange={(e) => onChange(clamp(Number(e.target.value)))} />
+      {unit && <span className="twk-num-unit">{unit}</span>}
+    </div>
+  );
+}
+
+function TweakColor({ label, value, onChange }) {
+  return (
+    <div className="twk-row twk-row-h">
+      <div className="twk-lbl"><span>{label}</span></div>
+      <input type="color" className="twk-swatch" value={value}
+             onChange={(e) => onChange(e.target.value)} />
+    </div>
+  );
+}
+
+function TweakButton({ label, onClick, secondary = false }) {
+  return (
+    <button type="button" className={secondary ? 'twk-btn secondary' : 'twk-btn'}
+            onClick={onClick}>{label}</button>
+  );
+}
+
+Object.assign(window, {
+  useTweaks, TweaksPanel, TweakSection, TweakRow,
+  TweakSlider, TweakToggle, TweakRadio, TweakSelect,
+  TweakText, TweakNumber, TweakColor, TweakButton,
+});
+
+
+// ===== hifi-styles.jsx =====
+// hifi-styles.jsx — futuristic global styles for Rag-search hi-fi prototype
+
+const HIFI_STYLES = `
+:root {
+  --brand-50:#eef4ff; --brand-100:#dbe6ff; --brand-200:#b8ccff; --brand-300:#8aabff;
+  --brand-400:#5a85ff; --brand-500:#3d63ff; --brand-600:#2949e6; --brand-700:#1f37b3;
+  --brand-800:#182a87; --brand-900:#131f5e;
+
+  --accent-cyan:#22d3ee; --accent-emerald:#10b981; --accent-amber:#f59e0b; --accent-rose:#f43f5e;
+
+  --bg:#fafaf7; --bg-elev:#ffffff; --bg-sunken:#f4f3ee; --bg-overlay:rgba(20,20,26,.5);
+  --line:#e6e3da; --line-strong:#d8d3c4;
+  --ink:#14141a; --ink-2:#3a3a44; --ink-3:#6c6c78; --ink-4:#9a9aa2;
+  --ok:#16a34a; --warn:#f59e0b; --err:#dc2626; --info:var(--brand-500);
+
+  --font-display:'Manrope',system-ui,sans-serif;
+  --font-text:'Inter',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,monospace;
+  --font-serif:'Instrument Serif',serif;
+
+  --radius-xs:4px; --radius-sm:6px; --radius-md:10px; --radius-lg:14px; --radius-xl:22px;
+
+  --shadow-1:0 1px 0 rgba(20,20,26,.04), 0 1px 2px rgba(20,20,26,.05);
+  --shadow-2:0 6px 16px -8px rgba(20,20,26,.12), 0 2px 4px rgba(20,20,26,.04);
+  --shadow-3:0 24px 48px -16px rgba(20,20,26,.18), 0 8px 16px -8px rgba(20,20,26,.08);
+  --glow-brand:0 0 0 1px color-mix(in oklch, var(--brand-500) 40%, transparent), 0 0 32px -4px color-mix(in oklch, var(--brand-500) 50%, transparent);
+}
+[data-theme=dark]{
+  --bg:#08080c; --bg-elev:#101016; --bg-sunken:#050507; --bg-overlay:rgba(0,0,0,.7);
+  --line:#1d1d25; --line-strong:#2b2b35;
+  --ink:#f4f4f7; --ink-2:#c8c8d0; --ink-3:#8a8a96; --ink-4:#5a5a64;
+  --brand-500:#6385ff;
+  --shadow-1:0 1px 0 rgba(0,0,0,.4);
+  --shadow-2:0 8px 20px -8px rgba(0,0,0,.6);
+  --shadow-3:0 30px 60px -20px rgba(0,0,0,.8);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font-text); background: var(--bg); color: var(--ink);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv02','cv03','cv04','cv11','ss01';
+}
+#root, .hifi-app { height: 100vh; width: 100vw; overflow: hidden; }
+
+/* === SCROLLBARS === */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 5px; border: 2px solid var(--bg); }
+*::-webkit-scrollbar-thumb:hover { background: var(--ink-4); }
+
+/* === MONO LABEL === */
+.mono-label {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-3);
+}
+.mono-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* === DISPLAY TEXT === */
+.hd {
+  font-family: var(--font-display); font-weight: 800;
+  letter-spacing: -0.04em; line-height: 0.92;
+}
+
+/* === HEADER === */
+.app-header {
+  height: 56px; flex-shrink: 0;
+  display: grid; grid-template-columns: 220px 1fr 320px;
+  align-items: center; padding: 0 16px;
+  background: color-mix(in oklch, var(--bg) 86%, transparent);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  position: relative; z-index: 10;
+}
+.app-header-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.app-header-brand-name { font-family: var(--font-display); font-weight: 700; font-size: 14px; letter-spacing: -0.02em; }
+.app-header-nav { display: flex; gap: 4px; align-items: center; justify-content: center; }
+.app-header-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+
+.nav-tab {
+  position: relative;
+  padding: 8px 14px; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 500; color: var(--ink-3);
+  cursor: pointer; user-select: none;
+  display: inline-flex; align-items: center; gap: 8px;
+  transition: color 160ms ease, background 160ms ease;
+}
+.nav-tab:hover { color: var(--ink); background: var(--bg-sunken); }
+.nav-tab.active { color: var(--ink); }
+.nav-tab.active::after {
+  content: ''; position: absolute; left: 14px; right: 14px; bottom: -8px;
+  height: 2px; background: var(--brand-500);
+  box-shadow: 0 0 12px color-mix(in oklch, var(--brand-500) 60%, transparent);
+}
+.nav-tab .nav-tab-kbd {
+  font-family: var(--font-mono); font-size: 10px; color: var(--ink-4);
+  padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px;
+}
+
+/* === LOGO MARK === */
+.mark {
+  border-radius: 8px; background: var(--brand-500);
+  display: grid; place-items: center;
+  flex-shrink: 0; position: relative; overflow: hidden;
+}
+.mark::before {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,.22));
+}
+.mark::after {
+  content: ''; position: absolute; inset: -1px;
+  border-radius: inherit; padding: 1px;
+  background: linear-gradient(180deg, rgba(255,255,255,.4), transparent 60%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+}
+.mark > svg { position: relative; z-index: 1; }
+
+/* === LIQUID BACKGROUND (Brand panel) === */
+.liquid-bg {
+  position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+}
+.liquid-bg::before {
+  content:''; position:absolute; inset:-20%;
+  background:
+    radial-gradient(600px 400px at 15% 20%, color-mix(in oklch, var(--brand-500) 45%, transparent), transparent 65%),
+    radial-gradient(700px 500px at 85% 80%, color-mix(in oklch, var(--accent-cyan) 25%, transparent), transparent 60%),
+    radial-gradient(400px 300px at 60% 45%, color-mix(in oklch, var(--accent-amber) 10%, transparent), transparent 60%);
+  filter: blur(40px); animation: liquid 22s ease-in-out infinite alternate;
+}
+@keyframes liquid {
+  0%, 100% { transform: translate(0,0) scale(1); }
+  33%      { transform: translate(2%, -2%) scale(1.05); }
+  66%      { transform: translate(-2%, 2%) scale(.97); }
+}
+
+.grid-overlay {
+  position: absolute; inset: 0; pointer-events: none; opacity: .35;
+  background-image:
+    linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask: radial-gradient(circle at 30% 30%, black, transparent 70%);
+  -webkit-mask: radial-gradient(circle at 30% 30%, black, transparent 70%);
+}
+
+/* === GLASS PANEL === */
+.glass {
+  background: color-mix(in oklch, var(--bg-elev) 78%, transparent);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+}
+
+/* === GLOWING BORDER === */
+.glow-border {
+  position: relative;
+}
+.glow-border::before {
+  content: ''; position: absolute; inset: -1px;
+  border-radius: inherit; padding: 1px;
+  background: linear-gradient(135deg,
+    color-mix(in oklch, var(--brand-500) 40%, transparent),
+    transparent 30%,
+    color-mix(in oklch, var(--accent-cyan) 30%, transparent) 80%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* === BUTTON === */
+.btn {
+  position: relative; overflow: hidden; isolation: isolate;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 9px 14px; border-radius: var(--radius-sm);
+  font-family: var(--font-text); font-size: 13px; font-weight: 500;
+  border: 1px solid transparent; cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;
+  user-select: none; line-height: 1;
+}
+.btn svg { width: 14px; height: 14px; }
+.btn::before {
+  content: ''; position: absolute; inset: 0; z-index: -1;
+  transform-origin: left center; transform: scaleX(0);
+  transition: transform 320ms cubic-bezier(.65,0,.35,1);
+}
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0); transition-duration: 80ms; }
+
+.btn-primary { background: var(--brand-500); color: white; }
+.btn-primary::before { background: var(--brand-700); }
+.btn-primary:hover { box-shadow: 0 8px 20px -6px color-mix(in oklch, var(--brand-500) 70%, transparent); }
+.btn-primary:hover::before { transform: scaleX(1); }
+
+.btn-secondary { background: var(--bg-elev); border-color: var(--line-strong); color: var(--ink); }
+.btn-secondary::before { background: var(--ink); }
+.btn-secondary:hover { color: var(--bg-elev); border-color: var(--ink); }
+.btn-secondary:hover::before { transform: scaleX(1); }
+
+.btn-ghost { background: transparent; color: var(--ink-2); }
+.btn-ghost::before { background: var(--bg-sunken); }
+.btn-ghost:hover { color: var(--ink); }
+.btn-ghost:hover::before { transform: scaleX(1); }
+
+.btn-danger { background: var(--err); color: white; }
+.btn-danger::before { background: #991b1b; }
+.btn-danger:hover { box-shadow: 0 8px 20px -6px color-mix(in oklch, var(--err) 70%, transparent); }
+.btn-danger:hover::before { transform: scaleX(1); }
+
+.btn-lg { padding: 13px 20px; font-size: 15px; border-radius: var(--radius-md); }
+.btn-sm { padding: 6px 10px; font-size: 12px; }
+.btn-icon { padding: 8px; }
+.btn-icon svg { width: 16px; height: 16px; }
+
+/* === INPUT === */
+.input {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px; height: 38px;
+  background: var(--bg-elev); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  transition: border-color 160ms, box-shadow 160ms, background 160ms;
+  position: relative;
+}
+.input input {
+  flex: 1; border: none; outline: none; background: transparent;
+  font: 500 14px/1.5 var(--font-text); color: var(--ink);
+}
+.input input::placeholder { color: var(--ink-4); }
+.input:focus-within {
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--brand-500) 15%, transparent);
+}
+.input-lg { height: 52px; padding: 0 18px; border-radius: var(--radius-md); }
+.input-lg input { font-size: 16px; }
+
+/* === KBD === */
+.kbd {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+  padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg-sunken);
+  line-height: 1;
+}
+
+/* === CHIP === */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 500; line-height: 1.4;
+  background: var(--bg-elev); border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+.chip svg { width: 12px; height: 12px; }
+.chip-primary { background: color-mix(in oklch, var(--brand-500) 12%, var(--bg-elev)); border-color: color-mix(in oklch, var(--brand-500) 30%, var(--line)); color: var(--brand-500); }
+.chip-success { background: color-mix(in oklch, var(--ok) 10%, var(--bg-elev)); border-color: color-mix(in oklch, var(--ok) 30%, var(--line)); color: var(--ok); }
+.chip-warn { background: color-mix(in oklch, var(--warn) 12%, var(--bg-elev)); border-color: color-mix(in oklch, var(--warn) 30%, var(--line)); color: #b6730a; }
+.chip-danger { background: color-mix(in oklch, var(--err) 10%, var(--bg-elev)); border-color: color-mix(in oklch, var(--err) 30%, var(--line)); color: var(--err); }
+.chip-bare { background: transparent; border: none; padding: 4px 0; }
+[data-theme=dark] .chip-warn { color: #fbbf24; }
+
+/* === STATUS DOT === */
+.dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+.dot-ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ok) 22%, transparent), 0 0 8px color-mix(in oklch, var(--ok) 50%, transparent); }
+.dot-info { background: var(--brand-500); box-shadow: 0 0 0 3px color-mix(in oklch, var(--brand-500) 22%, transparent), 0 0 8px color-mix(in oklch, var(--brand-500) 50%, transparent); animation: pulse 2s infinite; }
+.dot-warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in oklch, var(--warn) 22%, transparent); }
+.dot-err { background: var(--err); box-shadow: 0 0 0 3px color-mix(in oklch, var(--err) 22%, transparent); }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--brand-500) 60%, transparent), 0 0 8px color-mix(in oklch, var(--brand-500) 50%, transparent); }
+  50%      { box-shadow: 0 0 0 6px color-mix(in oklch, var(--brand-500) 0%, transparent), 0 0 12px color-mix(in oklch, var(--brand-500) 30%, transparent); }
+}
+
+/* === CARD === */
+.card {
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: var(--radius-md); padding: 18px;
+  box-shadow: var(--shadow-1);
+  position: relative;
+}
+
+/* === FILE ICON === */
+.file-icon {
+  border-radius: 6px; display: grid; place-items: center;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 700; color: white;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+.file-icon.lg { width: 40px; height: 40px; font-size: 10px; border-radius: 8px; }
+.file-icon.md { width: 32px; height: 32px; font-size: 9px; }
+.file-icon.sm { width: 24px; height: 24px; font-size: 8px; border-radius: 4px; }
+.file-icon.pdf { background: linear-gradient(135deg, #dc2626, #991b1b); }
+.file-icon.doc { background: linear-gradient(135deg, #2563eb, #1d4ed8); }
+.file-icon.xls { background: linear-gradient(135deg, #16a34a, #15803d); }
+.file-icon.folder { background: linear-gradient(135deg, #f59e0b, #d97706); }
+.file-icon.img { background: linear-gradient(135deg, #a855f7, #7c3aed); }
+.file-icon.txt { background: linear-gradient(135deg, #64748b, #475569); }
+
+/* === PROGRESS BAR === */
+.progress {
+  height: 6px; background: var(--line); border-radius: 3px; overflow: hidden;
+  position: relative;
+}
+.progress > div {
+  height: 100%; background: var(--brand-500); border-radius: 3px;
+  position: relative; overflow: hidden;
+  transition: width 600ms cubic-bezier(.65,0,.35,1);
+}
+.progress > div::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.4), transparent);
+  animation: shimmer 1.6s infinite;
+}
+@keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+
+.freshness { height: 4px; border-radius: 2px; }
+.freshness.green { background: var(--ok); }
+.freshness.blue { background: var(--brand-500); }
+.freshness.red { background: var(--err); }
+.freshness.empty { background: var(--line); }
+
+/* === SHIMMER LOADER === */
+.shimmer {
+  background: linear-gradient(90deg, var(--bg-sunken) 0%, color-mix(in oklch, var(--ink) 6%, var(--bg-sunken)) 50%, var(--bg-sunken) 100%);
+  background-size: 200% 100%;
+  animation: shimmer-bg 1.4s linear infinite;
+  border-radius: 4px;
+}
+@keyframes shimmer-bg { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* === DRAWER === */
+.drawer {
+  position: fixed; right: 0; top: 0; bottom: 0;
+  width: 480px; max-width: 90vw;
+  background: var(--bg-elev); border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-3);
+  transform: translateX(0); transition: transform 320ms cubic-bezier(.65,0,.35,1);
+  z-index: 50;
+  display: flex; flex-direction: column;
+}
+.drawer.closed { transform: translateX(110%); }
+.drawer-scrim {
+  position: fixed; inset: 0; background: var(--bg-overlay);
+  opacity: 1; transition: opacity 240ms; z-index: 49;
+}
+.drawer-scrim.closed { opacity: 0; pointer-events: none; }
+
+/* === DIVIDER === */
+.divider-mono {
+  display: flex; align-items: center; gap: 12px;
+  color: var(--ink-4); font-family: var(--font-mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.12em;
+}
+.divider-mono::before, .divider-mono::after {
+  content: ''; flex: 1; height: 1px; background: var(--line);
+}
+
+/* === UTILITIES === */
+.stack > * + * { margin-top: var(--stack-gap, 12px); }
+.row { display: flex; align-items: center; gap: var(--row-gap, 10px); }
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.col { display: flex; flex-direction: column; gap: var(--col-gap, 10px); }
+.muted { color: var(--ink-3); }
+.muted-2 { color: var(--ink-4); }
+
+/* === SCAN LINE EFFECT (subtle) === */
+.scan-lines {
+  position: relative;
+}
+.scan-lines::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: repeating-linear-gradient(180deg, transparent 0 2px, rgba(255,255,255,.02) 2px 3px);
+  border-radius: inherit;
+  mix-blend-mode: overlay;
+}
+
+/* === PILL TAB GROUP === */
+.tab-group {
+  display: inline-flex; padding: 3px;
+  background: var(--bg-sunken); border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+.tab-group > button {
+  padding: 6px 12px; border-radius: 4px;
+  font-size: 12px; font-weight: 500; color: var(--ink-3);
+  border: none; background: transparent; cursor: pointer;
+  transition: all 160ms ease;
+}
+.tab-group > button.active {
+  background: var(--bg-elev); color: var(--ink); box-shadow: var(--shadow-1);
+}
+
+/* === RESULT ROW === */
+.result-row {
+  display: grid; grid-template-columns: 18px 40px 1fr auto auto auto;
+  gap: 14px; align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 160ms ease;
+  position: relative;
+}
+.result-row:hover {
+  border-color: color-mix(in oklch, var(--brand-500) 30%, var(--line));
+  box-shadow: var(--shadow-1);
+}
+.result-row.selected {
+  background: color-mix(in oklch, var(--brand-500) 6%, var(--bg-elev));
+  border-color: color-mix(in oklch, var(--brand-500) 40%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--brand-500) 35%, transparent);
+}
+.result-row .result-name {
+  font-family: var(--font-display); font-weight: 600;
+  font-size: 14px; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.result-row .result-path {
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--ink-3); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.result-row .result-meta {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.result-row .result-score { color: var(--ink-4); opacity: 0.5; }
+.result-row .result-actions {
+  color: var(--ink-3); font-size: 20px;
+  padding: 6px 8px; border-radius: 4px;
+  cursor: pointer; line-height: 1;
+}
+.result-row .result-actions:hover { background: var(--bg-sunken); color: var(--ink); }
+.result-row .check-box {
+  width: 16px; height: 16px; border-radius: 4px;
+  border: 1px solid var(--line-strong); background: var(--bg-elev);
+  display: grid; place-items: center;
+}
+.result-row.selected .check-box {
+  background: var(--brand-500); border-color: var(--brand-500); color: white;
+}
+
+/* === ANIMATED COUNTER === */
+@keyframes flip-up {
+  0% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(-100%); opacity: 0; }
+}
+
+/* === TICKER === */
+.ticker-dot {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 8px var(--accent-cyan);
+  animation: ticker 1.2s infinite alternate;
+}
+@keyframes ticker {
+  from { opacity: 0.3; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1.2); }
+}
+`;
+
+(() => {
+  const el = document.createElement('style');
+  el.textContent = HIFI_STYLES;
+  el.dataset.hifi = 'styles';
+  document.head.appendChild(el);
+})();
+
+
+// ===== hifi-icons.jsx =====
+// hifi-icons.jsx — Icon library for hi-fi prototype
+// All icons 20×20, 1.5px stroke, currentColor
+
+const Icon = {
+  search: (p={}) => <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>,
+  arrow: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M4 10h12m-4-4 4 4-4 4"/></svg>,
+  arrowRight: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m8 5 5 5-5 5"/></svg>,
+  arrowLeft: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m12 5-5 5 5 5"/></svg>,
+  chevronDown: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m6 8 4 4 4-4"/></svg>,
+  chevronRight: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m8 6 4 4-4 4"/></svg>,
+  chevronUp: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m6 12 4-4 4 4"/></svg>,
+  eye: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M2 10s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6Z"/><circle cx="10" cy="10" r="2.5"/></svg>,
+  eyeOff: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 3 17 17"/><path d="M6.5 6.5C4.2 7.8 2 10 2 10s3 6 8 6c1.4 0 2.7-.4 3.8-1M9 4.1c.3 0 .7-.1 1-.1 5 0 8 6 8 6s-.6 1.2-1.7 2.5"/></svg>,
+  close: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M5 5 15 15M15 5 5 15"/></svg>,
+  check: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m4 10 4 4 8-8"/></svg>,
+  plus: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M10 4v12M4 10h12"/></svg>,
+  minus: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M4 10h12"/></svg>,
+  more: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" {...p}><circle cx="10" cy="10" r="1.4" fill="currentColor"/><circle cx="10" cy="4" r="1.4" fill="currentColor"/><circle cx="10" cy="16" r="1.4" fill="currentColor"/></svg>,
+  folder: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 6a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></svg>,
+  folderOpen: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 7V5a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v1"/><path d="M3 7h14l-1.5 7a1 1 0 0 1-1 1H4.5a1 1 0 0 1-1-1L2 8a1 1 0 0 1 1-1Z"/></svg>,
+  file: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M6 2h6l4 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"/><path d="M12 2v4h4"/></svg>,
+  history: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 2.5"/></svg>,
+  trend: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m4 12 3-3 3 3 6-6"/><path d="M12 6h4v4"/></svg>,
+  star: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m10 2 2.5 5 5.5.8-4 4 1 5.5L10 15l-5 2.3 1-5.5-4-4 5.5-.8L10 2Z"/></svg>,
+  starFilled: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" {...p}><path d="m10 2 2.5 5 5.5.8-4 4 1 5.5L10 15l-5 2.3 1-5.5-4-4 5.5-.8L10 2Z"/></svg>,
+  bookmark: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M5 3h10v15l-5-3-5 3V3Z"/></svg>,
+  schedule: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="10" cy="10" r="7"/><path d="M10 7v3l2 1.5"/></svg>,
+  chart: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 17h14"/><path d="M5 17V8m4 9V4m4 13V10m4 7V6"/></svg>,
+  settings: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M10 1.8 11.6 4l2.6-.5.7 2.5 2.3 1.4-1.1 2.4 1.1 2.4-2.3 1.4-.7 2.5-2.6-.5L10 18.2 8.4 16l-2.6.5-.7-2.5-2.3-1.4 1.1-2.4L2.8 7.8l2.3-1.4.7-2.5L8.4 4 10 1.8Z"/><circle cx="10" cy="10" r="2.5"/></svg>,
+  user: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="10" cy="6" r="3"/><path d="M3 17a7 7 0 0 1 14 0"/></svg>,
+  users: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="7" cy="7" r="2.5"/><circle cx="14" cy="6" r="2"/><path d="M2 16c.5-2.5 2.5-4 5-4s4.5 1.5 5 4M12 12c2 0 4 1.5 4.5 4"/></svg>,
+  download: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M10 3v10m0 0-4-4m4 4 4-4"/><path d="M3 17h14"/></svg>,
+  upload: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M10 17V7m0 0-4 4m4-4 4 4"/><path d="M3 3h14"/></svg>,
+  trash: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 4h14v3H3z"/><path d="M5 7v9a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V7"/><path d="M8 4V2h4v2"/></svg>,
+  lock: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><rect x="4" y="9" width="12" height="9" rx="2"/><path d="M7 9V6a3 3 0 0 1 6 0v3"/></svg>,
+  shield: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M10 2 4 4v6c0 4 2.5 6.7 6 8 3.5-1.3 6-4 6-8V4l-6-2Z"/><path d="m7 10 2 2 4-4"/></svg>,
+  cloud: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M14 14h.5a3 3 0 0 0 0-6 4 4 0 0 0-7.7-1.2A3 3 0 0 0 4 14h2"/></svg>,
+  cloudUpload: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M14 13h.5a3 3 0 0 0 0-6 4 4 0 0 0-7.7-1.2A3 3 0 0 0 4 13"/><path d="M10 11v6m-3-3 3-3 3 3"/></svg>,
+  cloudOff: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 3 17 17"/><path d="M14 14h.5a3 3 0 0 0 1.9-5.3M9.7 6c.6-.6 1.4-1 2.3-1a4 4 0 0 1 4 4 3 3 0 0 1 0 5h-5M6 14H4a3 3 0 0 1-1-5.8"/></svg>,
+  sparkle: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m10 2 1.5 5L17 8.5 11.5 10 10 16 8.5 10 3 8.5 8.5 7Z"/><path d="m4 14-1 3M15 15l-1 2"/></svg>,
+  ai: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M10 3a3 3 0 0 0-3 3v1H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1v1a3 3 0 0 0 6 0v-1h1a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-1V6a3 3 0 0 0-3-3Z"/><path d="M8 11h.01M12 11h.01"/></svg>,
+  filter: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 4h14l-5 7v6l-4-2v-4Z"/></svg>,
+  sort: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M5 4v12m0 0-3-3m3 3 3-3M15 16V4m0 0-3 3m3-3 3 3"/></svg>,
+  play: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" {...p}><path d="m6 4 10 6-10 6V4Z"/></svg>,
+  pause: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" {...p}><path d="M5 4h4v12H5zM11 4h4v12h-4z"/></svg>,
+  stop: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" {...p}><rect x="5" y="5" width="10" height="10" rx="1"/></svg>,
+  refresh: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M17 8a7 7 0 0 0-12-3L3 7M3 12a7 7 0 0 0 12 3l2-2"/><path d="M17 3v5h-5M3 17v-5h5"/></svg>,
+  thumbUp: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M5 9v8h10a2 2 0 0 0 2-2l1-5a1 1 0 0 0-1-1h-5l1-4a2 2 0 0 0-2-2L8 9Z"/><path d="M5 9H3v8h2"/></svg>,
+  thumbDown: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M15 11V3H5a2 2 0 0 0-2 2L2 10a1 1 0 0 0 1 1h5l-1 4a2 2 0 0 0 2 2l3-6Z"/><path d="M15 11h2V3h-2"/></svg>,
+  copy: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><rect x="4" y="4" width="10" height="12" rx="2"/><path d="M8 4V3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v11"/></svg>,
+  link: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M8 12a3 3 0 0 1 0-4l3-3a3 3 0 1 1 4 4l-1 1M12 8a3 3 0 0 1 0 4l-3 3a3 3 0 1 1-4-4l1-1"/></svg>,
+  external: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M11 4h5v5M16 4l-8 8M9 5H4v11h11v-5"/></svg>,
+  bell: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M5 9a5 5 0 0 1 10 0v3l1.5 2H3.5L5 12Z"/><path d="M8 16a2 2 0 0 0 4 0"/></svg>,
+  sun: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="10" cy="10" r="3.5"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M15.5 4.5l-1.4 1.4M5.9 14.1l-1.4 1.4"/></svg>,
+  moon: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M16 12a6 6 0 0 1-8-8 7 7 0 1 0 8 8Z"/></svg>,
+  command: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M7 4a2 2 0 1 0-2 2h10a2 2 0 1 0-2-2v10a2 2 0 1 0 2-2H5a2 2 0 1 0 2 2V4Z"/></svg>,
+  fingerprint: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M5 7a6 6 0 0 1 10 0"/><path d="M4 11c0-3 2.7-5.5 6-5.5S16 8 16 11v1c0 2-1 3-1 3"/><path d="M7 13c0-2 1.3-3.5 3-3.5S13 11 13 13v2"/><path d="M10 13v3"/></svg>,
+  alert: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="10" cy="10" r="7"/><path d="M10 6v5M10 14v.5"/></svg>,
+  info: (p={}) => <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="10" cy="10" r="7"/><path d="M10 9v5M10 6v.5"/></svg>,
+  scan: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 7V5a2 2 0 0 1 2-2h2M17 7V5a2 2 0 0 0-2-2h-2M3 13v2a2 2 0 0 0 2 2h2M17 13v2a2 2 0 0 1-2 2h-2M6 10h8"/></svg>,
+  tree: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="6" cy="4" r="1.5"/><circle cx="14" cy="10" r="1.5"/><circle cx="6" cy="16" r="1.5"/><path d="M6 6v4a2 2 0 0 0 2 2h4M6 12v2"/></svg>,
+  grid: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="6" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/><rect x="11" y="11" width="6" height="6" rx="1"/></svg>,
+  list: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M3 5h14M3 10h14M3 15h14"/></svg>,
+  google: (p={}) => <svg viewBox="0 0 18 18" width="16" height="16" {...p}><path fill="#4285F4" d="M17.6 9.2c0-.6-.1-1.2-.2-1.7H9v3.3h4.9c-.2 1.1-.8 2-1.8 2.7v2.3h2.9c1.7-1.6 2.6-3.9 2.6-6.6Z"/><path fill="#34A853" d="M9 18c2.4 0 4.5-.8 6-2.2l-2.9-2.3c-.8.6-1.9.9-3.1.9-2.4 0-4.4-1.6-5.1-3.8H1v2.4A9 9 0 0 0 9 18Z"/><path fill="#FBBC05" d="M3.9 10.6c-.2-.6-.3-1.1-.3-1.7s.1-1.2.3-1.7V4.9H1a9 9 0 0 0 0 8.2l2.9-2.4Z"/><path fill="#EA4335" d="M9 3.6c1.4 0 2.6.5 3.5 1.4l2.6-2.6C13.5.9 11.5 0 9 0a9 9 0 0 0-8 4.9l2.9 2.4C4.6 5.1 6.6 3.6 9 3.6Z"/></svg>,
+  ms: (p={}) => <svg viewBox="0 0 20 20" width="16" height="16" {...p}><rect x="1" y="1" width="8.5" height="8.5" fill="#F25022"/><rect x="10.5" y="1" width="8.5" height="8.5" fill="#7FBA00"/><rect x="1" y="10.5" width="8.5" height="8.5" fill="#00A4EF"/><rect x="10.5" y="10.5" width="8.5" height="8.5" fill="#FFB900"/></svg>,
+};
+
+window.Icon = Icon;
+
+
+// ===== hifi-components.jsx =====
+// hifi-components.jsx — reusable building blocks for hi-fi prototype
+
+/* ── Logo mark ───────────────────────────────────────── */
+function LogoMark({ size = 28 }) {
+  return (
+    <div className="mark" style={{ width: size, height: size, borderRadius: size * 0.28 }}>
+      <svg width={size * 0.54} height={size * 0.54} viewBox="0 0 32 32" fill="none">
+        <path d="M9 8 L9 24 M9 8 L17 8 Q22 8 22 13 Q22 18 17 18 L9 18" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+        <circle cx="22" cy="22" r="4.5" stroke="white" strokeWidth="3" fill="none"/>
+      </svg>
+    </div>
+  );
+}
+
+function Logo({ size = 28, withName = true }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: size * 0.4 }}>
+      <LogoMark size={size} />
+      {withName && (
+        <span style={{
+          fontFamily: 'var(--font-display)', fontWeight: 700,
+          fontSize: size * 0.5, letterSpacing: '-0.02em',
+        }}>Rag-search</span>
+      )}
+    </div>
+  );
+}
+
+/* ── File icon by extension ──────────────────────────── */
+function FileIconBox({ ext = 'doc', size = 'md' }) {
+  const map = { pdf: 'PDF', doc: 'DOC', docx: 'DOC', xls: 'XLS', xlsx: 'XLS', img: 'IMG', jpg: 'IMG', png: 'IMG', txt: 'TXT', folder: '', md: 'TXT' };
+  const cls = ['pdf','doc','docx'].includes(ext) ? (ext === 'pdf' ? 'pdf' : 'doc')
+              : ['xls','xlsx'].includes(ext) ? 'xls'
+              : ['img','jpg','png','jpeg'].includes(ext) ? 'img'
+              : ext === 'folder' ? 'folder' : 'txt';
+  return (
+    <div className={`file-icon ${size} ${cls}`}>
+      {cls === 'folder' ? Icon.folder({ width: size === 'lg' ? 22 : size === 'sm' ? 14 : 18, height: size === 'lg' ? 22 : size === 'sm' ? 14 : 18, stroke: 'white', strokeWidth: 1.6 }) : map[ext]}
+    </div>
+  );
+}
+
+/* ── Live counter (smoothly increments) ──────────────── */
+function LiveCounter({ value, format = (v) => v.toLocaleString('ru-RU').replace(/,/g, ' '), className, style, drift = false }) {
+  const [v, setV] = React.useState(value);
+  React.useEffect(() => {
+    if (!drift) { setV(value); return; }
+    const t = setInterval(() => setV(prev => prev + Math.floor(Math.random() * 2)), 3800);
+    return () => clearInterval(t);
+  }, [value, drift]);
+  return <span className={className} style={{ fontVariantNumeric: 'tabular-nums', ...style }}>{format(v)}</span>;
+}
+
+/* ── Kbd hint ────────────────────────────────────────── */
+function Kbd({ children }) {
+  return <span className="kbd">{children}</span>;
+}
+
+/* ── Chip with optional icon and trailing close ──────── */
+function Chip({ variant, children, icon, onClose, onClick, style = {} }) {
+  const cls = variant ? `chip chip-${variant}` : 'chip';
+  return (
+    <span className={cls} onClick={onClick} style={{ cursor: onClick ? 'pointer' : 'default', ...style }}>
+      {icon && icon}
+      <span>{children}</span>
+      {onClose && (
+        <button onClick={(e) => { e.stopPropagation(); onClose(); }}
+          style={{ marginLeft: 4, border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 0, opacity: 0.7 }}>
+          {Icon.close({ width: 11, height: 11 })}
+        </button>
+      )}
+    </span>
+  );
+}
+
+/* ── Status dot + label ──────────────────────────────── */
+function StatusDot({ status = 'ok', label, sub }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      <span className={`dot dot-${status}`} />
+      {label && <span style={{ fontSize: 12 }}>{label}</span>}
+      {sub && <span className="mono-label">{sub}</span>}
+    </span>
+  );
+}
+
+/* ── KPI Card — big display number ──────────────────── */
+function KPI({ label, value, delta, deltaPositive = true, sparkline, footer }) {
+  return (
+    <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div className="row-between">
+        <span className="mono-label">{label}</span>
+        {delta && (
+          <span style={{
+            fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600,
+            color: deltaPositive ? 'var(--ok)' : 'var(--err)',
+            padding: '2px 6px',
+            background: deltaPositive ? 'color-mix(in oklch, var(--ok) 12%, var(--bg-elev))' : 'color-mix(in oklch, var(--err) 12%, var(--bg-elev))',
+            borderRadius: 4,
+          }}>{deltaPositive ? '↑' : '↓'} {delta}</span>
+        )}
+      </div>
+      <div style={{
+        fontFamily: 'var(--font-display)', fontWeight: 800,
+        fontSize: 36, letterSpacing: '-0.03em', lineHeight: 1,
+        fontVariantNumeric: 'tabular-nums',
+      }}>{value}</div>
+      {sparkline && <MiniSparkline data={sparkline} />}
+      {footer && <div className="mono-label" style={{ marginTop: 'auto' }}>{footer}</div>}
+    </div>
+  );
+}
+
+/* ── Mini sparkline (SVG) ────────────────────────────── */
+function MiniSparkline({ data, height = 24, color = 'var(--brand-500)' }) {
+  if (!data || !data.length) return null;
+  const min = Math.min(...data), max = Math.max(...data);
+  const range = max - min || 1;
+  const w = 100, h = height;
+  const points = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * w;
+    const y = h - ((v - min) / range) * h;
+    return `${x},${y}`;
+  }).join(' ');
+  return (
+    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+      <defs>
+        <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.35"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <polyline points={`0,${h} ${points} ${w},${h}`} fill="url(#sparkFill)" />
+      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/* ── Section block ───────────────────────────────────── */
+function Section({ title, eyebrow, action, children, collapsible = false, defaultOpen = true, style = {} }) {
+  const [open, setOpen] = React.useState(defaultOpen);
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 12, ...style }}>
+      {(title || eyebrow || action) && (
+        <header className="row-between" style={{ alignItems: 'baseline' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {collapsible && (
+              <button onClick={() => setOpen(!open)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 4, color: 'var(--ink-3)', display: 'grid', placeItems: 'center' }}>
+                {open ? Icon.chevronDown() : Icon.chevronRight()}
+              </button>
+            )}
+            <div>
+              {eyebrow && <div className="mono-label" style={{ marginBottom: 4 }}>{eyebrow}</div>}
+              {title && <h2 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em', margin: 0 }}>{title}</h2>}
+            </div>
+          </div>
+          {action && <div>{action}</div>}
+        </header>
+      )}
+      {open && children}
+    </section>
+  );
+}
+
+/* ── Toolbar (sticky) ────────────────────────────────── */
+function Toolbar({ left, right, style = {} }) {
+  return (
+    <div className="glass" style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '8px 12px', borderRadius: 'var(--radius-sm)',
+      gap: 12, ...style,
+    }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', flex: 1, minWidth: 0 }}>{left}</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{right}</div>
+    </div>
+  );
+}
+
+/* ── Page layout: app shell ──────────────────────────── */
+function AppShell({ active, onNav, children, user = { name: 'Иванов', role: 'admin' }, theme, onTheme, indexStatus = { running: true, percent: 72 } }) {
+  return (
+    <div className="hifi-app" style={{ display: 'flex', flexDirection: 'column' }}>
+      <header className="app-header">
+        <div className="app-header-brand">
+          <Logo size={28} />
+          <span className="chip chip-bare mono-label" style={{ padding: '2px 6px', border: '1px solid var(--line)', borderRadius: 4 }}>v3.4</span>
+        </div>
+        <nav className="app-header-nav">
+          {[
+            { k: 'home', label: 'Главная', icon: Icon.grid, kbd: '1' },
+            { k: 'search', label: 'Поиск', icon: Icon.search, kbd: 'K' },
+            { k: 'explorer', label: 'Файлы', icon: Icon.folder, kbd: '3' },
+            { k: 'cloud', label: 'Cloud', icon: Icon.cloud, kbd: '4' },
+            { k: 'index', label: 'Индекс', icon: Icon.scan, kbd: '5', admin: true },
+          ].filter(t => !t.admin || user.role === 'admin').map(t => (
+            <div key={t.k}
+                 className={'nav-tab ' + (active === t.k ? 'active' : '')}
+                 onClick={() => onNav(t.k)}>
+              {t.icon()}
+              <span>{t.label}</span>
+            </div>
+          ))}
+        </nav>
+        <div className="app-header-actions">
+          {indexStatus.running && (
+            <div className="chip" title={`Идёт индексация · ${indexStatus.percent}%`}>
+              <span className="dot dot-info" />
+              <span className="mono-num">{indexStatus.percent}%</span>
+              <span style={{ color: 'var(--ink-3)' }}>· индексация</span>
+            </div>
+          )}
+          <button className="btn btn-ghost btn-icon" onClick={() => onTheme(theme === 'dark' ? 'light' : 'dark')}>
+            {theme === 'dark' ? Icon.sun() : Icon.moon()}
+          </button>
+          <button className="btn btn-ghost btn-icon">{Icon.bell()}</button>
+          <div style={{
+            width: 28, height: 28, borderRadius: '50%',
+            background: 'linear-gradient(135deg, var(--brand-500), var(--accent-cyan))',
+            color: 'white', display: 'grid', placeItems: 'center',
+            fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 12,
+          }}>{user.name[0]}</div>
+        </div>
+      </header>
+      <main style={{ flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
+        {children}
+      </main>
+    </div>
+  );
+}
+
+/* ── Page scroll container ───────────────────────────── */
+function PageScroll({ children, maxWidth = 1320, style = {} }) {
+  return (
+    <div style={{ height: '100%', overflow: 'auto' }}>
+      <div style={{ maxWidth, margin: '0 auto', padding: '32px 32px 80px', ...style }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ── Empty state ─────────────────────────────────────── */
+function EmptyState({ icon, title, description, action, illustration }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      justifyContent: 'center', gap: 16, padding: 48,
+      textAlign: 'center',
+    }}>
+      {illustration || (icon && (
+        <div style={{
+          width: 64, height: 64, borderRadius: 16,
+          background: 'var(--bg-sunken)', border: '1px solid var(--line)',
+          display: 'grid', placeItems: 'center',
+          color: 'var(--ink-3)',
+        }}>
+          {icon}
+        </div>
+      ))}
+      <div>
+        <h3 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 20, margin: '0 0 6px', letterSpacing: '-0.02em' }}>{title}</h3>
+        {description && <p style={{ color: 'var(--ink-3)', fontSize: 14, margin: 0, maxWidth: 420 }}>{description}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
+/* ── Loading skeleton ────────────────────────────────── */
+function Skeleton({ width = '100%', height = 16, style = {} }) {
+  return <div className="shimmer" style={{ width, height, ...style }} />;
+}
+
+/* ── Action item (icon + label, for dropdown menus) ──── */
+function ActionItem({ icon, label, kbd, danger, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      width: '100%', padding: '8px 12px',
+      background: 'transparent', border: 'none', cursor: 'pointer',
+      color: danger ? 'var(--err)' : 'var(--ink-2)',
+      fontSize: 13, borderRadius: 6, textAlign: 'left',
+    }}
+    onMouseEnter={(e) => e.currentTarget.style.background = danger ? 'color-mix(in oklch, var(--err) 8%, var(--bg-sunken))' : 'var(--bg-sunken)'}
+    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+      <span style={{ display: 'grid', placeItems: 'center', color: danger ? 'var(--err)' : 'var(--ink-3)' }}>{icon}</span>
+      <span style={{ flex: 1 }}>{label}</span>
+      {kbd && <Kbd>{kbd}</Kbd>}
+    </button>
+  );
+}
+
+window.LogoMark = LogoMark;
+window.Logo = Logo;
+window.FileIconBox = FileIconBox;
+window.LiveCounter = LiveCounter;
+window.Kbd = Kbd;
+window.Chip = Chip;
+window.StatusDot = StatusDot;
+window.KPI = KPI;
+window.MiniSparkline = MiniSparkline;
+window.Section = Section;
+window.Toolbar = Toolbar;
+window.AppShell = AppShell;
+window.PageScroll = PageScroll;
+window.EmptyState = EmptyState;
+window.Skeleton = Skeleton;
+window.ActionItem = ActionItem;
+
+
+// ===== hifi-screen-login.jsx =====
+// hifi-screen-login.jsx — futuristic login
+
+function LoginScreen({ onLogin, theme }) {
+  const [login, setLogin] = React.useState('a.ivanov');
+  const [pwd, setPwd] = React.useState('••••••••••••');
+  const [showPwd, setShowPwd] = React.useState(false);
+  const [remember, setRemember] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+
+  // Animated stats
+  const [files, setFiles] = React.useState(35167);
+  const [searches, setSearches] = React.useState(187);
+  const [latency, setLatency] = React.useState(0.42);
+  const [activity, setActivity] = React.useState([
+    { t: '14:23', who: 'А. Иванов', q: 'карточка предприятия Спецмаш' },
+    { t: '14:21', who: 'М. Петрова', q: 'паспорт цыбусов 2024' },
+    { t: '14:19', who: 'admin', q: 'vin lovol PC300' },
+    { t: '14:14', who: 'Д. Сидоров', q: 'договор поставки № 442' },
+    { t: '14:08', who: 'А. Иванов', q: 'инструкция по индексации' },
+  ]);
+  React.useEffect(() => {
+    const t = setInterval(() => {
+      setFiles(v => v + Math.floor(Math.random() * 2));
+      setSearches(v => v + Math.floor(Math.random() * 2));
+      setLatency(v => +(0.36 + Math.random() * 0.14).toFixed(2));
+    }, 3800);
+    return () => clearInterval(t);
+  }, []);
+
+  const submit = (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setTimeout(() => { setBusy(false); onLogin && onLogin(); }, 1200);
+  };
+
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '1.2fr 1fr',
+      height: '100vh', overflow: 'hidden',
+      background: 'var(--bg)',
+    }}>
+      {/* ─── LEFT: Brand panel ─── */}
+      <aside style={{
+        position: 'relative', overflow: 'hidden',
+        background: '#08080c',
+        padding: '40px 56px', color: '#fff',
+        display: 'flex', flexDirection: 'column',
+      }}>
+        <div className="liquid-bg" />
+        <div className="grid-overlay" />
+
+        {/* Top */}
+        <div className="row-between" style={{ position: 'relative', zIndex: 2 }}>
+          <Logo size={32} />
+          <div className="chip" style={{ background: 'rgba(255,255,255,.04)', borderColor: 'rgba(255,255,255,.1)', color: 'rgba(255,255,255,.7)' }}>
+            <span className="dot dot-ok" />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>онлайн · v3.4</span>
+          </div>
+        </div>
+
+        {/* Hero */}
+        <div style={{ position: 'relative', zIndex: 2, marginTop: 'auto', marginBottom: 56 }}>
+          <div className="mono-label" style={{ color: 'rgba(255,255,255,.45)', marginBottom: 28 }}>
+            внутренний поиск компании · 04.05.2026
+          </div>
+          <h1 className="hd" style={{ fontSize: 'clamp(56px, 6vw, 96px)', margin: 0, color: '#fff' }}>
+            Найдём всё,<br/>
+            <span style={{ color: 'var(--brand-300)' }}>за секунду.</span>
+          </h1>
+
+          {/* Live stats */}
+          <div style={{ marginTop: 48, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 0, maxWidth: 540 }}>
+            {[
+              { label: 'документов в индексе', value: files.toLocaleString('ru-RU').replace(/,/g, ' '), live: true },
+              { label: 'поисков сегодня', value: searches.toString() },
+              { label: 'среднее время', value: latency.toFixed(2) + 'с' },
+            ].map((s, i) => (
+              <div key={i} style={{
+                padding: i === 0 ? '0 24px 0 0' : '0 24px',
+                borderLeft: i > 0 ? '1px solid rgba(255,255,255,.08)' : 'none',
+              }}>
+                <div style={{
+                  fontFamily: 'var(--font-display)', fontWeight: 800,
+                  fontSize: 36, letterSpacing: '-0.03em', lineHeight: 1,
+                  color: '#fff', fontVariantNumeric: 'tabular-nums',
+                  display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                  {s.value}
+                  {s.live && <span className="ticker-dot" style={{ marginBottom: 4 }} />}
+                </div>
+                <div className="mono-label" style={{ color: 'rgba(255,255,255,.4)', marginTop: 8 }}>
+                  {s.label}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Activity ticker */}
+        <div style={{ position: 'relative', zIndex: 2, marginBottom: 24 }}>
+          <div className="mono-label" style={{ color: 'rgba(255,255,255,.4)', marginBottom: 12 }}>
+            ↗ команда сейчас ищет
+          </div>
+          <div style={{ display: 'grid', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+            {activity.slice(0, 3).map((e, i) => (
+              <div key={i} style={{
+                display: 'grid', gridTemplateColumns: '50px 130px 1fr',
+                gap: 12, padding: '6px 0',
+                color: 'rgba(255,255,255,.45)',
+                opacity: 1 - i * 0.2,
+              }}>
+                <span>{e.t}</span>
+                <span>{e.who}</span>
+                <span style={{ color: 'var(--brand-300)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {e.q}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Bottom */}
+        <div style={{
+          position: 'relative', zIndex: 2,
+          display: 'flex', justifyContent: 'space-between',
+          fontFamily: 'var(--font-mono)', fontSize: 10,
+          color: 'rgba(255,255,255,.3)', textTransform: 'uppercase', letterSpacing: '0.1em',
+        }}>
+          <span>v3.4 · build 4280 · production</span>
+          <span>support@rag-search.local</span>
+        </div>
+      </aside>
+
+      {/* ─── RIGHT: Form ─── */}
+      <main style={{
+        display: 'grid', gridTemplateRows: 'auto 1fr auto',
+        padding: '24px 32px', position: 'relative',
+      }}>
+        {/* Top bar */}
+        <div className="row-between">
+          <div className="row" style={{ gap: 8 }}>
+            <span className="chip mono-label" style={{ borderRadius: 4 }}>прод. среда</span>
+            <span style={{ color: 'var(--ink-3)' }}>·</span>
+            <span style={{ color: 'var(--ink-3)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>rag-search.local</span>
+          </div>
+          <a style={{ color: 'var(--ink-3)', fontSize: 13, textDecoration: 'none', cursor: 'pointer' }}>Что это?</a>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={submit} style={{
+          alignSelf: 'center', justifySelf: 'center',
+          width: '100%', maxWidth: 420,
+          display: 'flex', flexDirection: 'column', gap: 14,
+        }}>
+          <div style={{ marginBottom: 8 }}>
+            <h2 style={{
+              fontFamily: 'var(--font-display)', fontWeight: 800,
+              fontSize: 40, letterSpacing: '-0.03em', lineHeight: 1, margin: 0,
+            }}>Вход</h2>
+            <p style={{ color: 'var(--ink-3)', fontSize: 14, marginTop: 8, marginBottom: 0 }}>
+              Используйте корпоративный аккаунт.
+            </p>
+          </div>
+
+          {/* SSO row */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <button type="button" className="btn btn-secondary" style={{ justifyContent: 'center', padding: '12px 14px', borderRadius: 8 }}>
+              {Icon.google()} Google
+            </button>
+            <button type="button" className="btn btn-secondary" style={{ justifyContent: 'center', padding: '12px 14px', borderRadius: 8 }}>
+              {Icon.ms()} Microsoft 365
+            </button>
+          </div>
+
+          <div className="divider-mono">или логином</div>
+
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-2)' }}>Логин или email</span>
+            <div className="input input-lg">
+              <input value={login} onChange={e => setLogin(e.target.value)} autoComplete="username" />
+              {login && (
+                <button type="button" onClick={() => setLogin('')}
+                  style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 4, color: 'var(--ink-3)', display: 'grid', placeItems: 'center' }}>
+                  {Icon.close()}
+                </button>
+              )}
+            </div>
+          </label>
+
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-2)', display: 'flex', alignItems: 'center' }}>
+              Пароль
+              <a style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--brand-500)', cursor: 'pointer', textDecoration: 'none' }}>Забыли?</a>
+            </span>
+            <div className="input input-lg">
+              <input type={showPwd ? 'text' : 'password'} value={pwd} onChange={e => setPwd(e.target.value)} autoComplete="current-password" />
+              <button type="button" onClick={() => setShowPwd(s => !s)}
+                style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 4, color: 'var(--ink-3)', display: 'grid', placeItems: 'center' }}>
+                {showPwd ? Icon.eyeOff() : Icon.eye()}
+              </button>
+            </div>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none', color: 'var(--ink-2)' }}>
+            <input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} style={{ display: 'none' }} />
+            <span style={{
+              width: 18, height: 18, borderRadius: 5,
+              border: '1px solid var(--line-strong)',
+              background: remember ? 'var(--brand-500)' : 'var(--bg-elev)',
+              borderColor: remember ? 'var(--brand-500)' : 'var(--line-strong)',
+              display: 'grid', placeItems: 'center', color: 'white',
+            }}>
+              {remember && Icon.check({ width: 12, height: 12 })}
+            </span>
+            <span style={{ fontSize: 13 }}>Запомнить на этом устройстве</span>
+          </label>
+
+          <button type="submit" disabled={busy}
+            style={{
+              position: 'relative', overflow: 'hidden', isolation: 'isolate',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              height: 52, padding: '0 22px',
+              background: 'var(--brand-500)', color: 'white',
+              border: 'none', borderRadius: 10,
+              font: '600 15px var(--font-display)', letterSpacing: '-0.01em',
+              cursor: busy ? 'wait' : 'pointer',
+              transition: 'transform 120ms, box-shadow 200ms',
+              marginTop: 6,
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 12px 30px -8px color-mix(in oklch, var(--brand-500) 70%, transparent)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = ''; }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {busy ? 'Проверяем…' : 'Войти'}
+            </span>
+            {!busy && Icon.arrow({ width: 18, height: 18 })}
+            {busy && (
+              <div style={{
+                position: 'absolute', left: 0, right: 0, bottom: 0, height: 3,
+                backgroundImage: 'repeating-linear-gradient(45deg, rgba(255,255,255,.4) 0 8px, transparent 8px 16px)',
+                animation: 'shimmer-bg 1.6s linear infinite',
+              }}/>
+            )}
+          </button>
+
+          <div style={{ textAlign: 'center', fontSize: 13, color: 'var(--ink-3)', marginTop: 4 }}>
+            Нет доступа? <a style={{ color: 'var(--brand-500)', cursor: 'pointer', textDecoration: 'none', fontWeight: 500 }}>Запросить у администратора →</a>
+          </div>
+        </form>
+
+        {/* Status strip */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
+          borderTop: '1px solid var(--line)', margin: '0 -32px', padding: '0 32px',
+        }}>
+          {[
+            { dot: 'ok', label: 'индекс актуален', sub: '04.05.2026 · 03:14' },
+            { dot: 'info', label: 'идёт large этап', sub: '72% · ~30 мин' },
+            { icon: Icon.lock, label: 'защищённое', sub: 'TLS 1.3' },
+          ].map((s, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '14px 0', fontSize: 12, color: 'var(--ink-2)',
+              borderRight: i < 2 ? '1px solid var(--line)' : 'none',
+              paddingRight: i < 2 ? 16 : 0, paddingLeft: i > 0 ? 16 : 0,
+            }}>
+              {s.dot ? <span className={`dot dot-${s.dot}`} /> : <span style={{ color: 'var(--ink-3)' }}>{s.icon()}</span>}
+              <span>{s.label}</span>
+              <span style={{ marginLeft: 'auto', color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{s.sub}</span>
+            </div>
+          ))}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+window.LoginScreen = LoginScreen;
+
+
+// ===== hifi-screen-home.jsx =====
+// hifi-screen-home.jsx — Dashboard with collapsible widgets
+
+function HomeScreen({ onNavigate }) {
+  const [files, setFiles] = React.useState(35167);
+  React.useEffect(() => {
+    const t = setInterval(() => setFiles(v => v + Math.floor(Math.random() * 2)), 4200);
+    return () => clearInterval(t);
+  }, []);
+
+  // Sparkline data
+  const spark1 = [12, 18, 15, 32, 38, 42, 47, 51, 65, 68, 72, 88, 91, 102, 108, 124, 131, 145, 152, 167, 173, 187];
+  const spark2 = [3, 4, 4, 5, 5, 6, 7, 7, 7, 8, 8, 9, 10, 10, 11, 11, 12, 12, 12, 12];
+  const spark3 = [580, 540, 520, 510, 490, 480, 470, 460, 450, 440, 440, 430, 425, 420];
+
+  return (
+    <PageScroll>
+      {/* Welcome */}
+      <div className="row-between" style={{ marginBottom: 28, alignItems: 'flex-start' }}>
+        <div>
+          <div className="mono-label" style={{ marginBottom: 8 }}>04 МАЯ 2026 · 14:32 · СРЕДА</div>
+          <h1 style={{
+            fontFamily: 'var(--font-display)', fontWeight: 800,
+            fontSize: 56, letterSpacing: '-0.04em', lineHeight: 0.95, margin: 0,
+          }}>
+            Здравствуйте, <span style={{ fontFamily: 'var(--font-serif)', fontStyle: 'italic', fontWeight: 400 }}>Алексей</span>
+          </h1>
+          <p style={{ color: 'var(--ink-3)', fontSize: 15, marginTop: 12 }}>
+            Команда сделала <b style={{ color: 'var(--ink)' }}>187</b> поисков сегодня. Большинство — про карточки контрагентов.
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="btn btn-ghost">{Icon.grid()} <span>настроить главную</span></button>
+        </div>
+      </div>
+
+      {/* Global search */}
+      <div style={{
+        position: 'relative', marginBottom: 28,
+        borderRadius: 16,
+        padding: 1.5,
+        background: 'linear-gradient(135deg, color-mix(in oklch, var(--brand-500) 30%, transparent), transparent 40%, color-mix(in oklch, var(--accent-cyan) 25%, transparent))',
+      }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 14,
+          padding: '16px 22px', background: 'var(--bg-elev)',
+          borderRadius: 14.5,
+          boxShadow: '0 24px 60px -28px color-mix(in oklch, var(--brand-500) 40%, transparent)',
+        }}>
+          <span style={{ color: 'var(--ink-3)' }}>{Icon.search({ width: 22, height: 22 })}</span>
+          <input
+            placeholder="Спросите что угодно — карточка предприятия, паспорт PC300, договор поставки № 442…"
+            style={{
+              flex: 1, border: 'none', outline: 'none', background: 'transparent',
+              fontSize: 18, fontFamily: 'var(--font-text)', color: 'var(--ink)',
+              fontWeight: 500,
+            }}
+          />
+          <Chip variant="primary" icon={Icon.ai()}>AI</Chip>
+          <Kbd>⌘K</Kbd>
+        </div>
+      </div>
+
+      {/* KPI row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 28 }}>
+        <KPI label="ФАЙЛОВ В ИНДЕКСЕ"
+             value={<><LiveCounter value={files} drift /> </>}
+             delta="+143 за сутки" deltaPositive
+             footer="актуален 03:14" />
+        <KPI label="ПОИСКОВ СЕГОДНЯ" value="187" delta="+23% к среде" deltaPositive sparkline={spark1} footer="команда · 12 чел." />
+        <KPI label="ОТКЛИК (P95)" value="0.42с" delta="-12%" deltaPositive={false} sparkline={spark3} footer="без всплесков" />
+        <KPI label="AI ВЫЗОВОВ" value="94" delta="+45%" deltaPositive sparkline={spark2} footer="LLM: qwen3:8b" />
+      </div>
+
+      {/* Bento: My history + Index + Activity feed */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        {/* My search history */}
+        <Section
+          collapsible
+          eyebrow="ЛИЧНОЕ · 24 Ч"
+          title="Моя история поиска"
+          action={<button className="btn btn-ghost btn-sm">{Icon.external()} все</button>}>
+          <div className="card" style={{ padding: 0 }}>
+            {[
+              { q: 'карточка предприятия', t: '14:23', n: 50, k: 'docx' },
+              { q: 'PC300 паспорт', t: '12:08', n: 16, k: 'pdf' },
+              { q: 'Спецмаш PC300', t: '11:42', n: 14, k: 'docx' },
+              { q: 'паспорт цыбусов', t: '10:15', n: 11, k: 'pdf' },
+              { q: 'счёт 4153', t: 'вчера', n: 1, k: 'doc' },
+              { q: 'доверенность Грищенко', t: 'вчера', n: 3, k: 'pdf' },
+            ].map((h, i, arr) => (
+              <div key={i}
+                onClick={() => onNavigate('search')}
+                style={{
+                  display: 'grid', gridTemplateColumns: '60px 1fr auto',
+                  alignItems: 'center', gap: 12,
+                  padding: '14px 18px',
+                  borderTop: i ? '1px solid var(--line)' : 'none',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-sunken)'}
+                onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+                <span className="mono-num muted-2" style={{ fontSize: 11 }}>{h.t}</span>
+                <span style={{ fontFamily: 'var(--font-display)', fontWeight: 500, fontSize: 14 }}>{h.q}</span>
+                <span className="chip mono-num" style={{ fontSize: 10 }}>{h.n}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        {/* Index status */}
+        <Section
+          collapsible
+          eyebrow="ОБЩЕЕ"
+          title="Индекс"
+          action={<button className="btn btn-ghost btn-sm" onClick={() => onNavigate('index')}>{Icon.external()} детали</button>}>
+          <div className="card">
+            <div className="row-between" style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="dot dot-info" />
+                <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14 }}>large этап</span>
+                <span className="mono-label">· идёт</span>
+              </div>
+              <span className="mono-num" style={{ fontSize: 13, fontWeight: 600 }}>328 / 11 800</span>
+            </div>
+            <div className="progress" style={{ marginBottom: 16 }}>
+              <div style={{ width: '72%' }} />
+            </div>
+
+            {/* Phase chips */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+              {[
+                { l: 'metadata', s: 'ok' },
+                { l: 'small', s: 'ok' },
+                { l: 'large', s: 'run' },
+                { l: 'content', s: 'idle' },
+                { l: 'OCR', s: 'idle' },
+              ].map((p, i) => (
+                <Chip key={i}
+                      variant={p.s === 'ok' ? 'success' : p.s === 'run' ? 'primary' : null}
+                      icon={p.s === 'ok' ? Icon.check() : p.s === 'run' ? <span className="dot dot-info" style={{ width: 6, height: 6, boxShadow: 'none' }} /> : null}>
+                  {p.l}
+                </Chip>
+              ))}
+            </div>
+
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8,
+              fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)',
+              paddingTop: 14, borderTop: '1px solid var(--line)',
+            }}>
+              <div><span style={{ color: 'var(--ok)' }}>+18</span> добавлено</div>
+              <div><span style={{ color: 'var(--ink)' }}>247</span> обновлено</div>
+              <div><span style={{ color: 'var(--err)' }}>1408</span> ошибок · small</div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => onNavigate('index')}>{Icon.pause()} пауза</button>
+              <button className="btn btn-ghost btn-sm">{Icon.refresh()} перезапустить</button>
+              <span className="mono-label" style={{ marginLeft: 'auto', alignSelf: 'center' }}>~30 мин</span>
+            </div>
+          </div>
+        </Section>
+      </div>
+
+      {/* Widgets row 2: AI Insight + Tasks + Recent Files */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr', gap: 16 }}>
+        {/* AI insight */}
+        <Section eyebrow="AI · СВОДКА"
+                 title="Что заметила система"
+                 collapsible>
+          <div className="card" style={{
+            position: 'relative', overflow: 'hidden',
+            background: 'linear-gradient(135deg, color-mix(in oklch, var(--brand-500) 5%, var(--bg-elev)), var(--bg-elev) 60%)',
+          }}>
+            <div style={{
+              position: 'absolute', top: 0, right: 0,
+              width: 140, height: 140,
+              background: 'radial-gradient(circle at 70% 30%, color-mix(in oklch, var(--brand-500) 30%, transparent), transparent 60%)',
+              pointerEvents: 'none',
+            }}/>
+            <div style={{ position: 'relative' }}>
+              <div className="row" style={{ marginBottom: 12 }}>
+                <span style={{
+                  width: 28, height: 28, borderRadius: 8,
+                  background: 'linear-gradient(135deg, var(--brand-500), var(--accent-cyan))',
+                  display: 'grid', placeItems: 'center', color: 'white',
+                }}>{Icon.sparkle()}</span>
+                <span className="mono-label">сводка дня</span>
+              </div>
+              <p style={{ fontSize: 14, lineHeight: 1.55, margin: '0 0 16px' }}>
+                Команда искала <b>в 1.4 раза активнее</b> чем вчера. Топ-запросы: <span style={{ color: 'var(--brand-500)' }}>«PC300»</span> (16 раз), <span style={{ color: 'var(--brand-500)' }}>«Спецмаш»</span> (14), <span style={{ color: 'var(--brand-500)' }}>«паспорт»</span> (11). У <b>М. Петровой</b> 4 поиска подряд не дали полезных результатов — возможно стоит добавить синоним.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn btn-secondary btn-sm">{Icon.users()} посмотреть аналитику</button>
+                <button className="btn btn-ghost btn-sm">{Icon.plus()} добавить синоним</button>
+              </div>
+            </div>
+          </div>
+        </Section>
+
+        {/* Tasks */}
+        <Section eyebrow="3 АКТИВНЫХ" title="Мои задачи" collapsible
+                 action={<button className="btn btn-ghost btn-sm">{Icon.plus()}</button>}>
+          <div className="card" style={{ padding: 0 }}>
+            {[
+              { t: 'Проверить small chunks', sub: '1408 ошибок индексации', urgent: true },
+              { t: '38 заявок на доступ ждут', sub: 'все за сегодня', warn: true },
+              { t: 'Настроить ночной OCR', sub: 'до 30.04', },
+            ].map((t, i) => (
+              <div key={i} style={{
+                display: 'flex', gap: 12, alignItems: 'flex-start',
+                padding: '14px 16px',
+                borderTop: i ? '1px solid var(--line)' : 'none',
+              }}>
+                <div style={{
+                  width: 16, height: 16, borderRadius: 4,
+                  border: '1px solid var(--line-strong)', background: 'var(--bg-elev)',
+                  marginTop: 2, flexShrink: 0,
+                }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500 }}>{t.t}</div>
+                  <div style={{ fontSize: 11, color: t.urgent ? 'var(--err)' : t.warn ? 'var(--warn)' : 'var(--ink-3)', marginTop: 2, fontFamily: 'var(--font-mono)' }}>{t.sub}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        {/* Recent files */}
+        <Section eyebrow="5 ФАЙЛОВ" title="Открыто недавно" collapsible>
+          <div className="card" style={{ padding: 0 }}>
+            {[
+              { n: 'Карточка Спецмаш 2026.pdf', ext: 'pdf', t: '15 мин' },
+              { n: 'Доверенность 15ПП.pdf', ext: 'pdf', t: '32 мин' },
+              { n: 'ТКО 175813.docx', ext: 'doc', t: '1ч' },
+              { n: 'Реквизиты.pdf', ext: 'pdf', t: '2ч' },
+              { n: 'vin lovol.docx', ext: 'doc', t: 'вчера' },
+            ].map((f, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '12px 14px',
+                borderTop: i ? '1px solid var(--line)' : 'none',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-sunken)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+                <FileIconBox ext={f.ext} size="sm" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.n}</div>
+                </div>
+                <span className="mono-label">{f.t}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      </div>
+    </PageScroll>
+  );
+}
+
+window.HomeScreen = HomeScreen;
+
+
+// ===== hifi-screen-search.jsx =====
+// hifi-screen-search.jsx — search results with AI answer and preview drawer
+
+function SearchScreen({ state = 'results' }) {
+  // states: idle | loading | results | empty | error
+  const [searchState, setSearchState] = React.useState(state);
+  const [query, setQuery] = React.useState(state === 'idle' ? '' : 'карточка предприятия');
+  const [focused, setFocused] = React.useState(state === 'idle');
+  const [aiOn, setAiOn] = React.useState(true);
+  const [selected, setSelected] = React.useState(null);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [refineQuery, setRefineQuery] = React.useState('');
+  const [view, setView] = React.useState('list'); // list / grid / table
+  const [grouping, setGrouping] = React.useState('type'); // none / type / date
+
+  const onSubmit = () => {
+    setFocused(false);
+    setSearchState('loading');
+    setTimeout(() => setSearchState('results'), 1400);
+  };
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Top search bar */}
+      <div style={{
+        flexShrink: 0, padding: '20px 32px 12px',
+        position: 'relative', zIndex: 5,
+      }}>
+        <div style={{ maxWidth: 1320, margin: '0 auto' }}>
+          <SearchInput
+            value={query} onChange={setQuery} onSubmit={onSubmit}
+            focused={focused} setFocused={setFocused}
+            aiOn={aiOn} setAiOn={setAiOn} />
+        </div>
+      </div>
+
+      {/* Body */}
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        <div style={{ maxWidth: 1320, margin: '0 auto', padding: '8px 32px 80px' }}>
+          {searchState === 'idle' && <SearchIdle />}
+          {searchState === 'loading' && <SearchLoading />}
+          {searchState === 'empty' && <SearchEmpty query={query} />}
+          {searchState === 'results' && (
+            <SearchResults
+              query={query}
+              refineQuery={refineQuery} setRefineQuery={setRefineQuery}
+              view={view} setView={setView}
+              grouping={grouping} setGrouping={setGrouping}
+              selected={selected} setSelected={(p) => { setSelected(p); setPreviewOpen(!!p); }}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* State switcher (for demo) */}
+      <div style={{
+        position: 'fixed', top: 78, left: '50%', transform: 'translateX(-50%)',
+        zIndex: 6,
+        display: 'flex', gap: 4, padding: 4,
+        background: 'var(--bg-elev)', border: '1px solid var(--line)',
+        borderRadius: 999, boxShadow: 'var(--shadow-2)',
+        opacity: 0.6,
+      }}
+      onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+      onMouseLeave={(e) => e.currentTarget.style.opacity = '0.6'}>
+        <span className="mono-label" style={{ alignSelf: 'center', padding: '0 8px' }}>STATE:</span>
+        {['idle','loading','results','empty'].map(s => (
+          <button key={s} onClick={() => setSearchState(s)}
+            style={{
+              border: 'none', padding: '4px 10px',
+              borderRadius: 999, cursor: 'pointer',
+              background: searchState === s ? 'var(--ink)' : 'transparent',
+              color: searchState === s ? 'var(--bg-elev)' : 'var(--ink-3)',
+              fontSize: 11, fontFamily: 'var(--font-mono)',
+            }}>{s}</button>
+        ))}
+      </div>
+
+      {/* Preview drawer */}
+      <div className={'drawer ' + (previewOpen ? '' : 'closed')}>
+        {selected && <PreviewDrawer file={selected} onClose={() => { setPreviewOpen(false); setSelected(null); }} />}
+      </div>
+      {previewOpen && <div className="drawer-scrim" onClick={() => { setPreviewOpen(false); setSelected(null); }} />}
+    </div>
+  );
+}
+
+/* ── SEARCH INPUT with dropdown ───────────────────────── */
+function SearchInput({ value, onChange, onSubmit, focused, setFocused, aiOn, setAiOn }) {
+  return (
+    <div style={{ position: 'relative' }}>
+      <div className="glow-border" style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        padding: '14px 18px', height: 56,
+        background: 'var(--bg-elev)',
+        border: '1px solid ' + (focused ? 'transparent' : 'var(--line)'),
+        borderRadius: 14,
+        boxShadow: focused
+          ? '0 0 0 1px var(--brand-500), 0 24px 60px -28px color-mix(in oklch, var(--brand-500) 40%, transparent)'
+          : 'var(--shadow-1)',
+        transition: 'box-shadow 200ms',
+      }}>
+        <span style={{ color: focused ? 'var(--brand-500)' : 'var(--ink-3)' }}>
+          {Icon.search({ width: 20, height: 20 })}
+        </span>
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setTimeout(() => setFocused(false), 200)}
+          onKeyDown={(e) => e.key === 'Enter' && onSubmit()}
+          placeholder="Спросите по-человечески: название, номер, контрагента, фразу из документа…"
+          style={{
+            flex: 1, border: 'none', outline: 'none', background: 'transparent',
+            fontSize: 16, color: 'var(--ink)', fontFamily: 'var(--font-text)', fontWeight: 500,
+          }}
+        />
+        <button
+          onClick={() => setAiOn(!aiOn)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 10px', borderRadius: 999,
+            border: '1px solid ' + (aiOn ? 'color-mix(in oklch, var(--brand-500) 40%, transparent)' : 'var(--line)'),
+            background: aiOn ? 'color-mix(in oklch, var(--brand-500) 10%, var(--bg-elev))' : 'transparent',
+            color: aiOn ? 'var(--brand-500)' : 'var(--ink-3)',
+            cursor: 'pointer', fontSize: 11, fontFamily: 'var(--font-mono)',
+            textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600,
+          }}>
+          {Icon.ai()}
+          <span>AI</span>
+        </button>
+        <Kbd>⌘K</Kbd>
+        <button className="btn btn-primary" onClick={onSubmit} style={{ padding: '8px 14px' }}>
+          Найти {Icon.arrow()}
+        </button>
+      </div>
+
+      {focused && (
+        <div className="glass" style={{
+          position: 'absolute', top: 'calc(100% + 8px)', left: 0, right: 0,
+          borderRadius: 12, boxShadow: 'var(--shadow-3)',
+          zIndex: 10, padding: 16,
+          display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 24,
+        }}>
+          <div>
+            <div className="mono-label" style={{ color: 'var(--brand-500)', marginBottom: 10 }}>СОХРАНЁННЫЕ</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {['Договоры поставки 2026', 'Карточки ИП', 'PC300 паспорта'].map((q, i) => (
+                <SuggestItem key={i} icon={Icon.bookmark} text={q} />
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="mono-label" style={{ color: 'var(--brand-500)', marginBottom: 10 }}>МОЯ ИСТОРИЯ</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {['карточка предприятия', 'PC300', 'паспорт цыбусов', 'доверенность Грищенко'].map((q, i) => (
+                <SuggestItem key={i} icon={Icon.history} text={q} />
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="mono-label" style={{ color: 'var(--brand-500)', marginBottom: 10 }}>ЧАСТО ИЩУТ</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {['Спецмаш', 'vin lovol', 'PC300', 'Сколько весит PC300'].map((q, i) => (
+                <SuggestItem key={i} icon={Icon.trend} text={q} count={[14,12,16,8][i]} />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SuggestItem({ icon, text, count }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '6px 8px', borderRadius: 6,
+      cursor: 'pointer',
+    }}
+    onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-sunken)'}
+    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+      <span style={{ color: 'var(--ink-3)' }}>{icon({ width: 14, height: 14 })}</span>
+      <span style={{ flex: 1, fontSize: 13 }}>{text}</span>
+      {count != null && <span className="mono-label">{count}</span>}
+    </div>
+  );
+}
+
+/* ── IDLE STATE ──────────────────────────────────────── */
+function SearchIdle() {
+  return (
+    <div style={{ paddingTop: 60 }}>
+      <div style={{ textAlign: 'center', maxWidth: 720, margin: '0 auto' }}>
+        <div className="mono-label" style={{ marginBottom: 16 }}>35 167 ДОКУМЕНТОВ ГОТОВЫ ОТВЕТИТЬ</div>
+        <h1 style={{
+          fontFamily: 'var(--font-display)', fontWeight: 800,
+          fontSize: 64, lineHeight: 1, letterSpacing: '-0.04em',
+          margin: '0 0 16px',
+        }}>
+          Что <span style={{ fontFamily: 'var(--font-serif)', fontStyle: 'italic', fontWeight: 400 }}>ищете</span>?
+        </h1>
+        <p style={{ color: 'var(--ink-3)', fontSize: 16, margin: '0 0 40px' }}>
+          Кликните в поле поиска или нажмите <Kbd>⌘K</Kbd>
+        </p>
+
+        {/* Recent searches as cards */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, textAlign: 'left' }}>
+          {[
+            { q: 'карточка предприятия', t: '14:23', n: 50 },
+            { q: 'PC300 паспорт', t: '12:08', n: 16 },
+            { q: 'Спецмаш PC300', t: '11:42', n: 14 },
+            { q: 'паспорт цыбусов', t: '10:15', n: 11 },
+          ].map((h, i) => (
+            <div key={i} className="card" style={{ cursor: 'pointer', padding: 16 }}
+              onMouseEnter={(e) => e.currentTarget.style.borderColor = 'color-mix(in oklch, var(--brand-500) 30%, var(--line))'}
+              onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--line)'}>
+              <div className="row-between" style={{ marginBottom: 8 }}>
+                <span className="mono-label">{h.t}</span>
+                <span className="mono-num" style={{ fontSize: 11, color: 'var(--ink-3)' }}>{h.n} результатов</span>
+              </div>
+              <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 15 }}>{h.q}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── LOADING STATE ───────────────────────────────────── */
+function SearchLoading() {
+  return (
+    <div style={{ paddingTop: 24 }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 24 }}>
+        <span className="dot dot-info" />
+        <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>Ищу совпадения…</span>
+        <span className="mono-label">проверяю 35 167 документов</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {[0,1,2,3,4,5].map(i => (
+          <div key={i} style={{
+            display: 'grid', gridTemplateColumns: '40px 1fr 100px 100px 60px',
+            gap: 14, padding: 16, alignItems: 'center',
+            background: 'var(--bg-elev)', border: '1px solid var(--line)',
+            borderRadius: 6,
+          }}>
+            <Skeleton width={40} height={40} style={{ borderRadius: 6 }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Skeleton width={`${50 + Math.random() * 30}%`} height={16} />
+              <Skeleton width={`${30 + Math.random() * 25}%`} height={11} />
+            </div>
+            <Skeleton width={70} height={11} />
+            <Skeleton width={80} height={11} />
+            <Skeleton width={40} height={11} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── EMPTY STATE ─────────────────────────────────────── */
+function SearchEmpty({ query }) {
+  return (
+    <div style={{ paddingTop: 80 }}>
+      <EmptyState
+        icon={Icon.search({ width: 28, height: 28 })}
+        title={<>Ничего не нашли по «<span style={{ color: 'var(--brand-500)' }}>{query}</span>»</>}
+        description="Попробуйте другие слова, отключите фильтр или включите AI-расширение запроса."
+        action={
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button className="btn btn-secondary btn-sm">{Icon.ai()} включить AI</button>
+            <button className="btn btn-secondary btn-sm">{Icon.filter()} убрать фильтры</button>
+            <button className="btn btn-ghost btn-sm">Найти в Cloud Drive</button>
+          </div>
+        }
+      />
+    </div>
+  );
+}
+
+/* ── RESULTS ─────────────────────────────────────────── */
+function SearchResults({ query, refineQuery, setRefineQuery, view, setView, grouping, setGrouping, selected, setSelected }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* AI answer */}
+      <AIAnswer query={query} />
+
+      {/* Stats + Refine */}
+      <div className="card" style={{
+        padding: '14px 18px',
+        display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap',
+      }}>
+        <div>
+          <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 22, letterSpacing: '-0.02em' }}>
+            50 <span style={{ color: 'var(--ink-3)', fontSize: 14, fontWeight: 400 }}>результатов</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 16, paddingLeft: 16, borderLeft: '1px solid var(--line)' }}>
+          {[
+            { l: 'в названиях', v: 8, c: 'var(--ok)' },
+            { l: 'в содержимом', v: 4, c: 'var(--brand-500)' },
+            { l: 'семантически близкие', v: 38, c: 'var(--ink-3)' },
+          ].map((s, i) => (
+            <div key={i}>
+              <div className="mono-num" style={{ fontSize: 20, fontWeight: 700, color: s.c, letterSpacing: '-0.02em' }}>{s.v}</div>
+              <div className="mono-label" style={{ marginTop: 2 }}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center', flex: 1, minWidth: 280, maxWidth: 460 }}>
+          <span className="mono-label">↳ уточнить:</span>
+          <div className="input" style={{ flex: 1, height: 32 }}>
+            <input
+              value={refineQuery}
+              onChange={(e) => setRefineQuery(e.target.value)}
+              placeholder="искать в найденных…"
+              style={{ fontSize: 13 }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Active refinements */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="mono-label">фильтры:</span>
+        <Chip variant="primary" onClose={() => {}}>× Спецмаш</Chip>
+        <Chip variant="primary" onClose={() => {}}>× docx</Chip>
+        <Chip variant="primary" onClose={() => {}}>× 2026</Chip>
+        <Chip>+ тип</Chip>
+        <Chip>+ дата</Chip>
+        <Chip>+ каталог</Chip>
+        <Chip>+ автор</Chip>
+        <Chip>+ автор</Chip>
+      </div>
+
+      {/* Toolbar */}
+      <Toolbar
+        left={
+          <>
+            <span className="mono-label">сорт:</span>
+            <div className="tab-group">
+              <button className="active">релевантность</button>
+              <button>дата ↓</button>
+              <button>имя</button>
+              <button>размер</button>
+            </div>
+            <span className="mono-label" style={{ marginLeft: 8 }}>группа:</span>
+            <div className="tab-group">
+              <button className={grouping === 'none' ? 'active' : ''} onClick={() => setGrouping('none')}>нет</button>
+              <button className={grouping === 'type' ? 'active' : ''} onClick={() => setGrouping('type')}>тип</button>
+              <button className={grouping === 'date' ? 'active' : ''} onClick={() => setGrouping('date')}>дата</button>
+            </div>
+          </>
+        }
+        right={
+          <>
+            <div className="tab-group">
+              <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}>{Icon.list({ width: 14, height: 14 })}</button>
+              <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')}>{Icon.grid({ width: 14, height: 14 })}</button>
+            </div>
+            <button className="btn btn-ghost btn-sm">{Icon.download()} CSV</button>
+          </>
+        }
+      />
+
+      {/* Group: Folders */}
+      <ResultGroup label="ПАПКИ" count={3} color="var(--accent-amber)">
+        {[
+          { name: 'Карточки предприятий', path: 'Магазин / Карточки предпр.', meta: '— · 14 файлов', score: 0.999, ext: 'folder', date: '12.04.2026' },
+          { name: 'Карточки предприятий (резерв)', path: 'Магазин / Рабочий стол / Карточки', meta: '— · 8 файлов', score: 0.999, ext: 'folder', date: '11.04.2026' },
+          { name: 'Карточка предпр., доверенности', path: 'Магазин / Нужное / Карточки', meta: '— · 22 файла', score: 0.997, ext: 'folder', date: '08.04.2026' },
+        ].map((r, i) => (
+          <ResultRow key={i} {...r} selected={selected?.name === r.name}
+            onClick={() => setSelected(r)} />
+        ))}
+      </ResultGroup>
+
+      <ResultGroup label="DOCX" count={4} color="var(--brand-500)">
+        {[
+          { name: 'ООО Спецмаш (почта, телефон).docx', path: 'Магазин / Карточки / ООО Спецмаш', meta: '98 КБ', score: 0.997, ext: 'docx', date: '04.04.2026' },
+          { name: 'Карточка предпр. Спецмаш 2026.docx', path: 'Магазин / Нужное / Карточки', meta: '158 КБ', score: 0.997, ext: 'docx', date: '05.04.2026' },
+          { name: 'Перечень документов ООО Спецмаш.docx', path: 'Магазин / Карточки', meta: '64 КБ', score: 0.993, ext: 'docx', date: '03.04.2026' },
+          { name: 'ООО Габдуллин (карточка).docx', path: 'Магазин / Карточки', meta: '108 КБ', score: 0.985, ext: 'docx', date: '01.04.2026' },
+        ].map((r, i) => (
+          <ResultRow key={i} {...r} selected={selected?.name === r.name}
+            onClick={() => setSelected(r)} />
+        ))}
+      </ResultGroup>
+
+      <ResultGroup label="PDF" count={3} color="var(--err)">
+        {[
+          { name: 'Карточка предприятия Спецмаш 2026.pdf', path: 'Магазин / Нужное / Карточки', meta: '1.4 МБ', score: 0.997, ext: 'pdf', date: '05.04.2026' },
+          { name: 'Доверенность 15ПП Грищенко А.Е.pdf', path: 'Магазин / Нужное / Счета на оплату', meta: '480 КБ', score: 0.996, ext: 'pdf', date: '06.04.2026' },
+          { name: 'Реквизиты ООО Спецмаш.pdf', path: 'Магазин / Карточки', meta: '220 КБ', score: 0.991, ext: 'pdf', date: '02.04.2026' },
+        ].map((r, i) => (
+          <ResultRow key={i} {...r} selected={selected?.name === r.name}
+            onClick={() => setSelected(r)} />
+        ))}
+      </ResultGroup>
+    </div>
+  );
+}
+
+/* ── AI Answer card ──────────────────────────────────── */
+function AIAnswer({ query }) {
+  const [expanded, setExpanded] = React.useState(false);
+  return (
+    <div style={{
+      position: 'relative', overflow: 'hidden',
+      padding: 1,
+      borderRadius: 12,
+      background: 'linear-gradient(135deg, color-mix(in oklch, var(--brand-500) 30%, transparent), transparent 40%, color-mix(in oklch, var(--accent-cyan) 20%, transparent))',
+    }}>
+      <div style={{
+        background: 'linear-gradient(135deg, color-mix(in oklch, var(--brand-500) 4%, var(--bg-elev)), var(--bg-elev) 50%)',
+        borderRadius: 11, padding: '18px 22px',
+        position: 'relative',
+      }}>
+        <div style={{
+          position: 'absolute', top: 0, right: 0,
+          width: 220, height: 100,
+          background: 'radial-gradient(circle at 70% 30%, color-mix(in oklch, var(--accent-cyan) 14%, transparent), transparent 70%)',
+          pointerEvents: 'none',
+        }}/>
+        <div className="row-between" style={{ marginBottom: 12, position: 'relative' }}>
+          <div className="row" style={{ gap: 10 }}>
+            <span style={{
+              width: 28, height: 28, borderRadius: 8,
+              background: 'linear-gradient(135deg, var(--brand-500), var(--accent-cyan))',
+              display: 'grid', placeItems: 'center', color: 'white',
+              boxShadow: '0 4px 16px -4px color-mix(in oklch, var(--brand-500) 50%, transparent)',
+            }}>{Icon.sparkle()}</span>
+            <div>
+              <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>AI ответ</div>
+              <div className="mono-label">qwen3:8b · 0.84с · 7 источников</div>
+            </div>
+          </div>
+          <button onClick={() => setExpanded(!expanded)} className="btn btn-ghost btn-sm">
+            {expanded ? 'Свернуть' : 'Раскрыть полностью'} {expanded ? Icon.chevronUp() : Icon.chevronDown()}
+          </button>
+        </div>
+
+        <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0, position: 'relative' }}>
+          Найдено <b>50 документов</b> по запросу «<span style={{ color: 'var(--brand-500)' }}>{query}</span>». Основная папка — <b>«Карточки предприятий»</b> в разделе Магазин (3 каталога), плюс отдельные документы по конкретным организациям: ООО Спецмаш (12 файлов), ИП Габдуллин (4 файла), ООО Сбербанк (2 файла).
+          {expanded && <>
+            <br/><br/>
+            Самый полный комплект — папка <b>«Магазин/Карточки предприятий»</b>: содержит реквизиты, доверенности, ТТН за 2026 год. Документы датированы апрелем 2026 года. Для ООО Спецмаш также есть отдельная папка с историческими версиями карточек.
+          </>}
+        </p>
+
+        <div style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap' }}>
+          <Chip variant="primary" icon={Icon.folder({ width: 12, height: 12 })}>Карточки предприятий</Chip>
+          <Chip variant="primary" icon={Icon.file({ width: 12, height: 12 })}>ООО Спецмаш.docx</Chip>
+          <Chip variant="primary" icon={Icon.file({ width: 12, height: 12 })}>Карточка 2026.pdf</Chip>
+          <Chip>+4 ещё</Chip>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResultGroup({ label, count, color, children }) {
+  return (
+    <div>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '12px 4px 8px',
+      }}>
+        <span style={{
+          width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0,
+          boxShadow: `0 0 8px ${color}`,
+        }} />
+        <span className="mono-label" style={{ fontWeight: 700, color: 'var(--ink-2)' }}>{label}</span>
+        <span className="mono-label">· {count}</span>
+        <span style={{ flex: 1, height: 1, background: 'var(--line)', marginLeft: 8 }} />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ResultRow({ name, path, meta, score, ext, date, selected, onClick }) {
+  return (
+    <div className={'result-row ' + (selected ? 'selected' : '')} onClick={onClick}>
+      <div className="check-box" onClick={(e) => e.stopPropagation()}>
+        {selected && Icon.check({ width: 10, height: 10 })}
+      </div>
+      <FileIconBox ext={ext} size="lg" />
+      <div style={{ minWidth: 0 }}>
+        <div className="result-name">{name}</div>
+        <div className="result-path">{path}</div>
+      </div>
+      <div className="result-meta">{meta}</div>
+      <div className="result-meta">{date}</div>
+      <div className="result-actions" onClick={(e) => e.stopPropagation()}>⋯</div>
+    </div>
+  );
+}
+
+/* ── PREVIEW DRAWER ──────────────────────────────────── */
+function PreviewDrawer({ file, onClose }) {
+  const [tab, setTab] = React.useState('preview');
+  return (
+    <>
+      {/* Header */}
+      <div style={{
+        flexShrink: 0, padding: '16px 20px',
+        borderBottom: '1px solid var(--line)',
+        display: 'flex', alignItems: 'center', gap: 12,
+      }}>
+        <FileIconBox ext={file.ext} size="md" />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{file.name}</div>
+          <div className="mono-label">{file.path}</div>
+        </div>
+        <button className="btn btn-ghost btn-icon" onClick={onClose}>{Icon.close()}</button>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ flexShrink: 0, display: 'flex', gap: 0, borderBottom: '1px solid var(--line)', padding: '0 20px' }}>
+        {[
+          { k: 'preview', l: 'Превью' },
+          { k: 'meta', l: 'Метаданные' },
+          { k: 'related', l: 'Связанные · 8' },
+          { k: 'chunks', l: 'Чанки · 24' },
+        ].map(t => (
+          <button key={t.k} onClick={() => setTab(t.k)}
+            style={{
+              position: 'relative', padding: '14px 12px',
+              border: 'none', background: 'transparent', cursor: 'pointer',
+              fontSize: 13, fontWeight: 500,
+              color: tab === t.k ? 'var(--ink)' : 'var(--ink-3)',
+            }}>
+            {t.l}
+            {tab === t.k && (
+              <span style={{
+                position: 'absolute', bottom: -1, left: 12, right: 12,
+                height: 2, background: 'var(--brand-500)',
+                boxShadow: '0 0 12px color-mix(in oklch, var(--brand-500) 50%, transparent)',
+              }} />
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Body */}
+      <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
+        {tab === 'preview' && (
+          <div>
+            <div style={{
+              background: '#fafaf7', border: '1px solid var(--line)',
+              borderRadius: 8, padding: '32px 36px',
+              fontFamily: 'var(--font-serif)', fontSize: 14, lineHeight: 1.7,
+              color: '#222',
+              minHeight: 400,
+            }}>
+              <h3 style={{ fontFamily: 'var(--font-display)', textAlign: 'center', margin: '0 0 24px' }}>КАРТОЧКА ПРЕДПРИЯТИЯ</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 8 }}>
+                {[
+                  ['Наименование', 'ООО «Спецмаш»'],
+                  ['ИНН', '7704123456'],
+                  ['КПП', '770401001'],
+                  ['ОГРН', '1027700123456'],
+                  ['Адрес', 'г. Москва, ул. Промышленная, д. 17'],
+                  ['Телефон', '+7 (495) 123-45-67'],
+                  ['Email', 'info@specmash.ru'],
+                  ['Расч. счёт', '40702810400000012345'],
+                ].map(([k, v], i) => (
+                  <React.Fragment key={i}>
+                    <span style={{ color: '#666' }}>{k}</span>
+                    <span style={{ background: i === 4 ? '#fef3c7' : 'transparent', padding: '0 4px' }}>{v}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+        {tab === 'meta' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {[
+              ['Размер', '98 КБ'],
+              ['Тип', '.docx (Word)'],
+              ['Создан', '03.04.2026 14:23'],
+              ['Изменён', '04.04.2026 14:23'],
+              ['Автор', 'a.ivanov'],
+              ['Каталог', 'Магазин / Карточки'],
+              ['Чанков', '24 (small) · 6 (large)'],
+              ['В индексе', '✓ актуален · 04.05 03:14'],
+              ['ИНН найден', '7704123456'],
+              ['Релевантность', '0.997'],
+            ].map(([k, v], i) => (
+              <div key={i} style={{
+                display: 'grid', gridTemplateColumns: '140px 1fr',
+                padding: '10px 0',
+                borderBottom: '1px solid var(--line)',
+              }}>
+                <span className="mono-label">{k}</span>
+                <span className="mono-num" style={{ fontSize: 13 }}>{v}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {tab === 'related' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[
+              { n: 'ООО Спецмаш (история).docx', ext: 'docx' },
+              { n: 'Доверенность 15ПП Грищенко.pdf', ext: 'pdf' },
+              { n: 'Реквизиты Спецмаш.pdf', ext: 'pdf' },
+              { n: 'ТТН Спецмаш 2026.docx', ext: 'docx' },
+            ].map((f, i) => (
+              <div key={i} className="result-row" style={{ gridTemplateColumns: '40px 1fr auto' }}>
+                <FileIconBox ext={f.ext} size="md" />
+                <div className="result-name">{f.n}</div>
+                <Chip>{Icon.link({ width: 12, height: 12 })}</Chip>
+              </div>
+            ))}
+          </div>
+        )}
+        {tab === 'chunks' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} style={{
+                padding: 12, border: '1px solid var(--line)',
+                borderRadius: 6, background: 'var(--bg-sunken)',
+              }}>
+                <div className="mono-label" style={{ marginBottom: 8 }}>chunk #{i + 1} · small · 512 токенов</div>
+                <div style={{ color: 'var(--ink-2)', lineHeight: 1.5 }}>
+                  ООО «Спецмаш» — поставщик специальной техники. Основная сфера деятельности — комплектация горнодобывающих предприятий…
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div style={{
+        flexShrink: 0, padding: 16,
+        borderTop: '1px solid var(--line)',
+        display: 'flex', gap: 8, flexWrap: 'wrap',
+      }}>
+        <button className="btn btn-primary btn-sm" style={{ flex: 1 }}>{Icon.download()} Скачать</button>
+        <button className="btn btn-secondary btn-sm">{Icon.external()} Открыть</button>
+        <button className="btn btn-secondary btn-sm">{Icon.folder()} В проводник</button>
+        <button className="btn btn-ghost btn-sm">{Icon.star()} </button>
+        <button className="btn btn-ghost btn-sm">{Icon.thumbUp()} </button>
+        <button className="btn btn-ghost btn-sm">{Icon.thumbDown()} </button>
+        <button className="btn btn-ghost btn-sm">{Icon.more()}</button>
+      </div>
+    </>
+  );
+}
+
+window.SearchScreen = SearchScreen;
+
+
+// ===== hifi-screen-explorer.jsx =====
+// hifi-screen-explorer.jsx — Explorer + Cloud Drive screens
+
+function ExplorerScreen({ initial = 'fs' }) {
+  const [mode, setMode] = React.useState(initial); // 'fs' | 'cloud'
+  return mode === 'cloud' ? <CloudDriveScreen onSwitchFs={() => setMode('fs')} /> : <FsExplorer onSwitchCloud={() => setMode('cloud')} />;
+}
+
+/* ── FS Explorer ─────────────────────────────────────── */
+function FsExplorer() {
+  const [view, setView] = React.useState('details'); // grid | medium | small | details
+  const [selected, setSelected] = React.useState(null);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Header strip */}
+      <div style={{ flexShrink: 0, padding: '16px 32px 8px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="row" style={{ gap: 4 }}>
+          <button className="btn btn-ghost btn-icon">{Icon.arrowLeft()}</button>
+          <button className="btn btn-ghost btn-icon">{Icon.arrowRight()}</button>
+          <button className="btn btn-ghost btn-icon">{Icon.chevronUp()}</button>
+          <button className="btn btn-ghost btn-icon">{Icon.refresh()}</button>
+        </div>
+
+        {/* Breadcrumbs */}
+        <div className="row" style={{ flex: 1, padding: '6px 12px', background: 'var(--bg-elev)', border: '1px solid var(--line)', borderRadius: 6, gap: 4, fontSize: 13 }}>
+          {Icon.folderOpen({ width: 14, height: 14 })}
+          {['Магазин', 'Карточки предпр.', 'ООО Спецмаш'].map((p, i, arr) => (
+            <React.Fragment key={i}>
+              <span style={{ cursor: 'pointer', color: i === arr.length - 1 ? 'var(--ink)' : 'var(--ink-3)', fontWeight: i === arr.length - 1 ? 600 : 400 }}>{p}</span>
+              {i < arr.length - 1 && <span style={{ color: 'var(--ink-4)' }}>›</span>}
+            </React.Fragment>
+          ))}
+        </div>
+
+        {/* Local search */}
+        <div className="input" style={{ width: 280 }}>
+          {Icon.search({ width: 14, height: 14, stroke: 'var(--ink-3)' })}
+          <input placeholder="семантический поиск в этой папке…" style={{ fontSize: 13 }} />
+        </div>
+      </div>
+
+      {/* Toolbar */}
+      <div style={{ flexShrink: 0, padding: '0 32px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <button className="btn btn-secondary btn-sm">{Icon.upload()} Загрузить</button>
+        <button className="btn btn-ghost btn-sm">{Icon.plus()} Папка</button>
+        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
+        <Chip>тип: все</Chip>
+        <Chip>изменён: за месяц</Chip>
+        <Chip>размер: любой</Chip>
+        <button className="btn btn-ghost btn-sm">{Icon.plus()} фильтр</button>
+
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span className="mono-label">сорт:</span>
+          <div className="tab-group">
+            <button className="active">имя ↑</button>
+            <button>дата</button>
+            <button>тип</button>
+            <button>размер</button>
+          </div>
+          <div className="tab-group">
+            <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')} title="Крупные значки">{Icon.grid({ width: 12, height: 12 })}</button>
+            <button className={view === 'medium' ? 'active' : ''} onClick={() => setView('medium')} title="Средние значки">{Icon.grid({ width: 10, height: 10 })}</button>
+            <button className={view === 'small' ? 'active' : ''} onClick={() => setView('small')} title="Мелкие">{Icon.list({ width: 12, height: 12 })}</button>
+            <button className={view === 'details' ? 'active' : ''} onClick={() => setView('details')} title="Детали">{Icon.list({ width: 14, height: 14 })}</button>
+          </div>
+        </div>
+      </div>
+
+      {/* Body: tree + files + (drawer) */}
+      <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: '240px 1fr', gap: 0, padding: '0 32px 32px' }}>
+        {/* Tree */}
+        <aside style={{
+          background: 'var(--bg-elev)', border: '1px solid var(--line)',
+          borderRadius: 8, padding: 12, overflow: 'auto',
+        }}>
+          <div className="input" style={{ height: 30, marginBottom: 12 }}>
+            {Icon.search({ width: 12, height: 12 })}
+            <input placeholder="фильтр дерева…" style={{ fontSize: 12 }} />
+          </div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>ИЗБРАННОЕ</div>
+          {[
+            { l: 'Карточки 2026', s: true },
+            { l: 'Договоры', s: true },
+          ].map((it, i) => (
+            <TreeNode key={i} label={it.l} starred icon={Icon.folder} />
+          ))}
+          <div className="mono-label" style={{ margin: '14px 0 6px' }}>ДЕРЕВО</div>
+          <TreeNode label="📁 Магазин" expanded ancestor depth={0}>
+            <TreeNode label="📁 Бухгалтерия" depth={1} />
+            <TreeNode label="📁 Карточки предпр." expanded ancestor depth={1}>
+              <TreeNode label="📁 ООО Габдуллин" depth={2} />
+              <TreeNode label="📁 ООО Спецмаш" depth={2} active />
+              <TreeNode label="📁 ИП Дураков" depth={2} />
+            </TreeNode>
+            <TreeNode label="📁 Тендер 2022" depth={1} />
+            <TreeNode label="📁 ОСАГО" depth={1} />
+          </TreeNode>
+          <TreeNode label="📁 Обмен" depth={0} />
+          <TreeNode label="📁 Архив 2024" depth={0} />
+        </aside>
+
+        {/* Files */}
+        <div style={{ minWidth: 0, padding: '0 0 0 16px', overflow: 'auto' }}>
+          {view === 'details' && <FilesDetails onSelect={(f) => { setSelected(f); setPreviewOpen(true); }} selected={selected} />}
+          {(view === 'grid' || view === 'medium') && <FilesGrid view={view} onSelect={(f) => { setSelected(f); setPreviewOpen(true); }} selected={selected} />}
+          {view === 'small' && <FilesSmall onSelect={(f) => { setSelected(f); setPreviewOpen(true); }} selected={selected} />}
+
+          {/* status bar */}
+          <div style={{
+            position: 'sticky', bottom: 0,
+            display: 'flex', justifyContent: 'space-between',
+            padding: '10px 0 0',
+            marginTop: 16, borderTop: '1px solid var(--line)',
+            background: 'var(--bg)',
+            fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)',
+          }}>
+            <span>75 папок · 120 файлов · 4.2 ГБ</span>
+            <span>выбрано: {selected ? '1 файл' : '—'}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Preview drawer (reuse from search) */}
+      <div className={'drawer ' + (previewOpen ? '' : 'closed')}>
+        {selected && <PreviewDrawer file={selected} onClose={() => { setPreviewOpen(false); setSelected(null); }} />}
+      </div>
+      {previewOpen && <div className="drawer-scrim" onClick={() => { setPreviewOpen(false); setSelected(null); }} />}
+    </div>
+  );
+}
+
+/* ── TreeNode ────────────────────────────────────────── */
+function TreeNode({ label, depth = 0, expanded = false, active = false, ancestor = false, starred = false, children, icon }) {
+  const [open, setOpen] = React.useState(expanded);
+  return (
+    <div>
+      <div
+        onClick={() => setOpen(!open)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: `5px ${8 + depth * 14}px 5px ${8 + depth * 14}px`,
+          borderRadius: 4,
+          background: active ? 'color-mix(in oklch, var(--brand-500) 14%, transparent)' : 'transparent',
+          color: active ? 'var(--brand-500)' : ancestor ? 'var(--ink)' : 'var(--ink-2)',
+          fontWeight: active ? 700 : ancestor ? 600 : 400,
+          fontSize: 12, cursor: 'pointer',
+        }}
+        onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--bg-sunken)'; }}
+        onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
+        {children && (
+          <span style={{ color: 'var(--ink-3)', flexShrink: 0 }}>
+            {open ? Icon.chevronDown({ width: 12, height: 12 }) : Icon.chevronRight({ width: 12, height: 12 })}
+          </span>
+        )}
+        {!children && <span style={{ width: 12, flexShrink: 0 }} />}
+        <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+        {starred && <span style={{ color: '#f6b700' }}>{Icon.starFilled({ width: 12, height: 12 })}</span>}
+      </div>
+      {open && children}
+    </div>
+  );
+}
+
+/* ── Files in details view ───────────────────────────── */
+function FilesDetails({ onSelect, selected }) {
+  const files = [
+    { n: '1Фактуры ТСК', ext: 'folder', d: '12.04 14:15', s: '—', a: 'admin', idx: '✓' },
+    { n: 'Анастасия диспетчер', ext: 'folder', d: '11.04 16:22', s: '—', a: 'test', idx: '✓' },
+    { n: 'Бланки путевок.pdf', ext: 'pdf', d: '12.04 14:15', s: '142 КБ', a: 'admin', idx: '✓' },
+    { n: 'ВТН 30.06.2025.docx', ext: 'docx', d: '03.04 14:23', s: '98 КБ', a: 'admin', idx: '✓' },
+    { n: 'Выписка из банка.pdf', ext: 'pdf', d: '02.04 11:08', s: '220 КБ', a: 'alex', idx: '✓' },
+    { n: 'Голгофа Татьяна', ext: 'folder', d: '12.04 14:15', s: '—', a: 'admin', idx: '✓' },
+    { n: 'Грузовые автомобили.pdf', ext: 'pdf', d: '01.04 09:00', s: '1.2 МБ', a: 'admin', idx: '○' },
+    { n: 'ГТСК.docx', ext: 'docx', d: '04.04 14:22', s: '64 КБ', a: 'test', idx: '✓' },
+    { n: 'Для Дмитрия', ext: 'folder', d: '12.04 14:15', s: '—', a: 'admin', idx: '✓' },
+    { n: 'Для Евгении.jpg', ext: 'jpg', d: '10.04 18:30', s: '340 КБ', a: 'admin', idx: '✓' },
+    { n: 'ДЛЯ ЗАПИСИ В.pdf', ext: 'pdf', d: '12.04 14:15', s: '340 КБ', a: 'admin', idx: '✓' },
+    { n: 'для регистрации.docx', ext: 'docx', d: '12.04 14:15', s: '158 КБ', a: 'admin', idx: '✓' },
+    { n: 'Документы.docx', ext: 'docx', d: '12.04 14:15', s: '108 КБ', a: 'admin', idx: '✓' },
+    { n: 'Документы водителей.pdf', ext: 'pdf', d: '12.04 14:15', s: '420 КБ', a: 'admin', idx: '✓' },
+  ];
+
+  return (
+    <div style={{ background: 'var(--bg-elev)', border: '1px solid var(--line)', borderRadius: 8, overflow: 'hidden' }}>
+      <div style={{
+        display: 'grid', gridTemplateColumns: '28px 1fr 100px 90px 80px 60px',
+        gap: 14, padding: '10px 14px',
+        background: 'var(--bg-sunken)', borderBottom: '1px solid var(--line)',
+      }}>
+        <span></span>
+        <span className="mono-label" style={{ fontWeight: 700 }}>Имя ↑</span>
+        <span className="mono-label" style={{ fontWeight: 700 }}>Изменён</span>
+        <span className="mono-label" style={{ fontWeight: 700 }}>Размер</span>
+        <span className="mono-label" style={{ fontWeight: 700 }}>Автор</span>
+        <span className="mono-label" style={{ fontWeight: 700 }}>Индекс</span>
+      </div>
+      {files.map((f, i) => {
+        const isSel = selected?.n === f.n;
+        return (
+          <div key={i}
+            onClick={() => onSelect({ ...f, name: f.n, path: 'Магазин/Карточки/ООО Спецмаш', meta: f.s, ext: f.ext, date: f.d })}
+            style={{
+              display: 'grid', gridTemplateColumns: '28px 1fr 100px 90px 80px 60px',
+              gap: 14, padding: '8px 14px', alignItems: 'center',
+              background: isSel ? 'color-mix(in oklch, var(--brand-500) 8%, var(--bg-elev))' : 'transparent',
+              borderBottom: i < files.length - 1 ? '1px solid var(--line)' : 'none',
+              cursor: 'pointer', position: 'relative',
+            }}
+            onMouseEnter={(e) => { if (!isSel) e.currentTarget.style.background = 'var(--bg-sunken)'; }}
+            onMouseLeave={(e) => { if (!isSel) e.currentTarget.style.background = 'transparent'; }}>
+            <FileIconBox ext={f.ext} size="sm" />
+            <div style={{ fontSize: 13, fontWeight: isSel ? 600 : 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.n}</div>
+            <span className="mono-num" style={{ fontSize: 11, color: 'var(--ink-3)' }}>{f.d}</span>
+            <span className="mono-num" style={{ fontSize: 11, color: 'var(--ink-3)' }}>{f.s}</span>
+            <span className="mono-num" style={{ fontSize: 11, color: 'var(--ink-3)' }}>{f.a}</span>
+            <span style={{ fontSize: 12, color: f.idx === '✓' ? 'var(--ok)' : 'var(--ink-4)', fontFamily: 'var(--font-mono)' }}>{f.idx}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FilesGrid({ view, onSelect, selected }) {
+  const size = view === 'grid' ? 160 : 120;
+  const files = Array.from({ length: 18 }).map((_, i) => {
+    const exts = ['folder','folder','pdf','docx','xls','folder','pdf','docx','folder','jpg','pdf','docx','folder','folder','xls','docx','pdf','folder'];
+    const names = ['1Фактуры', 'Анастасия', 'Бланки.pdf', 'ВТН.docx', 'Выписка.pdf', 'Голгофа', 'Грузовые.pdf', 'ГТСК.docx', 'Дмитрию', 'Евгении.jpg', 'ДЛЯ ЗАПИСИ.pdf', 'регистрации.docx', 'Сергей', 'магазина', 'Договора.xlsx', 'Документы.docx', 'водителей.pdf', 'Демидов'];
+    return { ext: exts[i], n: names[i] };
+  });
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${size}px, 1fr))`, gap: 8 }}>
+      {files.map((f, i) => {
+        const isSel = selected?.n === f.n;
+        return (
+          <div key={i}
+            onClick={() => onSelect({ ...f, name: f.n, path: 'Магазин/Карточки', meta: '142 КБ', ext: f.ext, date: '12.04' })}
+            style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+              padding: 14, borderRadius: 8,
+              background: isSel ? 'color-mix(in oklch, var(--brand-500) 8%, var(--bg-elev))' : 'var(--bg-elev)',
+              border: '1px solid ' + (isSel ? 'color-mix(in oklch, var(--brand-500) 40%, var(--line))' : 'var(--line)'),
+              cursor: 'pointer', position: 'relative',
+            }}>
+            <FileIconBox ext={f.ext} size="lg" />
+            <span style={{ fontSize: 12, textAlign: 'center', lineHeight: 1.3, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{f.n}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FilesSmall({ onSelect, selected }) {
+  return <FilesGrid view="medium" onSelect={onSelect} selected={selected} />;
+}
+
+/* ─────────────── CLOUD DRIVE ──────────────────────────── */
+function CloudDriveScreen() {
+  const [hasFiles, setHasFiles] = React.useState(true);
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Mode toggle / breadcrumbs */}
+      <div style={{ flexShrink: 0, padding: '20px 32px 12px' }}>
+        <div className="row-between">
+          <div>
+            <div className="mono-label" style={{ marginBottom: 6 }}>CLOUD STORAGE · ACL АКТИВЕН</div>
+            <h1 style={{
+              fontFamily: 'var(--font-display)', fontWeight: 800,
+              fontSize: 32, margin: 0, letterSpacing: '-0.03em',
+              display: 'flex', alignItems: 'center', gap: 12,
+            }}>
+              Cloud Drive
+              <span style={{
+                fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500,
+                color: 'var(--accent-cyan)', padding: '3px 8px',
+                background: 'color-mix(in oklch, var(--accent-cyan) 12%, var(--bg-elev))',
+                border: '1px solid color-mix(in oklch, var(--accent-cyan) 30%, transparent)',
+                borderRadius: 6, textTransform: 'uppercase', letterSpacing: '0.08em',
+              }}>NEW</span>
+            </h1>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => setHasFiles(!hasFiles)}>
+              демо: {hasFiles ? 'пустое состояние' : 'с файлами'}
+            </button>
+            <button className="btn btn-primary">{Icon.upload()} Загрузить файлы</button>
+          </div>
+        </div>
+
+        {/* KPI strip */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 24 }}>
+          {[
+            { l: 'ФАЙЛОВ В CLOUD', v: hasFiles ? '1 247' : '0', sub: '+12 за сутки' },
+            { l: 'ЗАНЯТО', v: hasFiles ? '2.4 ГБ' : '0 Б', sub: 'из 50 ГБ · 4.8%' },
+            { l: 'ИНДЕКС CLOUD', v: hasFiles ? '✓ актуален' : '—', sub: hasFiles ? '04.05 03:14' : 'нет файлов' },
+            { l: 'ОЧЕРЕДЬ ЗАДАЧ', v: hasFiles ? '3' : '0', sub: 'OCR · reindex' },
+          ].map((m, i) => (
+            <div key={i} className="card">
+              <div className="mono-label" style={{ marginBottom: 8 }}>{m.l}</div>
+              <div style={{
+                fontFamily: 'var(--font-display)', fontWeight: 800,
+                fontSize: 26, letterSpacing: '-0.02em', lineHeight: 1,
+              }}>{m.v}</div>
+              <div className="mono-label" style={{ marginTop: 6 }}>{m.sub}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Body */}
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '12px 32px 80px' }}>
+        {!hasFiles ? <CloudEmpty /> : <CloudWithFiles />}
+      </div>
+    </div>
+  );
+}
+
+function CloudEmpty() {
+  const actions = [
+    {
+      icon: Icon.cloudUpload({ width: 24, height: 24 }),
+      title: 'Загрузить файлы',
+      desc: 'Drag-and-drop или диалог выбора. До 500 МБ за раз.',
+      cta: 'Выбрать файлы',
+      featured: true,
+    },
+    {
+      icon: Icon.folder({ width: 24, height: 24 }),
+      title: 'Создать папку',
+      desc: 'Структурируйте файлы как удобно. Можно вложенно.',
+      cta: 'Создать',
+    },
+    {
+      icon: Icon.cloud({ width: 24, height: 24 }),
+      title: 'Подключить сторонний диск',
+      desc: 'Google Drive, OneDrive, Yandex.Disk, S3.',
+      cta: 'Подключить',
+    },
+    {
+      icon: Icon.search({ width: 24, height: 24 }),
+      title: 'Поиск в Cloud Drive',
+      desc: 'Если файлы уже загружены — найдите их в общем поиске.',
+      cta: 'Открыть поиск',
+    },
+  ];
+
+  return (
+    <div style={{ maxWidth: 960, margin: '40px auto 0' }}>
+      <div style={{ textAlign: 'center', marginBottom: 40 }}>
+        {/* Hero illustration */}
+        <div style={{
+          width: 140, height: 140, margin: '0 auto 24px', position: 'relative',
+          background: 'radial-gradient(circle, color-mix(in oklch, var(--brand-500) 14%, transparent) 0%, transparent 70%)',
+        }}>
+          <div style={{
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+          }}>
+            <div style={{
+              width: 80, height: 80, borderRadius: 20,
+              background: 'linear-gradient(135deg, var(--brand-500), var(--accent-cyan))',
+              display: 'grid', placeItems: 'center', color: 'white',
+              boxShadow: '0 24px 48px -12px color-mix(in oklch, var(--brand-500) 50%, transparent)',
+            }}>
+              {Icon.cloud({ width: 40, height: 40, strokeWidth: 1.6 })}
+            </div>
+          </div>
+        </div>
+        <h2 style={{
+          fontFamily: 'var(--font-display)', fontWeight: 800,
+          fontSize: 32, letterSpacing: '-0.03em', margin: '0 0 8px',
+        }}>
+          В <span style={{ fontFamily: 'var(--font-serif)', fontStyle: 'italic', fontWeight: 400 }}>Cloud Drive</span> пока пусто
+        </h2>
+        <p style={{ color: 'var(--ink-3)', fontSize: 15, margin: 0, maxWidth: 540, marginInline: 'auto' }}>
+          Загрузите документы — они автоматически попадут в семантический индекс и станут доступны для поиска всей команде (с учётом прав).
+        </p>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+        {actions.map((a, i) => (
+          <div key={i} className={'card ' + (a.featured ? 'glow-border' : '')} style={{
+            display: 'flex', flexDirection: 'column', gap: 12,
+            padding: 20, cursor: 'pointer',
+            transition: 'all 200ms',
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+          onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}>
+            <div style={{
+              width: 44, height: 44, borderRadius: 10,
+              background: a.featured ? 'linear-gradient(135deg, var(--brand-500), var(--accent-cyan))' : 'var(--bg-sunken)',
+              color: a.featured ? 'white' : 'var(--ink-2)',
+              display: 'grid', placeItems: 'center',
+            }}>{a.icon}</div>
+            <div>
+              <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{a.title}</div>
+              <div style={{ color: 'var(--ink-3)', fontSize: 12, lineHeight: 1.4 }}>{a.desc}</div>
+            </div>
+            <div className="row" style={{ gap: 6, color: a.featured ? 'var(--brand-500)' : 'var(--ink-2)', fontSize: 12, fontWeight: 600, marginTop: 'auto' }}>
+              <span>{a.cta}</span>
+              {Icon.arrow({ width: 12, height: 12 })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Drop zone hint */}
+      <div style={{
+        marginTop: 24,
+        padding: 32,
+        border: '2px dashed var(--line-strong)',
+        borderRadius: 12,
+        textAlign: 'center',
+        color: 'var(--ink-3)',
+        background: 'var(--bg-sunken)',
+      }}>
+        <div style={{ marginBottom: 8 }}>{Icon.cloudUpload({ width: 28, height: 28 })}</div>
+        <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-2)' }}>
+          Перетащите файлы в эту область
+        </div>
+        <div className="mono-label" style={{ marginTop: 6 }}>
+          поддерживаются: docx · xlsx · pdf · jpg · png · txt · до 500 МБ
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CloudWithFiles() {
+  return (
+    <div style={{ maxWidth: 1320, margin: '0 auto' }}>
+      {/* Action strip */}
+      <div className="row-between" style={{ marginBottom: 16 }}>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn btn-primary btn-sm">{Icon.upload()} Загрузить</button>
+          <button className="btn btn-secondary btn-sm">{Icon.plus()} Папка</button>
+          <button className="btn btn-ghost btn-sm">{Icon.cloud()} Подключить</button>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <Chip variant="warn">3 в очереди</Chip>
+          <Chip variant="success">{Icon.check({ width: 11, height: 11 })} ACL активен</Chip>
+        </div>
+      </div>
+
+      {/* Live activity */}
+      <Section eyebrow="ОЧЕРЕДЬ ОБРАБОТКИ" title="Сейчас обрабатывается"
+               style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {[
+            { n: 'Договор-2026-12.pdf', t: 'OCR', p: 64, sub: 'страница 14 из 22', dot: 'info' },
+            { n: 'Реестр поставщиков.xlsx', t: 'индексация', p: 92, sub: 'small chunks', dot: 'info' },
+            { n: 'Карточка ИП.docx', t: 'превью', p: 100, sub: 'готово', dot: 'ok' },
+          ].map((j, i) => (
+            <div key={i} className="card" style={{ padding: '12px 16px', display: 'grid', gridTemplateColumns: '40px 1fr 160px 100px', gap: 14, alignItems: 'center' }}>
+              <FileIconBox ext={j.n.split('.').pop()} size="md" />
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{j.n}</div>
+                <div className="mono-label" style={{ marginTop: 2 }}>{j.t} · {j.sub}</div>
+              </div>
+              <div className="progress">
+                <div style={{ width: `${j.p}%`, background: j.dot === 'ok' ? 'var(--ok)' : 'var(--brand-500)' }} />
+              </div>
+              <div className="row" style={{ justifyContent: 'flex-end' }}>
+                <StatusDot status={j.dot} />
+                <span className="mono-num" style={{ fontSize: 11 }}>{j.p}%</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* File grid */}
+      <Section eyebrow="ВСЕ ФАЙЛЫ" title="Cloud Drive"
+        action={
+          <div className="tab-group">
+            <button className="active">{Icon.grid({ width: 12, height: 12 })}</button>
+            <button>{Icon.list({ width: 12, height: 12 })}</button>
+          </div>
+        }>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
+          {[
+            { n: 'Карточка ИП.docx', ext: 'docx', s: '142 КБ', a: 'Иванов', shared: true },
+            { n: 'Договор-2026-12.pdf', ext: 'pdf', s: '1.2 МБ', a: 'Петрова', queued: 'OCR' },
+            { n: 'Реестр поставщиков.xlsx', ext: 'xlsx', s: '450 КБ', a: 'admin', shared: true },
+            { n: 'Брендбук v1.pdf', ext: 'pdf', s: '8.4 МБ', a: 'Иванов' },
+            { n: 'Презентация Q2.pdf', ext: 'pdf', s: '12 МБ', a: 'Сидоров', shared: true },
+            { n: 'Логотип-ч.png', ext: 'png', s: '64 КБ', a: 'Иванов' },
+            { n: 'Контакты.xlsx', ext: 'xlsx', s: '38 КБ', a: 'admin' },
+            { n: 'Заметки.md', ext: 'txt', s: '12 КБ', a: 'Иванов' },
+          ].map((f, i) => (
+            <div key={i} className="card" style={{
+              display: 'flex', flexDirection: 'column', gap: 8, padding: 14,
+              cursor: 'pointer', position: 'relative',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-2)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = ''; }}>
+              <div className="row-between">
+                <FileIconBox ext={f.ext} size="md" />
+                {f.queued && <Chip variant="primary" style={{ padding: '2px 6px', fontSize: 10 }}>{f.queued}</Chip>}
+                {f.shared && <span style={{ color: 'var(--ink-3)' }}>{Icon.users({ width: 14, height: 14 })}</span>}
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{f.n}</div>
+              <div className="row-between mono-label" style={{ marginTop: 'auto' }}>
+                <span>{f.s}</span>
+                <span>{f.a}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+window.ExplorerScreen = ExplorerScreen;
+window.CloudDriveScreen = CloudDriveScreen;
+
+
+// ===== hifi-screen-index.jsx =====
+// hifi-screen-index.jsx — Index pipeline screen
+
+function IndexScreen() {
+  return (
+    <PageScroll>
+      {/* Header */}
+      <div className="row-between" style={{ marginBottom: 28, alignItems: 'flex-start' }}>
+        <div>
+          <div className="mono-label" style={{ marginBottom: 8, color: 'var(--brand-500)' }}>ADMIN · ПАЙПЛАЙН</div>
+          <h1 style={{
+            fontFamily: 'var(--font-display)', fontWeight: 800,
+            fontSize: 40, letterSpacing: '-0.03em', lineHeight: 1, margin: 0,
+          }}>
+            Индексация
+            <span style={{ color: 'var(--ink-3)', fontWeight: 400, fontSize: 22, marginLeft: 16 }}>v3.4</span>
+          </h1>
+          <p style={{ color: 'var(--ink-3)', marginTop: 10, fontSize: 14 }}>
+            5 этапов конвейера: metadata → small → large → content → OCR. Каждый можно запустить и приостановить отдельно.
+          </p>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn btn-danger btn-sm">{Icon.stop()} остановить всё</button>
+          <button className="btn btn-secondary btn-sm">{Icon.pause()} пауза</button>
+          <button className="btn btn-primary">{Icon.play()} Запустить полный прогон</button>
+        </div>
+      </div>
+
+      {/* KPI strip with running state hero */}
+      <div className="card" style={{
+        marginBottom: 24, padding: 24,
+        background: 'linear-gradient(135deg, color-mix(in oklch, var(--brand-500) 6%, var(--bg-elev)), var(--bg-elev) 60%)',
+        position: 'relative', overflow: 'hidden',
+      }}>
+        <div style={{
+          position: 'absolute', top: -40, right: -40,
+          width: 240, height: 240,
+          background: 'radial-gradient(circle, color-mix(in oklch, var(--brand-500) 25%, transparent) 0%, transparent 60%)',
+          pointerEvents: 'none', filter: 'blur(30px)',
+        }}/>
+        <div style={{ position: 'relative', display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 32, alignItems: 'center' }}>
+          <div>
+            <div className="row" style={{ marginBottom: 12 }}>
+              <span className="dot dot-info" />
+              <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>СЕЙЧАС ИДЁТ</span>
+              <span className="mono-label">04.05 · 03:01</span>
+            </div>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontWeight: 800,
+              fontSize: 36, letterSpacing: '-0.03em', lineHeight: 1,
+            }}>
+              large этап
+              <span className="mono-num" style={{ color: 'var(--brand-500)', fontSize: 24, marginLeft: 16 }}>72%</span>
+            </div>
+            <div className="progress" style={{ marginTop: 12, height: 8 }}>
+              <div style={{ width: '72%' }} />
+            </div>
+            <div className="row" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)', gap: 16 }}>
+              <span>328 / 11 800 файлов</span>
+              <span>осталось ~30 мин</span>
+              <span>скорость: 18 ф/с</span>
+            </div>
+          </div>
+
+          {[
+            { l: 'ФАЙЛОВ В БД', v: '35 167', sub: '+143 за сутки' },
+            { l: 'РАЗМЕР', v: '12.8 ГБ', sub: 'из 28 ГБ' },
+            { l: 'ПОСЛЕДНИЙ ПОЛНЫЙ', v: '7ч 52м', sub: '02.05 02:00' },
+          ].map((m, i) => (
+            <div key={i}>
+              <div className="mono-label" style={{ marginBottom: 8 }}>{m.l}</div>
+              <div style={{
+                fontFamily: 'var(--font-display)', fontWeight: 800,
+                fontSize: 28, letterSpacing: '-0.03em', lineHeight: 1,
+              }}>{m.v}</div>
+              <div className="mono-label" style={{ marginTop: 6 }}>{m.sub}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Phases */}
+      <Section eyebrow="ЭТАПЫ ИНДЕКСАЦИИ" title="Конвейер · 5 шагов"
+               action={<button className="btn btn-ghost btn-sm">{Icon.refresh()} перезапустить все</button>}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {[
+            {
+              name: 'metadata', status: 'ok',
+              start: '02:00:00', dur: '12 мин', age: 'свежий', recent: 'green',
+              files: '85 193', units: 'файлов · 0 ошибок',
+              progress: 100, action: { icon: Icon.refresh, label: 'перезапустить' },
+            },
+            {
+              name: 'small', status: 'failed',
+              start: '02:12:00', dur: '49 мин', age: 'свежий', recent: 'green',
+              files: '7 848', units: 'файлов · 1 408 ошибок · требует внимания',
+              progress: 38, error: true,
+              action: { icon: Icon.alert, label: 'логи' },
+            },
+            {
+              name: 'large', status: 'running',
+              start: '03:01:00', dur: 'идёт · ~30 мин', age: 'идёт', recent: 'blue',
+              files: '328 / 11 800', units: 'файлов',
+              progress: 72,
+              action: { icon: Icon.pause, label: 'пауза' },
+            },
+            {
+              name: 'content', status: 'pending',
+              start: '—', dur: '—', age: 'после large', recent: 'empty',
+              files: '—', units: 'чанки', progress: 0,
+              action: { icon: Icon.play, label: 'запустить' },
+            },
+            {
+              name: 'OCR', status: 'pending',
+              start: 'было: 22.04 04:00', dur: '6ч 12м', age: 'давно (12 дней)', recent: 'red',
+              files: '849', units: 'PDF · 4 280 страниц · считается отдельно',
+              progress: 0,
+              action: { icon: Icon.play, label: 'запустить' },
+            },
+          ].map((p, i) => (
+            <PhaseRow key={i} {...p} />
+          ))}
+        </div>
+      </Section>
+
+      {/* Schedule + Params */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 24 }}>
+        <Section eyebrow="АВТО · 3 РЕГЛАМЕНТА" title="Расписание"
+                 action={<button className="btn btn-ghost btn-sm">{Icon.plus()} новый</button>}>
+          <div className="card" style={{ padding: 0 }}>
+            {[
+              { n: 'Утренний инкремент', when: 'каждый час · 03:00 · пн–пт', stages: ['metadata', 'small'], dot: 'ok' },
+              { n: 'Полный пересчёт', when: 'ежедневно · 02:00', stages: ['все'], dot: 'ok' },
+              { n: 'OCR ночь', when: 'каждую субботу · 04:00', stages: ['OCR'], dot: 'ok' },
+            ].map((s, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 14,
+                padding: '14px 18px',
+                borderTop: i ? '1px solid var(--line)' : 'none',
+              }}>
+                <span className={`dot dot-${s.dot}`} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 13 }}>{s.n}</div>
+                  <div className="mono-label" style={{ marginTop: 4 }}>{s.when}</div>
+                </div>
+                <div className="row" style={{ gap: 4 }}>
+                  {s.stages.map((st, j) => <Chip key={j} variant="primary" style={{ padding: '2px 8px', fontSize: 10 }}>{st}</Chip>)}
+                </div>
+                <button className="btn btn-ghost btn-icon">{Icon.more()}</button>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        <Section eyebrow="6 НАСТРОЕК" title="Параметры">
+          <div className="card" style={{ padding: 0 }}>
+            {[
+              ['Размер чанков (small / large)', '512 / 2 000'],
+              ['Макс. размер файла', '4 МБ'],
+              ['DPI для OCR', '300'],
+              ['Параллельных воркеров', '8'],
+              ['Embedding модель', 'paraphrase-multi'],
+              ['Векторная БД', 'Qdrant 1.10.2'],
+            ].map(([k, v], i) => (
+              <div key={i} style={{
+                display: 'grid', gridTemplateColumns: '1fr auto',
+                gap: 8, padding: '14px 18px',
+                borderTop: i ? '1px solid var(--line)' : 'none',
+              }}>
+                <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{k}</span>
+                <span className="mono-num" style={{ fontSize: 12, fontWeight: 600 }}>{v}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      </div>
+
+      {/* File-type breakdown */}
+      <Section eyebrow="РАСПРЕДЕЛЕНИЕ ПО ТИПАМ" title="Что в индексе" style={{ marginTop: 24 }}>
+        <div className="card" style={{ padding: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 16 }}>
+            {[
+              { ext: 'xlsx', files: 12277, size: '1.7 ГБ', color: '#16a34a' },
+              { ext: 'docx', files: 9741, size: '644 МБ', color: '#2563eb' },
+              { ext: 'jpg', files: 5125, size: '4.0 ГБ', color: '#a855f7' },
+              { ext: 'xls', files: 4939, size: '2.0 ГБ', color: '#16a34a' },
+              { ext: 'pdf', files: 849, size: '1.1 ГБ', color: '#dc2626' },
+              { ext: 'tif', files: 357, size: '1.9 ГБ', color: '#a855f7' },
+            ].map((f, i) => (
+              <div key={i}>
+                <div className="row" style={{ marginBottom: 8 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: f.color, boxShadow: `0 0 8px ${f.color}` }} />
+                  <span className="mono-num" style={{ fontWeight: 700, fontSize: 11 }}>.{f.ext}</span>
+                </div>
+                <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 22, letterSpacing: '-0.02em' }}>
+                  {f.files.toLocaleString('ru-RU').replace(/,/g, ' ')}
+                </div>
+                <div className="mono-label" style={{ marginTop: 4 }}>{f.size}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Section>
+    </PageScroll>
+  );
+}
+
+function PhaseRow({ name, status, start, dur, age, recent, files, units, progress, error, action }) {
+  const statusColors = {
+    ok: 'var(--ok)',
+    running: 'var(--brand-500)',
+    failed: 'var(--err)',
+    pending: 'var(--ink-4)',
+  };
+  const statusIcons = {
+    ok: Icon.check({ width: 16, height: 16 }),
+    running: <span className="dot dot-info" />,
+    failed: Icon.alert({ width: 14, height: 14 }),
+    pending: <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700 }}>?</span>,
+  };
+
+  return (
+    <div className="card" style={{
+      display: 'grid',
+      gridTemplateColumns: '44px minmax(0, 1fr) 340px 140px',
+      gap: 16, alignItems: 'center',
+      padding: 16,
+      borderColor: status === 'running' ? 'color-mix(in oklch, var(--brand-500) 30%, var(--line))' : 'var(--line)',
+      boxShadow: status === 'running' ? '0 0 0 3px color-mix(in oklch, var(--brand-500) 8%, transparent)' : 'var(--shadow-1)',
+      position: 'relative',
+    }}>
+      <div style={{
+        width: 36, height: 36, borderRadius: 10,
+        background: status === 'pending' ? 'var(--bg-sunken)' : statusColors[status],
+        color: status === 'pending' ? 'var(--ink-3)' : 'white',
+        display: 'grid', placeItems: 'center',
+        boxShadow: status === 'running' ? '0 0 16px color-mix(in oklch, var(--brand-500) 60%, transparent)' : 'none',
+      }}>
+        {statusIcons[status]}
+      </div>
+
+      <div style={{ minWidth: 0 }}>
+        <div className="row" style={{ marginBottom: 4 }}>
+          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 16 }}>{name}</span>
+          <Chip
+            variant={status === 'ok' ? 'success' : status === 'failed' ? 'danger' : status === 'running' ? 'primary' : null}
+            style={{ padding: '2px 8px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            {status === 'ok' ? 'completed' : status === 'failed' ? 'failed' : status === 'running' ? 'running' : 'pending'}
+          </Chip>
+        </div>
+        <div className="mono-label" style={{ color: error ? 'var(--err)' : 'var(--ink-3)' }}>
+          {files} {units}
+        </div>
+        <div className="mono-label" style={{ marginTop: 4, fontSize: 10 }}>
+          старт {start} · длительность {dur}
+        </div>
+      </div>
+
+      {/* Progress + freshness wrapped together */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div className="progress" style={{ height: 8 }}>
+          <div style={{
+            width: `${progress}%`,
+            background: error ? 'var(--err)' : status === 'ok' ? 'var(--ok)' : 'var(--brand-500)',
+          }} />
+        </div>
+        <div className="row-between mono-label" style={{ fontSize: 10 }}>
+          <span>
+            свежесть:
+            <span style={{ marginLeft: 6, color: recent === 'green' ? 'var(--ok)' : recent === 'blue' ? 'var(--brand-500)' : recent === 'red' ? 'var(--err)' : 'var(--ink-4)' }}>
+              {age}
+            </span>
+          </span>
+          <span style={{ fontWeight: 600 }}>{progress > 0 ? `${progress}%` : '—'}</span>
+        </div>
+        <div className={`freshness ${recent}`} />
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+        <button className="btn btn-ghost btn-sm">
+          {action.icon()} {action.label}
+        </button>
+        <button className="btn btn-ghost btn-icon">{Icon.more()}</button>
+      </div>
+    </div>
+  );
+}
+
+window.IndexScreen = IndexScreen;
+
+
+// ===== hifi-app.jsx =====
+// hifi-app.jsx — main app router + theme/tweaks
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "dark",
+  "accent": "#3d63ff",
+  "density": "default",
+  "startScreen": "login"
+}/*EDITMODE-END*/;
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const [screen, setScreen] = React.useState(t.startScreen);
+  const [searchState, setSearchState] = React.useState('results');
+
+  React.useEffect(() => {
+    document.body.dataset.theme = t.theme;
+    // Override --brand-500 if user changed it
+    document.documentElement.style.setProperty('--brand-500', t.accent);
+  }, [t.theme, t.accent]);
+
+  const navigate = (s) => {
+    setScreen(s);
+    // When entering search, restore last state
+  };
+
+  // Login screen takes whole page
+  if (screen === 'login') {
+    return (
+      <>
+        <LoginScreen onLogin={() => setScreen('home')} theme={t.theme} />
+        <Tweaks t={t} setTweak={setTweak} screen={screen} onScreen={setScreen} searchState={searchState} setSearchState={setSearchState} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <AppShell active={screen} onNav={navigate} theme={t.theme}
+        onTheme={(v) => setTweak('theme', v)}
+        user={{ name: 'Алексей', role: 'admin' }}>
+        {screen === 'home' && <HomeScreen onNavigate={navigate} />}
+        {screen === 'search' && <SearchScreen state={searchState} key={searchState} />}
+        {screen === 'explorer' && <ExplorerScreen />}
+        {screen === 'cloud' && <CloudDriveScreen />}
+        {screen === 'index' && <IndexScreen />}
+      </AppShell>
+      <Tweaks t={t} setTweak={setTweak} screen={screen} onScreen={setScreen} searchState={searchState} setSearchState={setSearchState} />
+    </>
+  );
+}
+
+function Tweaks({ t, setTweak, screen, onScreen, searchState, setSearchState }) {
+  return (
+    <TweaksPanel>
+      <TweakSection label="Тема" />
+      <TweakRadio label="Цветовая схема" value={t.theme}
+        options={[{ value: 'light', label: '☀ light' }, { value: 'dark', label: '☾ dark' }]}
+        onChange={(v) => setTweak('theme', v)} />
+
+      <TweakSection label="Акцент" />
+      <TweakColor label="Brand" value={t.accent}
+        options={['#3d63ff', '#6385ff', '#10b981', '#f43f5e', '#a855f7', '#22d3ee', '#f59e0b']}
+        onChange={(v) => setTweak('accent', v)} />
+
+      <TweakSection label="Экран" />
+      <TweakSelect label="Открыть" value={screen}
+        options={[
+          { value: 'login', label: 'Вход' },
+          { value: 'home', label: 'Главная' },
+          { value: 'search', label: 'Поиск' },
+          { value: 'explorer', label: 'Файлы (FS)' },
+          { value: 'cloud', label: 'Cloud Drive' },
+          { value: 'index', label: 'Индекс (admin)' },
+        ]}
+        onChange={onScreen} />
+
+      {screen === 'search' && (
+        <>
+          <TweakSection label="Состояние поиска" />
+          <TweakRadio label="State" value={searchState}
+            options={[
+              { value: 'idle', label: 'idle' },
+              { value: 'loading', label: 'load' },
+              { value: 'results', label: 'res' },
+              { value: 'empty', label: 'empty' },
+            ]}
+            onChange={setSearchState} />
+        </>
+      )}
+    </TweaksPanel>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+
+</script>
+</head>
+<body>
+<div id="root"><div class="pre-boot">Booting Rag-search…</div></div>
+</body>
+</html>
