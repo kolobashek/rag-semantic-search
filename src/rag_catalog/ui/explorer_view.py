@@ -387,12 +387,6 @@ def render_explorer_screen(
             except Exception as exc:
                 ui.notify(f"Ошибка восстановления: {exc}", type="negative")
 
-        # ── Layout skeleton ───────────────────────────────────────────────
-        with ui.row().classes("rag-explorer-v2-layout w-full gap-3 items-start"):
-            tree_col = ui.column().classes("rag-explorer-tree rag-card p-3 gap-2")
-            main_col = ui.column().classes("rag-explorer-files rag-card p-3 gap-3")
-            details_col = ui.column().classes("rag-explorer-details rag-card p-3 gap-3")
-
         cd_path = page_state.explorer_cd_path or ""
         _is_trash_view = cd_path == "__trash__"
         if _is_trash_view:
@@ -470,6 +464,70 @@ def render_explorer_screen(
                 if label_text:
                     ui.label(label_text)
                 ui.tooltip(tip)
+
+        # ── Explorer command bar (hi-fi top area) ─────────────────────────
+        parent_path = breadcrumbs[-2].path if len(breadcrumbs) >= 2 else ""
+        can_go_up = bool(cd_path and root_folder is not None and cd_path != root_folder.path)
+
+        with ui.column().classes("rag-explorer-commandbar w-full gap-2"):
+            with ui.row().classes("rag-explorer-topline"):
+                up_btn = ui.button(
+                    icon="arrow_upward",
+                    on_click=lambda: _cd_open_folder(parent_path),
+                    color=None,
+                ).props("flat round dense").classes("rag-explorer-iconbtn")
+                if not can_go_up:
+                    up_btn.disable()
+                ui.button(icon="refresh", on_click=lambda: render_fn(), color=None).props("flat round dense").classes("rag-explorer-iconbtn").tooltip("Обновить")
+                with ui.row().classes("rag-explorer-pathbar rag-breadcrumbs items-center gap-1 no-wrap"):
+                    ui.icon("folder", size="16px").classes("text-slate-400")
+                    for idx, folder in enumerate(breadcrumbs):
+                        label = "Корень" if folder.is_root else folder.name
+                        ui.button(
+                            label,
+                            on_click=lambda p=folder.path: _cd_open_folder(p),
+                            color=None,
+                        ).props("flat dense no-caps").tooltip(folder.path or "Корень")
+                        if idx < len(breadcrumbs) - 1:
+                            ui.icon("chevron_right").classes("text-slate-500")
+                folder_search = ui.input(
+                    placeholder="семантический поиск в этой папке",
+                ).props("dense borderless clearable").classes("rag-explorer-folder-search")
+
+                async def _search_current_folder() -> None:
+                    query = str(folder_search.value or "").strip()
+                    if not query:
+                        return
+                    await choose_query_fn(f"{query} path:{cd_path}" if cd_path else query)
+
+                folder_search.on("keydown.enter", _search_current_folder)
+
+            with ui.row().classes("rag-explorer-actionline"):
+                ui.button("Загрузить", icon="upload", on_click=_cd_upload_dialog, color=None).props("outline dense no-caps")
+                ui.button("Папка", icon="add", on_click=_cd_new_folder_dialog, color=None).props("flat dense no-caps")
+                ui.separator().props("vertical")
+                ui.button(f"тип: {page_state.explorer_ext.lower()}", color=None).props("flat dense no-caps")
+                ui.button("изменён: любой", color=None).props("flat dense no-caps")
+                ui.button("размер: любой", color=None).props("flat dense no-caps")
+                ui.button("фильтр", icon="add", color=None).props("flat dense no-caps")
+                ui.space()
+                ui.label("Сорт:").classes("rag-explorer-sort-label")
+                ui.select(
+                    ["По имени", "По размеру", "По дате"],
+                    value=page_state.explorer_sort,
+                    on_change=lambda e: (setattr(page_state, "explorer_sort", e.value), render_fn()),
+                ).props("dense outlined").classes("w-36")
+                ui.select(
+                    ["Таблица", "Список"],
+                    value=page_state.explorer_view if page_state.explorer_view in ("Таблица", "Список") else "Таблица",
+                    on_change=lambda e: (setattr(page_state, "explorer_view", e.value), render_fn()),
+                ).props("dense outlined").classes("w-32")
+
+        # ── Layout skeleton ───────────────────────────────────────────────
+        with ui.row().classes("rag-explorer-v2-layout w-full gap-3 items-start"):
+            tree_col = ui.column().classes("rag-explorer-tree rag-card p-3 gap-2")
+            main_col = ui.column().classes("rag-explorer-files rag-card p-3 gap-3")
+            details_col = ui.column().classes("rag-explorer-details rag-card p-3 gap-3")
 
         # ── Tree column ───────────────────────────────────────────────────
         with tree_col:
@@ -631,72 +689,6 @@ def render_explorer_screen(
                                 color=None,
                             ).props("outline dense no-caps")
                 return
-
-            # Breadcrumbs toolbar
-            with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
-                parent_path = breadcrumbs[-2].path if len(breadcrumbs) >= 2 else ""
-                up_btn = ui.button(
-                    icon="arrow_upward",
-                    on_click=lambda: _cd_open_folder(parent_path),
-                    color=None,
-                ).props("flat round dense")
-                if not cd_path or root_folder is None or (root_folder and cd_path == root_folder.path):
-                    up_btn.disable()
-                with ui.row().classes("rag-breadcrumbs flex-1 min-w-0 items-center gap-1 no-wrap"):
-                    for idx, folder in enumerate(breadcrumbs):
-                        label = "Корень" if folder.is_root else folder.name
-                        ui.button(
-                            label,
-                            on_click=lambda p=folder.path: _cd_open_folder(p),
-                            color=None,
-                        ).props("flat dense no-caps").tooltip(folder.path)
-                        if idx < len(breadcrumbs) - 1:
-                            ui.icon("chevron_right").classes("text-slate-400")
-                ui.button(icon="refresh", on_click=lambda: render_fn(), color=None).props("flat round dense").tooltip("Обновить")
-                ui.button(
-                    icon="create_new_folder",
-                    on_click=_cd_new_folder_dialog,
-                    color=None,
-                ).props("flat round dense").tooltip("Создать папку")
-                ui.button(
-                    icon="upload_file",
-                    on_click=_cd_upload_dialog,
-                    color=None,
-                ).props("flat round dense").tooltip("Загрузить файлы")
-
-            # Filter / view toolbar
-            with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
-                fi = ui.input(
-                    placeholder="Фильтр по имени",
-                    value=page_state.explorer_filter,
-                ).props("dense outlined clearable debounce=0").classes("min-w-48 flex-1")
-
-                def _apply_cd_filter(event: Any = None) -> None:
-                    _apply_explorer_filter_input(page_state, event, fi.value)
-                    render_fn()
-
-                fi.on_value_change(_apply_cd_filter)
-
-                ui.select(
-                    ["Все", ".docx", ".xlsx", ".xls", ".pdf"],
-                    value=page_state.explorer_ext,
-                    on_change=lambda e: (setattr(page_state, "explorer_ext", e.value), setattr(page_state, "explorer_page", 0), render_fn()),
-                ).props("dense outlined").classes("w-36")
-                ui.select(
-                    ["Таблица", "Список"],
-                    value=page_state.explorer_view if page_state.explorer_view in ("Таблица", "Список") else "Таблица",
-                    on_change=lambda e: (setattr(page_state, "explorer_view", e.value), render_fn()),
-                ).props("dense outlined").classes("w-36")
-                ui.select(
-                    ["По имени", "По размеру", "По дате"],
-                    value=page_state.explorer_sort,
-                    on_change=lambda e: (setattr(page_state, "explorer_sort", e.value), render_fn()),
-                ).props("dense outlined").classes("w-40")
-                ui.select(
-                    ["По возрастанию", "По убыванию"],
-                    value="По убыванию" if page_state.explorer_desc else "По возрастанию",
-                    on_change=lambda e: (setattr(page_state, "explorer_desc", e.value == "По убыванию"), render_fn()),
-                ).props("dense outlined").classes("w-44")
 
             # Entry stats bar
             with ui.row().classes("w-full items-center gap-2 px-1"):

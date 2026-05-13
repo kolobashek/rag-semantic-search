@@ -399,6 +399,77 @@ def _install_css() -> None:
         .rag-explorer-files {
           min-width: 0;
         }
+        .rag-explorer-commandbar {
+          padding: 14px 8px 2px;
+        }
+        .rag-explorer-topline,
+        .rag-explorer-actionline {
+          display: flex;
+          align-items: center;
+          width: 100%;
+          gap: 10px;
+          min-width: 0;
+        }
+        .rag-explorer-iconbtn {
+          width: 32px !important;
+          height: 32px !important;
+          min-width: 32px !important;
+          min-height: 32px !important;
+          color: var(--rag-muted) !important;
+        }
+        .rag-explorer-iconbtn:hover {
+          color: var(--rag-text) !important;
+          background: var(--rag-sunken) !important;
+        }
+        .rag-explorer-pathbar,
+        .rag-explorer-folder-search {
+          min-height: 32px;
+          border: 1px solid var(--rag-border);
+          border-radius: 8px;
+          background: var(--rag-surface);
+          color: var(--rag-text);
+        }
+        .rag-explorer-pathbar {
+          flex: 1 1 auto;
+          min-width: 260px;
+          padding: 0 10px;
+        }
+        .rag-explorer-folder-search {
+          flex: 0 0 min(280px, 28vw);
+          padding: 0 10px;
+        }
+        .rag-explorer-folder-search .q-field__control,
+        .rag-explorer-folder-search .q-field__native,
+        .rag-explorer-folder-search .q-field__append,
+        .rag-explorer-folder-search .q-field__prepend {
+          min-height: 30px !important;
+          height: 30px !important;
+        }
+        .rag-explorer-folder-search .q-field__control {
+          background: transparent !important;
+          border: 0 !important;
+          box-shadow: none !important;
+        }
+        .rag-explorer-actionline {
+          padding-top: 6px;
+          flex-wrap: wrap;
+        }
+        .rag-explorer-actionline .q-btn {
+          min-height: 30px !important;
+          height: 30px !important;
+          border-radius: 7px !important;
+        }
+        .rag-explorer-actionline .q-field {
+          min-width: 120px;
+        }
+        .rag-explorer-sort-label {
+          color: var(--rag-muted);
+          font-family: var(--rag-font-mono);
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+        }
         @media (max-width: 1400px) {
           .rag-explorer-v2-layout {
             grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
@@ -1015,6 +1086,12 @@ def _install_css() -> None:
           .rag-actions .q-btn { width: auto; }
           .rag-search-box { box-shadow: 0 4px 12px rgba(23, 32, 44, 0.06); }
           .rag-search-toolbar { top: 50px; }
+          .rag-explorer-commandbar { padding: 10px 0 0; }
+          .rag-explorer-topline,
+          .rag-explorer-actionline { gap: 6px; }
+          .rag-explorer-pathbar { order: 10; flex: 1 0 100%; min-width: 0; }
+          .rag-explorer-folder-search { flex: 1 0 100%; min-width: 0; }
+          .rag-explorer-actionline .q-field { flex: 1 1 140px; }
           .rag-index-layout,
           .rag-index-config-layout { display: flex; flex-direction: column; }
           .rag-pipeline-row { display: flex; flex-direction: column; align-items: stretch; }
@@ -1135,6 +1212,14 @@ def _install_css() -> None:
           display: block;
           flex: 0 0 auto;
         }
+        .rag-mobile-menu-button {
+          display: none !important;
+        }
+        @media (max-width: 1100px) {
+          .rag-mobile-menu-button {
+            display: inline-flex !important;
+          }
+        }
         @media (max-width: 900px) {
           .rag-hdr-grid { grid-template-columns: auto 1fr auto; }
           .rag-hdr-nav { display: none; }
@@ -1147,15 +1232,22 @@ def _install_css() -> None:
         .rag-nav-tab {
           position: relative;
           padding: 7px 13px; border-radius: 6px;
-          font-size: 13px; font-weight: 500; color: var(--rag-muted);
+          font-size: 13px; font-weight: 500; color: var(--rag-muted) !important;
           cursor: pointer; user-select: none;
           display: inline-flex; align-items: center; gap: 7px;
           transition: color 160ms ease, background 160ms ease;
           border: none; background: transparent; line-height: 1;
           text-decoration: none;
         }
-        .rag-nav-tab:hover { color: var(--rag-text); background: var(--rag-sunken); }
-        .rag-nav-tab.active { color: var(--rag-text); font-weight: 600; }
+        .rag-nav-tab .q-icon,
+        .rag-nav-tab .block {
+          color: inherit !important;
+        }
+        .rag-nav-tab:hover { color: var(--rag-text) !important; background: var(--rag-sunken); }
+        .rag-nav-tab.active { color: var(--rag-text) !important; font-weight: 600; }
+        body.body--dark .rag-nav-tab { color: #7b7b86 !important; }
+        body.body--dark .rag-nav-tab:hover,
+        body.body--dark .rag-nav-tab.active { color: #f4f4f7 !important; }
         .rag-nav-tab.active::after {
           content: ''; position: absolute;
           left: 13px; right: 13px; bottom: -8px;

@@ -108,7 +108,7 @@ def _build_page(initial_screen: str = "search") -> None:
         with ui.element("div").classes("rag-hdr-grid"):
             # ── Left: brand ──────────────────────────────────
             with ui.element("div").classes("rag-hdr-brand"):
-                menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("rag-header-button md:hidden")
+                menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("rag-header-button rag-mobile-menu-button")
                 if LOGO_PATH.exists():
                     ui.image("/rag-logo.png").classes("w-7 h-7 rounded")
                 else:
