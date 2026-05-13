@@ -480,24 +480,55 @@ def render_explorer_screen(
                     ui.label("Реестр пуст. Запустите импорт в настройках Cloud Drive.").classes("text-center text-xs")
             else:
                 ancestor_paths = {folder.path for folder in breadcrumbs}
+                if root_folder.path not in page_state.explorer_tree_open:
+                    page_state.explorer_tree_open.append(root_folder.path)
+                open_paths = set(page_state.explorer_tree_open) | ancestor_paths
+
+                def _toggle_tree_path(path: str) -> None:
+                    current = set(page_state.explorer_tree_open)
+                    if path in current and path not in ancestor_paths:
+                        current.remove(path)
+                    else:
+                        current.add(path)
+                    page_state.explorer_tree_open = sorted(current)
+                    render_fn()
 
                 def _render_tree_node_cd(folder: CloudDriveFolder, depth: int) -> None:
                     is_current = folder.path == cd_path or (not cd_path and folder.is_root)
                     is_ancestor = folder.path in ancestor_paths and not is_current
-                    icon = "folder_open" if is_current else "folder"
+                    children = svc.registry.list_child_folders(folder.id)
+                    has_children = bool(children)
+                    is_open = folder.path in open_paths
+                    icon = "folder_open" if is_open or is_current else "folder"
                     label = "Корень" if folder.is_root else folder.name
-                    btn = ui.button(
-                        label, icon=icon,
-                        on_click=lambda p=folder.path: _cd_open_folder(p),
-                        color=None,
-                    ).props("flat align=left no-caps dense").classes(
-                        "rag-nav-button rag-tree-button w-full"
+                    row_classes = (
+                        "rag-tree-row"
                         + (" active" if is_current else "")
                         + (" ancestor" if is_ancestor else "")
-                    ).style(f"padding-left: {depth * 12}px")
-                    btn.tooltip(folder.path)
-                    if folder.is_root or is_current or is_ancestor:
-                        for child in svc.registry.list_child_folders(folder.id):
+                    )
+                    with ui.element("div").classes(row_classes).style(f"padding-left: {depth * 12}px"):
+                        if has_children:
+                            ui.button(
+                                icon="expand_more" if is_open else "chevron_right",
+                                on_click=lambda p=folder.path: _toggle_tree_path(p),
+                                color=None,
+                            ).props("flat round dense").classes("rag-tree-toggle").tooltip(
+                                "Свернуть" if is_open else "Раскрыть"
+                            )
+                        else:
+                            ui.element("span").classes("rag-tree-toggle")
+                        btn = ui.button(
+                            label, icon=icon,
+                            on_click=lambda p=folder.path: _cd_open_folder(p),
+                            color=None,
+                        ).props("flat align=left no-caps dense").classes(
+                            "rag-nav-button rag-tree-button rag-tree-label"
+                            + (" active" if is_current else "")
+                            + (" ancestor" if is_ancestor else "")
+                        )
+                        btn.tooltip(folder.path or "Корень")
+                    if has_children and is_open:
+                        for child in children:
                             _render_tree_node_cd(child, depth + 1)
 
                 _render_tree_node_cd(root_folder, 0)

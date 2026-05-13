@@ -399,6 +399,14 @@ def _install_css() -> None:
         .rag-explorer-files {
           min-width: 0;
         }
+        @media (max-width: 1400px) {
+          .rag-explorer-v2-layout {
+            grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+          }
+          .rag-explorer-details {
+            display: none;
+          }
+        }
         .rag-index-phase {
           padding: 10px;
           border: 1px solid var(--rag-border);
@@ -580,6 +588,47 @@ def _install_css() -> None:
         .rag-tree-button.ancestor {
           color: var(--rag-text) !important;
           font-weight: 650;
+        }
+        .rag-tree-row {
+          display: flex;
+          align-items: center;
+          min-width: 0;
+          width: 100%;
+          height: 30px;
+          border-radius: 8px;
+          box-sizing: border-box;
+        }
+        .rag-tree-row.active {
+          background: color-mix(in srgb, var(--rag-accent) 14%, transparent);
+        }
+        .rag-tree-row.ancestor {
+          background: color-mix(in srgb, var(--rag-surface) 55%, transparent);
+        }
+        .rag-tree-toggle {
+          width: 22px !important;
+          min-width: 22px !important;
+          height: 30px !important;
+          min-height: 30px !important;
+          padding: 0 !important;
+          color: var(--rag-muted) !important;
+        }
+        .rag-tree-toggle .q-icon {
+          margin: 0 !important;
+          font-size: 16px !important;
+        }
+        .rag-tree-label {
+          flex: 1 1 auto;
+          min-width: 0;
+          height: 30px !important;
+          min-height: 30px !important;
+          padding: 0 8px 0 2px !important;
+        }
+        .rag-tree-label .q-icon {
+          color: #f2b237 !important;
+        }
+        .rag-tree-row.active .rag-tree-label,
+        .rag-tree-row.active .rag-tree-label .q-icon {
+          color: var(--rag-accent) !important;
         }
         .rag-breadcrumbs {
           min-width: 0;
@@ -971,12 +1020,13 @@ def _install_css() -> None:
           .rag-pipeline-row { display: flex; flex-direction: column; align-items: stretch; }
           .rag-pipeline-actions { justify-content: flex-start; flex-wrap: wrap; }
           .rag-explorer-v2-layout { display: flex; flex-direction: column; }
-          .rag-explorer-tree,
-          .rag-explorer-details {
+          .rag-explorer-tree {
             position: static;
-            max-height: none;
+            max-height: 300px;
+            overflow: auto;
             width: 100%;
           }
+          .rag-explorer-details { display: none; }
         }
 
         /* ================================================================
@@ -989,13 +1039,26 @@ def _install_css() -> None:
         /* === HEADER V2: 3-column grid === */
         .rag-header-v2 {
           height: 56px !important; min-height: 56px !important; max-height: 56px !important;
+          display: flex !important;
+          align-items: center !important;
+          overflow: hidden !important;
+          padding: 0 16px !important;
           background: color-mix(in srgb, var(--rag-bg) 88%, transparent) !important;
           border-bottom: 1px solid var(--rag-border) !important;
           backdrop-filter: blur(18px) saturate(140%) !important;
           -webkit-backdrop-filter: blur(18px) saturate(140%) !important;
         }
+        .rag-header-v2 .nicegui-content {
+          width: 100% !important;
+          height: 56px !important;
+          min-height: 56px !important;
+          display: flex !important;
+          align-items: center !important;
+          padding: 0 !important;
+          margin: 0 !important;
+        }
         .rag-header-v2 > .q-toolbar {
-          height: 56px !important; min-height: 56px !important; padding: 0 16px !important;
+          height: 56px !important; min-height: 56px !important; padding: 0 !important;
           align-items: center !important;
           overflow: hidden !important;
         }

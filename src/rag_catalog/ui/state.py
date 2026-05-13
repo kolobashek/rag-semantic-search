@@ -62,6 +62,7 @@ class PageState:
     explorer_view: str = "Таблица"
     explorer_page: int = 0
     explorer_cd_path: str = ""
+    explorer_tree_open: List[str] = field(default_factory=list)
     auth_db: Optional[UserAuthDB] = None
     current_user: Optional[Dict[str, Any]] = None
     auth_token: str = ""
