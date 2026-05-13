@@ -240,13 +240,12 @@ class CloudDriveRegistryDB:
             conn.execute("ALTER TABLE cloud_jobs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
         if current_version <= 1 and not self._has_column(conn, "cloud_jobs", "finished_at"):
             conn.execute("ALTER TABLE cloud_jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
-        if current_version <= 2 and not self._has_column(conn, "cloud_folders", "deleted_at"):
+        if not self._has_column(conn, "cloud_folders", "deleted_at"):
             conn.execute("ALTER TABLE cloud_folders ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''")
-        if current_version <= 3:
-            if not self._has_column(conn, "cloud_folders", "source_mtime"):
-                conn.execute("ALTER TABLE cloud_folders ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
-            if not self._has_column(conn, "cloud_files", "source_mtime"):
-                conn.execute("ALTER TABLE cloud_files ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
+        if not self._has_column(conn, "cloud_folders", "source_mtime"):
+            conn.execute("ALTER TABLE cloud_folders ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
+        if not self._has_column(conn, "cloud_files", "source_mtime"):
+            conn.execute("ALTER TABLE cloud_files ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
 
     def ensure_root_folder(self, *, root_name: str, source_path: str = '', source_mtime: float = 0.0) -> CloudDriveFolder:
         clean_name = str(root_name or '').strip() or 'root'
@@ -346,16 +345,27 @@ class CloudDriveRegistryDB:
         now = _utc_now()
         with self._lock:
             with self._connect() as conn:
-                row = conn.execute('SELECT id, current_version_id FROM cloud_files WHERE path=?', (clean_path,)).fetchone()
+                row = conn.execute(
+                    'SELECT id, current_version_id, storage_key, checksum, size_bytes FROM cloud_files WHERE path=?',
+                    (clean_path,),
+                ).fetchone()
                 file_id = str(row['id']) if row else str(uuid.uuid4())
-                version_id = str(uuid.uuid4())
-                conn.execute(
-                    '''
-                    INSERT INTO cloud_file_versions (id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, '', ?)
-                    ''',
-                    (version_id, file_id, storage_key, checksum, int(size_bytes), source_path, now),
+                same_content = (
+                    row is not None
+                    and str(row['current_version_id'] or '')
+                    and str(row['storage_key'] or '') == storage_key
+                    and str(row['checksum'] or '') == checksum
+                    and int(row['size_bytes'] or 0) == int(size_bytes)
                 )
+                version_id = str(row['current_version_id']) if same_content else str(uuid.uuid4())
+                if not same_content:
+                    conn.execute(
+                        '''
+                        INSERT INTO cloud_file_versions (id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, '', ?)
+                        ''',
+                        (version_id, file_id, storage_key, checksum, int(size_bytes), source_path, now),
+                    )
                 conn.execute(
                     '''
                     INSERT INTO cloud_files (id, folder_id, name, path, storage_key, mime_type, size_bytes, checksum, source_path, source_mtime, current_version_id, created_at, updated_at, deleted_at)
@@ -1510,6 +1520,42 @@ class CloudDriveRegistryDB:
             "unique_storage_keys": unique_keys,
             "saved_bytes": max(0, total_bytes - int((unique or {})["s"] or 0)),
         }
+
+    def compact_duplicate_versions(self) -> int:
+        """Remove duplicate version rows for unchanged file content.
+
+        Keeps the current version row for every file/content tuple when present;
+        otherwise keeps the newest row. Distinct historical contents remain.
+        """
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT v.id, v.file_id, v.storage_key, v.checksum, v.size_bytes, v.created_at, f.current_version_id
+                    FROM cloud_file_versions v
+                    LEFT JOIN cloud_files f ON f.id = v.file_id
+                    ORDER BY v.file_id, v.storage_key, v.checksum, v.size_bytes, v.created_at DESC
+                    """
+                ).fetchall()
+                grouped: dict[tuple[str, str, str, int], list[sqlite3.Row]] = {}
+                for row in rows:
+                    key = (
+                        str(row["file_id"] or ""),
+                        str(row["storage_key"] or ""),
+                        str(row["checksum"] or ""),
+                        int(row["size_bytes"] or 0),
+                    )
+                    grouped.setdefault(key, []).append(row)
+                delete_ids: list[str] = []
+                for items in grouped.values():
+                    if len(items) <= 1:
+                        continue
+                    current_id = str(items[0]["current_version_id"] or "")
+                    keep_id = current_id if any(str(item["id"]) == current_id for item in items) else str(items[0]["id"])
+                    delete_ids.extend(str(item["id"]) for item in items if str(item["id"]) != keep_id)
+                if delete_ids:
+                    conn.executemany("DELETE FROM cloud_file_versions WHERE id=?", [(item_id,) for item_id in delete_ids])
+                return len(delete_ids)
 
     def sample_storage_objects(self, *, limit: int = 25) -> list[Dict[str, str]]:
         """Return a small deterministic sample of registry objects for storage checks."""

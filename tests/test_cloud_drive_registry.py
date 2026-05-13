@@ -34,6 +34,69 @@ def test_registry_root_folder_and_stats(tmp_path: Path) -> None:
     assert root.is_root is True
 
 
+def test_registry_upsert_file_is_idempotent_for_same_content(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')
+
+    first = registry.upsert_file(
+        folder_id=root.id,
+        path='same.txt',
+        name='same.txt',
+        storage_key='objects/sha256/ab/cd/abcd.txt',
+        mime_type='text/plain',
+        size_bytes=12,
+        checksum='abcd',
+        source_path='O:/Обмен/same.txt',
+    )
+    second = registry.upsert_file(
+        folder_id=root.id,
+        path='same.txt',
+        name='same.txt',
+        storage_key='objects/sha256/ab/cd/abcd.txt',
+        mime_type='text/plain',
+        size_bytes=12,
+        checksum='abcd',
+        source_path='O:/Обмен/same.txt',
+        source_mtime=123.0,
+    )
+
+    versions = registry.list_file_versions(path='same.txt')
+
+    assert first.id == second.id
+    assert first.current_version_id == second.current_version_id
+    assert len(versions) == 1
+    assert registry.stats().versions == 1
+
+
+def test_registry_compacts_duplicate_versions(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')
+    file_row = registry.upsert_file(
+        folder_id=root.id,
+        path='same.txt',
+        name='same.txt',
+        storage_key='objects/sha256/ab/cd/abcd.txt',
+        mime_type='text/plain',
+        size_bytes=12,
+        checksum='abcd',
+        source_path='O:/Обмен/same.txt',
+    )
+    with registry._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO cloud_file_versions (id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at)
+            VALUES ('duplicate-version', ?, ?, ?, ?, '', '', '2026-05-13T00:00:00+00:00')
+            """,
+            (file_row.id, file_row.storage_key, file_row.checksum, file_row.size_bytes),
+        )
+
+    deleted = registry.compact_duplicate_versions()
+
+    assert deleted == 1
+    assert len(registry.list_file_versions(path='same.txt')) == 1
+    assert registry.get_file_by_path('same.txt').current_version_id == file_row.current_version_id  # type: ignore[union-attr]
+
+
 def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     catalog = tmp_path / 'catalog'
     (catalog / 'Folder A').mkdir(parents=True)
@@ -638,3 +701,68 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
     assert 'cloud_sync_selective_paths' in tables
     assert 'cloud_sync_conflicts' in tables
     assert int(version) == 4
+
+
+def test_registry_repairs_current_version_missing_source_mtime_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / 'registry.db'
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE schema_meta (
+                db_kind TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                code_root TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO schema_meta (db_kind, schema_version, updated_at, code_root)
+            VALUES ('cloud_drive', 4, '2026-05-07T00:00:00+00:00', '')
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cloud_folders (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                depth INTEGER NOT NULL DEFAULT 0,
+                source_path TEXT NOT NULL DEFAULT '',
+                is_root INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cloud_files (
+                id TEXT PRIMARY KEY,
+                folder_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                storage_key TEXT NOT NULL,
+                mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                checksum TEXT NOT NULL DEFAULT '',
+                source_path TEXT NOT NULL DEFAULT '',
+                current_version_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    CloudDriveRegistryDB(str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        folder_columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_folders)").fetchall()}
+        file_columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_files)").fetchall()}
+
+    assert 'source_mtime' in folder_columns
+    assert 'source_mtime' in file_columns
