@@ -310,14 +310,21 @@ def _read_log_entries(
     try:
         if not path.exists():
             return []
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if not text:
+        size = path.stat().st_size
+        if size == 0:
             return []
-        if len(text) > max_read_chars:
-            text = text[-max_read_chars:]
+        read_size = min(size, max_read_chars)
+        with path.open("rb") as fh:
+            if read_size < size:
+                fh.seek(-read_size, 2)
+            raw = fh.read(read_size)
+        text = raw.decode("utf-8", errors="replace")
+        if read_size < size:
             nl = text.find("\n")
             if nl >= 0:
                 text = text[nl + 1:]
+        if not text:
+            return []
         all_entries = _parse_log_lines(text)
         level_key = str(level or "all").strip().upper()
         date_from = str(date_from or "").strip()

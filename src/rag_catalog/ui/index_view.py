@@ -147,7 +147,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
     _progress_rendered = [False]
     _current_log_entries: List[Dict[str, Any]] = []
 
-    with ui.dialog() as stage_status_dialog, ui.card().classes("w-[min(1200px,96vw)] max-h-[90vh] flex flex-col p-4 gap-3"):
+    with ui.dialog().props("persistent") as stage_status_dialog, ui.card().classes("w-[min(1200px,96vw)] max-h-[90vh] flex flex-col p-4 gap-3"):
         stage_status_title = ui.label("Статус этапа").classes("text-lg font-semibold")
         stage_status_run = ui.label("Run ID: -").classes("rag-meta")
         stage_status_note_title = ui.label("Сообщение рана").classes("font-semibold")
