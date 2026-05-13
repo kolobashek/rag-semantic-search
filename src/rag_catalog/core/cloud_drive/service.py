@@ -82,6 +82,32 @@ class CloudDriveService:
             return dict(ensure())
         return dict(self.storage.healthcheck())
 
+    def get_storage_coverage(self, *, sample_limit: int = 25) -> dict:
+        """Check whether registry objects are present in the configured storage backend.
+
+        This is intentionally sample-based: S3/MinIO HEAD requests across the full
+        registry can be slow and expensive, while a small recent sample is enough
+        to detect the common misconfiguration after switching storage backends.
+        """
+        sample = self.registry.sample_storage_objects(limit=sample_limit)
+        missing: list[dict] = []
+        checked = 0
+        for item in sample:
+            storage_key = str(item.get("storage_key") or "")
+            if not storage_key:
+                continue
+            checked += 1
+            if not self.storage.exists(storage_key):
+                missing.append(item)
+        return {
+            "checked": checked,
+            "missing": len(missing),
+            "sample_limit": max(1, min(int(sample_limit or 25), 500)),
+            "missing_examples": missing[:5],
+            "ok": checked == 0 or not missing,
+            "needs_backfill": bool(missing),
+        }
+
     @staticmethod
     def _immutable_storage_key(*, checksum: str, filename: str) -> str:
         clean_checksum = str(checksum or '').strip().lower()

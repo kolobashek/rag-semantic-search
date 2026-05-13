@@ -1511,6 +1511,28 @@ class CloudDriveRegistryDB:
             "saved_bytes": max(0, total_bytes - int((unique or {})["s"] or 0)),
         }
 
+    def sample_storage_objects(self, *, limit: int = 25) -> list[Dict[str, str]]:
+        """Return a small deterministic sample of registry objects for storage checks."""
+        safe_limit = max(1, min(int(limit or 25), 500))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT path, storage_key
+                FROM cloud_files
+                WHERE deleted_at='' AND storage_key<>''
+                ORDER BY updated_at DESC, path ASC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [
+            {
+                "path": str(row["path"] or ""),
+                "storage_key": str(row["storage_key"] or ""),
+            }
+            for row in rows
+        ]
+
     def _normalize_path(self, path: str) -> str:
         value = str(path or '').strip().replace('\\', '/')
         value = '/'.join(part for part in value.split('/') if part not in {'', '.'})

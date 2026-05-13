@@ -186,3 +186,25 @@ def test_cloud_drive_download_descriptor_supports_presigned_storage(tmp_path: Pa
     assert descriptor["mode"] == "redirect_url"
     assert descriptor["url"].startswith("https://storage.example/objects/sha256/")
     assert descriptor["filename"] == "report.pdf"
+
+
+def test_cloud_drive_storage_coverage_reports_missing_registry_objects(tmp_path: Path) -> None:
+    service = CloudDriveService(
+        registry=CloudDriveRegistryDB(str(tmp_path / "registry.db")),
+        storage=_FakePresignedStorage(),
+    )
+    service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"pdf")
+    service.upload_file(parent_path="", filename="report.pdf", source_path=str(source), mime_type="application/pdf")
+
+    replacement_storage = _FakePresignedStorage()
+    service = CloudDriveService(registry=service.registry, storage=replacement_storage)
+
+    coverage = service.get_storage_coverage(sample_limit=10)
+
+    assert coverage["ok"] is False
+    assert coverage["needs_backfill"] is True
+    assert coverage["checked"] == 1
+    assert coverage["missing"] == 1
+    assert coverage["missing_examples"][0]["path"] == "report.pdf"

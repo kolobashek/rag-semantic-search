@@ -800,7 +800,8 @@ def render_settings_screen(
                     if root_path:
                         ui.label(f"Корень: {root_path}").classes("rag-path text-xs")
                     try:
-                        _savings = CloudDriveService.from_config(build_cloud_config()).registry.get_storage_savings()
+                        _cloud_service = CloudDriveService.from_config(build_cloud_config())
+                        _savings = _cloud_service.registry.get_storage_savings()
                         _saved = int(_savings.get("saved_bytes") or 0)
                         _dups = max(0, int(_savings.get("total_files") or 0) - int(_savings.get("unique_storage_keys") or 0))
                         if _saved > 0 or _dups > 0:
@@ -811,6 +812,21 @@ def render_settings_screen(
                             ui.label(_lbl).classes("rag-meta text-xs text-green-700")
                     except Exception:
                         pass
+                    try:
+                        _coverage = CloudDriveService.from_config(build_cloud_config()).get_storage_coverage(sample_limit=25)
+                        _checked = int(_coverage.get("checked") or 0)
+                        _missing = int(_coverage.get("missing") or 0)
+                        if _checked > 0 and _missing > 0:
+                            with ui.element("div").classes("cd-alert cd-alert-warning w-full"):
+                                ui.icon("warning", size="18px")
+                                ui.label(
+                                    f"Storage не содержит {_missing} из {_checked} проверенных объектов. "
+                                    "Если недавно сменили Local/S3/MinIO, запустите «Добавить новые файлы» для дозаливки."
+                                ).classes("text-xs")
+                        elif _checked > 0:
+                            ui.label(f"Storage проверен: {_checked} объектов доступны.").classes("rag-meta text-xs text-green-700")
+                    except Exception as exc:
+                        ui.label(f"Проверка storage недоступна: {exc}").classes("rag-meta text-xs text-orange-700")
 
             _CD_STATUS_META = {
                 "pending":   ("schedule",     "cd-status-pending",   "Ожидание"),
