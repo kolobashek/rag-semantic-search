@@ -26,6 +26,7 @@ from .helpers import (
     _cd_file_size,
     _cd_get_service,
     _cd_list_children,
+    _file_badge_html,
     _file_icon_svg,
     _file_rows,
     _format_file_size,
@@ -691,51 +692,19 @@ def render_explorer_screen(
                         color=None,
                     ).props("outline dense").classes("mt-2")
             else:
-                # Folders first
-                if child_folders:
-                    if page_state.explorer_view == "Список":
+                # ── Список view ────────────────────────────────────────────
+                if page_state.explorer_view == "Список":
+                    if child_folders:
                         with ui.column().classes("rag-explorer-list w-full"):
                             for folder in child_folders:
                                 with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
-                                    ui.icon("folder", size="24px").classes("text-yellow-500")
+                                    ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
                                     with ui.column().classes("flex-1 gap-0"):
                                         ui.button(
                                             folder.name,
                                             on_click=lambda p=folder.path: _cd_open_folder(p),
                                             color=None,
                                         ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
-                                    render_star(Path(folder.source_path or folder.path), item_type="folder")
-                                    if not folder.is_root:
-                                        with ui.button(icon="more_vert", color=None).props("flat round dense") as _menu_btn:
-                                            with ui.menu():
-                                                ui.menu_item(
-                                                    "Переименовать",
-                                                    on_click=lambda fo=folder: _cd_rename_dialog(fo.path, fo.name),
-                                                    auto_close=True,
-                                                )
-                                                ui.menu_item(
-                                                    "Переместить в…",
-                                                    on_click=lambda fo=folder: _cd_move_dialog(fo.path, fo.name, is_folder=True),
-                                                    auto_close=True,
-                                                )
-                                                ui.separator()
-                                                ui.menu_item(
-                                                    "Удалить папку…",
-                                                    on_click=lambda fo=folder: _cd_delete_dialog(fo.path, fo.name, is_folder=True),
-                                                    auto_close=True,
-                                                ).classes("text-negative")
-                    else:
-                        with ui.column().classes("w-full gap-1"):
-                            for folder in child_folders:
-                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
-                                    ui.icon("folder", size="24px").classes("text-yellow-500")
-                                    with ui.column().classes("flex-1 gap-0"):
-                                        ui.button(
-                                            folder.name,
-                                            on_click=lambda p=folder.path: _cd_open_folder(p),
-                                            color=None,
-                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
-                                        ui.label(f"Папка · {folder.path}").classes("rag-meta text-xs truncate")
                                     render_star(Path(folder.source_path or folder.path), item_type="folder")
                                     if not folder.is_root:
                                         with ui.button(icon="more_vert", color=None).props("flat round dense"):
@@ -756,17 +725,13 @@ def render_explorer_screen(
                                                     on_click=lambda fo=folder: _cd_delete_dialog(fo.path, fo.name, is_folder=True),
                                                     auto_close=True,
                                                 ).classes("text-negative")
-
-                # Files
-                if page_files:
-                    def _cd_download_url(file_path: str) -> str:
-                        return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
-
-                    if page_state.explorer_view == "Список":
+                    if page_files:
+                        def _cd_download_url(file_path: str) -> str:
+                            return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
                         with ui.column().classes("rag-explorer-list w-full"):
                             for f in page_files:
                                 with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
-                                    ui.html(_file_icon_svg(f.name, "Файл"), sanitize=False)
+                                    ui.html(_file_badge_html(f.name), sanitize=False)
                                     with ui.column().classes("flex-1 gap-0"):
                                         ui.button(
                                             f.name,
@@ -810,21 +775,65 @@ def render_explorer_screen(
                                                 on_click=lambda fi=f: _cd_delete_dialog(fi.path, fi.name, is_folder=False),
                                                 auto_close=True,
                                             ).classes("text-negative")
-                    else:
-                        with ui.column().classes("w-full gap-1"):
-                            for f in page_files:
-                                ext = Path(f.name).suffix or "без расширения"
-                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
-                                    ui.html(_file_icon_svg(f.name, "Файл"), sanitize=False)
-                                    with ui.column().classes("flex-1 gap-0"):
-                                        ui.button(
-                                            f.name,
-                                            on_click=lambda fi=f: _cd_open_file(fi),
-                                            color=None,
-                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
-                                        ui.label(
-                                            f"{ext} · {_cd_file_size(f.size_bytes)} · {f.updated_at[:10] if f.updated_at else ''}".strip(" ·")
-                                        ).classes("rag-meta text-xs")
+                # ── Таблица view ───────────────────────────────────────────
+                else:
+                    def _cd_download_url(file_path: str) -> str:
+                        return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
+                    with ui.column().classes("w-full gap-0"):
+                        with ui.element("div").classes("rag-file-table-header"):
+                            ui.element("div")
+                            ui.label("Имя").classes("rag-col-header")
+                            ui.label("Изменён").classes("rag-col-header")
+                            ui.label("Размер").classes("rag-col-header")
+                            ui.label("Индекс").classes("rag-col-header")
+                            ui.element("div")
+                        for folder in child_folders:
+                            with ui.element("div").classes("rag-file-table-row"):
+                                ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
+                                with ui.element("div").classes("min-w-0"):
+                                    ui.button(
+                                        folder.name,
+                                        on_click=lambda p=folder.path: _cd_open_folder(p),
+                                        color=None,
+                                    ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                ui.label("—").classes("rag-meta text-xs")
+                                ui.label("папка").classes("rag-meta text-xs")
+                                ui.element("div")
+                                with ui.element("div").classes("flex items-center gap-0.5 justify-end"):
+                                    render_star(Path(folder.source_path or folder.path), item_type="folder")
+                                    if not folder.is_root:
+                                        with ui.button(icon="more_vert", color=None).props("flat round dense"):
+                                            with ui.menu():
+                                                ui.menu_item(
+                                                    "Переименовать",
+                                                    on_click=lambda fo=folder: _cd_rename_dialog(fo.path, fo.name),
+                                                    auto_close=True,
+                                                )
+                                                ui.menu_item(
+                                                    "Переместить в…",
+                                                    on_click=lambda fo=folder: _cd_move_dialog(fo.path, fo.name, is_folder=True),
+                                                    auto_close=True,
+                                                )
+                                                ui.separator()
+                                                ui.menu_item(
+                                                    "Удалить папку…",
+                                                    on_click=lambda fo=folder: _cd_delete_dialog(fo.path, fo.name, is_folder=True),
+                                                    auto_close=True,
+                                                ).classes("text-negative")
+                        for f in page_files:
+                            with ui.element("div").classes("rag-file-table-row"):
+                                ui.html(_file_badge_html(f.name), sanitize=False)
+                                with ui.element("div").classes("min-w-0"):
+                                    ui.button(
+                                        f.name,
+                                        on_click=lambda fi=f: _cd_open_file(fi),
+                                        color=None,
+                                    ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                ui.label(f.updated_at[:10] if f.updated_at else "—").classes("rag-meta text-xs")
+                                ui.label(_cd_file_size(f.size_bytes) if f.size_bytes else "—").classes("rag-meta text-xs")
+                                with ui.element("div").classes("flex items-center"):
+                                    _render_file_status(f.id)
+                                with ui.element("div").classes("flex items-center gap-0.5 justify-end"):
                                     src = str(f.source_path or f.path or "")
                                     if src:
                                         ui.button(
@@ -844,7 +853,6 @@ def render_explorer_screen(
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
                                     render_star(Path(f.source_path or f.path or f.name), item_type="file")
-                                    _render_file_status(f.id)
                                     with ui.button(icon="more_vert", color=None).props("flat round dense"):
                                         with ui.menu():
                                             ui.menu_item(
@@ -1088,7 +1096,7 @@ def render_explorer_screen(
         row = ui.row().classes(f"rag-explorer-item w-full p-2 items-center gap-3{system_class}")
         row.props(explorer_context_props(path, is_dir=is_dir))
         with row:
-            ui.html(_file_icon_svg(str(path), "Каталог" if is_dir else "Файл"), sanitize=False)
+            ui.html(_file_badge_html(str(path), "Каталог" if is_dir else "Файл"), sanitize=False)
             action = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
             with ui.column().classes("flex-1 gap-0"):
                 open_btn = ui.button(path.name, on_click=action, color=None).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")

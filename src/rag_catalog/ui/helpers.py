@@ -1363,6 +1363,35 @@ def _file_icon_svg(path_or_ext: str, kind: str = "Файл") -> str:
     return f'<span class="{icon_class}">{svg}</span>'
 
 
+def _file_badge_html(path_or_ext: str, kind: str = "Файл") -> str:
+    """CSS badge <span> for ui.html() in list/table rows — uses rag-file-badge CSS."""
+    ext = Path(str(path_or_ext or "")).suffix.lower() or str(path_or_ext or "").lower()
+    if kind == "Каталог":
+        css_cls, label = "fld", "FLD"
+    elif ext in {".doc", ".docx"}:
+        css_cls, label = "doc", "DOC"
+    elif ext in {".xls", ".xlsx", ".csv"}:
+        css_cls, label = "xls", "XLS"
+    elif ext in {".ppt", ".pptx"}:
+        css_cls, label = "ppt", "PPT"
+    elif ext == ".pdf":
+        css_cls, label = "pdf", "PDF"
+    elif ext in {".zip", ".rar", ".7z"}:
+        css_cls, label = "txt", "ZIP"
+    elif ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico"}:
+        css_cls, label = "img", "IMG"
+    elif ext in {".txt", ".log", ".md"}:
+        css_cls, label = "txt", "TXT"
+    elif ext in {".mp3", ".wav", ".flac"}:
+        css_cls, label = "doc", "AUD"
+    elif ext in {".mp4", ".avi", ".mov", ".mkv"}:
+        css_cls, label = "ppt", "VID"
+    else:
+        css_cls = "txt"
+        label = ext.replace(".", "").upper()[:3] or "FIL"
+    return f'<span class="rag-file-badge {css_cls}">{html.escape(label)}</span>'
+
+
 # ─────────────────────────── explorer helpers ────────────────────────────────
 
 def _path_sort_key(path: Path, sort_by: str) -> Any:

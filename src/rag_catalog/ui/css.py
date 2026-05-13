@@ -27,6 +27,7 @@ def _install_css() -> None:
           --rag-text: #14141a;
           --rag-muted: #6c6c78;
           --rag-muted-2: #9a9aa2;
+          --rag-hover: rgba(20, 20, 26, 0.06);
           --rag-accent: #3d63ff;
           --rag-accent-hover: #2949e6;
           --rag-accent-2: #10b981;
@@ -56,6 +57,7 @@ def _install_css() -> None:
           --rag-text: #f4f4f7;
           --rag-muted: #8a8a96;
           --rag-muted-2: #5a5a64;
+          --rag-hover: rgba(255, 255, 255, 0.06);
           --rag-accent: #6385ff;
           --rag-accent-hover: #4f6dff;
           --rag-header-bg: rgba(12, 12, 15, 0.9);
@@ -1162,6 +1164,57 @@ def _install_css() -> None:
         body.body--dark .rag-file-badge.xls { background: #14532d; color: #86efac; }
         body.body--dark .rag-file-badge.img { background: #500724; color: #f9a8d4; }
         body.body--dark .rag-file-badge.fld { background: #422006; color: #fbbf24; }
+        .rag-file-badge.ppt { background: #ffedd5; color: #c2410c; }
+        body.body--dark .rag-file-badge.ppt { background: #431407; color: #fb923c; }
+
+        /* === SETTINGS NAV === */
+        .rag-settings-nav-item {
+          color: var(--rag-text);
+          border-radius: 6px;
+          transition: background 0.12s, color 0.12s;
+        }
+        .rag-settings-nav-item .q-icon { color: var(--rag-muted); transition: color 0.12s; }
+        .rag-settings-nav-item:hover { background: var(--rag-hover); }
+        .rag-settings-nav-item:hover .q-icon { color: var(--rag-text); }
+        .rag-settings-nav-item.active {
+          background: color-mix(in srgb, var(--rag-accent) 12%, transparent);
+          color: var(--rag-accent);
+          font-weight: 600;
+        }
+        .rag-settings-nav-item.active .q-icon { color: var(--rag-accent); }
+        .rag-settings-section-label {
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--rag-muted-2);
+          padding: 12px 8px 4px;
+        }
+
+        /* === FILE TABLE (cloud drive Таблица view) === */
+        .rag-file-table-header,
+        .rag-file-table-row {
+          display: grid;
+          grid-template-columns: 44px minmax(0,1fr) 90px 64px 110px 88px;
+          align-items: center;
+          gap: 8px;
+          padding: 3px 8px;
+        }
+        .rag-file-table-header {
+          border-bottom: 1px solid var(--rag-border);
+          padding-bottom: 6px;
+          margin-bottom: 2px;
+        }
+        .rag-file-table-row { border-radius: 6px; transition: background 0.1s; }
+        .rag-file-table-row:hover { background: var(--rag-hover); }
+        .rag-col-header {
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--rag-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          white-space: nowrap;
+        }
 
         /* === SHIMMER ANIMATION === */
         @keyframes rag-shimmer {

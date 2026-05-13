@@ -1984,22 +1984,15 @@ def render_settings_screen(
                 if not filtered:
                     continue
                 if group_label:
-                    ui.label(group_label.upper()).classes(
-                        "text-xs text-gray-400 font-semibold mt-3 mb-1 px-2"
-                    )
+                    ui.label(group_label.upper()).classes("rag-settings-section-label")
                 for key, icon, label, _ in filtered:
                     is_active = active[0] == key
-                    bg = "background:#eef2ff;" if is_active else ""
-                    with ui.row().classes("w-full items-center gap-2 px-2 py-1 rounded cursor-pointer").style(
-                        bg + "user-select:none;flex-wrap:nowrap"
-                    ).on("click", lambda k=key: navigate(k)):
-                        ui.icon(icon, size="16px").classes(
-                            ("text-indigo-600" if is_active else "text-gray-400") + " shrink-0"
-                        )
-                        ui.label(label).classes(
-                            ("text-sm font-medium text-indigo-700" if is_active else "text-sm text-gray-700")
-                            + " truncate"
-                        )
+                    active_cls = " active" if is_active else ""
+                    with ui.row().classes(
+                        f"rag-settings-nav-item w-full items-center gap-2 px-2 py-1 cursor-pointer{active_cls}"
+                    ).style("user-select:none;flex-wrap:nowrap").on("click", lambda k=key: navigate(k)):
+                        ui.icon(icon, size="16px").classes("shrink-0")
+                        ui.label(label).classes("text-sm truncate")
 
     # ── Контент секции ───────────────────────────────────────────────
     def render_section() -> None:
