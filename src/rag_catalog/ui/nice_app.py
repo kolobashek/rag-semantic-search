@@ -103,27 +103,34 @@ def _build_page(initial_screen: str = "search") -> None:
 
     dark_mode = ui.dark_mode(state.theme == "dark")
 
-    with ui.header(fixed=True, elevated=False).classes("rag-header px-3 md:px-4 items-center no-wrap"):
-        menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("rag-header-button")
-        ui.image("/rag-logo.png").classes("w-6 h-6 rounded self-center") if LOGO_PATH.exists() else ui.icon("manage_search").classes("text-2xl self-center")
-        ui.label("RAG Каталог").classes("font-semibold text-base self-center leading-none")
-        # header_title убран — активный экран видно по подсветке в сайдбаре.
-        # Оставляем ссылочное поле на None для совместимости с render().
-        header_title = ui.label("").classes("hidden")
-        header_breadcrumbs = ui.row().classes("rag-header-breadcrumbs items-center gap-1 hidden md:flex")
-        header_actions = ui.row().classes("rag-header-actions items-center gap-1")
-        state.header_breadcrumbs = header_breadcrumbs
-        state.header_explorer_actions = header_actions
-        ui.space()
-        theme_button = ui.button(
-            icon="light_mode" if state.theme == "dark" else "dark_mode",
-            on_click=lambda: toggle_theme(),
-            color=None,
-        ).props("flat round dense").classes("rag-header-button")
-        status_text = "Qdrant готов" if _ensure_searcher(state) and state.searcher and state.searcher.connected else "Qdrant недоступен"
-        ui.label(status_text).classes("hidden sm:block rag-chip")
+    with ui.header(fixed=True, elevated=False).classes("rag-header-v2"):
+        with ui.element("div").classes("rag-hdr-grid"):
+            # ── Left: brand ──────────────────────────────────
+            with ui.element("div").classes("rag-hdr-brand"):
+                menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("rag-header-button md:hidden")
+                if LOGO_PATH.exists():
+                    ui.image("/rag-logo.png").classes("w-7 h-7 rounded")
+                else:
+                    ui.icon("manage_search").classes("text-2xl")
+                ui.label("Rag-search").classes("rag-hdr-brand-name hidden sm:block")
+                ui.label("v3").classes("rag-chip rag-mono-label hidden lg:block").style("padding:2px 6px;font-size:10px")
+            # ── Center: nav tabs ──────────────────────────────
+            header_nav = ui.element("nav").classes("rag-hdr-nav")
+            # ── Right: actions ────────────────────────────────
+            with ui.element("div").classes("rag-hdr-actions"):
+                header_breadcrumbs = ui.row().classes("rag-header-breadcrumbs items-center gap-1")
+                header_actions = ui.row().classes("rag-header-actions items-center gap-1")
+                state.header_breadcrumbs = header_breadcrumbs
+                state.header_explorer_actions = header_actions
+                theme_button = ui.button(
+                    icon="light_mode" if state.theme == "dark" else "dark_mode",
+                    on_click=lambda: toggle_theme(),
+                    color=None,
+                ).props("flat round dense").classes("rag-header-button")
+                header_title = ui.label("").classes("hidden")
+                header_user_label = ui.label("").classes("rag-avatar hidden lg:grid")
 
-    with ui.left_drawer(value=False, fixed=True, bordered=True).props("show-if-above breakpoint=1024").classes("rag-drawer w-80 p-4") as drawer:
+    with ui.left_drawer(value=False, fixed=True, bordered=True).classes("rag-drawer w-72 p-4") as drawer:
         with ui.column().classes("rag-drawer-body w-full"):
             ui.label("Меню").classes("text-xl font-semibold mb-2")
             nav_area = ui.column().classes("w-full gap-2")
@@ -181,19 +188,46 @@ def _build_page(initial_screen: str = "search") -> None:
         set_screen("explorer")
 
     def update_nav() -> None:
+        is_admin = str((state.current_user or {}).get("role") or "") == "admin"
+        nav_items = [
+            ("search",   "Поиск",      "search"),
+            ("explorer", "Файлы",      "folder"),
+        ]
+        if is_admin:
+            nav_items += [
+                ("index", "Индекс",    "analytics"),
+                ("stats", "Аналитика", "query_stats"),
+            ]
+
+        # ── Header nav tabs (desktop) ──────────────────────
+        header_nav.clear()
+        if state.current_user:
+            with header_nav:
+                for screen, label, icon_name in nav_items:
+                    active_cls = "active" if state.screen == screen else ""
+                    tab = ui.button(
+                        label, icon=icon_name,
+                        on_click=lambda s=screen: set_screen(s),
+                    ).props("flat no-caps").classes(f"rag-nav-tab {active_cls}")
+                    tab._props["style"] = "font-size:13px;font-weight:500"
+                if is_admin:
+                    active_cls = "active" if state.screen == "settings" else ""
+                    ui.button(
+                        "Настройки", icon="settings",
+                        on_click=lambda: set_screen("settings"),
+                    ).props("flat no-caps").classes(f"rag-nav-tab {active_cls}")
+
+        # ── Avatar label ────────────────────────────────────
+        uname = str((state.current_user or {}).get("username") or "")
+        header_user_label.set_text(uname[:2].upper() if uname else "")
+        header_user_label.set_visibility(bool(uname))
+
+        # ── Left drawer nav (mobile / supplementary) ────────
         nav_area.clear()
         with nav_area:
-            for screen, label, icon in [
-                ("search", "Поиск", "search"),
-                ("explorer", "Проводник", "folder"),
-            ]:
+            for screen, label, icon_name in nav_items:
                 color = "primary" if state.screen == screen else None
-                ui.button(label, icon=icon, on_click=lambda s=screen: set_screen(s, close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
-            if str((state.current_user or {}).get("role") or "") == "admin":
-                color = "primary" if state.screen == "index" else None
-                ui.button("Индекс", icon="analytics", on_click=lambda: set_screen("index", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
-                color = "primary" if state.screen == "stats" else None
-                ui.button("Аналитика", icon="query_stats", on_click=lambda: set_screen("stats", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button(label, icon=icon_name, on_click=lambda s=screen: set_screen(s, close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
         settings_area.clear()
 
@@ -1431,134 +1465,255 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
-        with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
-            with ui.column().classes("rag-card w-full max-w-xl p-5 gap-3"):
+        tg_login_token = {"value": ""}
+
+        def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
+            complete_login_session(state, user, event_type=event_type)
+            _load_user_state(state)
+            ui.notify("Вход выполнен.", type="positive")
+            render()
+
+        def login() -> None:
+            username = str(username_input.value or "")
+            result = auth_db.login_with_reason(username=username, password=str(password_input.value or ""))
+            reason = str(result.get("reason") or "")
+            user = result.get("user")
+            if reason == "pending":
+                auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="pending")
+                ui.notify("Ваша заявка ещё не активирована администратором.", type="warning", timeout=6000)
+                return
+            if reason == "blocked":
+                auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="blocked")
+                ui.notify("Аккаунт заблокирован. Обратитесь к администратору.", type="negative")
+                return
+            if not user:
+                auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
+                ui.notify("Неверный логин или пароль.", type="negative")
+                return
+            _complete_login(user, event_type="login")
+
+        def request_tg_login() -> None:
+            bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+            if not bot_link:
+                ui.notify("Telegram-вход не настроен: задайте telegram_bot_link в config.json.", type="warning")
+                return
+            out = auth_db.create_telegram_login_challenge(target="web")
+            token = str(out.get("token") or "")
+            link = _telegram_deeplink(bot_link, "login", token)
+            if not token or not link:
+                ui.notify("Не удалось создать Telegram-ссылку входа.", type="negative")
+                return
+            tg_login_token["value"] = token
+            ui.run_javascript(
+                "(() => {"
+                f"const url = {json.dumps(link)};"
+                "const w = window.open(url, '_blank', 'noopener,noreferrer');"
+                "if (!w) { window.location.href = url; }"
+                "})();"
+            )
+            ui.notify("Подтвердите вход в Telegram, затем вернитесь в браузер.", type="positive")
+
+        def poll_tg_login() -> None:
+            token = tg_login_token["value"]
+            if not token or state.current_user is not None:
+                return
+            out = auth_db.consume_confirmed_telegram_login(token=token)
+            if not out.get("ok"):
+                return
+            tg_login_token["value"] = ""
+            user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
+            if not user:
+                return
+            _complete_login(user, event_type="telegram_web_login")
+
+        def register_request() -> None:
+            username = str(reg_username_input.value or "").strip().lower()
+            display_name = str(reg_display_input.value or "").strip()
+            tg_username = str(reg_tg_user_input.value or "").strip().lstrip("@")
+            if len(username) < 3:
+                ui.notify("Укажите логин (минимум 3 символа).", type="warning")
+                return
+            if auth_db.get_user(username=username):
+                ui.notify("Пользователь с таким логином уже существует. Используйте вход.", type="warning")
+                return
+            out = auth_db.create_registration_request(
+                username=username,
+                display_name=display_name or username,
+                telegram_username=tg_username,
+                source="web",
+                note="requested from web login form",
+            )
+            if not out.get("ok"):
+                ui.notify("Не удалось отправить заявку. Попробуйте позже.", type="negative")
+                return
+            ui.notify("Заявка отправлена администратору.", type="positive")
+            for inp in (reg_username_input, reg_display_input, reg_tg_user_input):
+                inp.value = ""
+                inp.update()
+
+        # ── Split layout — break out of page_root padding ──────────────────
+        with ui.element("div").classes("rag-login-split").style(
+            "position:fixed;inset:56px 0 0 0;z-index:1"
+        ):
+
+            # ── LEFT: brand panel ───────────────────────────────────────────
+            with ui.element("div").classes("rag-login-brand"):
+                ui.element("div").classes("rag-login-brand-liquid")
+                ui.element("div").classes("rag-login-brand-grid")
+
+                # Top: logo + version badge
+                with ui.element("div").style("display:flex;align-items:center;justify-content:space-between;margin-bottom:auto"):
+                    with ui.element("div").style("display:flex;align-items:center;gap:12px"):
+                        if LOGO_PATH.exists():
+                            ui.image("/rag-logo.png").style("width:32px;height:32px;border-radius:8px")
+                        ui.label("Rag-search").style("font-family:var(--rag-font-display);font-weight:700;font-size:16px;letter-spacing:-0.02em;color:#fff")
+                    ui.element("div").style(
+                        "display:flex;align-items:center;gap:6px;padding:4px 10px;"
+                        "background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);"
+                        "border-radius:999px;font-family:var(--rag-font-mono);font-size:10px;color:rgba(255,255,255,.7)"
+                    ).text = "● онлайн · v3"
+
+                # Hero text
+                with ui.element("div").style("margin-top:auto;margin-bottom:52px"):
+                    ui.label("ВНУТРЕННИЙ ПОИСК КОМПАНИИ").style(
+                        "font-family:var(--rag-font-mono);font-size:10px;font-weight:500;"
+                        "letter-spacing:0.12em;color:rgba(255,255,255,.4);margin-bottom:24px;display:block"
+                    )
+                    ui.html(
+                        "<h1 style=\"font-family:'Manrope',system-ui,sans-serif;font-weight:800;"
+                        "font-size:clamp(48px,5.5vw,84px);letter-spacing:-0.04em;line-height:0.92;"
+                        "margin:0;color:#fff\">"
+                        "Найдём всё,<br>"
+                        "<span style=\"color:#8aabff\">за секунду.</span>"
+                        "</h1>"
+                    )
+
+                    # Live stats
+                    with ui.element("div").style("display:flex;gap:0;margin-top:44px;max-width:480px"):
+                        for i, (num, lbl) in enumerate([
+                            ("65 664", "документов в индексе"),
+                            ("187",    "поисков сегодня"),
+                            ("0.42с",  "среднее время"),
+                        ]):
+                            style = "display:flex;flex-direction:column;gap:6px;" + (
+                                "padding-right:24px;" if i < 2 else ""
+                            ) + ("padding-left:24px;border-left:1px solid rgba(255,255,255,.1);" if i > 0 else "")
+                            with ui.element("div").style(style):
+                                ui.label(num).classes("rag-login-stat-num")
+                                ui.label(lbl).style(
+                                    "font-family:var(--rag-font-mono);font-size:10px;font-weight:500;"
+                                    "text-transform:uppercase;letter-spacing:0.1em;color:rgba(255,255,255,.4)"
+                                )
+
+                # Activity feed
+                with ui.element("div").style("margin-bottom:24px"):
+                    ui.label("↗ команда сейчас ищет").style(
+                        "font-family:var(--rag-font-mono);font-size:10px;letter-spacing:0.08em;"
+                        "color:rgba(255,255,255,.35);text-transform:uppercase;margin-bottom:10px;display:block"
+                    )
+                    for t, who, q in [
+                        ("14:23", "А. Иванов",  "карточка предприятия Спецмаш"),
+                        ("14:21", "М. Петрова", "паспорт цыбусов 2024"),
+                        ("14:19", "Д. Сидоров", "договор поставки № 442"),
+                    ]:
+                        with ui.element("div").classes("rag-login-activity-row"):
+                            ui.label(t)
+                            ui.label(who)
+                            ui.label(q).style("color:#8aabff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+
+                # Bottom
+                with ui.element("div").style(
+                    "display:flex;justify-content:space-between;font-family:var(--rag-font-mono);"
+                    "font-size:10px;color:rgba(255,255,255,.28);text-transform:uppercase;letter-spacing:0.08em"
+                ):
+                    ui.label("v3 · production")
+                    ui.label("internal use only")
+
+            # ── RIGHT: form panel ───────────────────────────────────────────
+            with ui.element("div").classes("rag-login-form-panel"):
+                # Top bar
+                with ui.element("div").style("display:flex;justify-content:space-between;align-items:center;margin-bottom:auto"):
+                    with ui.element("div").style("display:flex;align-items:center;gap:8px"):
+                        ui.label("прод. среда").style(
+                            "font-family:var(--rag-font-mono);font-size:11px;padding:2px 8px;"
+                            "border:1px solid var(--rag-border);border-radius:4px;color:var(--rag-muted)"
+                        )
+                        ui.label("·").style("color:var(--rag-muted)")
+                        ui.label("rag-search.local").style("font-family:var(--rag-font-mono);font-size:12px;color:var(--rag-muted)")
+
+                # Session-expired warning
                 if state.session_expired:
-                    with ui.row().classes("items-center gap-2 bg-orange-50 border border-orange-200 rounded p-3 w-full"):
-                        ui.icon("schedule").classes("text-orange-500")
-                        ui.label("Сессия истекла — выполните вход снова.").classes("text-orange-700 text-sm")
-                ui.label("Вход в RAG Каталог").classes("text-2xl font-semibold")
-                ui.label("Войдите в аккаунт или отправьте заявку на доступ.").classes("rag-meta")
+                    with ui.row().classes("items-center gap-2 w-full").style(
+                        "background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;margin-top:16px"
+                    ):
+                        ui.icon("schedule").style("color:#f59e0b")
+                        ui.label("Сессия истекла — выполните вход снова.").style("color:#92400e;font-size:13px")
 
-                tg_login_token = {"value": ""}
+                # Form content (centered)
+                with ui.element("div").style(
+                    "align-self:center;justify-self:center;display:flex;flex-direction:column;"
+                    "gap:16px;width:100%;max-width:400px;margin:auto"
+                ):
+                    with ui.element("div").style("margin-bottom:4px"):
+                        ui.label("Вход").style(
+                            "font-family:var(--rag-font-display);font-weight:800;"
+                            "font-size:40px;letter-spacing:-0.03em;line-height:1;margin:0;display:block"
+                        )
+                        ui.label("Используйте корпоративный аккаунт.").style(
+                            "color:var(--rag-muted);font-size:14px;margin-top:8px;display:block"
+                        )
 
-                def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
-                    complete_login_session(state, user, event_type=event_type)
-                    _load_user_state(state)
-                    ui.notify("Вход выполнен.", type="positive")
-                    render()
+                    tabs = ui.tabs().classes("w-full")
+                    with tabs:
+                        tab_login = ui.tab("Войти", icon="login")
+                        tab_register = ui.tab("Зарегистрироваться", icon="person_add")
 
-                def login() -> None:
-                    username = str(username_input.value or "")
-                    result = auth_db.login_with_reason(username=username, password=str(password_input.value or ""))
-                    reason = str(result.get("reason") or "")
-                    user = result.get("user")
-                    if reason == "pending":
-                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="pending")
-                        ui.notify("Ваша заявка ещё не активирована администратором.", type="warning", timeout=6000)
-                        return
-                    if reason == "blocked":
-                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="blocked")
-                        ui.notify("Аккаунт заблокирован. Обратитесь к администратору.", type="negative")
-                        return
-                    if not user:
-                        auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
-                        ui.notify("Неверный логин или пароль.", type="negative")
-                        return
-                    _complete_login(user, event_type="login")
+                    with ui.tab_panels(tabs, value=tab_login).classes("w-full"):
+                        with ui.tab_panel(tab_login).classes("w-full gap-3"):
+                            username_input = ui.input("Логин или email").props("dense outlined").classes("w-full")
+                            password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
+                            username_input.on("keyup.enter", lambda _: ui.run_javascript(
+                                "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
+                                "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
+                                "if(i>=0&&ins[i+1])ins[i+1].focus();"
+                            ))
+                            password_input.on("keyup.enter", lambda _: login())
+                            ui.button("Войти", icon="login", on_click=login).props("unelevated").classes("w-full").style(
+                                "height:48px;font-family:var(--rag-font-display);font-size:15px;font-weight:600;letter-spacing:-0.01em"
+                            )
+                            with ui.element("div").classes("rag-divider-text"):
+                                ui.label("или")
+                            tg_btn = ui.button("Войти через Telegram", icon="send", on_click=request_tg_login).props("outline").classes("w-full")
+                            bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
+                            tg_btn.set_visibility(bool(bot_link))
 
-                def request_tg_login() -> None:
-                    bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-                    if not bot_link:
-                        ui.notify("Telegram-вход не настроен: задайте telegram_bot_link в config.json.", type="warning")
-                        return
-                    out = auth_db.create_telegram_login_challenge(target="web")
-                    token = str(out.get("token") or "")
-                    link = _telegram_deeplink(bot_link, "login", token)
-                    if not token or not link:
-                        ui.notify("Не удалось создать Telegram-ссылку входа.", type="negative")
-                        return
-                    tg_login_token["value"] = token
-                    ui.run_javascript(
-                        "(() => {"
-                        f"const url = {json.dumps(link)};"
-                        "const w = window.open(url, '_blank', 'noopener,noreferrer');"
-                        "if (!w) { window.location.href = url; }"
-                        "})();"
-                    )
-                    ui.notify("Подтвердите вход в Telegram, затем вернитесь в браузер.", type="positive")
+                        with ui.tab_panel(tab_register).classes("w-full gap-3"):
+                            reg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")
+                            reg_display_input = ui.input("Имя").props("dense outlined").classes("w-full")
+                            reg_tg_user_input = ui.input("Telegram username (необязательно)").props("dense outlined").classes("w-full")
+                            reg_tg_user_input.on("keyup.enter", lambda _: register_request())
+                            ui.button("Отправить заявку", icon="how_to_reg", on_click=register_request).props("unelevated").classes("w-full")
+                            ui.label("После одобрения администратором вы получите доступ.").classes("rag-meta")
 
-                def poll_tg_login() -> None:
-                    token = tg_login_token["value"]
-                    if not token or state.current_user is not None:
-                        return
-                    out = auth_db.consume_confirmed_telegram_login(token=token)
-                    if not out.get("ok"):
-                        return
-                    tg_login_token["value"] = ""
-                    user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
-                    if not user:
-                        return
-                    _complete_login(user, event_type="telegram_web_login")
+                # Status strip
+                with ui.element("div").style(
+                    "display:grid;grid-template-columns:1fr 1fr;gap:0;"
+                    "border-top:1px solid var(--rag-border);margin:0 -32px;padding:0 32px;margin-top:auto"
+                ):
+                    for dot_cls, lbl, sub in [
+                        ("ok",   "индекс актуален",  "13.05.2026"),
+                        ("info", "индексация идёт",  "small chunks"),
+                    ]:
+                        with ui.element("div").style(
+                            "display:flex;align-items:center;gap:10px;padding:14px 0;"
+                            "font-size:12px;color:var(--rag-text)"
+                        ):
+                            ui.element("span").classes(f"rag-dot {dot_cls}")
+                            ui.label(lbl)
+                            ui.label(sub).style("margin-left:auto;font-family:var(--rag-font-mono);font-size:11px;color:var(--rag-muted)")
 
-                def register_request() -> None:
-                    username = str(reg_username_input.value or "").strip().lower()
-                    display_name = str(reg_display_input.value or "").strip()
-                    tg_username = str(reg_tg_user_input.value or "").strip().lstrip("@")
-                    if len(username) < 3:
-                        ui.notify("Укажите логин (минимум 3 символа).", type="warning")
-                        return
-                    if auth_db.get_user(username=username):
-                        ui.notify("Пользователь с таким логином уже существует. Используйте вход.", type="warning")
-                        return
-                    out = auth_db.create_registration_request(
-                        username=username,
-                        display_name=display_name or username,
-                        telegram_username=tg_username,
-                        source="web",
-                        note="requested from web login form",
-                    )
-                    if not out.get("ok"):
-                        ui.notify("Не удалось отправить заявку. Попробуйте позже.", type="negative")
-                        return
-                    ui.notify("Заявка отправлена администратору.", type="positive")
-                    reg_username_input.value = ""
-                    reg_display_input.value = ""
-                    reg_tg_user_input.value = ""
-                    reg_username_input.update()
-                    reg_display_input.update()
-                    reg_tg_user_input.update()
-
-                tabs = ui.tabs().classes("w-full")
-                with tabs:
-                    tab_login = ui.tab("Войти", icon="login")
-                    tab_register = ui.tab("Зарегистрироваться", icon="person_add")
-
-                with ui.tab_panels(tabs, value=tab_login).classes("w-full"):
-                    with ui.tab_panel(tab_login).classes("w-full gap-3"):
-                        username_input = ui.input("Логин").props("dense outlined").classes("w-full")
-                        password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-                        username_input.on("keyup.enter", lambda _: ui.run_javascript(
-                            "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
-                            "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
-                            "if(i>=0&&ins[i+1])ins[i+1].focus();"
-                        ))
-                        password_input.on("keyup.enter", lambda _: login())
-                        ui.button("Войти", icon="login", on_click=login).props("unelevated")
-                        ui.separator()
-                        ui.button("Войти через Telegram", icon="send", on_click=request_tg_login).props("outline").classes("w-full")
-                        ui.label("Стандартный сценарий: как у OAuth-входа — нажали кнопку, подтвердили в Telegram, вернулись в приложение.").classes("rag-meta")
-
-                    with ui.tab_panel(tab_register).classes("w-full gap-3"):
-                        reg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")
-                        reg_display_input = ui.input("Имя").props("dense outlined").classes("w-full")
-                        reg_tg_user_input = ui.input("Telegram username (необязательно)").props("dense outlined").classes("w-full")
-                        reg_tg_user_input.on("keyup.enter", lambda _: register_request())
-                        ui.button("Отправить заявку", icon="how_to_reg", on_click=register_request).props("unelevated")
-                        ui.label("После одобрения администратором вы получите доступ к аккаунту.").classes("rag-meta")
-
-                _stop_managed_timer(state.tg_login_timer)
-                state.tg_login_timer = ui.timer(2.0, poll_tg_login)
+        _stop_managed_timer(state.tg_login_timer)
+        state.tg_login_timer = ui.timer(2.0, poll_tg_login)
 
 
     # ── Admin / settings screens ──────────────────────────────────────────────
