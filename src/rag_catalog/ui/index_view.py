@@ -147,33 +147,41 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
     _progress_rendered = [False]
     _current_log_entries: List[Dict[str, Any]] = []
 
-    with ui.dialog().props("persistent") as stage_status_dialog, ui.card().classes("w-[min(1200px,96vw)] max-h-[90vh] flex flex-col p-4 gap-3"):
-        stage_status_title = ui.label("Статус этапа").classes("text-lg font-semibold")
-        stage_status_run = ui.label("Run ID: -").classes("rag-meta")
-        stage_status_note_title = ui.label("Сообщение рана").classes("font-semibold")
-        stage_status_note_value = ui.label("").classes("rag-meta")
-        stage_status_log_path = ui.label("").classes("rag-meta text-xs")
-        with ui.row().classes("w-full items-end gap-3 flex-wrap"):
-            stage_status_lines = ui.number("Записей", value=200, min=20, max=5000, step=20).props("dense outlined").classes("w-32")
+    with ui.dialog() as stage_status_dialog, ui.card().classes("w-[min(1200px,96vw)] max-h-[90vh] flex flex-col p-0 gap-0"):
+        # ── Header ──────────────────────────────────────────────────────────
+        with ui.row().classes("w-full items-start justify-between gap-2 p-4 pb-2"):
+            with ui.column().classes("gap-0 min-w-0"):
+                stage_status_title = ui.label("Статус этапа").classes("text-lg font-semibold")
+                stage_status_run = ui.label("Run ID: -").classes("rag-meta text-xs")
+                stage_status_note_title = ui.label("Сообщение рана").classes("font-semibold text-sm")
+                stage_status_note_value = ui.label("").classes("rag-meta text-xs")
+            ui.button(icon="close", on_click=stage_status_dialog.close).props("flat dense round").classes("shrink-0 self-start")
+        # ── Filters ─────────────────────────────────────────────────────────
+        with ui.row().classes("w-full items-end gap-2 flex-wrap px-4 pb-2"):
+            stage_status_lines = ui.number("Записей", value=200, min=20, max=5000, step=20).props("dense outlined").classes("w-28")
             stage_status_level = ui.select(
                 options={"all": "Все уровни", "INFO": "INFO", "WARNING": "WARNING", "ERROR": "ERROR", "DEBUG": "DEBUG", "CRITICAL": "CRITICAL"},
                 value="all",
                 label="Уровень",
-            ).props("dense outlined").classes("w-44")
-            stage_status_date_from = ui.input("Дата с (ГГГГ-ММ-ДД)").props("dense outlined clearable").classes("w-44")
-            stage_status_date_to = ui.input("Дата по (ГГГГ-ММ-ДД)").props("dense outlined clearable").classes("w-44")
+            ).props("dense outlined").classes("w-40")
+            stage_status_date_from = ui.input("Дата с").props("dense outlined clearable mask='####-##-##' placeholder='ГГГГ-ММ-ДД'").classes("w-36")
+            stage_status_date_to = ui.input("Дата по").props("dense outlined clearable mask='####-##-##' placeholder='ГГГГ-ММ-ДД'").classes("w-36")
             stage_status_autorefresh = ui.checkbox("Автообновление", value=True)
+        stage_status_log_path = ui.label("").classes("rag-meta text-xs px-4 pb-1")
+        # ── Log content ─────────────────────────────────────────────────────
         with ui.element("div").style(
-            "flex:1;min-height:300px;max-height:55vh;overflow-y:auto;"
-            "border:1px solid #e5e7eb;border-radius:6px;padding:4px;"
-            "font-family:var(--rag-font-mono,monospace);font-size:12px;background:#fff"
+            "flex:1;min-height:300px;max-height:55vh;overflow-y:auto;overflow-x:hidden;"
+            "border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:6px 12px;"
+            "font-family:var(--rag-font-mono,monospace);font-size:12px;background:#fff;"
+            "word-break:break-word;"
         ):
             stage_status_log_html = ui.html("")
-        with ui.row().classes("w-full justify-end gap-2"):
-            ui.button("Обновить", icon="refresh", on_click=lambda: _refresh_stage_status_log(force=True)).props("outline")
-            ui.button("Копировать", icon="content_copy", on_click=lambda: _copy_stage_status_log()).props("outline")
-            ui.button("Скачать", icon="download", on_click=lambda: _download_stage_status_log()).props("outline")
-            ui.button("Закрыть", on_click=stage_status_dialog.close).props("unelevated")
+        # ── Footer actions ───────────────────────────────────────────────────
+        with ui.row().classes("w-full justify-end gap-2 p-3"):
+            ui.button("Обновить", icon="refresh", on_click=lambda: _refresh_stage_status_log(force=True)).props("outline dense")
+            ui.button("Копировать", icon="content_copy", on_click=lambda: _copy_stage_status_log()).props("outline dense")
+            ui.button("Скачать", icon="download", on_click=lambda: _download_stage_status_log()).props("outline dense")
+            ui.button("Закрыть", on_click=stage_status_dialog.close).props("unelevated dense")
 
     def _refresh_stage_status_log(*, force: bool = False) -> None:
         is_open = bool(getattr(stage_status_dialog, "value", False))
