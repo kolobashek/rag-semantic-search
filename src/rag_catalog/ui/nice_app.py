@@ -1601,6 +1601,7 @@ def _build_page(initial_screen: str = "search") -> None:
             render_fn=render,
             query_handler=choose_query_handler,
             index_dashboard_fn=render_index_screen,
+            logout_fn=do_logout,
         )
 
     # ── Analytics / stats screen ───────────────────────────────────────────

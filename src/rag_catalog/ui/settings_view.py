@@ -89,6 +89,7 @@ def render_settings_screen(
     render_fn: Callable,
     query_handler: Callable,
     index_dashboard_fn: Optional[Callable] = None,
+    logout_fn: Optional[Callable] = None,
 ) -> None:
 
     def render_admin_users(auth_db: UserAuthDB) -> None:
@@ -2210,7 +2211,7 @@ def render_settings_screen(
                     new_pw2.on("keyup.enter", lambda _: change_pw())
                     with ui.row().classes("gap-2"):
                         ui.button("Сменить пароль", icon="key", on_click=change_pw).props("outline")
-                        ui.button("Выйти", icon="logout", on_click=do_logout).props("flat")
+                        ui.button("Выйти", icon="logout", on_click=logout_fn or (lambda: None)).props("flat")
 
             elif sec == "paths":
                 render_admin_path_settings()
