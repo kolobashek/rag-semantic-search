@@ -68,6 +68,28 @@ def test_cloud_drive_service_storage_health(tmp_path: Path) -> None:
     assert health.writable is True
 
 
+def test_bootstrap_import_files_backfills_existing_registry_objects(tmp_path: Path) -> None:
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    source = catalog / "report.txt"
+    source.write_text("payload", encoding="utf-8")
+
+    storage_root = tmp_path / "storage"
+    service = CloudDriveService(
+        registry=CloudDriveRegistryDB(str(tmp_path / "registry.db")),
+        storage=LocalStorageAdapter(str(storage_root)),
+    )
+
+    service.bootstrap_from_catalog(str(catalog), import_files=False)
+    assert not [path for path in storage_root.rglob("*") if path.is_file()]
+
+    service.bootstrap_from_catalog(str(catalog), import_files=True)
+
+    stored_files = [path for path in storage_root.rglob("*") if path.is_file()]
+    assert len(stored_files) == 1
+    assert stored_files[0].read_text(encoding="utf-8") == "payload"
+
+
 def test_s3_storage_ensure_container_creates_missing_bucket(monkeypatch) -> None:
     calls: list[tuple[str, dict]] = []
 

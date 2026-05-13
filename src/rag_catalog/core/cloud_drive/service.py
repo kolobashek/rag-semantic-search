@@ -933,7 +933,7 @@ class CloudDriveService:
                     emit_progress('folder', current_path=str(base))
             else:
                 stored_dir_mtime = self.registry.get_folder_source_mtime(base_id)
-                if stored_dir_mtime != 0.0 and abs(dir_mtime - stored_dir_mtime) < 1e-3:
+                if not import_files and stored_dir_mtime != 0.0 and abs(dir_mtime - stored_dir_mtime) < 1e-3:
                     # Directory unchanged — skip all files, but still recurse
                     # into subdirs (os.walk continues naturally; subdir mtimes
                     # are checked individually when we reach them).
@@ -975,7 +975,7 @@ class CloudDriveService:
                     file_mtime, file_size = 0.0, 0
 
                 known = known_mtimes.get(filename)
-                if known is not None:
+                if known is not None and not import_files:
                     stored_mtime, stored_size = known
                     if (
                         stored_mtime != 0.0
