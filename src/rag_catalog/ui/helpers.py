@@ -1018,7 +1018,7 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
     if not run_id:
         return []
 
-    return _db_query_dicts(
+    rows = _db_query_dicts(
         db_path,
         """
         SELECT isp.*,
@@ -1031,6 +1031,11 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
         """,
         (run_id,),
     )
+    # PID is alive → watchdog-set 'cancelled' status is wrong; correct it to 'running'
+    for r in rows:
+        if r.get("status") == "cancelled":
+            r["status"] = "running"
+    return rows
 
 
 def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
