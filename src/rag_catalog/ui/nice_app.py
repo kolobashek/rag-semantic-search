@@ -47,6 +47,7 @@ from .helpers import (
     _popular_queries,
     _preview_file,
     _preview_office_file,
+    _read_index_telemetry,
     _remember_query,
     _resolve_catalog_file,
     _result_group,
@@ -112,8 +113,8 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.image("/rag-logo.png").classes("w-7 h-7 rounded")
                 else:
                     ui.icon("manage_search").classes("text-2xl")
-                ui.label("Rag-search").classes("rag-hdr-brand-name hidden sm:block")
-                ui.label("v3").classes("rag-chip rag-mono-label hidden lg:block").style("padding:2px 6px;font-size:10px")
+                ui.label("Rag-search").classes("rag-hdr-brand-name")
+                ui.label("v3.4").classes("rag-chip rag-mono-label rag-version-chip")
             # ── Center: nav tabs ──────────────────────────────
             header_nav = ui.element("nav").classes("rag-hdr-nav")
             # ── Right: actions ────────────────────────────────
@@ -122,6 +123,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 header_actions = ui.row().classes("rag-header-actions items-center gap-1")
                 state.header_breadcrumbs = header_breadcrumbs
                 state.header_explorer_actions = header_actions
+                header_status_chip = ui.label("").classes("rag-chip rag-header-status")
+                header_status_chip.set_visibility(False)
                 theme_button = ui.button(
                     icon="light_mode" if state.theme == "dark" else "dark_mode",
                     on_click=lambda: toggle_theme(),
@@ -199,28 +202,52 @@ def _build_page(initial_screen: str = "search") -> None:
                 ("stats", "Аналитика", "query_stats"),
             ]
 
+        def open_settings_section(section: str) -> None:
+            state.settings_section = section
+            set_screen("settings")
+
         # ── Header nav tabs (desktop) ──────────────────────
         header_nav.clear()
         if state.current_user:
+            header_items = [
+                ("home", "Главная", "dashboard", lambda: set_screen("search"), False),
+                ("search", "Поиск", "search", lambda: set_screen("search"), state.screen == "search"),
+                ("explorer", "Файлы", "folder", lambda: set_screen("explorer"), state.screen == "explorer"),
+                ("cloud", "Cloud", "cloud", lambda: open_settings_section("cloud_drive"), state.screen == "settings" and state.settings_section == "cloud_drive"),
+            ]
+            if is_admin:
+                header_items.append(("index", "Индекс", "filter_center_focus", lambda: set_screen("index"), state.screen == "index"))
             with header_nav:
-                for screen, label, icon_name in nav_items:
-                    active_cls = "active" if state.screen == screen else ""
+                for _key, label, icon_name, action, is_active in header_items:
+                    active_cls = "active" if is_active else ""
                     tab = ui.button(
                         label, icon=icon_name,
-                        on_click=lambda s=screen: set_screen(s),
+                        on_click=action,
                     ).props("flat no-caps").classes(f"rag-nav-tab {active_cls}")
                     tab._props["style"] = "font-size:13px;font-weight:500"
-                if is_admin:
-                    active_cls = "active" if state.screen == "settings" else ""
-                    ui.button(
-                        "Настройки", icon="settings",
-                        on_click=lambda: set_screen("settings"),
-                    ).props("flat no-caps").classes(f"rag-nav-tab {active_cls}")
 
         # ── Avatar label ────────────────────────────────────
         uname = str((state.current_user or {}).get("username") or "")
         header_user_label.set_text(uname[:2].upper() if uname else "")
         header_user_label.set_visibility(bool(uname))
+
+        # ── Header index status chip ────────────────────────
+        header_status_chip.set_visibility(False)
+        if state.current_user:
+            try:
+                telemetry = _read_index_telemetry(state.cfg)
+                active_rows = list(telemetry.get("active_stages") or [])
+                if telemetry.get("active_ocr"):
+                    active_rows.append(telemetry.get("active_ocr") or {})
+                if active_rows:
+                    row = active_rows[0]
+                    processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
+                    total = int(row.get("total_files") or row.get("found_scanned") or 0)
+                    pct = min(100, max(0, round(processed * 100 / total))) if total > 0 else 0
+                    header_status_chip.set_text(f"● {pct}% · индексация")
+                    header_status_chip.set_visibility(True)
+            except Exception:
+                header_status_chip.set_visibility(False)
 
         # ── Left drawer nav (mobile / supplementary) ────────
         nav_area.clear()

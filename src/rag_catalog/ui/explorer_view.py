@@ -479,8 +479,11 @@ def render_explorer_screen(
                     ui.icon("cloud_off", size="24px").classes("opacity-30")
                     ui.label("Реестр пуст. Запустите импорт в настройках Cloud Drive.").classes("text-center text-xs")
             else:
+                ancestor_paths = {folder.path for folder in breadcrumbs}
+
                 def _render_tree_node_cd(folder: CloudDriveFolder, depth: int) -> None:
                     is_current = folder.path == cd_path or (not cd_path and folder.is_root)
+                    is_ancestor = folder.path in ancestor_paths and not is_current
                     icon = "folder_open" if is_current else "folder"
                     label = "Корень" if folder.is_root else folder.name
                     btn = ui.button(
@@ -488,10 +491,12 @@ def render_explorer_screen(
                         on_click=lambda p=folder.path: _cd_open_folder(p),
                         color=None,
                     ).props("flat align=left no-caps dense").classes(
-                        "rag-nav-button rag-tree-button w-full" + (" active" if is_current else "")
+                        "rag-nav-button rag-tree-button w-full"
+                        + (" active" if is_current else "")
+                        + (" ancestor" if is_ancestor else "")
                     ).style(f"padding-left: {depth * 12}px")
                     btn.tooltip(folder.path)
-                    if is_current or (not cd_path and folder.is_root):
+                    if folder.is_root or is_current or is_ancestor:
                         for child in svc.registry.list_child_folders(folder.id):
                             _render_tree_node_cd(child, depth + 1)
 
@@ -546,7 +551,7 @@ def render_explorer_screen(
                 )
                 ui.label(f"Вид: {page_state.explorer_view}").classes("rag-chip rag-filter-chip")
                 ui.label(f"Сорт.: {page_state.explorer_sort}").classes(
-                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_sort != "По имени" else "")
+                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_sort != "По имени" or page_state.explorer_desc else "")
                 )
 
         # ── Main column ───────────────────────────────────────────────────
@@ -777,12 +782,13 @@ def render_explorer_screen(
                             ui.label("Имя").classes("rag-col-header")
                             ui.label("Изменён").classes("rag-col-header")
                             ui.label("Размер").classes("rag-col-header")
+                            ui.label("Автор").classes("rag-col-header")
                             ui.label("Индекс").classes("rag-col-header")
                             ui.element("div")
                         for folder in child_folders:
                             with ui.element("div").classes("rag-file-table-row"):
                                 ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
-                                with ui.element("div").classes("min-w-0"):
+                                with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
                                         folder.name,
                                         on_click=lambda p=folder.path: _cd_open_folder(p),
@@ -790,8 +796,9 @@ def render_explorer_screen(
                                     ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
                                 ui.label("—").classes("rag-meta text-xs")
                                 ui.label("папка").classes("rag-meta text-xs")
-                                ui.element("div")
-                                with ui.element("div").classes("flex items-center gap-0.5 justify-end"):
+                                ui.label("admin").classes("rag-meta text-xs")
+                                ui.label("✓").classes("rag-file-table-index-ok")
+                                with ui.element("div").classes("rag-file-table-actions"):
                                     render_star(Path(folder.source_path or folder.path), item_type="folder")
                                     if not folder.is_root:
                                         with ui.button(icon="more_vert", color=None).props("flat round dense"):
@@ -815,7 +822,7 @@ def render_explorer_screen(
                         for f in page_files:
                             with ui.element("div").classes("rag-file-table-row"):
                                 ui.html(_file_badge_html(f.name), sanitize=False)
-                                with ui.element("div").classes("min-w-0"):
+                                with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
                                         f.name,
                                         on_click=lambda fi=f: _cd_open_file(fi),
@@ -823,9 +830,13 @@ def render_explorer_screen(
                                     ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
                                 ui.label(f.updated_at[:10] if f.updated_at else "—").classes("rag-meta text-xs")
                                 ui.label(_cd_file_size(f.size_bytes) if f.size_bytes else "—").classes("rag-meta text-xs")
-                                with ui.element("div").classes("flex items-center"):
-                                    _render_file_status(f.id)
-                                with ui.element("div").classes("flex items-center gap-0.5 justify-end"):
+                                ui.label("admin").classes("rag-meta text-xs")
+                                with ui.element("div").classes("rag-file-table-index"):
+                                    if _file_jobs.get(f.id):
+                                        _render_file_status(f.id)
+                                    else:
+                                        ui.label("✓").classes("rag-file-table-index-ok")
+                                with ui.element("div").classes("rag-file-table-actions"):
                                     src = str(f.source_path or f.path or "")
                                     if src:
                                         ui.button(

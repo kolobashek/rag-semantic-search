@@ -1012,6 +1012,17 @@ def _install_css() -> None:
         .rag-hdr-brand-name {
           font-family: var(--rag-font-display); font-weight: 700;
           font-size: 14px; letter-spacing: -0.02em; line-height: 1;
+          color: var(--rag-text);
+          white-space: nowrap;
+        }
+        .rag-version-chip {
+          min-height: 20px;
+          padding: 0 7px !important;
+          border-radius: 4px;
+          font-size: 10px !important;
+          line-height: 18px;
+          color: var(--rag-text);
+          background: transparent;
         }
         .rag-hdr-nav {
           display: flex; gap: 4px; align-items: center; justify-content: center; height: 56px;
@@ -1019,6 +1030,16 @@ def _install_css() -> None:
         .rag-hdr-actions {
           display: flex; gap: 8px; align-items: center; justify-content: flex-end; height: 56px;
           min-width: 0;
+        }
+        .rag-header-status {
+          min-height: 24px;
+          padding: 0 12px;
+          border-radius: 999px;
+          font-family: var(--rag-font-mono);
+          color: var(--rag-muted);
+          background: var(--rag-sunken);
+          border-color: var(--rag-border-strong);
+          white-space: nowrap;
         }
         .rag-header-v2 .q-btn,
         .rag-header-v2 .rag-header-button {
@@ -1054,6 +1075,9 @@ def _install_css() -> None:
         @media (max-width: 900px) {
           .rag-hdr-grid { grid-template-columns: auto 1fr auto; }
           .rag-hdr-nav { display: none; }
+          .rag-hdr-brand-name,
+          .rag-version-chip,
+          .rag-header-status { display: none !important; }
         }
 
         /* === NAV TABS === */
@@ -1239,18 +1263,57 @@ def _install_css() -> None:
         .rag-file-table-header,
         .rag-file-table-row {
           display: grid;
-          grid-template-columns: 44px minmax(0,1fr) 90px 64px 110px 88px;
+          grid-template-columns: 44px minmax(220px,1fr) 120px 88px 84px 74px 88px;
           align-items: center;
           gap: 8px;
-          padding: 3px 8px;
+          width: 100%;
+          box-sizing: border-box;
+          padding: 5px 10px;
         }
         .rag-file-table-header {
           border-bottom: 1px solid var(--rag-border);
           padding-bottom: 6px;
           margin-bottom: 2px;
         }
-        .rag-file-table-row { border-radius: 6px; transition: background 0.1s; }
+        .rag-file-table-row {
+          min-height: 42px;
+          border-radius: 6px;
+          border-bottom: 1px solid color-mix(in srgb, var(--rag-border) 72%, transparent);
+          transition: background 0.1s;
+        }
         .rag-file-table-row:hover { background: var(--rag-hover); }
+        .rag-file-table-name .q-btn {
+          width: 100%;
+          min-width: 0;
+        }
+        .rag-file-table-name .q-btn__content {
+          justify-content: flex-start !important;
+          min-width: 0;
+          overflow: hidden;
+        }
+        .rag-file-table-name .block {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .rag-file-table-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 2px;
+          min-width: 0;
+        }
+        .rag-file-table-actions .q-btn {
+          width: 28px !important;
+          height: 28px !important;
+          min-width: 28px !important;
+          min-height: 28px !important;
+        }
+        .rag-file-table-index-ok {
+          color: #16a34a;
+          font-family: var(--rag-font-mono);
+          font-weight: 700;
+        }
         .rag-col-header {
           font-size: 11px;
           font-weight: 600;
