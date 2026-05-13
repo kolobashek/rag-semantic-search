@@ -51,6 +51,7 @@ python telegram_bot.py
 - `catalog_path` — исходный каталог документов.
 - `qdrant_url` — Qdrant endpoint, обычно `http://localhost:6333`.
 - `qdrant_db_path` — локальное состояние индекса.
+- Qdrant server/client держим в одной minor-линейке: compose использует `qdrant/qdrant:v1.17.1`, Python client `qdrant-client>=1.17.1,<1.18`.
 - `telemetry_db_path`, `user_db_path` — локальные SQLite БД.
 - `telegram_enabled`, `telegram_bot_token`, `telegram_bot_link` — если нужен бот.
 - `cloud_drive_enabled`, `cloud_drive_db_path`, `cloud_drive_storage_root` — если нужен Cloud Drive.

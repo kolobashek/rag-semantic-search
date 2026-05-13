@@ -7,7 +7,7 @@ nicegui>=3.10.0
 PyQt6>=6.5.0
 
 # Векторная БД и эмбеддинги
-qdrant-client>=1.7.0
+qdrant-client>=1.17.1,<1.18
 sentence-transformers>=2.3.0
 
 # Парсинг документов
