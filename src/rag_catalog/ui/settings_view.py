@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 from nicegui import app, run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.cloud_drive.storage import normalize_s3_credential
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
@@ -736,8 +737,8 @@ def render_settings_screen(
                     "cloud_drive_bucket": str(s3_bucket_input.value or "").strip(),
                     "cloud_drive_s3_endpoint": str(s3_endpoint_input.value or "").strip(),
                     "cloud_drive_s3_region": str(s3_region_input.value or "").strip(),
-                    "cloud_drive_s3_access_key": str(s3_access_input.value or "").strip(),
-                    "cloud_drive_s3_secret_key": str(s3_secret_input.value or "").strip(),
+                    "cloud_drive_s3_access_key": normalize_s3_credential(str(s3_access_input.value or "")),
+                    "cloud_drive_s3_secret_key": normalize_s3_credential(str(s3_secret_input.value or "")),
                     "catalog_path": str(catalog_input.value or "").strip(),
                     "cloud_drive_autosync_minutes": int(autosync_select.value or 0),
                 }
@@ -956,6 +957,8 @@ def render_settings_screen(
 
             def save_cloud_settings() -> None:
                 values = current_cloud_values()
+                s3_access_input.set_value(values["cloud_drive_s3_access_key"])
+                s3_secret_input.set_value(values["cloud_drive_s3_secret_key"])
                 if not values["cloud_drive_db_path"]:
                     ui.notify("Укажите путь к базе данных реестра.", type="warning")
                     return

@@ -17,6 +17,16 @@ class StorageAdapter(Protocol):
     def healthcheck(self) -> dict: ...
 
 
+def normalize_s3_credential(value: str) -> str:
+    """Accept plain keys and common MinIO console snippets like `RootUser: minioadmin`."""
+    text = str(value or "").strip()
+    lowered = text.lower()
+    for prefix in ("rootuser:", "rootpass:", "accesskey:", "secretkey:", "access key:", "secret key:"):
+        if lowered.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
 class LocalStorageAdapter:
     def __init__(self, root: str) -> None:
         self.root = Path(root)
@@ -187,8 +197,8 @@ def resolve_storage_adapter(config: dict) -> StorageAdapter:
             bucket=bucket,
             endpoint_url=str(config.get('cloud_drive_s3_endpoint') or '').strip(),
             region=str(config.get('cloud_drive_s3_region') or '').strip(),
-            access_key=str(config.get('cloud_drive_s3_access_key') or '').strip(),
-            secret_key=str(config.get('cloud_drive_s3_secret_key') or '').strip(),
+            access_key=normalize_s3_credential(str(config.get('cloud_drive_s3_access_key') or '')),
+            secret_key=normalize_s3_credential(str(config.get('cloud_drive_s3_secret_key') or '')),
         )
     raise RuntimeError(f'Неизвестный cloud_drive_storage: {kind}')
 

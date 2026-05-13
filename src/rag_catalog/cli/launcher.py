@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -100,7 +101,10 @@ def _find_python_module_pid(module: str) -> int:
                 cmdline = [str(part) for part in (proc.info.get("cmdline") or [])]
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-            if len(cmdline) >= 3 and cmdline[1] == "-m" and cmdline[2] == module:
+            for idx, part in enumerate(cmdline[:-1]):
+                if part == "-m" and cmdline[idx + 1] == module:
+                    return int(proc.info.get("pid") or 0)
+            if any(part.endswith("telegram_bot.py") for part in cmdline) and module.endswith("telegram_bot"):
                 return int(proc.info.get("pid") or 0)
     except Exception:
         return 0
@@ -135,6 +139,15 @@ def _remove_pid(pid_path: Path) -> None:
         pass
 
 
+def _stale_pid_note(pid_path: Path, service: str) -> str:
+    payload = _read_pid_payload(pid_path)
+    pid = int(payload.get("pid") or 0)
+    if pid <= 0 or _pid_alive(pid):
+        return ""
+    _remove_pid(pid_path)
+    return f"{service}.note: cleared stale pid {pid}"
+
+
 def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -150,12 +163,34 @@ def _windows_flags() -> int:
     return flags
 
 
+def _log_path(log_name: str) -> Path:
+    return RUNTIME_DIR / log_name
+
+
+def _last_log_error(log_name: str, max_lines: int = 80) -> str:
+    path = _log_path(log_name)
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    tail = lines[-max_lines:]
+    patterns = ("Traceback", "ERROR", "Error", "Exception", "OperationalError", "ProxyError")
+    for line in reversed(tail):
+        if any(pattern in line for pattern in patterns):
+            return re.sub(r"\s+", " ", line).strip()[:220]
+    for line in reversed(tail):
+        value = line.strip()
+        if value:
+            return re.sub(r"\s+", " ", value).strip()[:220]
+    return ""
+
+
 def _spawn_python_module(module: str, args: list[str], cwd: Path, log_name: str) -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"
     _runtime_dir()
-    log_path = RUNTIME_DIR / log_name
+    log_path = _log_path(log_name)
     log_fh = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
     log_fh.write(f"\n{'=' * 70}\nstart {module} {time.strftime('%Y-%m-%d %H:%M:%S')}\n{'=' * 70}\n")
     log_fh.flush()
@@ -281,6 +316,7 @@ def _stop_qdrant_if_managed() -> str:
 
 def _start_web(cfg: Dict[str, Any], host: str, port: int) -> str:
     web_pid_file = _pid_file(cfg, "web")
+    _stale_pid_note(web_pid_file, "web")
     payload = _read_pid_payload(web_pid_file)
     pid = int(payload.get("pid") or 0)
     if pid and _pid_alive(pid):
@@ -316,6 +352,7 @@ def _stop_web() -> str:
 def _start_bot(enable_mode: str) -> str:
     cfg = load_config()
     bot_pid_file = _pid_file(cfg, "bot")
+    _stale_pid_note(bot_pid_file, "bot")
     bot_enabled = bool(cfg.get("telegram_enabled"))
     token_set = bool(str(cfg.get("telegram_bot_token") or "").strip())
     q_mode = _qdrant_target(cfg).get("mode")
@@ -344,6 +381,9 @@ def _start_bot(enable_mode: str) -> str:
             _write_pid(bot_pid_file, discovered_pid, {"module": "rag_catalog.integrations.telegram_bot", "discovered": True})
             return f"bot=started (pid={discovered_pid}, discovered)"
     _remove_pid(bot_pid_file)
+    error = _last_log_error("telegram_bot.log")
+    if error:
+        return f"bot=failed-to-start ({error})"
     return "bot=failed-to-start"
 
 
@@ -369,6 +409,15 @@ def _status(host: str, port: int) -> int:
     bot_pid = int(bot_payload.get("pid") or 0)
     web_alive = _pid_alive(web_pid)
     bot_alive = _pid_alive(bot_pid)
+    notes: list[str] = []
+    if web_pid and not web_alive:
+        _remove_pid(_pid_file(cfg, "web"))
+        notes.append(f"web.note: cleared stale pid {web_pid}")
+        web_pid = 0
+    if bot_pid and not bot_alive:
+        _remove_pid(bot_pid_file)
+        notes.append(f"bot.note: cleared stale pid {bot_pid}")
+        bot_pid = 0
     bot_discovered = False
     if not bot_alive:
         discovered_pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
@@ -385,6 +434,8 @@ def _status(host: str, port: int) -> int:
     print(f"- web.managed: {'yes' if web_alive else 'no'}")
     if (not web_alive) and web_port_open:
         print("- web.note: port is open by unmanaged process")
+    for note in [n for n in notes if n.startswith("web.")]:
+        print(f"- {note}")
 
     if target["mode"] == "local":
         print(f"- qdrant.mode: local-file ({cfg.get('qdrant_db_path')})")
@@ -398,6 +449,12 @@ def _status(host: str, port: int) -> int:
     print(f"- bot.process: {'up' if bot_alive else 'down'} (pid={bot_pid or '-'})")
     if bot_discovered:
         print("- bot.note: discovered running process from another worktree/runtime")
+    for note in [n for n in notes if n.startswith("bot.")]:
+        print(f"- {note}")
+    if not bot_alive:
+        last_error = _last_log_error("telegram_bot.log")
+        if last_error:
+            print(f"- bot.last_error: {last_error}")
     print(f"- bot.enabled.config: {bool(cfg.get('telegram_enabled'))}")
     print(f"- bot.token.config: {'set' if str(cfg.get('telegram_bot_token') or '').strip() else 'empty'}")
     return 0

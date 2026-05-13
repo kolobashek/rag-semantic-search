@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from pathlib import Path
 import types
+from pathlib import Path
 
-from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter, S3StorageAdapter, compute_file_checksum, guess_mime_type
-from rag_catalog.core.cloud_drive.service import CloudDriveService
 from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
+from rag_catalog.core.cloud_drive.service import CloudDriveService
+from rag_catalog.core.cloud_drive.storage import (
+    LocalStorageAdapter,
+    S3StorageAdapter,
+    compute_file_checksum,
+    guess_mime_type,
+    normalize_s3_credential,
+)
 
 
 def test_local_storage_adapter_put_and_delete(tmp_path: Path) -> None:
@@ -30,6 +36,12 @@ def test_storage_helpers(tmp_path: Path) -> None:
 
     assert compute_file_checksum(file_path)
     assert guess_mime_type(file_path) == 'application/pdf'
+
+
+def test_normalize_s3_credential_accepts_minio_console_labels() -> None:
+    assert normalize_s3_credential("RootUser: minioadmin") == "minioadmin"
+    assert normalize_s3_credential("RootPass: minioadmin123") == "minioadmin123"
+    assert normalize_s3_credential(" plain-key ") == "plain-key"
 
 
 def test_local_storage_healthcheck(tmp_path: Path) -> None:
@@ -142,7 +154,7 @@ def test_cloud_drive_download_descriptor_supports_presigned_storage(tmp_path: Pa
         registry=CloudDriveRegistryDB(str(tmp_path / "registry.db")),
         storage=storage,
     )
-    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    service.registry.ensure_root_folder(root_name="Обмен", source_path="")
     source = tmp_path / "report.pdf"
     source.write_bytes(b"pdf")
 
