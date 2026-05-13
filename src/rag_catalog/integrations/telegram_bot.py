@@ -18,10 +18,12 @@ from urllib.parse import quote
 
 import requests
 
+from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import RAGSearcher, load_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+install_env_log_handler()
 logger = logging.getLogger(__name__)
 
 API_TIMEOUT = 40

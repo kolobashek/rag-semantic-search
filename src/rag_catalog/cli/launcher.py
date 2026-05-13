@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import signal
 import socket
 import subprocess
@@ -17,6 +16,7 @@ from urllib.parse import urlparse
 
 import psutil
 
+from rag_catalog.core.log_history import last_error_from_history, open_run_log
 from rag_catalog.core.rag_core import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -168,32 +168,17 @@ def _log_path(log_name: str) -> Path:
 
 
 def _last_log_error(log_name: str, max_lines: int = 80) -> str:
-    path = _log_path(log_name)
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
-        return ""
-    tail = lines[-max_lines:]
-    patterns = ("Traceback", "ERROR", "Error", "Exception", "OperationalError", "ProxyError")
-    for line in reversed(tail):
-        if any(pattern in line for pattern in patterns):
-            return re.sub(r"\s+", " ", line).strip()[:220]
-    for line in reversed(tail):
-        value = line.strip()
-        if value:
-            return re.sub(r"\s+", " ", value).strip()[:220]
-    return ""
+    return last_error_from_history(log_name, max_lines=max_lines)
 
 
 def _spawn_python_module(module: str, args: list[str], cwd: Path, log_name: str) -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"
+    env["RAG_LOG_HISTORY_NAME"] = log_name
+    env["RAG_LOG_LABEL"] = module
     _runtime_dir()
-    log_path = _log_path(log_name)
-    log_fh = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
-    log_fh.write(f"\n{'=' * 70}\nstart {module} {time.strftime('%Y-%m-%d %H:%M:%S')}\n{'=' * 70}\n")
-    log_fh.flush()
+    log_fh = open_run_log(log_name, f"start {module} {time.strftime('%Y-%m-%d %H:%M:%S')}")
     proc = subprocess.Popen(
         [sys.executable, "-m", module, *args],
         cwd=str(cwd),

@@ -39,6 +39,7 @@ from .extractors import (
 )
 from .index_state_db import IndexStateDB
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
+from .log_history import build_log_handler, install_env_log_handler
 from .ocr_runtime import resolve_ocr_runtime
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB
@@ -58,6 +59,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[_stream_handler],
 )
+install_env_log_handler()
 logger = logging.getLogger(__name__)
 
 # Поддерживаемые расширения
@@ -1013,8 +1015,7 @@ def main() -> None:
     log_file = cfg.get("log_file")
     if log_file:
         try:
-            fh = logging.FileHandler(log_file, encoding="utf-8")
-            fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+            fh = build_log_handler(log_file, label="index_rag")
             logging.getLogger().addHandler(fh)
         except Exception as exc:
             logger.warning("Не удалось открыть лог-файл %s: %s", log_file, exc)

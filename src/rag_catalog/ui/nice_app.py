@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from nicegui import app, events, run, ui
 
+from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
@@ -82,6 +83,7 @@ from .system import (
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 APP_ICON_PATH = PROJECT_ROOT / "assets" / "brand" / "ico" / "favicon.ico"
 LOGO_PATH = PROJECT_ROOT / "assets" / "brand" / "svg" / "rag-search-mark.svg"
+install_env_log_handler()
 
 SEARCH_PRESETS = [
     ("Договоры", "договор поставки"),

@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 import streamlit as st
 
+from rag_catalog.core.log_history import list_log_segments, read_history_tail_lines
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
@@ -678,13 +679,10 @@ def _read_log_tail(cfg: Dict[str, Any], n_lines: int = 200) -> List[str]:
 
     try:
         p = Path(log_file)
-        if not p.exists():
+        if not p.exists() and not list_log_segments(p):
             return [f"⚠ Лог-файл не найден: {log_file}"]
-
-        with open(p, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
-
-        return [line.rstrip() for line in lines[-n_lines:]]
+        text = read_history_tail_lines(p, max_lines=n_lines)
+        return [line.rstrip() for line in text.splitlines()]
     except Exception as exc:
         return [f"⚠ Ошибка чтения лога: {exc}"]
 

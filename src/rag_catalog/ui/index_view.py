@@ -156,6 +156,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 value="all",
                 label="Уровень",
             ).props("dense outlined").classes("w-40")
+            stage_status_query = ui.input("Поиск по истории").props("dense outlined clearable").classes("w-56")
             stage_status_date_from = ui.input("Дата с").props("dense outlined clearable mask='####-##-##' placeholder='ГГГГ-ММ-ДД'").classes("w-36")
             stage_status_date_to = ui.input("Дата по").props("dense outlined clearable mask='####-##-##' placeholder='ГГГГ-ММ-ДД'").classes("w-36")
             stage_status_autorefresh = ui.checkbox("Автообновление", value=True)
@@ -184,9 +185,17 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         log_path = Path(stage_status_ctx.get("log_path") or PROJECT_ROOT / "logs" / "indexer.log")
         entry_count = max(20, _safe_int(stage_status_lines.value, 200))
         level = str(stage_status_level.value or "all")
+        query = str(stage_status_query.value or "").strip()
         date_from = str(stage_status_date_from.value or "").strip()
         date_to = str(stage_status_date_to.value or "").strip()
-        entries = _read_log_entries(log_path, max_entries=entry_count, level=level, date_from=date_from, date_to=date_to)
+        entries = _read_log_entries(
+            log_path,
+            max_entries=entry_count,
+            level=level,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+        )
         _current_log_entries.clear()
         _current_log_entries.extend(entries)
         stage_status_log_html.set_content(_format_log_entries_html(entries))
@@ -217,6 +226,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
     _stop_managed_timer(state.stage_status_timer)
     state.stage_status_timer = ui.timer(1.5, lambda: _refresh_stage_status_log())
     stage_status_level.on_value_change(lambda _: _refresh_stage_status_log(force=True))
+    stage_status_query.on_value_change(lambda _: _refresh_stage_status_log(force=True))
     stage_status_lines.on_value_change(lambda _: _refresh_stage_status_log(force=True))
     stage_status_date_from.on_value_change(lambda _: _refresh_stage_status_log(force=True))
     stage_status_date_to.on_value_change(lambda _: _refresh_stage_status_log(force=True))

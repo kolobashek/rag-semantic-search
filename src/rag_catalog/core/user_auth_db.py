@@ -12,12 +12,12 @@ import re
 import secrets
 import sqlite3
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .db_contract import ensure_schema_version
+from .sqlite_runtime import prepare_sqlite_connection
 
 DEFAULT_SESSION_TTL_DAYS = 7
 MIN_SESSION_TTL_DAYS = 1
@@ -68,18 +68,7 @@ class UserAuthDB:
         return conn
 
     def _prepare_connection(self, conn: sqlite3.Connection) -> None:
-        last_error: Optional[Exception] = None
-        for _ in range(3):
-            try:
-                conn.execute("PRAGMA busy_timeout=30000;")
-                conn.execute("PRAGMA journal_mode=WAL;")
-                conn.execute("PRAGMA synchronous=NORMAL;")
-                return
-            except sqlite3.OperationalError as exc:
-                last_error = exc
-                time.sleep(0.25)
-        if last_error is not None:
-            raise last_error
+        prepare_sqlite_connection(conn)
 
     def _init_schema(self) -> None:
         with self._lock:

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import psutil
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.log_history import open_run_log
 from rag_catalog.core.telemetry_db import TelemetryDB
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -63,13 +64,8 @@ def _telemetry_db_path(cfg: Dict[str, Any]) -> Path:
 # ── Process utilities ──────────────────────────────────────────────────────
 
 def _open_log(log_path: "Path", label: str) -> "Any":
-    """Открыть лог-файл на дозапись, записать заголовок с временем."""
-    log_path.parent.mkdir(exist_ok=True)
-    fh = open(log_path, "a", encoding="utf-8", errors="replace")  # noqa: WPS515
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fh.write(f"\n{'='*60}\n{label}  {ts}\n{'='*60}\n")
-    fh.flush()
-    return fh
+    """Открыть новый run-сегмент лога и записать заголовок с временем."""
+    return open_run_log(log_path, label)
 
 
 def _windows_detached_creationflags() -> int:
@@ -311,6 +307,8 @@ def _launch_indexer(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"
+    env["RAG_LOG_HISTORY_NAME"] = "indexer.log"
+    env["RAG_LOG_LABEL"] = f"INDEXER stage={stage}"
     args = [
         sys.executable, "-m", "rag_catalog.core.index_rag",
         "--catalog", str(cfg.get("catalog_path") or ""),
@@ -342,7 +340,7 @@ def _launch_indexer(
             cwd=str(PROJECT_ROOT),
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=log_fh,
+            stdout=subprocess.DEVNULL,
             stderr=log_fh,
             creationflags=_windows_detached_creationflags(),
         )
@@ -371,6 +369,8 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optiona
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"
+    env["RAG_LOG_HISTORY_NAME"] = "ocr.log"
+    env["RAG_LOG_LABEL"] = "OCR"
     args = [
         sys.executable,
         "-m",
@@ -387,7 +387,7 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optiona
             cwd=str(PROJECT_ROOT),
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=log_fh,
+            stdout=subprocess.DEVNULL,
             stderr=log_fh,
             creationflags=_windows_detached_creationflags(),
         )

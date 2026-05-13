@@ -21,6 +21,12 @@ from nicegui import ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.index_state_db import IndexStateDB
+from rag_catalog.core.log_history import (
+    iter_history_texts,
+    list_log_segments,
+    read_history_tail,
+    read_history_tail_lines,
+)
 from rag_catalog.core.rag_core import RAGSearcher
 
 from .state import (
@@ -236,28 +242,24 @@ def _db_query_dicts(db_path: Path, query: str, params: Optional[tuple] = None) -
 
 def _read_log_tail(path: Path, *, max_chars: int = 12000) -> str:
     try:
-        if not path.exists():
+        if not path.exists() and not list_log_segments(path):
             return "Лог-файл не найден."
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = read_history_tail(path, max_chars=max_chars)
         if not text:
             return "Лог-файл пуст."
-        return text[-max_chars:]
+        return text
     except Exception as exc:
         return f"Не удалось прочитать лог: {exc}"
 
 
 def _read_log_tail_lines(path: Path, *, max_lines: int = 200, max_chars: int = 200_000) -> str:
     try:
-        if not path.exists():
+        if not path.exists() and not list_log_segments(path):
             return "Лог-файл не найден."
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = read_history_tail_lines(path, max_lines=max_lines, max_chars=max_chars)
         if not text:
             return "Лог-файл пуст."
-        lines = text.splitlines()
-        tail = "\n".join(lines[-max(1, int(max_lines)):])
-        if len(tail) > max_chars:
-            tail = tail[-max_chars:]
-        return tail
+        return text
     except Exception as exc:
         return f"Не удалось прочитать лог: {exc}"
 
@@ -302,43 +304,39 @@ def _read_log_entries(
     *,
     max_entries: int = 200,
     level: str = "all",
+    query: str = "",
     date_from: str = "",
     date_to: str = "",
     max_read_chars: int = 4_000_000,
 ) -> List[Dict[str, Any]]:
     """Read log entries from end of file, scan back until max_entries matching entries found."""
     try:
-        if not path.exists():
+        if not path.exists() and not list_log_segments(path):
             return []
-        size = path.stat().st_size
-        if size == 0:
-            return []
-        read_size = min(size, max_read_chars)
-        with path.open("rb") as fh:
-            if read_size < size:
-                fh.seek(-read_size, 2)
-            raw = fh.read(read_size)
-        text = raw.decode("utf-8", errors="replace")
-        if read_size < size:
-            nl = text.find("\n")
-            if nl >= 0:
-                text = text[nl + 1:]
-        if not text:
-            return []
-        all_entries = _parse_log_lines(text)
         level_key = str(level or "all").strip().upper()
+        query_key = str(query or "").strip().lower()
         date_from = str(date_from or "").strip()
         date_to = str(date_to or "").strip()
         collected: List[Dict[str, Any]] = []
-        for entry in reversed(all_entries):
-            if level_key not in {"", "ALL"}:
-                if entry["level"] != level_key:
+        for text in iter_history_texts(path, newest_first=True, max_chars_per_file=max_read_chars):
+            if not text:
+                continue
+            all_entries = _parse_log_lines(text)
+            for entry in reversed(all_entries):
+                if level_key not in {"", "ALL"} and entry["level"] != level_key:
                     continue
-            if date_from and entry["date"] < date_from:
-                continue
-            if date_to and entry["date"] > date_to:
-                continue
-            collected.append(entry)
+                if date_from and entry["date"] < date_from:
+                    continue
+                if date_to and entry["date"] > date_to:
+                    continue
+                if query_key and query_key not in (
+                    f"{entry.get('date', '')} {entry.get('time', '')} "
+                    f"{entry.get('level', '')} {entry.get('message', '')}"
+                ).lower():
+                    continue
+                collected.append(entry)
+                if len(collected) >= max_entries:
+                    break
             if len(collected) >= max_entries:
                 break
         return list(reversed(collected))

@@ -39,6 +39,7 @@ apply_windows_platform_workarounds()
 
 from .embedding_collections import resolve_embedding_collection_name
 from .index_state_db import IndexStateDB
+from .log_history import install_env_log_handler
 from .rag_core import load_config
 from .telemetry_db import TelemetryDB
 
@@ -46,6 +47,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
+install_env_log_handler()
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────── константы ─────────────────────────────────────
