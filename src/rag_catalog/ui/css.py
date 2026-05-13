@@ -195,6 +195,10 @@ def _install_css() -> None:
           height: 32px;
           align-items: center;
         }
+        .rag-header-breadcrumbs:empty,
+        .rag-header-actions:empty {
+          display: none;
+        }
         .rag-header-breadcrumbs .q-btn { min-height: 32px; padding: 0 6px; }
         .rag-header-actions .q-btn { min-width: 32px; min-height: 32px; }
         .rag-drawer {
@@ -382,7 +386,8 @@ def _install_css() -> None:
         }
         .rag-explorer-v2-layout {
           display: grid;
-          grid-template-columns: minmax(190px, 240px) minmax(0, 1fr) minmax(210px, 270px);
+          grid-template-columns: minmax(220px, 260px) minmax(0, 1fr) minmax(220px, 280px);
+          align-items: start;
         }
         .rag-explorer-tree,
         .rag-explorer-details {
@@ -536,32 +541,36 @@ def _install_css() -> None:
         .rag-nav-button .q-btn__content { justify-content: flex-start; width: 100%; text-align: left; }
         .rag-nav-button .q-icon { margin-right: 10px; }
         .rag-tree-button {
-          min-height: 34px;
-          height: auto;
-          padding-top: 4px;
-          padding-bottom: 4px;
+          min-height: 30px;
+          height: 30px;
+          padding-top: 0;
+          padding-bottom: 0;
+          box-sizing: border-box;
         }
         .rag-tree-button .q-btn__content {
           display: grid;
-          grid-template-columns: 22px minmax(0, 1fr);
+          grid-template-columns: 20px minmax(0, 1fr);
           column-gap: 8px;
-          align-items: start;
+          align-items: center;
           flex-wrap: nowrap;
           min-width: 0;
           width: 100%;
+          height: 30px;
+          min-height: 30px;
         }
         .rag-tree-button .q-icon {
           margin-right: 0;
-          width: 22px;
-          min-width: 22px;
-          line-height: 1.25;
+          width: 20px;
+          min-width: 20px;
+          font-size: 18px !important;
+          line-height: 1;
         }
         .rag-tree-button .block {
           min-width: 0;
-          white-space: normal;
-          overflow-wrap: anywhere;
-          word-break: normal;
-          line-height: 1.25;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          line-height: 1.2;
         }
         .rag-tree-button.active {
           background: color-mix(in srgb, var(--rag-accent) 14%, transparent);
@@ -591,6 +600,7 @@ def _install_css() -> None:
           color: var(--rag-accent);
           background: color-mix(in srgb, var(--rag-accent) 10%, var(--rag-surface));
           font-weight: 700;
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--rag-accent) 16%, transparent);
         }
         .rag-dirty-actions {
           position: sticky;
@@ -986,26 +996,60 @@ def _install_css() -> None:
         }
         .rag-header-v2 > .q-toolbar {
           height: 56px !important; min-height: 56px !important; padding: 0 16px !important;
+          align-items: center !important;
+          overflow: hidden !important;
         }
         .rag-hdr-grid {
           display: grid;
-          grid-template-columns: 220px 1fr 220px;
+          grid-template-columns: 220px 1fr minmax(260px, 320px);
           align-items: center;
           width: 100%; height: 100%;
           gap: 0;
         }
         .rag-hdr-brand {
-          display: flex; align-items: center; gap: 10px; min-width: 0;
+          display: flex; align-items: center; gap: 10px; min-width: 0; height: 56px;
         }
         .rag-hdr-brand-name {
           font-family: var(--rag-font-display); font-weight: 700;
           font-size: 14px; letter-spacing: -0.02em; line-height: 1;
         }
         .rag-hdr-nav {
-          display: flex; gap: 2px; align-items: center; justify-content: center;
+          display: flex; gap: 4px; align-items: center; justify-content: center; height: 56px;
         }
         .rag-hdr-actions {
-          display: flex; gap: 6px; align-items: center; justify-content: flex-end;
+          display: flex; gap: 8px; align-items: center; justify-content: flex-end; height: 56px;
+          min-width: 0;
+        }
+        .rag-header-v2 .q-btn,
+        .rag-header-v2 .rag-header-button {
+          height: 34px !important;
+          min-height: 34px !important;
+          max-height: 34px !important;
+          padding-top: 0 !important;
+          padding-bottom: 0 !important;
+          align-self: center !important;
+          color: var(--rag-text) !important;
+        }
+        .rag-header-v2 .q-btn--round {
+          width: 34px !important;
+          min-width: 34px !important;
+        }
+        .rag-header-v2 .q-btn__content {
+          min-height: 0 !important;
+          height: 34px !important;
+          line-height: 1 !important;
+          align-items: center !important;
+          justify-content: center !important;
+          flex-wrap: nowrap !important;
+        }
+        .rag-header-v2 .q-icon {
+          font-size: 20px !important;
+          line-height: 1 !important;
+        }
+        .rag-header-v2 .q-img,
+        .rag-header-v2 img {
+          display: block;
+          flex: 0 0 auto;
         }
         @media (max-width: 900px) {
           .rag-hdr-grid { grid-template-columns: auto 1fr auto; }

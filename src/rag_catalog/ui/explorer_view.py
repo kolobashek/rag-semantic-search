@@ -401,19 +401,11 @@ def render_explorer_screen(
         breadcrumbs = _cd_breadcrumb_chain(svc, cd_path)
         root_folder = svc.registry.get_root_folder()
 
-        # ── Sync header breadcrumbs ───────────────────────────────────────
+        # Keep global header for product navigation only; explorer has local breadcrumbs.
         if page_state.header_breadcrumbs is not None:
             page_state.header_breadcrumbs.clear()
-            with page_state.header_breadcrumbs:
-                for idx, folder in enumerate(breadcrumbs):
-                    label = "Cloud Drive" if folder.is_root else folder.name
-                    ui.button(
-                        label,
-                        on_click=lambda p=folder.path: _cd_open_folder(p),
-                        color=None,
-                    ).props("flat dense no-caps")
-                    if idx < len(breadcrumbs) - 1:
-                        ui.icon("chevron_right").classes("text-slate-400")
+        if page_state.header_explorer_actions is not None:
+            page_state.header_explorer_actions.clear()
 
         # filter & sort
         name_q = page_state.explorer_filter.strip().lower()
@@ -1204,25 +1196,12 @@ def render_explorer_screen(
             state.explorer_path = str(root)
             current = root
 
-        parts = _explorer_path_parts(root, current)
-
+        # Keep current folder controls inside the explorer toolbar. Duplicating them
+        # in the global header makes the path ambiguous on narrow screens.
         if state.header_breadcrumbs is not None:
             state.header_breadcrumbs.clear()
-            with state.header_breadcrumbs:
-                for idx, part in enumerate(parts):
-                    label = "Корень" if part == root else part.name
-                    ui.button(label, on_click=lambda p=part: (_log_app_event(state, "explorer", "breadcrumb", details={"path": str(p)}), open_folder(p)), color=None).props("flat dense no-caps")
-                    if idx < len(parts) - 1:
-                        ui.icon("chevron_right").classes("text-slate-400")
-
         if state.header_explorer_actions is not None:
             state.header_explorer_actions.clear()
-            with state.header_explorer_actions:
-                active = _is_favorite(state, str(current))
-                fav = ui.button(icon="star" if active else "star_border", color=None).props("flat round dense")
-                fav.classes("rag-favorite-star header active" if active else "rag-favorite-star header")
-                fav.tooltip("Убрать текущую папку из избранного" if active else "Добавить текущую папку в избранное")
-                fav.on("click", lambda p=current: (_toggle_favorite(state, p, item_type="folder"), render_fn()))
 
         dirs, files, total_files = _file_rows(current, state)
         state.explorer_page = max(0, min(state.explorer_page, max(0, (len(files) - 1) // PAGE_SIZE)))

@@ -264,7 +264,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 _coverage_refs["count"] = ui.label("").classes("rag-meta")
                 ui.space()
                 _coverage_refs["pct"] = ui.label("").classes("rag-meta")
-            _coverage_refs["bar"] = ui.linear_progress(value=0).props("color=indigo-5").classes("w-full mt-1")
+            _coverage_refs["bar"] = ui.linear_progress(value=0, show_value=False).props("color=indigo-5").classes("w-full mt-1")
             ui.label(
                 "Файлы со stage=content уже имеют проиндексированное содержимое. "
                 "Остальные пока представлены метаданными или ждут фаз small/large/OCR."
