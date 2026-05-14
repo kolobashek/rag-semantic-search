@@ -38,7 +38,7 @@ Done criteria:
 Owner: Codex.
 
 - Выбрать production embedding path: текущий `all-MiniLM-L6-v2` оставить legacy, новую модель вести через versioned collection.
-- Добавить migration plan для `BAAI/bge-m3` или `intfloat/multilingual-e5-large` без потери старой коллекции.
+- DONE 2026-05-14: README описывает migration plan для новой embedding-модели через `embedding_collection_versioning` и eval before switch.
 - DONE 2026-05-14: добавлен конфигурируемый `retrieval_preset=release_v2` для retrieval v2 + BM25/RRF defaults.
 - DONE 2026-05-14: reranker оставлен opt-in и не включается release preset без latency/eval замеров.
 - Зафиксировать latency p50/p95 для query classes: exact filename, folder name, semantic question, OCR-heavy.

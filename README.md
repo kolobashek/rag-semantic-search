@@ -234,7 +234,15 @@ GET  /api/cloud-drive/storage-health
 - RAG answer mode with citations and weak-source fallback;
 - Telegram assistant mode.
 
-Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted. For embedding migration, enable `embedding_collection_versioning=true` and use a versioned collection before switching users.
+Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted.
+
+Embedding migration without overwriting the old collection:
+
+1. Set a new model and vector size in `config.json`, for example `embedding_model=BAAI/bge-m3`, `vector_size=1024`.
+2. Set `embedding_collection_versioning=true` and optionally `embedding_collection_suffix=bge_m3`.
+3. Run indexing; data goes to `catalog__bge_m3` while the old `catalog` collection remains available.
+4. Run `python scripts/search_eval.py --golden eval/search_golden.json --limit 10 --output runtime/eval/bge_m3.json --markdown-output runtime/eval/bge_m3.md`.
+5. Switch users to the new collection only after quality and latency are accepted.
 
 CLI:
 
