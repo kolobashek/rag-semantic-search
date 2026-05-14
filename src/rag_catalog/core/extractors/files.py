@@ -10,8 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
+from zipfile import ZipFile
 
 from docx import Document
 from openpyxl import load_workbook
@@ -19,6 +21,29 @@ from openpyxl import load_workbook
 from rag_catalog.core.ocr_runtime import apply_tesseract_runtime
 
 logger = logging.getLogger(__name__)
+
+
+def _load_xlsx_workbook(filepath: Path, *, read_only: bool = True, data_only: bool = True) -> Any:
+    """Load XLSX, tolerating archives with incorrectly cased sharedStrings path."""
+    try:
+        return load_workbook(filepath, read_only=read_only, data_only=data_only)
+    except KeyError as exc:
+        message = str(exc)
+        if "xl/sharedStrings.xml" not in message:
+            raise
+
+    buffer = BytesIO()
+    with ZipFile(filepath, "r") as src, ZipFile(buffer, "w") as dst:
+        names = set(src.namelist())
+        has_expected = "xl/sharedStrings.xml" in names
+        for info in src.infolist():
+            name = info.filename
+            next_name = name
+            if not has_expected and name.lower() == "xl/sharedstrings.xml":
+                next_name = "xl/sharedStrings.xml"
+            dst.writestr(next_name, src.read(name))
+    buffer.seek(0)
+    return load_workbook(buffer, read_only=read_only, data_only=data_only)
 
 
 def extract_docx(filepath: Path) -> str:
@@ -38,8 +63,9 @@ def extract_docx(filepath: Path) -> str:
 
 def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
     """Extract text from XLSX with optional early stop by accumulated chars."""
+    wb: Any | None = None
     try:
-        wb = load_workbook(filepath, read_only=True, data_only=True)
+        wb = _load_xlsx_workbook(filepath, read_only=True, data_only=True)
         parts: list[str] = []
         total_chars = 0
         done = False
@@ -60,6 +86,12 @@ def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
     except Exception as exc:
         logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
         return ""
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
 
 
 def extract_xls(filepath: Path, *, max_chars: int = 0) -> str:
