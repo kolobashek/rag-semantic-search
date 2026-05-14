@@ -687,6 +687,50 @@ def test_cloud_drive_download_api(monkeypatch, tmp_path) -> None:
     assert response.filename == "hello.txt"
 
 
+
+def test_cloud_drive_download_requires_session(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "users_db_path": str(tmp_path / "users.db"),
+    }
+    auth_db = UserAuthDB(cfg["users_db_path"])
+    assert auth_db.admin_create_user(username="user", password="8215", role="user", status="active")
+    token = auth_db.create_session(username="user")
+
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    folder = service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    source_file = tmp_path / "hello.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    service.storage.put_file(source_file, "Folder A/hello.txt")
+    service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Folder A/hello.txt",
+        name="hello.txt",
+        storage_key="Folder A/hello.txt",
+        mime_type="text/plain",
+        size_bytes=5,
+        checksum="abc",
+        source_path="O:/Обмен/Folder A/hello.txt",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+
+    with pytest.raises(HTTPException) as exc:
+        api_cloud_drive_download("Folder A/hello.txt")
+    assert exc.value.status_code == 401
+
+    response = api_cloud_drive_download("Folder A/hello.txt", authorization=f"Bearer {token}")
+    assert response.filename == "hello.txt"
+
+
 def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:
     cfg = {
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
