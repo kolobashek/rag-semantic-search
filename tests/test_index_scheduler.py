@@ -1,6 +1,59 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from rag_catalog.ui import system
+
+
+def test_schedules_due_catches_up_after_daily_window() -> None:
+    schedules = [
+        {
+            "id": "daily",
+            "enabled": 1,
+            "cadence": "daily",
+            "time": "03:00",
+            "days_json": "[]",
+            "last_run_at": "",
+        }
+    ]
+
+    due = system._schedules_due(schedules, now=datetime(2026, 5, 14, 3, 7, tzinfo=timezone.utc))
+
+    assert [item["id"] for item in due] == ["daily"]
+
+
+def test_schedules_due_does_not_repeat_after_scheduled_slot() -> None:
+    schedules = [
+        {
+            "id": "daily",
+            "enabled": 1,
+            "cadence": "daily",
+            "time": "03:00",
+            "days_json": "[]",
+            "last_run_at": "2026-05-14T03:01:00+00:00",
+        }
+    ]
+
+    due = system._schedules_due(schedules, now=datetime(2026, 5, 14, 5, 0, tzinfo=timezone.utc))
+
+    assert due == []
+
+
+def test_hourly_schedule_runs_once_per_hour_after_minute_zero() -> None:
+    schedules = [
+        {
+            "id": "hourly",
+            "enabled": 1,
+            "cadence": "hourly",
+            "time": "",
+            "days_json": "[]",
+            "last_run_at": "2026-05-14T02:59:00+00:00",
+        }
+    ]
+
+    due = system._schedules_due(schedules, now=datetime(2026, 5, 14, 3, 42, tzinfo=timezone.utc))
+
+    assert [item["id"] for item in due] == ["hourly"]
 
 
 def test_scheduler_prioritizes_full_index_over_hourly_metadata(monkeypatch) -> None:

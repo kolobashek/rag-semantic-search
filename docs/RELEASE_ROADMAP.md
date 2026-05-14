@@ -68,7 +68,8 @@ Done criteria:
 
 Owner: Codex.
 
-- Проверить фактическую ночную индексацию на telemetry: расписание, lock, active process, last run reason.
+- DONE 2026-05-14: scheduler больше не теряет запуск из-за узкого окна ±1 минута; daily/hourly catch-up покрыт тестами.
+- Проверить фактическую ночную индексацию на telemetry после следующего ночного окна: lock, active process, last run reason.
 - Оставить одно действие для активного этапа: stop; следующий start продолжает по state DB.
 - Добавить retry failed files / failed phase UX: список ошибок, файл, exception, кнопка retry scope.
 - OCR вынести в явную очередь или job list: pending/running/failed/done по файлам.

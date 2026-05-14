@@ -447,14 +447,14 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optiona
 
 # ── Scheduler ─────────────────────────────────────────────────────────────
 
-def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Вернуть расписания, которые должны запуститься по локальному времени сервера."""
-    now = datetime.now().astimezone()
+def _schedules_due(schedules: List[Dict[str, Any]], *, now: datetime | None = None) -> List[Dict[str, Any]]:
+    """Return schedules due by local server time, including missed same-day windows."""
+    current = (now or datetime.now().astimezone()).astimezone()
     due = []
     for sched in schedules:
         if not int(sched.get("enabled") or 0):
             continue
-        cadence = str(sched.get("cadence") or "daily")
+        cadence = str(sched.get("cadence") or "daily").lower()
         sched_time = str(sched.get("time") or "03:00")
         try:
             hh, mm = int(sched_time[:2]), int(sched_time[3:5])
@@ -468,24 +468,24 @@ def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         except (ValueError, TypeError):
             days = []
 
-        day_name = now.strftime("%a")
+        day_name = current.strftime("%a")
         if cadence == "weekly" and day_name not in days:
             continue
         if cadence == "daily" and days and day_name not in days:
             continue
+
         if cadence == "hourly":
-            if abs(now.minute - 0) > 1:
-                continue
+            scheduled_at = current.replace(minute=0, second=0, microsecond=0)
         else:
-            if now.hour != hh or abs(now.minute - mm) > 1:
+            scheduled_at = current.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if current < scheduled_at:
                 continue
 
-        # Dedup window: at least as wide as the trigger window (3 min) to prevent double-firing
         last_run = str(sched.get("last_run_at") or "")
         if last_run:
             try:
-                lr = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                if (now - lr).total_seconds() < 300:
+                lr = datetime.fromisoformat(last_run.replace("Z", "+00:00")).astimezone(current.tzinfo)
+                if lr >= scheduled_at:
                     continue
             except ValueError:
                 pass
