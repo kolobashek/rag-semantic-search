@@ -13,6 +13,7 @@ import subprocess
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
+from xml.etree import ElementTree
 from zipfile import ZipFile
 
 from docx import Document
@@ -21,6 +22,8 @@ from openpyxl import load_workbook
 from rag_catalog.core.ocr_runtime import apply_tesseract_runtime
 
 logger = logging.getLogger(__name__)
+
+_XLSX_MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 
 def _load_xlsx_workbook(filepath: Path, *, read_only: bool = True, data_only: bool = True) -> Any:
@@ -44,6 +47,65 @@ def _load_xlsx_workbook(filepath: Path, *, read_only: bool = True, data_only: bo
             dst.writestr(next_name, src.read(name))
     buffer.seek(0)
     return load_workbook(buffer, read_only=read_only, data_only=data_only)
+
+
+def _xlsx_cell_text(cell: ElementTree.Element, shared_strings: list[str]) -> str:
+    cell_type = cell.attrib.get("t", "")
+    if cell_type == "inlineStr":
+        return "".join(node.text or "" for node in cell.iter(f"{_XLSX_MAIN_NS}t")).strip()
+
+    value = cell.find(f"{_XLSX_MAIN_NS}v")
+    if value is None or value.text is None:
+        return ""
+
+    text = value.text.strip()
+    if cell_type == "s":
+        try:
+            return shared_strings[int(text)]
+        except (IndexError, ValueError):
+            return ""
+    if cell_type == "b":
+        return "TRUE" if text == "1" else "FALSE"
+    return text
+
+
+def _read_xlsx_shared_strings(zf: ZipFile) -> list[str]:
+    try:
+        with zf.open("xl/sharedStrings.xml") as fh:
+            root = ElementTree.parse(fh).getroot()
+    except KeyError:
+        return []
+
+    strings: list[str] = []
+    for item in root.findall(f"{_XLSX_MAIN_NS}si"):
+        strings.append("".join(node.text or "" for node in item.iter(f"{_XLSX_MAIN_NS}t")).strip())
+    return strings
+
+
+def _extract_xlsx_zip_fallback(filepath: Path, *, max_chars: int = 0) -> str:
+    """Best-effort XLSX parser for damaged archives openpyxl refuses to load."""
+    parts: list[str] = []
+    total_chars = 0
+    done = False
+    with ZipFile(filepath, "r") as zf:
+        shared_strings = _read_xlsx_shared_strings(zf)
+        worksheet_names = sorted(name for name in zf.namelist() if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"))
+        for idx, name in enumerate(worksheet_names, start=1):
+            if done:
+                break
+            parts.append(f"Лист: sheet{idx}")
+            with zf.open(name) as fh:
+                root = ElementTree.parse(fh).getroot()
+            for row in root.iter(f"{_XLSX_MAIN_NS}row"):
+                values = [_xlsx_cell_text(cell, shared_strings) for cell in row.findall(f"{_XLSX_MAIN_NS}c")]
+                row_text = " | ".join(values)
+                if row_text.strip():
+                    parts.append(row_text)
+                    total_chars += len(row_text)
+                    if max_chars and total_chars >= max_chars:
+                        done = True
+                        break
+    return "\n".join(parts)
 
 
 def extract_docx(filepath: Path) -> str:
@@ -83,6 +145,17 @@ def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
                         done = True
                         break
         return "\n".join(parts)
+    except KeyError as exc:
+        if "xl/sharedStrings.xml" in str(exc):
+            try:
+                text = _extract_xlsx_zip_fallback(filepath, max_chars=max_chars)
+                logger.warning("XLSX %s прочитан через fallback без sharedStrings.xml", filepath)
+                return text
+            except Exception as fallback_exc:
+                logger.warning("Ошибка fallback-чтения XLSX %s: %s", filepath, fallback_exc)
+                return ""
+        logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
+        return ""
     except Exception as exc:
         logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
         return ""
