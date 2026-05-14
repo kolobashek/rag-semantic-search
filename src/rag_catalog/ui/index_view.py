@@ -387,10 +387,12 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                     issue_e = ui.label(d["issue_text"]).classes("rag-meta rag-stage-issue").props("title='Причина последнего сбоя'")
                     issue_e.set_visibility(bool(d["issue_text"]))
                 with ui.row().classes("rag-pipeline-actions"):
+                    play_icon = "replay" if d["status_str"] in {"failed", "cancelled"} else "play_arrow"
+                    play_tip = "Повторить этап. Индексатор пройдёт только то, что не закрыто state DB." if d["status_str"] in {"failed", "cancelled"} else "Запустить"
                     if is_ocr:
-                        play_e = ui.button(icon="play_arrow", on_click=run_ocr_now).props("flat dense round").tooltip("Запустить")
+                        play_e = ui.button(icon=play_icon, on_click=run_ocr_now).props("flat dense round").tooltip(play_tip)
                     else:
-                        play_e = ui.button(icon="play_arrow", on_click=make_run_handler(key)).props("flat dense round").tooltip("Запустить")
+                        play_e = ui.button(icon=play_icon, on_click=make_run_handler(key)).props("flat dense round").tooltip(play_tip)
                     stop_e = ui.button(icon="stop", on_click=lambda l=label, o=is_ocr: stop_phase(l, is_ocr=o)).props("flat dense round color=negative").tooltip("Остановить")
                     play_e.set_visibility(not d["is_running"])
                     stop_e.set_visibility(d["is_running"])
@@ -427,6 +429,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             refs["stats_e"].set_text(d["stats_text"])
             refs["issue_e"].set_text(d["issue_text"])
             refs["issue_e"].set_visibility(bool(d["issue_text"]))
+            refs["play_e"]._props["icon"] = "replay" if d["status_str"] in {"failed", "cancelled"} else "play_arrow"
+            refs["play_e"].update()
             refs["play_e"].set_visibility(not d["is_running"])
             refs["stop_e"].set_visibility(d["is_running"])
 

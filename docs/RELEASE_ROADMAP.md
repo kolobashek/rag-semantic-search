@@ -78,8 +78,9 @@ Owner: Codex.
 - DONE 2026-05-14: stop для index/OCR завершает дерево дочерних процессов, а не только root PID; это снижает риск зависших OCR/pdf helper-процессов после остановки.
 - DONE 2026-05-14: SQLite runtime больше не валит web/bot/scheduler при `PRAGMA journal_mode=WAL` -> `disk I/O error`; добавлен fallback на текущий/default journal mode и regression-тест.
 - DONE 2026-05-14: failed/cancelled stage summary теперь сохраняет `run_id/run_note`, а pipeline UI показывает короткую причину последнего сбоя прямо в строке этапа.
+- DONE 2026-05-14: failed/cancelled stage action визуально отделён как retry (`replay`), running stage оставляет только stop; повторный запуск продолжает по state DB.
 - Проверить фактическую ночную индексацию на telemetry после следующего ночного окна: lock, active process, last run reason.
-- Оставить одно действие для активного этапа: stop; следующий start продолжает по state DB.
+- DONE 2026-05-14: для активного этапа оставлено одно действие stop; следующий start/retry продолжает по state DB.
 - Добавить retry failed files / failed phase UX: список ошибок, файл, exception, кнопка retry scope.
 - OCR вынести в явную очередь или job list: pending/running/failed/done по файлам.
 - Проверить Qdrant timeout behavior на small/large chunks; не скрывать stage failure без ERROR логов.
