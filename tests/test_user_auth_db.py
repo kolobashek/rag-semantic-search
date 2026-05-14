@@ -5,6 +5,12 @@ import pytest
 from user_auth_db import UserAuthDB
 
 
+@pytest.fixture(autouse=True)
+def _explicit_test_bootstrap_admin(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_BOOTSTRAP_ADMIN_PASSWORD", "admin")
+    monkeypatch.delenv("RAG_DISABLE_DEFAULT_ADMIN", raising=False)
+
+
 def test_user_verification_and_login_flow(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     req = db.request_verification(
@@ -27,7 +33,17 @@ def test_user_verification_and_login_flow(tmp_path) -> None:
     assert user["role"] == "user"
 
 
-def test_default_admin_requires_password_change(tmp_path) -> None:
+def test_admin_is_not_created_without_explicit_bootstrap_password(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("RAG_BOOTSTRAP_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("RAG_DISABLE_DEFAULT_ADMIN", raising=False)
+    db = UserAuthDB(str(tmp_path / "users.db"))
+
+    assert db.login(username="admin", password="admin") is None
+    assert db.get_user(username="admin") is None
+    assert db.has_default_admin_password() is False
+
+
+def test_bootstrap_admin_requires_password_change(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     user = db.login(username="admin", password="admin")
     assert user is not None

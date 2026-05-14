@@ -249,7 +249,9 @@ class UserAuthDB:
         disable_default = str(os.environ.get("RAG_DISABLE_DEFAULT_ADMIN") or "").strip().lower()
         if disable_default in {"1", "true", "yes", "on"}:
             return
-        bootstrap_password = str(os.environ.get("RAG_BOOTSTRAP_ADMIN_PASSWORD") or "").strip() or "admin"
+        bootstrap_password = str(os.environ.get("RAG_BOOTSTRAP_ADMIN_PASSWORD") or "").strip()
+        if not bootstrap_password:
+            return
         now = _utc_now()
         conn.execute(
             """

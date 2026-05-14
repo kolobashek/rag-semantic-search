@@ -1888,7 +1888,10 @@ def render_settings_screen(
         ui.label("Настройки").classes("text-2xl font-semibold")
         with ui.column().classes("rag-card w-full max-w-xl p-4 gap-3"):
             ui.label("Вход пользователя").classes("text-xl font-semibold")
-            ui.label("Для первого входа администратора используйте admin / admin, затем смените пароль.").classes("rag-meta")
+            ui.label(
+                "Первый администратор создаётся только при запуске с RAG_BOOTSTRAP_ADMIN_PASSWORD. "
+                "Если админ ещё не создан, остановите сервер, задайте переменную окружения и запустите снова."
+            ).classes("rag-meta")
             username_input = ui.input("Логин").props("dense outlined").classes("w-full")
             password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
 

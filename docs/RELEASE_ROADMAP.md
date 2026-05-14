@@ -20,7 +20,7 @@
 
 Owner: Codex.
 
-- Убрать silent bootstrap `admin/admin` по умолчанию.
+- DONE 2026-05-14: убрать silent bootstrap `admin/admin` по умолчанию.
 - Оставить bootstrap admin только через явный env/config или first-run setup screen.
 - Убрать передачу `auth_token` через query-параметры; использовать app storage/cookie/header flow.
 - Проверить все download/viewer/sync endpoints на auth и path traversal.

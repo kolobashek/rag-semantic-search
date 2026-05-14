@@ -58,6 +58,21 @@ python telegram_bot.py
 
 Не коммитить реальные токены, локальные базы, storage, логи и runtime-state.
 
+### Первый Администратор
+
+Приложение не создаёт известный пароль `admin/admin` автоматически. Для первичного bootstrap задайте временный пароль перед первым запуском:
+
+```powershell
+$env:RAG_BOOTSTRAP_ADMIN_PASSWORD = "temporary-long-password"
+python -m rag_catalog.cli.launcher restart
+```
+
+После входа под `admin` смените пароль в настройках. Если нужно запретить bootstrap даже при заданной переменной:
+
+```powershell
+$env:RAG_DISABLE_DEFAULT_ADMIN = "1"
+```
+
 ## Архитектура
 
 Ключевая структура:
