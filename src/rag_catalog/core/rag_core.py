@@ -302,7 +302,28 @@ class RAGSearcher:
         raw_original = query_original if query_original else raw_query
         if title_only and content_only:
             content_only = False
-        query_used = self._expand_query_for_search(raw_query[:MAX_QUERY_LEN])[:MAX_QUERY_LEN]
+
+        # Expand synonyms/aliases using the ORIGINAL (pre-LLM) query so that
+        # alias groups match user intent, not the LLM-rewritten text.
+        _alias_exp = self._search_alias_expansion(raw_original[:MAX_QUERY_LEN])
+        _alias_terms: List[str] = [
+            str(a) for a in (_alias_exp.get("aliases") or []) if str(a).strip()
+        ]
+        # Append alias terms that aren't already present in the incoming query.
+        _raw_lower = raw_query.lower()
+        _extra = [a for a in _alias_terms if a.lower() not in _raw_lower]
+        query_with_aliases = (
+            (raw_query + " " + " ".join(_extra)).strip() if _extra else raw_query
+        )[:MAX_QUERY_LEN]
+
+        # Apply LLM expansion ONLY when the query wasn't already pre-expanded
+        # externally (e.g. by nice_app.py).  Detected by comparing raw_query to
+        # raw_original: if they differ, LLM expansion already happened upstream.
+        _externally_expanded = raw_query.strip() != raw_original.strip()
+        if _externally_expanded:
+            query_used = query_with_aliases
+        else:
+            query_used = self._expand_query_for_search(query_with_aliases)[:MAX_QUERY_LEN]
         query_original_used = raw_original
         truncated_note = ""
         if len(raw_query) > MAX_QUERY_LEN:
