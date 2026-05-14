@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import os
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Dict, List
@@ -40,7 +39,6 @@ def _get_api_auth_db(cfg: Dict[str, Any]) -> UserAuthDB:
 def _require_cloud_drive_api_user(
     cfg: Dict[str, Any],
     *,
-    auth_token: str = "",
     authorization: str = "",
     write: bool = False,
     admin_only: bool = False,
@@ -51,11 +49,6 @@ def _require_cloud_drive_api_user(
         token = header[7:].strip()
     elif header:
         token = header
-    allow_query_token = bool(cfg.get("allow_auth_token_query")) or str(
-        os.environ.get("RAG_ALLOW_AUTH_TOKEN_QUERY") or ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    if not token and allow_query_token:
-        token = str(auth_token or "").strip()
     if not token:
         try:
             token = str(app.storage.user.get("auth_token") or "").strip()
@@ -207,34 +200,34 @@ def api_view_file(path: str) -> FileResponse:
 
 
 @app.get("/api/cloud-drive/bootstrap-status")
-def api_cloud_drive_bootstrap_status(auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_bootstrap_status(authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     return _read_cloud_bootstrap_status(cfg)
 
 
 @app.get("/api/cloud-drive/bootstrap-jobs")
-def api_cloud_drive_bootstrap_jobs(limit: int = 20, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_bootstrap_jobs(limit: int = 20, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     service = CloudDriveService.from_config(cfg)
     jobs = service.list_bootstrap_jobs(limit=max(1, min(int(limit), 100)))
     return [_serialize_cloud_drive_job(job) for job in jobs]
 
 
 @app.get("/api/cloud-drive/jobs")
-def api_cloud_drive_jobs(job_type: str = "", limit: int = 20, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_jobs(job_type: str = "", limit: int = 20, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     service = CloudDriveService.from_config(cfg)
     jobs = service.list_jobs(job_type=str(job_type or "").strip(), limit=max(1, min(int(limit), 100)))
     return [_serialize_cloud_drive_job(job) for job in jobs]
 
 
 @app.get("/api/cloud-drive/job")
-def api_cloud_drive_job(job_id: str, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_job(job_id: str, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     service = CloudDriveService.from_config(cfg)
     job = service.get_job(job_id)
     if job is None:
@@ -243,9 +236,9 @@ def api_cloud_drive_job(job_id: str, auth_token: str = "", authorization: AuthHe
 
 
 @app.get("/api/cloud-drive/file-statuses")
-def api_cloud_drive_file_statuses(file_ids: str = "", paths: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_file_statuses(file_ids: str = "", paths: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     ids = [part.strip() for part in str(file_ids or "").split(",") if part.strip()]
     for path in [part.strip() for part in str(paths or "").split(",") if part.strip()]:
@@ -259,9 +252,9 @@ def api_cloud_drive_file_statuses(file_ids: str = "", paths: str = "", auth_toke
 
 
 @app.get("/api/cloud-drive/job-latest")
-def api_cloud_drive_job_latest(job_type: str, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_job_latest(job_type: str, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     clean_type = str(job_type or "").strip()
     if not clean_type:
         raise HTTPException(status_code=400, detail="Не задан job_type.")
@@ -273,9 +266,9 @@ def api_cloud_drive_job_latest(job_type: str, auth_token: str = "", authorizatio
 
 
 @app.get("/api/cloud-drive/storage-health")
-def api_cloud_drive_storage_health(auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_storage_health(authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     service = CloudDriveService.from_config(cfg)
     health = service.get_storage_health()
     return {
@@ -288,9 +281,9 @@ def api_cloud_drive_storage_health(auth_token: str = "", authorization: AuthHead
 
 
 @app.get("/api/cloud-drive/node")
-def api_cloud_drive_node(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_node(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -303,9 +296,9 @@ def api_cloud_drive_node(path: str = "", auth_token: str = "", authorization: Au
 
 
 @app.get("/api/cloud-drive/list")
-def api_cloud_drive_list(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_list(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -318,9 +311,9 @@ def api_cloud_drive_list(path: str = "", auth_token: str = "", authorization: Au
 
 
 @app.get("/api/cloud-drive/changes")
-def api_cloud_drive_changes(since: str = "", limit: int = 500, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_changes(since: str = "", limit: int = 500, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     result = service.list_changes(since=since, limit=max(1, min(int(limit or 500), 5000)))
     changes = [
@@ -334,9 +327,9 @@ def api_cloud_drive_changes(since: str = "", limit: int = 500, auth_token: str =
 
 
 @app.get("/api/cloud-drive/sync/clients")
-def api_cloud_drive_sync_clients(username: str = "", include_offline: bool = True, limit: int = 100, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_sync_clients(username: str = "", include_offline: bool = True, limit: int = 100, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     requested_username = str(username or "").strip().lower()
     if str(user.get("role") or "") != "admin":
@@ -357,11 +350,10 @@ def api_cloud_drive_sync_client_register(
     platform: str = "",
     status: str = "online",
     metadata_json: str = "{}",
-    auth_token: str = "",
     authorization: AuthHeader = "",
 ) -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     try:
         metadata = json.loads(str(metadata_json or "{}"))
     except json.JSONDecodeError:
@@ -386,9 +378,9 @@ def api_cloud_drive_sync_client_register(
 
 
 @app.get("/api/cloud-drive/sync/pairs")
-def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     if client_id:
         _require_sync_client_access(service, user, client_id)
@@ -401,11 +393,10 @@ def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, 
 @app.get("/api/cloud-drive/sync/client-download")
 def api_cloud_drive_sync_client_download(
     format: str = "auto",
-    auth_token: str = "",
     authorization: AuthHeader = "",
 ):
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    _require_cloud_drive_api_user(cfg, authorization=authorization)
     root = Path(__file__).parents[3]
     packaging = root / "packaging" / "dist"
     fmt = str(format or "auto").strip().lower()
@@ -444,11 +435,10 @@ def api_cloud_drive_sync_client_download(
 def api_cloud_drive_sync_heartbeat(
     client_id: str = "",
     status: str = "online",
-    auth_token: str = "",
     authorization: AuthHeader = "",
 ) -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     ok = service.registry.update_sync_client_status(client_id, status)
@@ -465,11 +455,10 @@ def api_cloud_drive_sync_pair_upsert(
     cloud_path: str = "",
     conflict_policy: str = "ask",
     enabled: bool = True,
-    auth_token: str = "",
     authorization: AuthHeader = "",
 ) -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     _require_cloud_drive_path_access(cfg, user, cloud_path)
@@ -489,9 +478,9 @@ def api_cloud_drive_sync_pair_upsert(
 
 
 @app.post("/api/cloud-drive/sync/pairs/delete")
-def api_cloud_drive_sync_pair_delete(pair_id: str = "", client_id: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_sync_pair_delete(pair_id: str = "", client_id: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     result = service.delete_sync_pair(pair_id, client_id=client_id)
@@ -500,9 +489,9 @@ def api_cloud_drive_sync_pair_delete(pair_id: str = "", client_id: str = "", aut
 
 
 @app.get("/api/cloud-drive/sync/selective")
-def api_cloud_drive_sync_selective(client_id: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_sync_selective(client_id: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     if client_id:
         _require_sync_client_access(service, user, client_id)
@@ -518,11 +507,10 @@ def api_cloud_drive_sync_selective_set(
     paths: str = "",
     mode: str = "exclude",
     replace: bool = True,
-    auth_token: str = "",
     authorization: AuthHeader = "",
 ) -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     path_values = [part.strip() for part in str(paths or "").split(",") if part.strip()]
@@ -538,9 +526,9 @@ def api_cloud_drive_sync_selective_set(
 
 
 @app.get("/api/cloud-drive/sync/conflicts")
-def api_cloud_drive_sync_conflicts(status: str = "open", client_id: str = "", limit: int = 100, auth_token: str = "", authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_sync_conflicts(status: str = "open", client_id: str = "", limit: int = 100, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     if client_id:
         _require_sync_client_access(service, user, client_id)
@@ -566,11 +554,10 @@ def api_cloud_drive_sync_conflict_record(
     local_version: str = "",
     cloud_version: str = "",
     details_json: str = "{}",
-    auth_token: str = "",
     authorization: AuthHeader = "",
 ) -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     if cloud_path or path:
@@ -604,11 +591,10 @@ def api_cloud_drive_sync_conflict_record(
 def api_cloud_drive_sync_conflict_resolve(
     conflict_id: str = "",
     resolution: str = "",
-    auth_token: str = "",
     authorization: AuthHeader = "",
 ) -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     existing = service.registry.list_sync_conflicts(status="all", limit=1000)
     conflict = next((item for item in existing if item.id == str(conflict_id or "").strip()), None)
@@ -629,9 +615,9 @@ def api_cloud_drive_sync_conflict_resolve(
 
 
 @app.post("/api/cloud-drive/folders")
-def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_cloud_drive_path_access(cfg, user, parent_path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -644,9 +630,9 @@ def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", auth_to
 
 
 @app.get("/api/cloud-drive/download")
-def api_cloud_drive_download(path: str, auth_token: str = "", authorization: AuthHeader = ""):
+def api_cloud_drive_download(path: str, authorization: AuthHeader = ""):
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -669,11 +655,11 @@ def api_cloud_drive_download(path: str, auth_token: str = "", authorization: Aut
 
 
 @app.post("/api/cloud-drive/upload")
-async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(...), auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(...), authorization: AuthHeader = "") -> Dict[str, Any]:
     if file is None or not str(file.filename or "").strip():
         raise HTTPException(status_code=400, detail="Не передан файл для загрузки.")
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_cloud_drive_path_access(cfg, user, parent_path)
     service = CloudDriveService.from_config(cfg)
     suffix = Path(str(file.filename or "")).suffix
@@ -702,9 +688,9 @@ async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(
 
 
 @app.get("/api/cloud-drive/versions")
-def api_cloud_drive_versions(path: str, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_versions(path: str, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -717,9 +703,9 @@ def api_cloud_drive_versions(path: str, auth_token: str = "", authorization: Aut
 
 
 @app.post("/api/cloud-drive/move")
-def api_cloud_drive_move(source_path: str = "", dest_parent_path: str = "", new_name: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_move(source_path: str = "", dest_parent_path: str = "", new_name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_cloud_drive_path_access(cfg, user, source_path)
     _require_cloud_drive_path_access(cfg, user, dest_parent_path)
     service = CloudDriveService.from_config(cfg)
@@ -733,9 +719,9 @@ def api_cloud_drive_move(source_path: str = "", dest_parent_path: str = "", new_
 
 
 @app.post("/api/cloud-drive/rename")
-def api_cloud_drive_rename(path: str = "", new_name: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_rename(path: str = "", new_name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     node = service.registry.get_node_by_path(path)
@@ -753,9 +739,9 @@ def api_cloud_drive_rename(path: str = "", new_name: str = "", auth_token: str =
 
 
 @app.post("/api/cloud-drive/delete")
-def api_cloud_drive_delete(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_delete(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -768,9 +754,9 @@ def api_cloud_drive_delete(path: str = "", auth_token: str = "", authorization: 
 
 
 @app.get("/api/cloud-drive/trash")
-def api_cloud_drive_trash(limit: int = 200, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_trash(limit: int = 200, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     result = service.list_trash(limit=limit)
     items = [
@@ -784,9 +770,9 @@ def api_cloud_drive_trash(limit: int = 200, auth_token: str = "", authorization:
 
 
 @app.post("/api/cloud-drive/restore")
-def api_cloud_drive_restore(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_restore(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -799,9 +785,9 @@ def api_cloud_drive_restore(path: str = "", auth_token: str = "", authorization:
 
 
 @app.post("/api/cloud-drive/reindex")
-def api_cloud_drive_reindex(path: str = "", auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_reindex(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, write=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
     try:
@@ -814,9 +800,9 @@ def api_cloud_drive_reindex(path: str = "", auth_token: str = "", authorization:
 
 
 @app.post("/api/cloud-drive/job-run")
-def api_cloud_drive_job_run(job_id: str, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_job_run(job_id: str, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     service = CloudDriveService.from_config(cfg)
     try:
         job = service.run_reindex_job(job_id, index_config=cfg)
@@ -828,9 +814,9 @@ def api_cloud_drive_job_run(job_id: str, auth_token: str = "", authorization: Au
 
 
 @app.post("/api/cloud-drive/job-retry")
-def api_cloud_drive_job_retry(job_id: str, auth_token: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_job_retry(job_id: str, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, auth_token=auth_token, authorization=authorization, admin_only=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     service = CloudDriveService.from_config(cfg)
     try:
         job = service.retry_job(job_id)

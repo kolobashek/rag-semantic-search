@@ -914,11 +914,14 @@ def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
 
     with pytest.raises(HTTPException) as exc:
-        cloud_api._require_cloud_drive_api_user(cfg, auth_token=token)
+        cloud_api._require_cloud_drive_api_user(cfg)
     assert exc.value.status_code == 401
 
-    user = cloud_api._require_cloud_drive_api_user({**cfg, "allow_auth_token_query": True}, auth_token=token)
-    assert user["username"] == "user"
+    # Query-string auth is intentionally unsupported; API clients must use headers.
+    with pytest.raises(HTTPException) as query_exc:
+        cloud_api._require_cloud_drive_api_user({**cfg, "allow_auth_token_query": True})
+    assert query_exc.value.status_code == 401
+
     header_user = cloud_api._require_cloud_drive_api_user(cfg, authorization=f"Bearer {token}")
     assert header_user["username"] == "user"
 
