@@ -162,6 +162,15 @@ def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def _wait_port_closed(host: str, port: int, *, timeout_sec: float = 8.0) -> bool:
+    deadline = time.time() + max(0.1, float(timeout_sec))
+    while time.time() < deadline:
+        if not _port_open(host, port, timeout=0.2):
+            return True
+        time.sleep(0.2)
+    return not _port_open(host, port, timeout=0.2)
+
+
 def _windows_flags() -> int:
     flags = 0
     for name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB"):
@@ -474,6 +483,7 @@ def _stop(args: argparse.Namespace) -> int:
 
 def _restart(args: argparse.Namespace) -> int:
     _stop(argparse.Namespace(with_qdrant=args.with_qdrant))
+    _wait_port_closed(args.host, int(args.port))
     return _start(args)
 
 

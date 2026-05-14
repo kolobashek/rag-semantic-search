@@ -76,3 +76,30 @@ def test_start_bot_reports_recent_log_error_on_failure(monkeypatch, tmp_path: Pa
     assert "failed-to-start" in result
     assert "disk I/O error" in result
     assert not launcher._pid_file(cfg, "bot").exists()
+
+
+def test_restart_waits_for_web_port_to_close_before_start(monkeypatch) -> None:
+    events: list[str] = []
+
+    def fake_stop(args) -> int:
+        events.append("stop")
+        return 0
+
+    def fake_wait(host: str, port: int) -> bool:
+        events.append(f"wait:{host}:{port}")
+        return True
+
+    def fake_start(args) -> int:
+        events.append("start")
+        return 0
+
+    monkeypatch.setattr(launcher, "_stop", fake_stop)
+    monkeypatch.setattr(launcher, "_wait_port_closed", fake_wait)
+    monkeypatch.setattr(launcher, "_start", fake_start)
+
+    result = launcher._restart(
+        type("Args", (), {"host": "127.0.0.1", "port": 8080, "with_qdrant": False})()
+    )
+
+    assert result == 0
+    assert events == ["stop", "wait:127.0.0.1:8080", "start"]
