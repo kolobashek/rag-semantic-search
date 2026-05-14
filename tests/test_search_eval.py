@@ -27,4 +27,7 @@ def test_evaluate_search_summary() -> None:
     assert report["recall_at_k"] == 1
     assert report["mrr_at_k"] == 1
     assert report["ndcg_at_k"] == 1
+    assert report["zero_result_rate"] == 0
+    assert report["latency_p50_ms"] >= 0
+    assert report["latency_p95_ms"] >= report["latency_p50_ms"]
     assert report["rows"][0]["top"][0]["filename"] == "Карточка ТСК.docx"

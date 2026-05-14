@@ -77,6 +77,14 @@ def ndcg_at_k(results: List[Dict[str, Any]], expected: List[str], *, k: int) -> 
     return dcg / ideal if ideal else 0.0
 
 
+def _percentile(values: List[int], pct: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, math.ceil((float(pct) / 100.0) * len(ordered)) - 1))
+    return int(ordered[idx])
+
+
 def evaluate_search(
     golden: List[GoldenQuery],
     search_fn: Callable[[str, int], List[Dict[str, Any]]],
@@ -108,12 +116,16 @@ def evaluate_search(
             }
         )
     count = max(1, len(rows))
+    latencies = [int(row["latency_ms"]) for row in rows]
+    zero_results = sum(1 for row in rows if int(row["results_count"] or 0) == 0)
     return {
         "queries": len(rows),
         "limit": int(limit),
         "recall_at_k": sum(row["recall_at_k"] for row in rows) / count,
         "mrr_at_k": sum(row["mrr_at_k"] for row in rows) / count,
         "ndcg_at_k": sum(row["ndcg_at_k"] for row in rows) / count,
-        "latency_p50_ms": sorted(row["latency_ms"] for row in rows)[len(rows) // 2] if rows else 0,
+        "zero_result_rate": zero_results / count,
+        "latency_p50_ms": _percentile(latencies, 50),
+        "latency_p95_ms": _percentile(latencies, 95),
         "rows": rows,
     }

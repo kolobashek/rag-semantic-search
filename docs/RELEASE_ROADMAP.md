@@ -53,15 +53,15 @@ Done criteria:
 
 Owner: Codex.
 
-- Расширить `eval/search_golden.json` до 30-50 реальных запросов.
+- DONE 2026-05-14: `eval/search_golden.json` расширен до 32 запросов по exact/folder/document/OCR-like сценариям.
 - Разделить кейсы: exact names, folders, document numbers, Russian semantic questions, OCR documents, Cloud Drive files.
 - Запускать `scripts/search_eval.py` в CI как optional/manual gate сначала, затем как required для retrieval changes.
-- Добавить отчет: Recall@5, MRR@10, nDCG@10, zero-result rate, latency p50/p95.
+- DONE 2026-05-14: eval report включает Recall/MRR/nDCG, zero-result rate, latency p50/p95; CLI умеет JSON и Markdown artifacts.
 
 Done criteria:
 
-- eval можно запустить одной командой локально;
-- результат сохраняется в JSON/Markdown artifact;
+- DONE 2026-05-14: eval можно запустить одной командой локально: `python scripts/search_eval.py --golden eval/search_golden.json --limit 10`.
+- DONE 2026-05-14: результат сохраняется в JSON/Markdown artifact через `--output` и `--markdown-output`.
 - пороги качества согласованы и видны в CI.
 
 ### 4. Indexing And OCR Reliability
