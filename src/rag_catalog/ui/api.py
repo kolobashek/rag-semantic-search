@@ -191,8 +191,10 @@ def api_device_token(device_code: str = "") -> Dict[str, Any]:
 # ─────────────────────────── API routes ─────────────────────────────────────
 
 @app.get("/api/view-file")
-def api_view_file(path: str) -> FileResponse:
-    resolved = _resolve_catalog_file(load_config(), path)
+def api_view_file(path: str, authorization: AuthHeader = "") -> FileResponse:
+    cfg = load_config()
+    _require_cloud_drive_api_user(cfg, authorization=authorization)
+    resolved = _resolve_catalog_file(cfg, path)
     if resolved is None:
         raise HTTPException(status_code=404, detail="Файл не найден или недоступен")
     media_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"

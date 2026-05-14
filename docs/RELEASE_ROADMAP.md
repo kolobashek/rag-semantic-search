@@ -23,7 +23,8 @@ Owner: Codex.
 - DONE 2026-05-14: убрать silent bootstrap `admin/admin` по умолчанию.
 - DONE 2026-05-14: bootstrap admin оставлен только через явный `RAG_BOOTSTRAP_ADMIN_PASSWORD`; silent first-run password отключён.
 - DONE 2026-05-14: убрана поддержка `auth_token` через query-параметры в Cloud Drive API; остаются browser session и `Authorization: Bearer`.
-- Проверить все download/viewer/sync endpoints на auth и path traversal.
+- DONE 2026-05-14: `/api/view-file` закрыт auth-проверкой; path traversal покрыт тестом.
+- Проверить оставшиеся download/sync endpoints на auth и path traversal.
 - Зафиксировать audit events для login/logout, download, upload, delete, restore, reindex, settings changes.
 
 Done criteria:

@@ -926,6 +926,35 @@ def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:
     assert header_user["username"] == "user"
 
 
+
+def test_view_file_requires_auth_and_catalog_path(monkeypatch, tmp_path) -> None:
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    file_path = catalog / "report.txt"
+    file_path.write_text("ok", encoding="utf-8")
+    cfg = {
+        "catalog_path": str(catalog),
+        "users_db_path": str(tmp_path / "users.db"),
+    }
+    auth_db = UserAuthDB(cfg["users_db_path"])
+    assert auth_db.admin_create_user(username="user", password="8215", role="user", status="active")
+    token = auth_db.create_session(username="user")
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+
+    with pytest.raises(HTTPException) as exc:
+        cloud_api.api_view_file(path=str(file_path))
+    assert exc.value.status_code == 401
+
+    response = cloud_api.api_view_file(path=str(file_path), authorization=f"Bearer {token}")
+    assert str(response.path) == str(file_path)
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    with pytest.raises(HTTPException) as outside_exc:
+        cloud_api.api_view_file(path=str(outside), authorization=f"Bearer {token}")
+    assert outside_exc.value.status_code == 404
+
+
 def test_cloud_drive_acl_allows_user_and_role_prefixes() -> None:
     cfg = {
         "cloud_drive_acl": {
