@@ -17,3 +17,4 @@ tqdm==4.67.3
 chardet==5.2.0
 charset-normalizer==3.4.4
 urllib3==2.6.3
+qdrant-client==1.17.1

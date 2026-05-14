@@ -141,7 +141,8 @@ Owner: Codex.
 - README оставить операционным, без длинной истории.
 - `config.example.json` и `config.docker.example.json` синхронизировать с текущими ключами.
 - Документировать launcher, Docker + MinIO, first-run admin, OCR deps, release checks.
-- Зафиксировать dependencies для CI/runtime (`requirements-ci.lock`; решить, нужен ли runtime lock).
+- DONE 2026-05-14: `requirements-ci.lock` дополнен `qdrant-client==1.17.1`, чтобы launcher smoke не падал на `ModuleNotFoundError`.
+- Решить, нужен ли отдельный runtime lock.
 
 Done criteria:
 
