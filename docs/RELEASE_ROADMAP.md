@@ -25,7 +25,7 @@ Owner: Codex.
 - DONE 2026-05-14: убрана поддержка `auth_token` через query-параметры в Cloud Drive API; остаются browser session и `Authorization: Bearer`.
 - DONE 2026-05-14: `/api/view-file` закрыт auth-проверкой; path traversal покрыт тестом.
 - DONE 2026-05-14: Cloud Drive download/sync endpoints сверены: auth/header flow активен, path ACL применяется; download auth покрыт тестом.
-- Зафиксировать audit events для login/logout, download, upload, delete, restore, reindex, settings changes.
+- DONE 2026-05-14: audit events сверены: login/logout в `auth_events`, Cloud Drive download/upload/delete/restore/reindex и settings changes в `app_events`.
 
 Done criteria:
 
