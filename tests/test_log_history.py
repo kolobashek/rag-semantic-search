@@ -55,3 +55,12 @@ def test_history_includes_legacy_file(monkeypatch, tmp_path: Path) -> None:
 
     assert "legacy error" in text
     assert "new segment" in text
+
+
+def test_last_error_can_ignore_info_fallback(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(log_history, "PROJECT_ROOT", tmp_path)
+    with log_history.open_run_log("telegram_bot.log", "BOT") as fh:
+        fh.write("2026-05-14 10:00:00 - INFO - Telegram bot started\n")
+
+    assert log_history.last_error_from_history("telegram_bot.log", include_fallback=False) == ""
+    assert "Telegram bot started" in log_history.last_error_from_history("telegram_bot.log")

@@ -452,7 +452,7 @@ def _status(host: str, port: int) -> int:
     for note in [n for n in notes if n.startswith("bot.")]:
         print(f"- {note}")
     if not bot_alive:
-        last_error = _last_log_error("telegram_bot.log")
+        last_error = last_error_from_history("telegram_bot.log", include_fallback=False)
         if last_error:
             print(f"- bot.last_error: {last_error}")
     print(f"- bot.enabled.config: {bool(cfg.get('telegram_enabled'))}")

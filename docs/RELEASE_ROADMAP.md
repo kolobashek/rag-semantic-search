@@ -154,6 +154,7 @@ Owner: Codex.
 - DONE 2026-05-14: README quick start теперь устанавливает пакет через `pip install -e .`; добавлен fallback запуска с `PYTHONPATH=src` для fresh checkout.
 - DONE 2026-05-14: launcher `restart` ждёт освобождения web-порта после stop, чтобы не оставлять web down из-за race между остановкой процесса и проверкой 8080.
 - DONE 2026-05-14: bot/web startup hardened against SQLite WAL setup failures on Windows/external drives.
+- DONE 2026-05-14: launcher status больше не показывает последнюю INFO-строку как `bot.last_error`; fallback оставлен только для failed-to-start диагностики.
 - Решить, нужен ли отдельный runtime lock.
 
 Done criteria:

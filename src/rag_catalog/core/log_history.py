@@ -230,7 +230,7 @@ def install_env_log_handler(*, logger: logging.Logger | None = None) -> bool:
     return True
 
 
-def last_error_from_history(path_or_name: str | Path, *, max_lines: int = 120) -> str:
+def last_error_from_history(path_or_name: str | Path, *, max_lines: int = 120, include_fallback: bool = True) -> str:
     patterns: Sequence[str] = ("Traceback", "ERROR", "Error", "Exception", "OperationalError", "ProxyError")
     fallback = ""
     for path in reversed(list_log_segments(path_or_name)):
@@ -247,7 +247,7 @@ def last_error_from_history(path_or_name: str | Path, *, max_lines: int = 120) -
                 if value:
                     fallback = re.sub(r"\s+", " ", value).strip()[:220]
                     break
-        if fallback:
+        if fallback and include_fallback:
             return fallback
     return ""
 
