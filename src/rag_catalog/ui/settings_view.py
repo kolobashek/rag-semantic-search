@@ -1831,51 +1831,21 @@ def render_settings_screen(
                         ui.notify("Группа удалена.", type="positive")
                         render_fn()
 
-                    group_actions = ui.row().classes("rag-dirty-actions")
-                    group_actions.set_visibility(False)
-
-                    # Capture loop vars via default args to avoid closure-over-last-iteration bug
-                    def current_group_values(
-                        _li: Any = label_input,
-                        _ai: Any = aliases_input,
-                        _ni: Any = negative_input,
-                        _gk: str = group_key,
-                    ) -> Dict[str, Any]:
-                        return {
-                            "label": str(_li.value or _gk),
-                            "aliases": str(_ai.value or ""),
-                            "negative": str(_ni.value or ""),
-                        }
-
-                    def refresh_group_dirty(
-                        _ig: Dict[str, Any] = initial_group,
-                        _ga: Any = group_actions,
-                        _cgv: Any = current_group_values,
-                    ) -> None:
-                        _ga.set_visibility(_cgv() != _ig)
-
                     def reset_group_fields(
                         _li: Any = label_input,
                         _ai: Any = aliases_input,
                         _ni: Any = negative_input,
                         _ig: Dict[str, Any] = initial_group,
-                        _ga: Any = group_actions,
                     ) -> None:
                         _li.set_value(_ig["label"])
                         _ai.set_value(_ig["aliases"])
                         _ni.set_value(_ig["negative"])
-                        _ga.set_visibility(False)
 
-                    label_input.on_value_change(lambda _, _rd=refresh_group_dirty: _rd())
-                    aliases_input.on_value_change(lambda _, _rd=refresh_group_dirty: _rd())
-                    negative_input.on_value_change(lambda _, _rd=refresh_group_dirty: _rd())
-
-                    with ui.row().classes("gap-2"):
+                    with ui.row().classes("gap-2 items-center"):
                         ui.button("Удалить", icon="delete", on_click=delete_group).props("flat dense")
-                    with group_actions:
-                        with ui.row().classes("rag-dirty-actions-inner"):
-                            ui.button("Отменить", icon="close", on_click=reset_group_fields).props("flat dense")
-                            ui.button("Сохранить", icon="save", on_click=save_group).props("outline dense")
+                        ui.space()
+                        ui.button("Сбросить", icon="undo", on_click=reset_group_fields).props("flat dense")
+                        ui.button("Сохранить", icon="save", on_click=save_group).props("outline dense")
 
             candidates = telemetry.suggest_search_alias_candidates(limit=12) if hasattr(telemetry, "suggest_search_alias_candidates") else []
             with ui.expansion("Кандидаты из истории поиска", icon="psychology", value=False).classes("w-full"):
