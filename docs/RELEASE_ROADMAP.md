@@ -72,6 +72,7 @@ Owner: Codex.
 - DONE 2026-05-14: индексный UI теперь видит runtime marker сразу после старта процесса, даже если `index_runs/index_stage_progress` ещё не созданы; это убирает задержку переключения кнопок/статуса после нажатия start.
 - DONE 2026-05-14: `active_stages` теперь включает только stage rows со статусом `running`; completed/failed этапы остаются в latest summary, но не показываются как активные задачи.
 - DONE 2026-05-14: XLSX extraction больше не падает на файлах без `xl/sharedStrings.xml`; добавлен ZIP/XML fallback и regression-тест на повреждённую структуру workbook.
+- DONE 2026-05-14: stop для index/OCR завершает дерево дочерних процессов, а не только root PID; это снижает риск зависших OCR/pdf helper-процессов после остановки.
 - Проверить фактическую ночную индексацию на telemetry после следующего ночного окна: lock, active process, last run reason.
 - Оставить одно действие для активного этапа: stop; следующий start продолжает по state DB.
 - Добавить retry failed files / failed phase UX: список ошибок, файл, exception, кнопка retry scope.
