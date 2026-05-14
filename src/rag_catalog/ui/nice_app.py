@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import threading
+import time as _time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -97,6 +98,22 @@ SEARCH_PRESETS = [
 
 if LOGO_PATH.exists():
     app.add_static_file(local_file=LOGO_PATH, url_path="/rag-logo.png")
+
+
+def _client_alive() -> bool:
+    """Return True if the current NiceGUI client is still connected.
+
+    When a browser disconnects and reconnects mid-search, the old async
+    handler continues but the client has been removed from Client.instances.
+    Calling render() on a deleted client logs a warning and rebuilds dead UI
+    elements — we skip those renders instead.
+    """
+    try:
+        from nicegui.client import Client  # noqa: PLC0415
+        c = Client.current
+        return c is not None and c.id in Client.instances
+    except Exception:
+        return True  # assume alive if we can't inspect
 
 
 def _build_page(initial_screen: str = "search") -> None:
@@ -239,7 +256,11 @@ def _build_page(initial_screen: str = "search") -> None:
         header_status_chip.set_visibility(False)
         if state.current_user:
             try:
-                telemetry = _read_index_telemetry(state.cfg)
+                _now = _time.monotonic()
+                if _now - state._telemetry_nav_cache_ts > 5.0:
+                    state._telemetry_nav_cache = _read_index_telemetry(state.cfg)
+                    state._telemetry_nav_cache_ts = _now
+                telemetry = state._telemetry_nav_cache or {}
                 active_rows = list(telemetry.get("active_stages") or [])
                 if telemetry.get("active_ocr"):
                     active_rows.append(telemetry.get("active_ocr") or {})
@@ -305,7 +326,8 @@ def _build_page(initial_screen: str = "search") -> None:
         searcher = _ensure_searcher(state)
         if searcher is None or not searcher.connected:
             state.search_error = state.searcher_error or "Нет подключения к Qdrant."
-            render()
+            if _client_alive():
+                render()
             return
 
         llm_enabled = bool(state.cfg.get("llm_enabled"))
@@ -332,6 +354,8 @@ def _build_page(initial_screen: str = "search") -> None:
             exact_count = _count_exact_name_matches(query, quick_results)
             state.search_stats_hint = f"Быстро найдено: {len(quick_results)} · точных совпадений: {exact_count}"
             state.search_lazy_loading = True
+            if not _client_alive():
+                return
             render()
             _log_app_event(
                 state,
@@ -356,7 +380,8 @@ def _build_page(initial_screen: str = "search") -> None:
                     "error": str(exc),
                 },
             )
-            render()
+            if _client_alive():
+                render()
             return
 
         # Ленивая догрузка: сначала, при необходимости, расширяем запрос через LLM.
@@ -444,6 +469,8 @@ def _build_page(initial_screen: str = "search") -> None:
             searcher_for_answer = _ensure_searcher(state)
             if searcher_for_answer is not None:
                 state.rag_answer_loading = True
+                if not _client_alive():
+                    return
                 render()
                 try:
                     ans = await run.io_bound(
@@ -467,7 +494,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
         if state.search_request_id == request_id:
             state.search_lazy_loading = False
-            render()
+            if _client_alive():
+                render()
 
     async def choose_query(query: str) -> None:
         # Прямой async-обработчик: пресеты больше не зависят от ui.timer и гонок с перерисовкой.
@@ -595,6 +623,15 @@ def _build_page(initial_screen: str = "search") -> None:
             search_input.on("keyup.escape", close_suggestions)
 
     def render_results_loading() -> None:
+        # Stop all periodic timers so they don't fire a concurrent render() while we await
+        for _timer_attr in (
+            "cloud_drive_timer", "scheduler_timer",
+            "index_progress_timer", "stage_status_timer", "tg_login_timer",
+        ):
+            _t = getattr(state, _timer_attr, None)
+            if _t is not None:
+                _stop_managed_timer(_t)
+                setattr(state, _timer_attr, None)
         content.clear()
         with content:
             render_search_header()

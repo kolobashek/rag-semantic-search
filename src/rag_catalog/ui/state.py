@@ -79,6 +79,9 @@ class PageState:
     activity_timer: Optional[Any] = None
     scheduler_timer: Optional[Any] = None
     cloud_drive_timer: Optional[Any] = None
+    # Cache for _read_index_telemetry() to avoid blocking event loop on every render
+    _telemetry_nav_cache: Optional[Dict[str, Any]] = None
+    _telemetry_nav_cache_ts: float = 0.0
 
 
 # ─────────────────────────── config helpers ─────────────────────────────────
