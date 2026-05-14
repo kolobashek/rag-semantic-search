@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Iterable, List
 class GoldenQuery:
     query: str
     expected: List[str]
+    category: str = "general"
 
 
 def load_golden_queries(path: str | Path) -> List[GoldenQuery]:
@@ -26,8 +27,9 @@ def load_golden_queries(path: str | Path) -> List[GoldenQuery]:
             continue
         query = str(item.get("query") or "").strip()
         expected = [str(x).strip() for x in item.get("expected", []) if str(x).strip()]
+        category = str(item.get("category") or "general").strip() or "general"
         if query and expected:
-            out.append(GoldenQuery(query=query, expected=expected))
+            out.append(GoldenQuery(query=query, expected=expected, category=category))
     if not out:
         raise ValueError("Golden set is empty.")
     return out
@@ -100,6 +102,7 @@ def evaluate_search(
             {
                 "query": item.query,
                 "expected": item.expected,
+                "category": item.category,
                 "results_count": len(results),
                 "recall_at_k": recall_at_k(results, item.expected, k=limit),
                 "mrr_at_k": mrr_at_k(results, item.expected, k=limit),
@@ -118,6 +121,20 @@ def evaluate_search(
     count = max(1, len(rows))
     latencies = [int(row["latency_ms"]) for row in rows]
     zero_results = sum(1 for row in rows if int(row["results_count"] or 0) == 0)
+    by_category: Dict[str, Dict[str, Any]] = {}
+    for category in sorted({str(row.get("category") or "general") for row in rows}):
+        cat_rows = [row for row in rows if str(row.get("category") or "general") == category]
+        cat_count = max(1, len(cat_rows))
+        cat_latencies = [int(row["latency_ms"]) for row in cat_rows]
+        by_category[category] = {
+            "queries": len(cat_rows),
+            "recall_at_k": sum(row["recall_at_k"] for row in cat_rows) / cat_count,
+            "mrr_at_k": sum(row["mrr_at_k"] for row in cat_rows) / cat_count,
+            "ndcg_at_k": sum(row["ndcg_at_k"] for row in cat_rows) / cat_count,
+            "zero_result_rate": sum(1 for row in cat_rows if int(row["results_count"] or 0) == 0) / cat_count,
+            "latency_p50_ms": _percentile(cat_latencies, 50),
+            "latency_p95_ms": _percentile(cat_latencies, 95),
+        }
     return {
         "queries": len(rows),
         "limit": int(limit),
@@ -127,5 +144,6 @@ def evaluate_search(
         "zero_result_rate": zero_results / count,
         "latency_p50_ms": _percentile(latencies, 50),
         "latency_p95_ms": _percentile(latencies, 95),
+        "by_category": by_category,
         "rows": rows,
     }

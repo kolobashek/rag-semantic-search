@@ -54,7 +54,7 @@ Done criteria:
 Owner: Codex.
 
 - DONE 2026-05-14: `eval/search_golden.json` расширен до 32 запросов по exact/folder/document/OCR-like сценариям.
-- Разделить кейсы: exact names, folders, document numbers, Russian semantic questions, OCR documents, Cloud Drive files.
+- DONE 2026-05-14: golden cases разделены по категориям (`folder_or_name`, `exact_number_or_vehicle`, `document_type`, `ocr_or_scan`, `semantic_business`, `general`); eval считает `by_category`. Cloud Drive-specific cases добавить после стабилизации registry search fixtures.
 - Запускать `scripts/search_eval.py` в CI как optional/manual gate сначала, затем как required для retrieval changes.
 - DONE 2026-05-14: eval report включает Recall/MRR/nDCG, zero-result rate, latency p50/p95; CLI умеет JSON и Markdown artifacts.
 

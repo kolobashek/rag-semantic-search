@@ -89,13 +89,30 @@ def main() -> int:
             f"- Latency p50: {report['latency_p50_ms']} ms",
             f"- Latency p95: {report['latency_p95_ms']} ms",
             "",
-            "| Query | Recall | MRR | nDCG | Results | Latency ms |",
-            "|---|---:|---:|---:|---:|---:|",
+            "## By Category",
+            "",
+            "| Category | Queries | Recall | MRR | nDCG | Zero-result | p50 ms | p95 ms |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
+        for category, metrics in sorted(report.get("by_category", {}).items()):
+            safe_category = str(category).replace("|", r"\|")
+            rows.append(
+                f"| {safe_category} | {metrics['queries']} | {metrics['recall_at_k']:.3f} | "
+                f"{metrics['mrr_at_k']:.3f} | {metrics['ndcg_at_k']:.3f} | "
+                f"{metrics['zero_result_rate']:.3f} | {metrics['latency_p50_ms']} | {metrics['latency_p95_ms']} |"
+            )
+        rows.extend([
+            "",
+            "## Queries",
+            "",
+            "| Category | Query | Recall | MRR | nDCG | Results | Latency ms |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ])
         for row in report["rows"]:
+            category = str(row.get("category") or "general").replace("|", r"\|")
             query = str(row["query"]).replace("|", r"\|")
             rows.append(
-                f"| {query} | {row['recall_at_k']:.3f} | {row['mrr_at_k']:.3f} | "
+                f"| {category} | {query} | {row['recall_at_k']:.3f} | {row['mrr_at_k']:.3f} | "
                 f"{row['ndcg_at_k']:.3f} | {row['results_count']} | {row['latency_ms']} |"
             )
         md_path.write_text("\n".join(rows) + "\n", encoding="utf-8")

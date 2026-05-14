@@ -16,7 +16,7 @@ def test_relevance_metrics() -> None:
 
 
 def test_evaluate_search_summary() -> None:
-    golden = [GoldenQuery(query="карточка тск", expected=["тск"])]
+    golden = [GoldenQuery(query="карточка тск", expected=["тск"], category="folder_or_name")]
 
     def search_fn(_query: str, _limit: int) -> list[dict]:
         return [{"filename": "Карточка ТСК.docx", "path": "Катя/Карточка ТСК.docx", "score": 0.9}]
@@ -30,4 +30,6 @@ def test_evaluate_search_summary() -> None:
     assert report["zero_result_rate"] == 0
     assert report["latency_p50_ms"] >= 0
     assert report["latency_p95_ms"] >= report["latency_p50_ms"]
+    assert report["by_category"]["folder_or_name"]["queries"] == 1
+    assert report["rows"][0]["category"] == "folder_or_name"
     assert report["rows"][0]["top"][0]["filename"] == "Карточка ТСК.docx"

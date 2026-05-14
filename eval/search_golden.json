@@ -1,34 +1,257 @@
 [
-  {"query": "карточка предприятия тск", "expected": ["карточка", "тск"]},
-  {"query": "карточка предприятия ООО Спецмаш", "expected": ["карточка", "спецмаш"]},
-  {"query": "карта предприятия ИП Галиулин", "expected": ["галиулин", "карта"]},
-  {"query": "карточка предприятия ООО ТСК", "expected": ["тск", "карточка"]},
-  {"query": "паспорт PC300", "expected": ["pc300", "паспорт"]},
-  {"query": "сколько весит PC300", "expected": ["pc300"]},
-  {"query": "Экскаватор 6357 ПСМ", "expected": ["6357", "псм"]},
-  {"query": "touareg O50 vin птс стс", "expected": ["touareg", "vin"]},
-  {"query": "vin lovol", "expected": ["lovol", "vin"]},
-  {"query": "счет на оплату", "expected": ["счет", "оплата"]},
-  {"query": "счета и платежи", "expected": ["счет", "платеж"]},
-  {"query": "договор поставки", "expected": ["договор", "поставка"]},
-  {"query": "договор услуг", "expected": ["договор", "услуг"]},
-  {"query": "акт сверки", "expected": ["акт", "сверки"]},
-  {"query": "реквизиты обслуживания технических услуг", "expected": ["реквизит", "технических"]},
-  {"query": "паспорт цыбусов", "expected": ["цыбусов", "паспорт"]},
-  {"query": "водительские права Цыбусов", "expected": ["цыбусов", "права"]},
-  {"query": "УТМ Колозин", "expected": ["колозин", "утм"]},
-  {"query": "Спецмайнинг Устав", "expected": ["спецмайнинг", "устав"]},
-  {"query": "Требования 2024 СТС", "expected": ["2024", "стс"]},
-  {"query": "Карбон реализации 2024", "expected": ["карбон", "2024"]},
-  {"query": "Энергия НК реализации", "expected": ["энергия", "реализации"]},
-  {"query": "документы водителей сканы", "expected": ["водителей", "сканы"]},
-  {"query": "Магазин карточки предприятий", "expected": ["магазин", "карточки"]},
-  {"query": "Рабочий стол карточки предприятий", "expected": ["рабочий", "карточки"]},
-  {"query": "1 Фактуры ТСК", "expected": ["фактуры", "тск"]},
-  {"query": "Выписка из банка НСК", "expected": ["выписка", "нск"]},
-  {"query": "Бланки путевок", "expected": ["бланки", "путевок"]},
-  {"query": "Грузовые автомобили", "expected": ["грузовые", "автомобили"]},
-  {"query": "Документы водителей", "expected": ["документы", "водителей"]},
-  {"query": "Налоговая Дзержинка", "expected": ["налоговая", "дзержинка"]},
-  {"query": "Тендер 2022", "expected": ["тендер", "2022"]}
+  {
+    "query": "карточка предприятия тск",
+    "expected": [
+      "карточка",
+      "тск"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "карточка предприятия ООО Спецмаш",
+    "expected": [
+      "карточка",
+      "спецмаш"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "карта предприятия ИП Галиулин",
+    "expected": [
+      "галиулин",
+      "карта"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "карточка предприятия ООО ТСК",
+    "expected": [
+      "тск",
+      "карточка"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "паспорт PC300",
+    "expected": [
+      "pc300",
+      "паспорт"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "сколько весит PC300",
+    "expected": [
+      "pc300"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "Экскаватор 6357 ПСМ",
+    "expected": [
+      "6357",
+      "псм"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "touareg O50 vin птс стс",
+    "expected": [
+      "touareg",
+      "vin"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "vin lovol",
+    "expected": [
+      "lovol",
+      "vin"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "счет на оплату",
+    "expected": [
+      "счет",
+      "оплата"
+    ],
+    "category": "document_type"
+  },
+  {
+    "query": "счета и платежи",
+    "expected": [
+      "счет",
+      "платеж"
+    ],
+    "category": "document_type"
+  },
+  {
+    "query": "договор поставки",
+    "expected": [
+      "договор",
+      "поставка"
+    ],
+    "category": "document_type"
+  },
+  {
+    "query": "договор услуг",
+    "expected": [
+      "договор",
+      "услуг"
+    ],
+    "category": "document_type"
+  },
+  {
+    "query": "акт сверки",
+    "expected": [
+      "акт",
+      "сверки"
+    ],
+    "category": "document_type"
+  },
+  {
+    "query": "реквизиты обслуживания технических услуг",
+    "expected": [
+      "реквизит",
+      "технических"
+    ],
+    "category": "document_type"
+  },
+  {
+    "query": "паспорт цыбусов",
+    "expected": [
+      "цыбусов",
+      "паспорт"
+    ],
+    "category": "ocr_or_scan"
+  },
+  {
+    "query": "водительские права Цыбусов",
+    "expected": [
+      "цыбусов",
+      "права"
+    ],
+    "category": "ocr_or_scan"
+  },
+  {
+    "query": "УТМ Колозин",
+    "expected": [
+      "колозин",
+      "утм"
+    ],
+    "category": "ocr_or_scan"
+  },
+  {
+    "query": "Спецмайнинг Устав",
+    "expected": [
+      "спецмайнинг",
+      "устав"
+    ],
+    "category": "ocr_or_scan"
+  },
+  {
+    "query": "Требования 2024 СТС",
+    "expected": [
+      "2024",
+      "стс"
+    ],
+    "category": "semantic_business"
+  },
+  {
+    "query": "Карбон реализации 2024",
+    "expected": [
+      "карбон",
+      "2024"
+    ],
+    "category": "semantic_business"
+  },
+  {
+    "query": "Энергия НК реализации",
+    "expected": [
+      "энергия",
+      "реализации"
+    ],
+    "category": "semantic_business"
+  },
+  {
+    "query": "документы водителей сканы",
+    "expected": [
+      "водителей",
+      "сканы"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "Магазин карточки предприятий",
+    "expected": [
+      "магазин",
+      "карточки"
+    ],
+    "category": "general"
+  },
+  {
+    "query": "Рабочий стол карточки предприятий",
+    "expected": [
+      "рабочий",
+      "карточки"
+    ],
+    "category": "general"
+  },
+  {
+    "query": "1 Фактуры ТСК",
+    "expected": [
+      "фактуры",
+      "тск"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "Выписка из банка НСК",
+    "expected": [
+      "выписка",
+      "нск"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "Бланки путевок",
+    "expected": [
+      "бланки",
+      "путевок"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "Грузовые автомобили",
+    "expected": [
+      "грузовые",
+      "автомобили"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "Документы водителей",
+    "expected": [
+      "документы",
+      "водителей"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "Налоговая Дзержинка",
+    "expected": [
+      "налоговая",
+      "дзержинка"
+    ],
+    "category": "folder_or_name"
+  },
+  {
+    "query": "Тендер 2022",
+    "expected": [
+      "тендер",
+      "2022"
+    ],
+    "category": "folder_or_name"
+  }
 ]
