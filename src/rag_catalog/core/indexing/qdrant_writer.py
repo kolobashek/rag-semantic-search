@@ -66,6 +66,7 @@ def delete_file_vectors(
     filepath: Path,
     timeout_sec: int,
     payload_match: Mapping[str, Any] | None = None,
+    retries: int = 2,
 ) -> None:
     """Delete vectors by explicit payload identity or by `full_path` fallback."""
     must = []
@@ -76,12 +77,31 @@ def delete_file_vectors(
     if not must:
         must.append(FieldCondition(key="full_path", match=MatchValue(value=str(filepath))))
 
-    client.delete(
-        collection_name=collection_name,
-        wait=False,
-        timeout=timeout_sec,
-        points_selector=FilterSelector(filter=Filter(must=must)),
-    )
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(retries) + 1)):
+        try:
+            client.delete(
+                collection_name=collection_name,
+                wait=False,
+                timeout=timeout_sec,
+                points_selector=FilterSelector(filter=Filter(must=must)),
+            )
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt >= int(retries):
+                break
+            delay = min(5.0, 0.75 * (attempt + 1))
+            logger.warning(
+                "Qdrant delete timeout/error, retry %d/%d in %.1fs: %s",
+                attempt + 1,
+                int(retries),
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    if last_error is not None:
+        raise last_error
 
 
 def upsert_points(

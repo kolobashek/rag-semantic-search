@@ -15,6 +15,7 @@ class _FakeClient:
         self.created: list[tuple[str, object]] = []
         self.deleted_points: list[dict] = []
         self.upserted: list[tuple[str, int]] = []
+        self.delete_failures = 0
 
     def get_collections(self):
         return SimpleNamespace(collections=[SimpleNamespace(name=name) for name in self.collections])
@@ -29,6 +30,9 @@ class _FakeClient:
         self.collections.append(collection_name)
 
     def delete(self, **kwargs) -> None:
+        if self.delete_failures > 0:
+            self.delete_failures -= 1
+            raise TimeoutError("timed out")
         self.deleted_points.append(kwargs)
 
     def upsert(self, collection_name: str, points, **kwargs) -> None:
@@ -70,6 +74,24 @@ def test_delete_file_vectors_uses_payload_identity_when_present() -> None:
     assert call["timeout"] == 5
     conditions = call["points_selector"].filter.must
     assert [condition.key for condition in conditions] == ["cloud_file_id"]
+
+
+def test_delete_file_vectors_retries_transient_timeout(monkeypatch) -> None:
+    client = _FakeClient(["catalog"])
+    client.delete_failures = 1
+    delays: list[float] = []
+    monkeypatch.setattr("rag_catalog.core.indexing.qdrant_writer.time.sleep", lambda delay: delays.append(delay))
+
+    delete_file_vectors(
+        client,
+        collection_name="catalog",
+        filepath=Path("doc.pdf"),
+        timeout_sec=5,
+        retries=2,
+    )
+
+    assert len(client.deleted_points) == 1
+    assert delays == [0.75]
 
 
 def test_upsert_points_returns_written_count() -> None:

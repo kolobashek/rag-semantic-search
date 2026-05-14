@@ -80,11 +80,12 @@ Owner: Codex.
 - DONE 2026-05-14: failed/cancelled stage summary теперь сохраняет `run_id/run_note`, а pipeline UI показывает короткую причину последнего сбоя прямо в строке этапа.
 - DONE 2026-05-14: failed/cancelled stage action визуально отделён как retry (`replay`), running stage оставляет только stop; повторный запуск продолжает по state DB.
 - DONE 2026-05-14: scheduler пишет системные `app_events` (`due`, `launched`, `skipped_covered`, `launch_blocked`), чтобы ночные пропуски и блокировки были диагностируемы без ручного чтения stdout.
+- DONE 2026-05-14: Qdrant vector delete получил retry/backoff, чтобы transient timeout не оставлял старые точки и не создавал дубли при переиндексации.
 - Проверить фактическую ночную индексацию на telemetry после следующего ночного окна: lock, active process, last run reason.
 - DONE 2026-05-14: для активного этапа оставлено одно действие stop; следующий start/retry продолжает по state DB.
 - Добавить retry failed files / failed phase UX: список ошибок, файл, exception, кнопка retry scope.
 - OCR вынести в явную очередь или job list: pending/running/failed/done по файлам.
-- Проверить Qdrant timeout behavior на small/large chunks; не скрывать stage failure без ERROR логов.
+- DONE 2026-05-14: Qdrant timeout behavior для delete покрыт тестом; upsert retry уже был покрыт `test_qdrant_writer.py`.
 
 Done criteria:
 
