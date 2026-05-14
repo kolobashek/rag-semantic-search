@@ -17,10 +17,16 @@ from urllib.parse import urlparse
 import psutil
 
 from rag_catalog.core.log_history import last_error_from_history, open_run_log
-from rag_catalog.core.rag_core import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "logs" / "runtime"
+
+
+def load_config() -> Dict[str, Any]:
+    """Load config lazily so `rag-launcher --help` works in minimal CI envs."""
+    from rag_catalog.core.rag_core import load_config as _load_config
+
+    return _load_config()
 
 
 def _runtime_dir() -> Path:
