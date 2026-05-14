@@ -8,7 +8,24 @@ import pytest
 from qdrant_client.models import Filter
 
 from rag_catalog.core.index_state_db import IndexStateDB
+from rag_catalog.core.rag_core import apply_retrieval_preset
 from rag_core import MAX_QUERY_LEN, RAGSearcher
+
+
+def test_apply_retrieval_release_preset_preserves_explicit_overrides() -> None:
+    cfg = apply_retrieval_preset(
+        {
+            "retrieval_preset": "release_v2",
+            "retrieval_final_top_k": 25,
+            "retrieval_reranker_enabled": True,
+        },
+        {"retrieval_preset", "retrieval_final_top_k", "retrieval_reranker_enabled"},
+    )
+
+    assert cfg["retrieval_pipeline"] == "v2"
+    assert cfg["retrieval_bm25_enabled"] is True
+    assert cfg["retrieval_final_top_k"] == 25
+    assert cfg["retrieval_reranker_enabled"] is True
 
 
 class _FakeTelemetry:

@@ -21,7 +21,6 @@
   "telegram_bot_link": "",
   "users_db_path": "/data/state/rag_users.db",
   "telemetry_db_path": "/data/state/rag_telemetry.db",
-
   "cloud_drive_enabled": true,
   "cloud_drive_db_path": "/data/state/cloud_drive.db",
   "cloud_drive_storage": "s3",
@@ -29,5 +28,18 @@
   "cloud_drive_s3_endpoint": "http://minio:9000",
   "cloud_drive_s3_region": "us-east-1",
   "cloud_drive_s3_access_key": "minioadmin",
-  "cloud_drive_s3_secret_key": "minioadmin123"
+  "cloud_drive_s3_secret_key": "minioadmin123",
+  "embedding_collection_versioning": false,
+  "embedding_collection_suffix": "",
+  "retrieval_preset": "legacy",
+  "retrieval_pipeline": "legacy",
+  "retrieval_dense_top_k": 50,
+  "retrieval_lexical_top_k": 50,
+  "retrieval_bm25_enabled": true,
+  "retrieval_bm25_top_k": 50,
+  "retrieval_final_top_k": 10,
+  "retrieval_reranker_enabled": false,
+  "retrieval_reranker_model": "",
+  "retrieval_reranker_top_n": 30,
+  "retrieval_reranker_weight": 0.65
 }

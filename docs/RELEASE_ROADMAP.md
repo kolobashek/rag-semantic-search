@@ -39,13 +39,13 @@ Owner: Codex.
 
 - Выбрать production embedding path: текущий `all-MiniLM-L6-v2` оставить legacy, новую модель вести через versioned collection.
 - Добавить migration plan для `BAAI/bge-m3` или `intfloat/multilingual-e5-large` без потери старой коллекции.
-- Довести retrieval v2: dense + BM25/RRF + optional reranker как один конфигурируемый preset.
-- Не включать reranker по умолчанию без latency/eval замеров.
+- DONE 2026-05-14: добавлен конфигурируемый `retrieval_preset=release_v2` для retrieval v2 + BM25/RRF defaults.
+- DONE 2026-05-14: reranker оставлен opt-in и не включается release preset без latency/eval замеров.
 - Зафиксировать latency p50/p95 для query classes: exact filename, folder name, semantic question, OCR-heavy.
 
 Done criteria:
 
-- есть config preset для legacy и release retrieval;
+- DONE 2026-05-14: есть config preset для legacy и release retrieval; `config.example.json` и Docker example синхронизированы.
 - eval показывает baseline vs release preset;
 - UI показывает режим поиска и не скрывает fallback/ошибки Qdrant/LLM.
 

@@ -54,6 +54,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     "embedding_collection_versioning": False,
     "embedding_collection_suffix": "",
+    "retrieval_preset": "legacy",  # legacy|release_v2
     "vector_size": 384,
     "chunk_size": 500,
     "chunk_overlap": 100,
@@ -131,6 +132,36 @@ _UNIT_NUMBER_RE = re.compile(
 )
 
 
+
+RETRIEVAL_PRESETS: Dict[str, Dict[str, Any]] = {
+    "release_v2": {
+        "retrieval_pipeline": "v2",
+        "retrieval_bm25_enabled": True,
+        "retrieval_dense_top_k": 50,
+        "retrieval_bm25_top_k": 50,
+        "retrieval_lexical_top_k": 50,
+        "retrieval_final_top_k": 10,
+        # Reranker stays opt-in until latency and eval thresholds are agreed.
+        "retrieval_reranker_enabled": False,
+        "retrieval_reranker_top_n": 30,
+        "retrieval_reranker_weight": 0.65,
+    },
+}
+
+
+def apply_retrieval_preset(config: Dict[str, Any], explicit_keys: set[str] | None = None) -> Dict[str, Any]:
+    """Apply named retrieval presets while preserving explicitly provided keys."""
+    out = dict(config)
+    preset = str(out.get("retrieval_preset") or "legacy").strip().lower()
+    values = RETRIEVAL_PRESETS.get(preset)
+    if not values:
+        return out
+    explicit = explicit_keys or set()
+    for key, value in values.items():
+        if key not in explicit:
+            out[key] = value
+    return out
+
 # ─────────────────────────── config helpers ────────────────────────────
 
 def load_config() -> Dict[str, Any]:
@@ -143,10 +174,10 @@ def load_config() -> Dict[str, Any]:
         try:
             with open(config_file, "r", encoding="utf-8") as fh:
                 user_cfg = json.load(fh)
-            return {**DEFAULT_CONFIG, **user_cfg}
+            return apply_retrieval_preset({**DEFAULT_CONFIG, **user_cfg}, set(user_cfg.keys()))
         except Exception as exc:
             logger.warning("Не удалось загрузить config.json: %s. Используются значения по умолчанию.", exc)
-    return dict(DEFAULT_CONFIG)
+    return apply_retrieval_preset(dict(DEFAULT_CONFIG), set())
 
 
 def save_config(config: Dict[str, Any]) -> None:
@@ -171,21 +202,21 @@ class RAGSearcher:
     """
 
     def __init__(self, config: Dict[str, Any]) -> None:
-        self.config = config
-        self.collection_name = resolve_collection_name_from_config(config)
+        self.config = apply_retrieval_preset(dict(config), set(config.keys()))
+        self.collection_name = resolve_collection_name_from_config(self.config)
         self.connected = False
         self._embedder: Optional[Any] = None  # SentenceTransformer, загружается лениво
         self._reranker: Optional[Any] = None  # CrossEncoder, загружается лениво
         self._fs_cache: Dict[str, Any] = {"ts": 0.0, "items": []}
-        telemetry_path = (config.get("telemetry_db_path") or "").strip()
+        telemetry_path = (self.config.get("telemetry_db_path") or "").strip()
         if not telemetry_path:
-            telemetry_path = str(Path(config["qdrant_db_path"]) / "rag_telemetry.db")
+            telemetry_path = str(Path(self.config["qdrant_db_path"]) / "rag_telemetry.db")
         self.telemetry = TelemetryDB(telemetry_path)
 
         # Подключение: сервер (Docker) имеет приоритет над локальным SQLite
-        qdrant_url = config.get("qdrant_url", "")
-        qdrant_path = Path(config["qdrant_db_path"])
-        qdrant_timeout = int(config.get("qdrant_timeout_sec", 60) or 60)
+        qdrant_url = self.config.get("qdrant_url", "")
+        qdrant_path = Path(self.config["qdrant_db_path"])
+        qdrant_timeout = int(self.config.get("qdrant_timeout_sec", 60) or 60)
         try:
             if qdrant_url:
                 self.qdrant = QdrantClient(url=qdrant_url, timeout=qdrant_timeout)

@@ -234,6 +234,8 @@ GET  /api/cloud-drive/storage-health
 - RAG answer mode with citations and weak-source fallback;
 - Telegram assistant mode.
 
+Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted. For embedding migration, enable `embedding_collection_versioning=true` and use a versioned collection before switching users.
+
 CLI:
 
 ```powershell

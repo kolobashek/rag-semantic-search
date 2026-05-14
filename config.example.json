@@ -36,5 +36,18 @@
   "rank_feedback_cap": 0.18,
   "rank_recency_enabled": true,
   "rank_recency_half_life_days": 180.0,
-  "rank_recency_max_boost": 0.03
+  "rank_recency_max_boost": 0.03,
+  "embedding_collection_versioning": false,
+  "embedding_collection_suffix": "",
+  "retrieval_preset": "legacy",
+  "retrieval_pipeline": "legacy",
+  "retrieval_dense_top_k": 50,
+  "retrieval_lexical_top_k": 50,
+  "retrieval_bm25_enabled": true,
+  "retrieval_bm25_top_k": 50,
+  "retrieval_final_top_k": 10,
+  "retrieval_reranker_enabled": false,
+  "retrieval_reranker_model": "",
+  "retrieval_reranker_top_n": 30,
+  "retrieval_reranker_weight": 0.65
 }
