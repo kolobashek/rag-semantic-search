@@ -220,11 +220,9 @@ class IndexStageRunner:
             ext = filepath.suffix.lower()
             size_mb = round(filepath.stat().st_size / 1_048_576, 1)
 
-            # Таймаут на извлечение: если воркер завис на сетевом I/O (SMB stall) —
-            # пропускаем файл через 5 минут и продолжаем индексирование.
-            # Используем daemon-поток: он умрёт сам когда процесс завершится,
-            # даже если заблокирован в ядре на SMB read().
-            FILE_TIMEOUT = 45  # секунд (быстро бросаем зависшие SMB-файлы)
+            # Таймаут на извлечение. Для large-этапа PDFs включает OCR (tesseract),
+            # который может занимать несколько минут на многостраничных документах.
+            FILE_TIMEOUT = 600 if stage == "large" else 45  # секунд
 
             t_start = time.monotonic()
             full_text = ""
@@ -429,13 +427,14 @@ class IndexStageRunner:
                     pending_texts.append(chunk)
                     pending_payloads.append(cpayload)
                 file_stage = "metadata" if stage == "metadata" else (
-                    "content" if result.get("has_content") else "metadata"
+                    "content" if result.get("has_content") else stage
                 )
                 if stage in ("small", "large") and not result.get("has_content"):
                     self._logger.warning(
-                        "Этап %s: файл %s без контента, сохраняю stage=metadata",
+                        "Этап %s: файл %s без контента, сохраняю stage=%s (повторного прохода не будет)",
                         stage,
                         result["filepath"].name,
+                        stage,
                     )
                 pending_states.append(
                     (
