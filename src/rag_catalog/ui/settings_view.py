@@ -1757,10 +1757,13 @@ def render_settings_screen(
 
             groups = telemetry.list_search_alias_groups() if hasattr(telemetry, "list_search_alias_groups") else []
             with ui.expansion("Добавить группу", icon="add", value=False).classes("w-full"):
-                new_key = ui.input("Ключ группы", placeholder="company_card").props("dense outlined").classes("w-full")
-                new_label = ui.input("Название", placeholder="Карточка предприятия").props("dense outlined").classes("w-full")
-                new_aliases = ui.textarea("Синонимы, по одному на строку").props("dense outlined autogrow").classes("w-full")
-                new_negative = ui.textarea("Исключения, по одному на строку").props("dense outlined autogrow").classes("w-full")
+                new_key = ui.input("Ключ группы (латиница, необязательно)", placeholder="company_card").props("dense outlined").classes("w-full")
+                new_label = ui.input("Основной термин", placeholder="Карточка предприятия").props("dense outlined").classes("w-full")
+                new_aliases = ui.textarea(
+                    "Синонимы — по одному на строку",
+                ).props("dense outlined autogrow rows=3 placeholder=реквизиты\nрасчётный счёт\nдетали компании").classes("w-full")
+                ui.label("Введите альтернативные формулировки — каждую с новой строки. Основной термин включается автоматически.").classes("rag-meta text-xs")
+                new_negative = ui.textarea("Исключения (необязательно)", ).props("dense outlined autogrow").classes("w-full")
 
                 def add_group() -> None:
                     label = str(new_label.value or "").strip()
@@ -1779,16 +1782,28 @@ def render_settings_screen(
 
             for group in groups:
                 group_key = str(group.get("key") or "")
-                alias_text = "\n".join(str(a.get("alias") or "") for a in group.get("aliases") or [])
+                _group_label = str(group.get("label") or "")
+                # Exclude the label itself from the aliases textarea — save_search_alias_group
+                # always prepends it automatically, so showing it here is confusing duplication.
+                _label_norm = _group_label.strip().lower().replace("ё", "е")
+                alias_text = "\n".join(
+                    str(a.get("alias") or "")
+                    for a in group.get("aliases") or []
+                    if str(a.get("alias") or "").strip().lower().replace("ё", "е") != _label_norm
+                )
                 negative_text = "\n".join(str(x) for x in group.get("negative_aliases") or [])
                 with ui.expansion(str(group.get("label") or group_key), icon="travel_explore", value=False).classes("w-full"):
                     initial_group = {
-                        "label": str(group.get("label") or ""),
+                        "label": _group_label,
                         "aliases": alias_text,
                         "negative": negative_text,
                     }
-                    label_input = ui.input("Название", value=str(group.get("label") or "")).props("dense outlined").classes("w-full")
-                    aliases_input = ui.textarea("Синонимы", value=alias_text).props("dense outlined autogrow").classes("w-full")
+                    label_input = ui.input("Название (основной термин)", value=_group_label).props("dense outlined").classes("w-full")
+                    aliases_input = ui.textarea(
+                        "Синонимы — по одному на строку",
+                        value=alias_text,
+                    ).props("dense outlined autogrow rows=2").classes("w-full")
+                    ui.label("Основной термин включается автоматически; добавьте сюда альтернативные формулировки.").classes("rag-meta text-xs")
                     negative_input = ui.textarea("Исключения", value=negative_text).props("dense outlined autogrow").classes("w-full")
                     ui.label(f"Ключ: {group_key} · обновлено: {group.get('updated_at') or '-'}").classes("rag-meta")
 
@@ -1806,12 +1821,6 @@ def render_settings_screen(
                             aliases=aliases,
                             negative_aliases=negatives,
                         )
-                        initial_group.update({
-                            "label": str(label_ref.value or key),
-                            "aliases": str(aliases_ref.value or ""),
-                            "negative": str(negative_ref.value or ""),
-                        })
-                        group_actions.set_visibility(False)
                         _log_app_event(state, "settings", "search_alias_save", details={"key": key})
                         ui.notify("Синонимы сохранены.", type="positive")
                         render_fn()
@@ -1825,25 +1834,41 @@ def render_settings_screen(
                     group_actions = ui.row().classes("rag-dirty-actions")
                     group_actions.set_visibility(False)
 
-                    def current_group_values() -> Dict[str, Any]:
+                    # Capture loop vars via default args to avoid closure-over-last-iteration bug
+                    def current_group_values(
+                        _li: Any = label_input,
+                        _ai: Any = aliases_input,
+                        _ni: Any = negative_input,
+                        _gk: str = group_key,
+                    ) -> Dict[str, Any]:
                         return {
-                            "label": str(label_input.value or group_key),
-                            "aliases": str(aliases_input.value or ""),
-                            "negative": str(negative_input.value or ""),
+                            "label": str(_li.value or _gk),
+                            "aliases": str(_ai.value or ""),
+                            "negative": str(_ni.value or ""),
                         }
 
-                    def refresh_group_dirty() -> None:
-                        group_actions.set_visibility(current_group_values() != initial_group)
+                    def refresh_group_dirty(
+                        _ig: Dict[str, Any] = initial_group,
+                        _ga: Any = group_actions,
+                        _cgv: Any = current_group_values,
+                    ) -> None:
+                        _ga.set_visibility(_cgv() != _ig)
 
-                    def reset_group_fields() -> None:
-                        label_input.set_value(initial_group["label"])
-                        aliases_input.set_value(initial_group["aliases"])
-                        negative_input.set_value(initial_group["negative"])
-                        group_actions.set_visibility(False)
+                    def reset_group_fields(
+                        _li: Any = label_input,
+                        _ai: Any = aliases_input,
+                        _ni: Any = negative_input,
+                        _ig: Dict[str, Any] = initial_group,
+                        _ga: Any = group_actions,
+                    ) -> None:
+                        _li.set_value(_ig["label"])
+                        _ai.set_value(_ig["aliases"])
+                        _ni.set_value(_ig["negative"])
+                        _ga.set_visibility(False)
 
-                    label_input.on_value_change(lambda _: refresh_group_dirty())
-                    aliases_input.on_value_change(lambda _: refresh_group_dirty())
-                    negative_input.on_value_change(lambda _: refresh_group_dirty())
+                    label_input.on_value_change(lambda _, _rd=refresh_group_dirty: _rd())
+                    aliases_input.on_value_change(lambda _, _rd=refresh_group_dirty: _rd())
+                    negative_input.on_value_change(lambda _, _rd=refresh_group_dirty: _rd())
 
                     with ui.row().classes("gap-2"):
                         ui.button("Удалить", icon="delete", on_click=delete_group).props("flat dense")
