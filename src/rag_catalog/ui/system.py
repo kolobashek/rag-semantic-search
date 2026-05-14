@@ -445,6 +445,29 @@ def _schedules_due(schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return due
 
 
+def _schedule_stage_priority(stage: str) -> int:
+    """Lower priority value means this stage should claim a shared schedule slot first."""
+    order = {
+        "all": 0,
+        "large": 10,
+        "small": 20,
+        "content": 30,
+        "metadata": 40,
+        "ocr": 50,
+    }
+    return order.get(str(stage or "all").lower(), 90)
+
+
+def _schedule_stage_covers(launched_stage: str, candidate_stage: str) -> bool:
+    launched = str(launched_stage or "").lower()
+    candidate = str(candidate_stage or "").lower()
+    if not launched or not candidate:
+        return False
+    if launched == candidate:
+        return True
+    return launched == "all" and candidate != "ocr"
+
+
 def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
     # Reload config each tick so catalog_path and other settings are always current
     from rag_catalog.core.rag_core import load_config as _load_cfg
@@ -460,12 +483,28 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
     due = _schedules_due(schedules)
     if not due:
         return
+    due = sorted(
+        due,
+        key=lambda sched: (
+            _schedule_stage_priority(str(sched.get("stage") or "all")),
+            str(sched.get("created_at") or ""),
+            str(sched.get("id") or ""),
+        ),
+    )
     cfg_settings = tdb.get_index_settings() if hasattr(tdb, "get_index_settings") else {}
     workers = int(cfg_settings.get("workers") or live_cfg.get("index_read_workers") or 4)
+    launched_index_stage = ""
     for sched in due:
         stage = str(sched.get("stage") or "all")
+        sched_id = str(sched["id"])
+        if stage != "ocr" and launched_index_stage:
+            if _schedule_stage_covers(launched_index_stage, stage):
+                tdb.touch_index_schedule(id=sched_id)
+            continue
         try:
             if stage == "ocr":
+                if launched_index_stage:
+                    continue
                 _launch_ocr(live_cfg, workers=workers)
             else:
                 _launch_indexer(
@@ -477,7 +516,9 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
                 )
         except RuntimeError:
             continue
-        tdb.touch_index_schedule(id=str(sched["id"]))
+        tdb.touch_index_schedule(id=sched_id)
+        if stage != "ocr":
+            launched_index_stage = stage
 
 
 def _start_global_scheduler(cfg: Dict[str, Any]) -> None:
