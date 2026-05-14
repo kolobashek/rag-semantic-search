@@ -60,6 +60,12 @@ qdrant_db/
 data/*.pre_o_sync.bak
 data/*.legacy.json
 
+# ── Cloud Drive runtime data ──────────────────────────────────────────
+data/cloud_storage/
+data/cloud_drive.db*
+cloud_storage/
+cloud_drive.db*
+
 # ── Временные файлы Office ────────────────────────────────────────────
 ~$*
 
