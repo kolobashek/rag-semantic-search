@@ -357,9 +357,9 @@ Cleanup локальных артефактов:
 
 ## Статус Roadmap
 
-Предыдущий Cloud Drive roadmap закрыт. История сохранена в Git. Новый roadmap стоит заводить только под следующий крупный этап, чтобы документация не дублировала выполненную работу.
+Предыдущий Cloud Drive roadmap закрыт. История сохранена в Git. Текущий план доведения до релиза: [docs/RELEASE_ROADMAP.md](docs/RELEASE_ROADMAP.md).
 
-Кандидаты для следующего этапа:
+Кандидаты после первого релиза:
 
 - production-hardening sync client;
 - deeper structural chunking for DOCX/PDF/XLSX;
