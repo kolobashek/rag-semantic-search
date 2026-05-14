@@ -1116,7 +1116,8 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         db_path,
         """
         WITH finished AS (
-            SELECT stage,
+            SELECT run_id,
+                   stage,
                    status,
                    total_files,
                    processed_files,
@@ -1149,6 +1150,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
             GROUP BY stage
         )
         SELECT latest.stage,
+               latest.run_id,
                latest.status,
                latest.total_files,
                latest.processed_files,
@@ -1159,12 +1161,15 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
                latest.points_added,
                latest.ts_started,
                latest.ts_finished,
+               ir.status AS run_status,
+               ir.note AS run_note,
                latest.duration_sec AS last_duration_sec,
                avg_by_stage.runs_count,
                CAST(avg_by_stage.avg_duration_sec AS INTEGER) AS avg_duration_sec,
                CAST(avg_by_stage.avg_processed_files AS INTEGER) AS avg_processed_files
         FROM latest
         JOIN avg_by_stage ON avg_by_stage.stage=latest.stage
+        LEFT JOIN index_runs AS ir ON ir.run_id=latest.run_id
         ORDER BY CASE latest.stage WHEN 'metadata' THEN 1 WHEN 'small' THEN 2 WHEN 'large' THEN 3 WHEN 'content' THEN 4 ELSE 9 END
         """,
     )

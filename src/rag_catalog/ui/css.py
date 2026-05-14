@@ -577,6 +577,13 @@ def _install_css() -> None:
           gap: 8px;
         }
         .rag-progressbar { height: 6px; }
+        .rag-stage-issue {
+          color: #dc2626;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          max-width: 100%;
+        }
         .rag-pipeline-row > * {
           min-width: 0;
         }

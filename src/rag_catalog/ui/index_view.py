@@ -329,6 +329,11 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 "cancelled": "Отменено",
                 "idle": "Не запускалось",
             }.get(status_str, status_str)
+            issue_text = ""
+            if status_str in {"failed", "cancelled"}:
+                issue_text = str(row.get("run_note") or "").strip()
+                if issue_text in {"ok", "stage=metadata", "stage=small", "stage=large", "stage=all"}:
+                    issue_text = ""
             shared_row = dict(row)
             shared_row["stage"] = label
             if is_ocr:
@@ -346,6 +351,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 "stats_text": stats_text,
                 "status_icon_name": status_icon_name,
                 "status_title": status_title,
+                "issue_text": issue_text,
                 "shared_row": shared_row,
             }
 
@@ -376,7 +382,10 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                         pct_e = ui.label(d["pct_label"]).classes("rag-meta")
                         dur_e = ui.label(_format_duration_seconds(d["duration_value"])).classes("rag-meta")
                     prog_e = ui.linear_progress(value=d["pct"], show_value=False).props("color=indigo-5" if d["is_running"] else "").classes("w-full rag-progressbar")
-                stats_e = ui.label(d["stats_text"]).classes("rag-meta")
+                with ui.column().classes("gap-1 min-w-0"):
+                    stats_e = ui.label(d["stats_text"]).classes("rag-meta")
+                    issue_e = ui.label(d["issue_text"]).classes("rag-meta rag-stage-issue").props("title='Причина последнего сбоя'")
+                    issue_e.set_visibility(bool(d["issue_text"]))
                 with ui.row().classes("rag-pipeline-actions"):
                     if is_ocr:
                         play_e = ui.button(icon="play_arrow", on_click=run_ocr_now).props("flat dense round").tooltip("Запустить")
@@ -395,6 +404,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 "dur_e": dur_e,
                 "prog_e": prog_e,
                 "stats_e": stats_e,
+                "issue_e": issue_e,
                 "play_e": play_e,
                 "stop_e": stop_e,
             }
@@ -415,6 +425,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             refs["dur_e"].set_text(_format_duration_seconds(d["duration_value"]))
             refs["prog_e"].set_value(d["pct"])
             refs["stats_e"].set_text(d["stats_text"])
+            refs["issue_e"].set_text(d["issue_text"])
+            refs["issue_e"].set_visibility(bool(d["issue_text"]))
             refs["play_e"].set_visibility(not d["is_running"])
             refs["stop_e"].set_visibility(d["is_running"])
 

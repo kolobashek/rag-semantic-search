@@ -324,6 +324,42 @@ def test_index_telemetry_active_stages_only_include_running_stage(tmp_path) -> N
     assert {row["stage"] for row in telemetry["latest_stages"]} == {"metadata", "small"}
 
 
+def test_index_telemetry_stage_summary_keeps_failed_run_note(tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    run_id = db.start_index_run(catalog_path="O:\\Обмен", collection_name="catalog", recreate=False)
+    db.start_stage(run_id=run_id, stage="small", total_files=5)
+    db.finish_stage(
+        run_id=run_id,
+        stage="small",
+        status="failed",
+        processed_files=2,
+        added_files=0,
+        updated_files=0,
+        skipped_files=0,
+        error_files=1,
+        points_added=0,
+    )
+    db.finish_index_run(
+        run_id=run_id,
+        status="failed",
+        total_files=5,
+        added_files=0,
+        updated_files=0,
+        skipped_files=0,
+        deleted_files=0,
+        error_files=1,
+        points_added=0,
+        note="qdrant timeout on file.docx",
+    )
+
+    telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
+    small = next(row for row in telemetry["stage_summary"] if row["stage"] == "small")
+
+    assert small["run_id"] == run_id
+    assert small["run_note"] == "qdrant timeout on file.docx"
+
+
 def test_resolve_index_recovery_stage_prefers_running_stage_over_note(tmp_path) -> None:
     db = TelemetryDB(str(tmp_path / "telemetry.db"))
     run_id = db.start_index_run(
