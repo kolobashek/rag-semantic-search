@@ -1226,11 +1226,48 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 # ─────────────────────────── searcher / admin helpers ───────────────────────
 
+_SEARCHER_CACHE: Dict[tuple[str, ...], RAGSearcher] = {}
+
+
+def _searcher_cache_key(cfg: Dict[str, Any]) -> tuple[str, ...]:
+    return (
+        str(cfg.get("qdrant_url") or ""),
+        str(cfg.get("qdrant_db_path") or ""),
+        str(cfg.get("collection_name") or ""),
+        str(cfg.get("embedding_model") or ""),
+        str(cfg.get("embedding_collection_versioning") or ""),
+        str(cfg.get("embedding_collection_suffix") or ""),
+        str(cfg.get("retrieval_preset") or ""),
+        str(cfg.get("retrieval_pipeline") or ""),
+    )
+
+
+def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
+    """Preload shared searcher/embedder after startup so first user search is not cold."""
+    try:
+        key = _searcher_cache_key(cfg)
+        searcher = _SEARCHER_CACHE.get(key)
+        if searcher is None:
+            searcher = RAGSearcher(cfg)
+            _SEARCHER_CACHE[key] = searcher
+        if searcher.connected:
+            searcher.embedder.encode(["warmup"])
+            searcher._refresh_fs_cache()  # noqa: SLF001 - warm shared name/path cache
+    except Exception:
+        # Warmup is an optimization; search path will report real errors to the user.
+        pass
+
+
 def _ensure_searcher(state: PageState) -> Optional[RAGSearcher]:
     if state.searcher is not None:
         return state.searcher
     try:
-        state.searcher = RAGSearcher(state.cfg)
+        key = _searcher_cache_key(state.cfg)
+        cached = _SEARCHER_CACHE.get(key)
+        if cached is None or not cached.connected:
+            cached = RAGSearcher(state.cfg)
+            _SEARCHER_CACHE[key] = cached
+        state.searcher = cached
     except Exception as exc:
         state.searcher_error = str(exc)
         return None

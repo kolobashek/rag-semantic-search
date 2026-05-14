@@ -67,6 +67,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "small_pdf_mb": 2.0,
     "qdrant_timeout_sec": 60,
     "qdrant_scroll_limit": 256,
+    "search_warmup_enabled": True,
     # OCR runtime: можно оставить пустым и использовать bundled tools/
     "ocr_tesseract_cmd": "",
     "ocr_poppler_bin": "",

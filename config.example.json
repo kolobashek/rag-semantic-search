@@ -15,6 +15,7 @@
   "index_default_stage": "all",
   "small_office_mb": 20.0,
   "small_pdf_mb": 2.0,
+  "search_warmup_enabled": true,
   "ocr_tesseract_cmd": "",
   "ocr_poppler_bin": "",
   "telegram_enabled": false,

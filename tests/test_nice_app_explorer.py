@@ -82,6 +82,33 @@ class _AuthDB:
         return self.show_system
 
 
+def test_ensure_searcher_reuses_shared_cache(monkeypatch) -> None:
+    created: list[dict] = []
+
+    class FakeSearcher:
+        def __init__(self, cfg: dict) -> None:
+            created.append(dict(cfg))
+            self.connected = True
+
+    monkeypatch.setattr(ui_helpers, "RAGSearcher", FakeSearcher)
+    ui_helpers._SEARCHER_CACHE.clear()
+
+    cfg = {
+        "qdrant_url": "http://localhost:6333",
+        "qdrant_db_path": "state",
+        "collection_name": "catalog",
+        "embedding_model": "model",
+    }
+    first = PageState(cfg=dict(cfg))
+    second = PageState(cfg=dict(cfg))
+
+    first_searcher = ui_helpers._ensure_searcher(first)
+    second_searcher = ui_helpers._ensure_searcher(second)
+
+    assert first_searcher is second_searcher
+    assert len(created) == 1
+
+
 class _SearchBackend:
     def __init__(self, search_result: object, lexical_result: list[dict[str, object]]) -> None:
         self.search_result = search_result

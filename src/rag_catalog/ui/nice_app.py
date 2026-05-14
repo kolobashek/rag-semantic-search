@@ -7,6 +7,7 @@ import html
 import json
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -60,6 +61,7 @@ from .helpers import (
     _select_in_os_explorer,
     _telegram_deeplink,
     _viewer_file_url,
+    _warm_searcher_cache,
 )
 from .state import (
     PageState,
@@ -2050,6 +2052,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     _start_cloud_drive_job_worker(cfg)
     _start_recovery_watchdog(cfg)
     _start_global_scheduler(cfg)
+    if bool(cfg.get("search_warmup_enabled", True)):
+        threading.Thread(target=_warm_searcher_cache, args=(cfg,), name="search-warmup", daemon=True).start()
     ui.run(
         title="RAG Каталог",
         host=args.host,

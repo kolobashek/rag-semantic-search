@@ -43,6 +43,7 @@ Owner: Codex.
 - DONE 2026-05-14: reranker оставлен opt-in и не включается release preset без latency/eval замеров.
 - DONE 2026-05-14: baseline eval снят на 32 запросах (`runtime/eval/baseline.*` локально): Recall@10=0.875, zero-result=0.000, steady-state p50=472 ms, p95=919 ms; cold-start первого запроса ~20 сек из-за загрузки модели.
 - DONE 2026-05-14: release gate rerun после index/cloud fixes: `pytest -q` = 375 passed; `search_eval` latest = Recall@10 0.875, zero-result 0.000, p50 790 ms, p95 1684 ms. Один cold/slow folder query 27.8s остаётся performance-риск для P1.
+- DONE 2026-05-14: NiceGUI теперь переиспользует общий `RAGSearcher` между сессиями и запускает фоновый warmup embedder + name/path cache при старте (`search_warmup_enabled=true`).
 
 Done criteria:
 
