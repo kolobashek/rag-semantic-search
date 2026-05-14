@@ -46,7 +46,7 @@ Owner: Codex.
 Done criteria:
 
 - DONE 2026-05-14: есть config preset для legacy и release retrieval; `config.example.json` и Docker example синхронизированы.
-- DONE 2026-05-14: baseline vs `release_v2` сравнен локально. Baseline: Recall@10=0.875, p50=472 ms, p95=919 ms. Release_v2: Recall@10=0.875, p50=1365 ms, p95=13127 ms. Решение: не включать `release_v2` по умолчанию до оптимизации latency.
+- DONE 2026-05-14: baseline vs `release_v2` сравнен локально. Baseline: Recall@10=0.875, p50=472 ms, p95=919 ms. Release_v2 before BM25 cache: Recall@10=0.875, p50=1365 ms, p95=13127 ms. After BM25 token cache: Recall@10=0.875, p50=501 ms, p95=942 ms. Решение: `release_v2` допустим как opt-in preset; default переключать только после согласования thresholds.
 - UI показывает режим поиска и не скрывает fallback/ошибки Qdrant/LLM.
 
 ### 3. Search Evaluation Gate

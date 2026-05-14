@@ -54,11 +54,21 @@ def bm25_rank_items(
     docs: List[tuple[Dict[str, Any], List[str]]] = []
     df: Counter[str] = Counter()
     for item in items:
-        filename = str(item.get("filename") or "")
-        path = str(item.get("path") or "")
-        # Filename gets repeated because users usually expect title matches to beat
-        # incidental parent path matches.
-        tokens = tokenize(f"{filename} {filename} {path}")
+        # Cache tokenization on the reused filesystem-cache dicts. BM25 still computes
+        # query-specific IDF each run, but avoids retokenizing tens of thousands of paths.
+        cached_tokens = item.get("_bm25_tokens")
+        if isinstance(cached_tokens, list):
+            tokens = [str(token) for token in cached_tokens]
+        else:
+            filename = str(item.get("filename") or "")
+            path = str(item.get("path") or "")
+            # Filename gets repeated because users usually expect title matches to beat
+            # incidental parent path matches.
+            tokens = tokenize(f"{filename} {filename} {path}")
+            try:
+                item["_bm25_tokens"] = tokens
+            except Exception:
+                pass
         if not tokens:
             continue
         docs.append((item, tokens))
