@@ -17,6 +17,35 @@ from rag_catalog.core.rag_core import RAGSearcher, load_config
 from rag_catalog.core.search_eval import evaluate_search, load_golden_queries
 
 
+def _parse_config_value(value: str) -> Any:
+    raw = str(value or "").strip()
+    lower = raw.lower()
+    if lower in {"true", "yes", "on"}:
+        return True
+    if lower in {"false", "no", "off"}:
+        return False
+    try:
+        if "." not in raw:
+            return int(raw)
+        return float(raw)
+    except ValueError:
+        return raw
+
+
+def _apply_config_overrides(config: Dict[str, Any], items: List[str]) -> Dict[str, Any]:
+    out = dict(config)
+    for item in items:
+        if "=" not in str(item):
+            raise ValueError(f"Invalid --config-set value: {item!r}. Expected key=value.")
+        key, value = str(item).split("=", 1)
+        clean_key = key.strip()
+        if not clean_key:
+            raise ValueError(f"Invalid --config-set value: {item!r}. Empty key.")
+        out[clean_key] = _parse_config_value(value)
+    return out
+
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate search relevance on a golden query set.")
     parser.add_argument("--golden", default="eval/search_golden.json", help="Path to golden JSON.")
@@ -24,9 +53,16 @@ def main() -> int:
     parser.add_argument("--output", default="", help="Optional JSON report path.")
     parser.add_argument("--markdown-output", default="", help="Optional Markdown summary path.")
     parser.add_argument("--fail-under-recall", type=float, default=0.0, help="Exit 1 if mean Recall@k is lower.")
+    parser.add_argument(
+        "--config-set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override config value for this eval run. Can be repeated.",
+    )
     args = parser.parse_args()
 
-    cfg = load_config()
+    cfg = _apply_config_overrides(load_config(), list(args.config_set or []))
     searcher = RAGSearcher(cfg)
     golden = load_golden_queries(args.golden)
 

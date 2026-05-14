@@ -46,7 +46,7 @@ Owner: Codex.
 Done criteria:
 
 - DONE 2026-05-14: есть config preset для legacy и release retrieval; `config.example.json` и Docker example синхронизированы.
-- baseline eval зафиксирован; release preset нужно сравнить отдельным прогоном перед включением по умолчанию;
+- DONE 2026-05-14: baseline vs `release_v2` сравнен локально. Baseline: Recall@10=0.875, p50=472 ms, p95=919 ms. Release_v2: Recall@10=0.875, p50=1365 ms, p95=13127 ms. Решение: не включать `release_v2` по умолчанию до оптимизации latency.
 - UI показывает режим поиска и не скрывает fallback/ошибки Qdrant/LLM.
 
 ### 3. Search Evaluation Gate
@@ -62,7 +62,7 @@ Done criteria:
 
 - DONE 2026-05-14: eval можно запустить одной командой локально: `python scripts/search_eval.py --golden eval/search_golden.json --limit 10`.
 - DONE 2026-05-14: результат сохраняется в JSON/Markdown artifact через `--output` и `--markdown-output`.
-- пороги качества ещё нужно согласовать и сделать CI gate required после стабилизации retrieval preset.
+- пороги качества ещё нужно согласовать; `release_v2` latency regression должен быть устранён до required CI gate.
 
 ### 4. Indexing And OCR Reliability
 
