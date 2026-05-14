@@ -252,6 +252,70 @@ def test_service_auto_queues_and_runs_reindex_jobs(tmp_path: Path) -> None:
     assert service.run_reindex_job(cleanup_job.id).status == 'completed'
 
 
+def test_service_move_queues_cleanup_before_reindexing_new_path(tmp_path: Path, monkeypatch) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    source = tmp_path / 'hello.txt'
+    source.write_text('hello', encoding='utf-8')
+
+    uploaded = service.upload_file(parent_path='Folder A', filename='hello.txt', source_path=str(source), mime_type='text/plain')
+    moved = service.move_node(source_path='Folder A/hello.txt', dest_parent_path='', new_name='renamed.txt')
+    pending = registry.list_pending_jobs(job_types=['reindex', 'cleanup'], limit=10)
+
+    assert [job.job_type for job in pending] == ['reindex', 'cleanup', 'reindex']
+    assert pending[1].progress['action'] == 'cleanup'
+    assert pending[1].progress['path'] == 'Folder A/hello.txt'
+    assert pending[2].progress['action'] == 'reindex'
+    assert pending[2].progress['path'] == 'renamed.txt'
+
+    reindexed_paths: list[str] = []
+    cleanup_matches: list[dict[str, object]] = []
+
+    def _fake_reindex(*, target_path, file_row, index_config):  # noqa: ANN001
+        reindexed_paths.append(file_row.path)
+        return True, 1
+
+    def _fake_cleanup(*, index_config, payload_match):  # noqa: ANN001
+        cleanup_matches.append(payload_match)
+        return 1
+
+    monkeypatch.setattr(service, '_run_indexer_for_file', _fake_reindex)
+    monkeypatch.setattr(service, '_delete_index_vectors', _fake_cleanup)
+    completed = service.run_pending_reindex_jobs(index_config={'qdrant_url': 'http://localhost:6333'}, limit=10)
+
+    assert [job.status for job in completed] == ['completed', 'completed', 'completed']
+    assert reindexed_paths == ['renamed.txt', 'renamed.txt']
+    assert cleanup_matches == [{'cloud_file_id': uploaded['id']}]
+    assert moved['path'] == 'renamed.txt'
+
+
+def test_service_delete_restore_folder_queue_cleanup_and_reindex_children(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    source = tmp_path / 'hello.txt'
+    source.write_text('hello', encoding='utf-8')
+    service.upload_file(parent_path='Folder A', filename='hello.txt', source_path=str(source), mime_type='text/plain')
+
+    service.delete_node('Folder A')
+    cleanup_jobs = [job for job in registry.list_jobs(limit=10) if job.job_type == 'cleanup']
+
+    assert cleanup_jobs
+    assert cleanup_jobs[0].progress['action'] == 'cleanup'
+    assert cleanup_jobs[0].progress['path'] == 'Folder A/hello.txt'
+    assert cleanup_jobs[0].progress['reason'] == 'delete_folder'
+
+    service.restore_node('Folder A')
+    reindex_jobs = [job for job in registry.list_jobs(limit=10) if job.job_type == 'reindex']
+
+    assert any(job.progress.get('reason') == 'restore_folder' and job.progress.get('path') == 'Folder A/hello.txt' for job in reindex_jobs)
+
+
 def test_service_lists_cloud_drive_changes_for_sync_clients(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     storage = LocalStorageAdapter(str(tmp_path / 'storage'))

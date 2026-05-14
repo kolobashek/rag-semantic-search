@@ -87,10 +87,10 @@ Owner: Codex + Claude.
 
 Codex:
 
-- Проверить reindex job handler для upload/move/rename/delete/restore.
+- DONE 2026-05-14: проверен и покрыт regression-тестами reindex/cleanup job lifecycle для upload/move/rename/delete/restore. Move/rename ставит cleanup старого пути и reindex нового, delete ставит cleanup, restore ставит reindex.
 - Проверить S3/MinIO: bucket init, healthcheck, presigned download, missing boto3 message, config validation.
 - Убедиться, что Cloud Drive local storage/data не попадает в Git.
-- Доработать cleanup job: удаление/restore синхронизируют Qdrant points.
+- DONE 2026-05-14: cleanup job удаляет Qdrant points по `cloud_file_id`/`cloud_path`; restore возвращает файл через reindex job. Остался release smoke на реальном Qdrant.
 
 Claude:
 
