@@ -31,8 +31,8 @@ class _FakeClient:
     def delete(self, **kwargs) -> None:
         self.deleted_points.append(kwargs)
 
-    def upsert(self, collection_name: str, points) -> None:
-        self.upserted.append((collection_name, len(points)))
+    def upsert(self, collection_name: str, points, **kwargs) -> None:
+        self.upserted.append((collection_name, len(points), kwargs))
 
 
 def test_ensure_collection_creates_missing_collection() -> None:
@@ -77,4 +77,12 @@ def test_upsert_points_returns_written_count() -> None:
     points = [PointStruct(id="p1", vector=[0.1, 0.2], payload={"x": 1})]
 
     assert upsert_points(client, collection_name="catalog", points=points) == 1
-    assert client.upserted == [("catalog", 1)]
+    assert client.upserted == [("catalog", 1, {"wait": False, "timeout": 60})]
+
+
+def test_upsert_points_passes_timeout_and_retries() -> None:
+    client = _FakeClient(["catalog"])
+    points = [PointStruct(id="p1", vector=[0.1, 0.2], payload={"x": 1})]
+
+    assert upsert_points(client, collection_name="catalog", points=points, timeout_sec=300, retries=1) == 1
+    assert client.upserted == [("catalog", 1, {"wait": False, "timeout": 300})]

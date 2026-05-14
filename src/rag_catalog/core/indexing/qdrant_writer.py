@@ -8,6 +8,7 @@ batching, embedding, and state updates remain owned by the caller.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -83,9 +84,41 @@ def delete_file_vectors(
     )
 
 
-def upsert_points(client: Any, *, collection_name: str, points: Sequence[PointStruct]) -> int:
+def upsert_points(
+    client: Any,
+    *,
+    collection_name: str,
+    points: Sequence[PointStruct],
+    timeout_sec: int = 60,
+    retries: int = 2,
+) -> int:
     """Upsert a non-empty point sequence and return the number of points written."""
     if not points:
         return 0
-    client.upsert(collection_name, points=list(points))
+    prepared = list(points)
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(retries) + 1)):
+        try:
+            try:
+                client.upsert(collection_name, points=prepared, wait=False, timeout=max(5, int(timeout_sec or 60)))
+            except TypeError as type_error:
+                if "unexpected keyword" not in str(type_error):
+                    raise
+                client.upsert(collection_name, points=prepared)
+            return len(prepared)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= int(retries):
+                break
+            delay = min(5.0, 0.75 * (attempt + 1))
+            logger.warning(
+                "Qdrant upsert timeout/error, retry %d/%d in %.1fs: %s",
+                attempt + 1,
+                int(retries),
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    if last_error is not None:
+        raise last_error
     return len(points)

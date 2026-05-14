@@ -69,10 +69,10 @@ def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
         parts: list[str] = []
         total_chars = 0
         done = False
-        for sheet_name in wb.sheetnames:
+        for ws in wb.worksheets:
             if done:
                 break
-            ws = wb[sheet_name]
+            sheet_name = ws.title
             parts.append(f"Лист: {sheet_name}")
             for row in ws.iter_rows(values_only=True):
                 row_text = " | ".join(str(c) if c is not None else "" for c in row)

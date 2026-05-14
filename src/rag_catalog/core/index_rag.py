@@ -775,7 +775,12 @@ class RAGIndexer:
 
     def _flush_buffer(self) -> None:
         if self._points_buffer:
-            upsert_points(self.qdrant, collection_name=self.collection_name, points=self._points_buffer)
+            upsert_points(
+                self.qdrant,
+                collection_name=self.collection_name,
+                points=self._points_buffer,
+                timeout_sec=self.qdrant_timeout_sec,
+            )
             logger.info(
                 "Загружен батч: %d точек (итого %d)", len(self._points_buffer), self.point_count
             )
@@ -1210,6 +1215,7 @@ def main() -> None:
         logger.warning("Индексация прервана пользователем.")
         raise
     except Exception as exc:
+        logger.exception("Индексация завершилась с ошибкой: %s", exc)
         indexer.telemetry.finish_index_run(
             run_id=run_id,
             status="failed",

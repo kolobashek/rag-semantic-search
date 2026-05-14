@@ -158,7 +158,12 @@ class IndexStageRunner:
                     PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=p)
                     for v, p in zip(vectors, chunk_payloads)
                 ]
-                written = upsert_points(self.qdrant, collection_name=self.collection_name, points=points)
+                written = upsert_points(
+                    self.qdrant,
+                    collection_name=self.collection_name,
+                    points=points,
+                    timeout_sec=int(getattr(self._indexer, "qdrant_timeout_sec", 60) or 60),
+                )
                 self.point_count += written
                 stage_stats["points_added"] += written
             self._logger.info(
