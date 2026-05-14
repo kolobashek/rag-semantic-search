@@ -80,7 +80,8 @@ def expand_query(
             {"model": model, "prompt": prompt, "stream": False, "options": {"temperature": 0.2, "num_predict": 120}},
             timeout=timeout,
         )
-        expanded = str(result.get("response") or "").strip().splitlines()[0].strip()
+        _lines = str(result.get("response") or "").strip().splitlines()
+        expanded = _lines[0].strip() if _lines else ""
         elapsed = int((time.perf_counter() - t0) * 1000)
         logger.debug("expand_query (%dms): '%s' → '%s'", elapsed, query, expanded)
         if expanded and expanded.lower() != query.lower():

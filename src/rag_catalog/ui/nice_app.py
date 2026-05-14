@@ -449,7 +449,6 @@ def _build_page(initial_screen: str = "search") -> None:
                     ans = await run.io_bound(
                         searcher_for_answer.answer_documents,
                         query,
-                        file_type=state.file_type,
                     )
                     if state.search_request_id != request_id:
                         return
@@ -1191,12 +1190,12 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.download(content_bytes, filename=f"search_{safe_q}.csv")
                 _log_app_event(state, "search", "export_csv", details={"query": state.searched_query, "count": len(state.results)})
             ui.button(icon="download", on_click=_export_results_csv, color=None).props("flat round dense").tooltip("Экспорт результатов в CSV")
-        if state.search_stats_hint:
+        if state.search_stats_hint and not state.search_lazy_loading:
             ui.label(state.search_stats_hint).classes("rag-meta")
         if state.search_lazy_loading:
             with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
                 ui.spinner(size="sm")
-                ui.label("Догружаю дополнительные совпадения…").classes("rag-meta")
+                ui.label("Ищу совпадения…").classes("rag-meta")
 
         # RAG Q&A карточка (основной ответ по всем результатам)
         if state.rag_answer_loading:
@@ -1257,7 +1256,7 @@ def _build_page(initial_screen: str = "search") -> None:
                         for _src in _sel_sources:
                             ui.label(_src).classes("rag-chip text-xs")
 
-        if not state.results:
+        if not state.results and not state.search_lazy_loading:
             with ui.column().classes("rag-card w-full p-6 gap-3 items-center"):
                 ui.icon("search_off", size="40px").classes("text-slate-300 dark:text-slate-600")
                 ui.label("Совпадений не найдено.").classes("text-lg font-semibold text-slate-500")
