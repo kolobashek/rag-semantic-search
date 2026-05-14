@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 import rag_catalog.ui.api as cloud_api
+import rag_catalog.ui.helpers as ui_helpers
 import rag_catalog.ui.state as ui_state
 import rag_catalog.ui.system as ui_system
 from rag_catalog.core.cloud_drive.service import CloudDriveService
@@ -253,6 +254,23 @@ def test_index_telemetry_reads_stage_and_ocr_progress(tmp_path) -> None:
     assert telemetry["active_runs"][0]["run_id"] == run_id
     assert telemetry["active_stages"][0]["processed_files"] == 4
     assert telemetry["active_ocr"]["processed_pdfs"] == 2
+
+
+def test_index_telemetry_uses_runtime_marker_before_run_row_exists(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    TelemetryDB(str(db_path))
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "index_active.json").write_text('{"pid": 4321, "stage": "small"}', encoding="utf-8")
+
+    monkeypatch.setattr(ui_helpers, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(ui_helpers, "_is_process_alive", lambda pid: int(pid) == 4321)
+
+    telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
+
+    assert telemetry["active_stages"][0]["stage"] == "small"
+    assert telemetry["active_stages"][0]["status"] == "running"
+    assert telemetry["active_stages"][0]["run_note"] == "runtime_marker"
 
 
 def test_resolve_index_recovery_stage_prefers_running_stage_over_note(tmp_path) -> None:

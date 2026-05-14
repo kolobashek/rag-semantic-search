@@ -987,6 +987,7 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
     import json as _json
 
     live_pid = 0
+    marker_stage = ""
     marker_path = PROJECT_ROOT / "runtime" / "index_active.json"
     if marker_path.exists():
         try:
@@ -994,6 +995,7 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
             pid = int(data.get("pid") or 0)
             if pid > 0 and _is_process_alive(pid):
                 live_pid = pid
+                marker_stage = str(data.get("stage") or "").strip().lower()
         except Exception:
             pass
 
@@ -1011,7 +1013,23 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
         (live_pid,),
     )
     if not rows:
-        return []
+        return [
+            {
+                "run_id": "",
+                "stage": marker_stage or "all",
+                "status": "running",
+                "run_status": "running",
+                "run_note": "runtime_marker",
+                "processed_files": 0,
+                "total_files": 0,
+                "added_files": 0,
+                "updated_files": 0,
+                "skipped_files": 0,
+                "error_files": 0,
+                "points_added": 0,
+                "duration_sec": 0,
+            }
+        ]
     run_id = str(rows[0].get("run_id") or "")
     if not run_id:
         return []
