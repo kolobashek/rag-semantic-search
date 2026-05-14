@@ -76,6 +76,7 @@ Owner: Codex.
 - DONE 2026-05-14: `active_stages` теперь включает только stage rows со статусом `running`; completed/failed этапы остаются в latest summary, но не показываются как активные задачи.
 - DONE 2026-05-14: XLSX extraction больше не падает на файлах без `xl/sharedStrings.xml`; добавлен ZIP/XML fallback и regression-тест на повреждённую структуру workbook.
 - DONE 2026-05-14: stop для index/OCR завершает дерево дочерних процессов, а не только root PID; это снижает риск зависших OCR/pdf helper-процессов после остановки.
+- DONE 2026-05-14: SQLite runtime больше не валит web/bot/scheduler при `PRAGMA journal_mode=WAL` -> `disk I/O error`; добавлен fallback на текущий/default journal mode и regression-тест.
 - Проверить фактическую ночную индексацию на telemetry после следующего ночного окна: lock, active process, last run reason.
 - Оставить одно действие для активного этапа: stop; следующий start продолжает по state DB.
 - Добавить retry failed files / failed phase UX: список ошибок, файл, exception, кнопка retry scope.
@@ -152,6 +153,7 @@ Owner: Codex.
 - DONE 2026-05-14: `requirements-ci.lock` дополнен `qdrant-client==1.17.1`, чтобы launcher smoke не падал на `ModuleNotFoundError`.
 - DONE 2026-05-14: README quick start теперь устанавливает пакет через `pip install -e .`; добавлен fallback запуска с `PYTHONPATH=src` для fresh checkout.
 - DONE 2026-05-14: launcher `restart` ждёт освобождения web-порта после stop, чтобы не оставлять web down из-за race между остановкой процесса и проверкой 8080.
+- DONE 2026-05-14: bot/web startup hardened against SQLite WAL setup failures on Windows/external drives.
 - Решить, нужен ли отдельный runtime lock.
 
 Done criteria:

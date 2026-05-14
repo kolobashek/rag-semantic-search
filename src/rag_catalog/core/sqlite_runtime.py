@@ -11,8 +11,9 @@ def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> 
 
     Several app processes may open the same SQLite database at startup. Re-running
     ``PRAGMA journal_mode=WAL`` on every connection can temporarily raise
-    ``OperationalError: disk I/O error`` on Windows even when the database is
-    healthy and already in WAL mode. In that case we keep using the connection.
+    ``OperationalError: disk I/O error`` on Windows or on network/external drives
+    even when the database remains readable. In that case we fall back to the
+    current/default journal mode instead of failing service startup.
     """
     last_error: sqlite3.OperationalError | None = None
     for _ in range(max(1, int(retries))):
@@ -21,14 +22,19 @@ def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> 
             try:
                 conn.execute("PRAGMA journal_mode=WAL;")
             except sqlite3.OperationalError as exc:
-                mode = ""
+                last_error = exc
                 try:
                     row = conn.execute("PRAGMA journal_mode;").fetchone()
-                    mode = str(row[0] if row else "").lower()
+                    if row and str(row[0] or "").strip():
+                        conn.execute("PRAGMA synchronous=NORMAL;")
+                        return
                 except sqlite3.OperationalError:
-                    mode = ""
-                if mode != "wal":
-                    raise exc
+                    try:
+                        conn.execute("PRAGMA journal_mode=DELETE;")
+                        conn.execute("PRAGMA synchronous=NORMAL;")
+                        return
+                    except sqlite3.OperationalError:
+                        raise exc
             conn.execute("PRAGMA synchronous=NORMAL;")
             return
         except sqlite3.OperationalError as exc:
