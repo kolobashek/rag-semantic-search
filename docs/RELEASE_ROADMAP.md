@@ -42,6 +42,7 @@ Owner: Codex.
 - DONE 2026-05-14: добавлен конфигурируемый `retrieval_preset=release_v2` для retrieval v2 + BM25/RRF defaults.
 - DONE 2026-05-14: reranker оставлен opt-in и не включается release preset без latency/eval замеров.
 - DONE 2026-05-14: baseline eval снят на 32 запросах (`runtime/eval/baseline.*` локально): Recall@10=0.875, zero-result=0.000, steady-state p50=472 ms, p95=919 ms; cold-start первого запроса ~20 сек из-за загрузки модели.
+- DONE 2026-05-14: release gate rerun после index/cloud fixes: `pytest -q` = 375 passed; `search_eval` latest = Recall@10 0.875, zero-result 0.000, p50 790 ms, p95 1684 ms. Один cold/slow folder query 27.8s остаётся performance-риск для P1.
 
 Done criteria:
 
@@ -57,6 +58,7 @@ Owner: Codex.
 - DONE 2026-05-14: golden cases разделены по категориям (`folder_or_name`, `exact_number_or_vehicle`, `document_type`, `ocr_or_scan`, `semantic_business`, `general`); eval считает `by_category`. Cloud Drive-specific cases добавить после стабилизации registry search fixtures.
 - Запускать `scripts/search_eval.py` в CI как optional/manual gate сначала, затем как required для retrieval changes.
 - DONE 2026-05-14: eval report включает Recall/MRR/nDCG, zero-result rate, latency p50/p95; CLI умеет JSON и Markdown artifacts.
+- DONE 2026-05-14: `python scripts/search_eval.py --golden eval/search_golden.json --limit 10 --output runtime/eval/latest.json --markdown-output runtime/eval/latest.md` проходит локально на текущем индексе.
 
 Done criteria:
 
