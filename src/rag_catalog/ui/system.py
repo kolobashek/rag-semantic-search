@@ -89,6 +89,28 @@ def _is_process_alive(pid: int) -> bool:
     return True
 
 
+def _terminate_process(pid: int, *, timeout_sec: float = 6.0) -> bool:
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        proc = psutil.Process(int(pid))
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout_sec)
+            return True
+        except psutil.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=timeout_sec)
+            except psutil.TimeoutExpired:
+                return False
+            return True
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.AccessDenied:
+        return False
+
+
 def _find_module_process_pids(module_name: str) -> List[int]:
     pids: List[int] = []
     for proc in psutil.process_iter(["pid", "cmdline"]):
@@ -207,6 +229,32 @@ def _clear_runtime_marker(kind: str, *, pid: int = 0) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+def stop_active_indexer(cfg: Dict[str, Any], *, reason: str = "stopped_by_user") -> bool:
+    telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
+    active = _find_live_running_index_run(telemetry)
+    if not active:
+        return False
+    pid = _safe_int(active.get("worker_pid"), 0)
+    stopped = _terminate_process(pid)
+    if stopped:
+        _clear_runtime_marker("index", pid=pid)
+        telemetry.finalize_running_index_runs(status="cancelled", note=reason, skip_alive_pids=False)
+    return stopped
+
+
+def stop_active_ocr(cfg: Dict[str, Any], *, reason: str = "stopped_by_user") -> bool:
+    telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
+    active = _find_live_running_ocr_run(telemetry)
+    if not active:
+        return False
+    pid = _safe_int(active.get("worker_pid"), 0)
+    stopped = _terminate_process(pid)
+    if stopped:
+        _clear_runtime_marker("ocr", pid=pid)
+        telemetry.finalize_running_ocr_runs(status="cancelled", note=reason, skip_alive_pids=False)
+    return stopped
 
 
 def _find_live_running_index_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any]]:

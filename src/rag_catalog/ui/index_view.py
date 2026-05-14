@@ -43,6 +43,8 @@ from .system import (
     _launch_ocr,
     _safe_int,
     _stop_managed_timer,
+    stop_active_indexer,
+    stop_active_ocr,
 )
 
 
@@ -66,9 +68,6 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         active_label = "Запущено: " + ", ".join(active_stage_names) if active_stage_names else "Нет активных задач"
         header_active_chip = ui.label(active_label).classes("rag-chip")
         ui.space()
-        if active_stage_names:
-            ui.button("Пауза", icon="pause", on_click=lambda: ui.notify("Пауза будет доступна после добавления cooperative-cancel в worker.", type="warning")).props("outline dense")
-            ui.button("Отмена", icon="close", on_click=lambda: ui.notify("Отмена будет доступна после добавления cooperative-cancel в worker.", type="warning")).props("outline dense color=negative")
     ui.label("Этапы, OCR, расписание и параметры индексирования.").classes("rag-meta")
 
     # ── Метрики ──────────────────────────────────────────────────────
@@ -114,7 +113,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 return
             _log_app_event(state, "index", "run_now", details={"stage": stage_key, "pid": pid})
             ui.notify(f"Индексация «{_STAGE_LABELS.get(stage_key, stage_key)}» запущена (PID {pid}).", type="positive")
-            ui.timer(1.5, _refresh_progress, once=True)
+            _refresh_progress()
+            ui.timer(1.0, _refresh_progress, once=True)
 
         return handler
 
@@ -130,6 +130,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             return
         _log_app_event(state, "index", "run_ocr_now", details={"pid": pid})
         ui.notify(f"OCR-проход запущен (PID {pid}).", type="positive")
+        _refresh_progress()
+        ui.timer(1.0, _refresh_progress, once=True)
 
     stage_status_ctx: Dict[str, Any] = {
         "row": {},
@@ -288,11 +290,14 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 ui.label("Статистика").classes("rag-meta font-semibold")
                 ui.label("Действия").classes("rag-meta font-semibold text-right")
 
-        def pause_phase(label: str) -> None:
-            ui.notify(f"Пауза для «{label}» будет доступна после cooperative-pause в worker.", type="warning")
-
-        def stop_phase(label: str) -> None:
-            ui.notify(f"Остановка для «{label}» будет доступна после cooperative-cancel в worker.", type="warning")
+        def stop_phase(label: str, *, is_ocr: bool = False) -> None:
+            ok = stop_active_ocr(state.cfg) if is_ocr else stop_active_indexer(state.cfg)
+            if ok:
+                ui.notify(f"«{label}» остановлен. Следующий запуск продолжит по state DB.", type="positive")
+            else:
+                ui.notify(f"Активный процесс для «{label}» не найден или не удалось остановить.", type="warning")
+            _refresh_progress()
+            ui.timer(1.0, _refresh_progress, once=True)
 
         def _phase_row_data(row: Dict[str, Any], *, label: str, is_ocr: bool) -> Dict[str, Any]:
             status_str = str(row.get("status") or "idle")
@@ -375,15 +380,10 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 with ui.row().classes("rag-pipeline-actions"):
                     if is_ocr:
                         play_e = ui.button(icon="play_arrow", on_click=run_ocr_now).props("flat dense round").tooltip("Запустить")
-                        restart_e = ui.button(icon="restart_alt", on_click=run_ocr_now).props("flat dense round").tooltip("Рестарт")
                     else:
                         play_e = ui.button(icon="play_arrow", on_click=make_run_handler(key)).props("flat dense round").tooltip("Запустить")
-                        restart_e = ui.button(icon="restart_alt", on_click=make_run_handler(key)).props("flat dense round").tooltip("Рестарт")
-                    pause_e = ui.button(icon="pause", on_click=lambda l=label: pause_phase(l)).props("flat dense round").tooltip("Пауза")
-                    stop_e = ui.button(icon="stop", on_click=lambda l=label: stop_phase(l)).props("flat dense round").tooltip("Остановить")
+                    stop_e = ui.button(icon="stop", on_click=lambda l=label, o=is_ocr: stop_phase(l, is_ocr=o)).props("flat dense round color=negative").tooltip("Остановить")
                     play_e.set_visibility(not d["is_running"])
-                    restart_e.set_visibility(d["is_running"])
-                    pause_e.set_visibility(d["is_running"])
                     stop_e.set_visibility(d["is_running"])
             _phase_refs[key] = {
                 "shared_row": shared_row,
@@ -396,8 +396,6 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 "prog_e": prog_e,
                 "stats_e": stats_e,
                 "play_e": play_e,
-                "restart_e": restart_e,
-                "pause_e": pause_e,
                 "stop_e": stop_e,
             }
 
@@ -418,8 +416,6 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             refs["prog_e"].set_value(d["pct"])
             refs["stats_e"].set_text(d["stats_text"])
             refs["play_e"].set_visibility(not d["is_running"])
-            refs["restart_e"].set_visibility(d["is_running"])
-            refs["pause_e"].set_visibility(d["is_running"])
             refs["stop_e"].set_visibility(d["is_running"])
 
         def _get_stage_rows(fresh: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
