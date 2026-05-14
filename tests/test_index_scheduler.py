@@ -71,6 +71,7 @@ def test_scheduler_prioritizes_full_index_over_hourly_metadata(monkeypatch) -> N
     ]
     launched: list[str] = []
     touched: list[str] = []
+    events: list[tuple[str, bool, dict]] = []
 
     class FakeTelemetryDB:
         def __init__(self, path: str) -> None:
@@ -85,6 +86,9 @@ def test_scheduler_prioritizes_full_index_over_hourly_metadata(monkeypatch) -> N
         def touch_index_schedule(self, *, id: str) -> None:
             touched.append(id)
 
+        def log_app_event(self, *, action: str, ok: bool = True, details=None, **kwargs) -> None:
+            events.append((action, ok, details or {}))
+
     monkeypatch.setattr(system, "TelemetryDB", FakeTelemetryDB)
     monkeypatch.setattr(system, "_schedules_due", lambda value: list(value))
     monkeypatch.setattr(system, "_launch_indexer", lambda cfg, *, stage, **kwargs: launched.append(stage) or 1234)
@@ -94,6 +98,40 @@ def test_scheduler_prioritizes_full_index_over_hourly_metadata(monkeypatch) -> N
 
     assert launched == ["all"]
     assert touched == ["daily-all", "hourly-metadata"]
+    assert [event[0] for event in events] == ["due", "launched", "skipped_covered"]
+    assert events[1][2]["stage"] == "all"
+    assert events[2][2]["covered_by"] == "all"
+
+
+def test_scheduler_logs_blocked_launch(monkeypatch) -> None:
+    schedules = [{"id": "daily-small", "stage": "small", "created_at": "2026-05-14T03:00:00+00:00"}]
+    events: list[tuple[str, bool, dict]] = []
+
+    class FakeTelemetryDB:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def list_index_schedules(self):
+            return list(schedules)
+
+        def get_index_settings(self):
+            return {}
+
+        def log_app_event(self, *, action: str, ok: bool = True, details=None, **kwargs) -> None:
+            events.append((action, ok, details or {}))
+
+        def touch_index_schedule(self, *, id: str) -> None:
+            raise AssertionError("blocked launch must not touch schedule")
+
+    monkeypatch.setattr(system, "TelemetryDB", FakeTelemetryDB)
+    monkeypatch.setattr(system, "_schedules_due", lambda value: list(value))
+    monkeypatch.setattr(system, "_launch_indexer", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("already running")))
+
+    system._run_scheduler_tick({"telemetry_db_path": "unused.db", "index_read_workers": 4})
+
+    assert [event[0] for event in events] == ["due", "launch_blocked"]
+    assert events[1][1] is False
+    assert events[1][2]["error"] == "already running"
 
 
 def test_full_index_schedule_covers_partial_index_stages() -> None:

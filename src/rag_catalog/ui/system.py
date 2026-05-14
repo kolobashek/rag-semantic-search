@@ -525,6 +525,26 @@ def _schedule_stage_covers(launched_stage: str, candidate_stage: str) -> bool:
     return launched == "all" and candidate != "ocr"
 
 
+def _log_scheduler_event(
+    telemetry: TelemetryDB,
+    action: str,
+    *,
+    ok: bool = True,
+    details: Dict[str, Any] | None = None,
+) -> None:
+    try:
+        telemetry.log_app_event(
+            username="system",
+            screen="index",
+            feature="scheduler",
+            action=action,
+            ok=ok,
+            details=details or {},
+        )
+    except Exception:
+        pass
+
+
 def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
     # Reload config each tick so catalog_path and other settings are always current
     from rag_catalog.core.rag_core import load_config as _load_cfg
@@ -540,6 +560,14 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
     due = _schedules_due(schedules)
     if not due:
         return
+    _log_scheduler_event(
+        tdb,
+        "due",
+        details={
+            "schedule_ids": [str(item.get("id") or "") for item in due],
+            "stages": [str(item.get("stage") or "all") for item in due],
+        },
+    )
     due = sorted(
         due,
         key=lambda sched: (
@@ -557,23 +585,44 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
         if stage != "ocr" and launched_index_stage:
             if _schedule_stage_covers(launched_index_stage, stage):
                 tdb.touch_index_schedule(id=sched_id)
+                _log_scheduler_event(
+                    tdb,
+                    "skipped_covered",
+                    details={"id": sched_id, "stage": stage, "covered_by": launched_index_stage},
+                )
             continue
         try:
             if stage == "ocr":
                 if launched_index_stage:
+                    _log_scheduler_event(
+                        tdb,
+                        "skipped_busy",
+                        details={"id": sched_id, "stage": stage, "active_stage": launched_index_stage},
+                    )
                     continue
-                _launch_ocr(live_cfg, workers=workers)
+                pid = _launch_ocr(live_cfg, workers=workers)
             else:
-                _launch_indexer(
+                pid = _launch_indexer(
                     live_cfg,
                     stage=stage,
                     workers=workers,
                     max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 2000),
                     skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
                 )
-        except RuntimeError:
+        except RuntimeError as exc:
+            _log_scheduler_event(
+                tdb,
+                "launch_blocked",
+                ok=False,
+                details={"id": sched_id, "stage": stage, "error": str(exc)},
+            )
             continue
         tdb.touch_index_schedule(id=sched_id)
+        _log_scheduler_event(
+            tdb,
+            "launched",
+            details={"id": sched_id, "stage": stage, "pid": int(pid or 0)},
+        )
         if stage != "ocr":
             launched_index_stage = stage
 

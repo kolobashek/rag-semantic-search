@@ -79,6 +79,7 @@ Owner: Codex.
 - DONE 2026-05-14: SQLite runtime больше не валит web/bot/scheduler при `PRAGMA journal_mode=WAL` -> `disk I/O error`; добавлен fallback на текущий/default journal mode и regression-тест.
 - DONE 2026-05-14: failed/cancelled stage summary теперь сохраняет `run_id/run_note`, а pipeline UI показывает короткую причину последнего сбоя прямо в строке этапа.
 - DONE 2026-05-14: failed/cancelled stage action визуально отделён как retry (`replay`), running stage оставляет только stop; повторный запуск продолжает по state DB.
+- DONE 2026-05-14: scheduler пишет системные `app_events` (`due`, `launched`, `skipped_covered`, `launch_blocked`), чтобы ночные пропуски и блокировки были диагностируемы без ручного чтения stdout.
 - Проверить фактическую ночную индексацию на telemetry после следующего ночного окна: lock, active process, last run reason.
 - DONE 2026-05-14: для активного этапа оставлено одно действие stop; следующий start/retry продолжает по state DB.
 - Добавить retry failed files / failed phase UX: список ошибок, файл, exception, кнопка retry scope.
