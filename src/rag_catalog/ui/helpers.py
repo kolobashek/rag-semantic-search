@@ -1091,6 +1091,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
             FROM index_stage_progress AS isp
             LEFT JOIN index_runs AS ir ON ir.run_id = isp.run_id
             WHERE isp.run_id IN ({placeholders})
+              AND isp.status='running'
             ORDER BY isp.ts_started, isp.stage
             """,
             tuple(active_run_ids),

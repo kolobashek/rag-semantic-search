@@ -273,6 +273,30 @@ def test_index_telemetry_uses_runtime_marker_before_run_row_exists(monkeypatch, 
     assert telemetry["active_stages"][0]["run_note"] == "runtime_marker"
 
 
+def test_index_telemetry_active_stages_only_include_running_stage(tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    run_id = db.start_index_run(catalog_path="O:\\Обмен", collection_name="catalog", recreate=False)
+    db.start_stage(run_id=run_id, stage="metadata", total_files=10)
+    db.finish_stage(
+        run_id=run_id,
+        stage="metadata",
+        status="completed",
+        processed_files=10,
+        added_files=10,
+        updated_files=0,
+        skipped_files=0,
+        error_files=0,
+        points_added=10,
+    )
+    db.start_stage(run_id=run_id, stage="small", total_files=5)
+
+    telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
+
+    assert [row["stage"] for row in telemetry["active_stages"]] == ["small"]
+    assert {row["stage"] for row in telemetry["latest_stages"]} == {"metadata", "small"}
+
+
 def test_resolve_index_recovery_stage_prefers_running_stage_over_note(tmp_path) -> None:
     db = TelemetryDB(str(tmp_path / "telemetry.db"))
     run_id = db.start_index_run(
