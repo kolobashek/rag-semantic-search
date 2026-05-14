@@ -18,3 +18,7 @@ chardet==5.2.0
 charset-normalizer==3.4.4
 urllib3==2.6.3
 qdrant-client==1.17.1
+boto3==1.41.4
+botocore==1.41.4
+jmespath==1.0.1
+s3transfer==0.15.0

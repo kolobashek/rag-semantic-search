@@ -88,7 +88,7 @@ Owner: Codex + Claude.
 Codex:
 
 - DONE 2026-05-14: проверен и покрыт regression-тестами reindex/cleanup job lifecycle для upload/move/rename/delete/restore. Move/rename ставит cleanup старого пути и reindex нового, delete ставит cleanup, restore ставит reindex.
-- Проверить S3/MinIO: bucket init, healthcheck, presigned download, missing boto3 message, config validation.
+- DONE 2026-05-14: S3/MinIO storage adapter проверен тестами: bucket init, healthcheck, presigned download, missing boto3 message, config validation. `boto3` добавлен в CI lock для воспроизводимого S3 smoke.
 - Убедиться, что Cloud Drive local storage/data не попадает в Git.
 - DONE 2026-05-14: cleanup job удаляет Qdrant points по `cloud_file_id`/`cloud_path`; restore возвращает файл через reindex job. Остался release smoke на реальном Qdrant.
 
