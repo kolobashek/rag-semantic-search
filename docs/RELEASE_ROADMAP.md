@@ -41,12 +41,12 @@ Owner: Codex.
 - DONE 2026-05-14: README описывает migration plan для новой embedding-модели через `embedding_collection_versioning` и eval before switch.
 - DONE 2026-05-14: добавлен конфигурируемый `retrieval_preset=release_v2` для retrieval v2 + BM25/RRF defaults.
 - DONE 2026-05-14: reranker оставлен opt-in и не включается release preset без latency/eval замеров.
-- Зафиксировать latency p50/p95 для query classes: exact filename, folder name, semantic question, OCR-heavy.
+- DONE 2026-05-14: baseline eval снят на 32 запросах (`runtime/eval/baseline.*` локально): Recall@10=0.875, zero-result=0.000, steady-state p50=472 ms, p95=919 ms; cold-start первого запроса ~20 сек из-за загрузки модели.
 
 Done criteria:
 
 - DONE 2026-05-14: есть config preset для legacy и release retrieval; `config.example.json` и Docker example синхронизированы.
-- eval показывает baseline vs release preset;
+- baseline eval зафиксирован; release preset нужно сравнить отдельным прогоном перед включением по умолчанию;
 - UI показывает режим поиска и не скрывает fallback/ошибки Qdrant/LLM.
 
 ### 3. Search Evaluation Gate
@@ -62,7 +62,7 @@ Done criteria:
 
 - DONE 2026-05-14: eval можно запустить одной командой локально: `python scripts/search_eval.py --golden eval/search_golden.json --limit 10`.
 - DONE 2026-05-14: результат сохраняется в JSON/Markdown artifact через `--output` и `--markdown-output`.
-- пороги качества согласованы и видны в CI.
+- пороги качества ещё нужно согласовать и сделать CI gate required после стабилизации retrieval preset.
 
 ### 4. Indexing And OCR Reliability
 
