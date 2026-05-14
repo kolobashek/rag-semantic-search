@@ -15,7 +15,15 @@
 
 ```powershell
 pip install -r requirements.txt
+pip install -e .
 Copy-Item config.example.json config.json
+python -m rag_catalog.cli.launcher start
+```
+
+Если пакет ещё не установлен в окружение, можно запустить из checkout без установки:
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
 python -m rag_catalog.cli.launcher start
 ```
 

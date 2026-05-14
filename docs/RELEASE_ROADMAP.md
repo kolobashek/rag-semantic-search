@@ -147,6 +147,7 @@ Owner: Codex.
 - `config.example.json` и `config.docker.example.json` синхронизировать с текущими ключами.
 - Документировать launcher, Docker + MinIO, first-run admin, OCR deps, release checks.
 - DONE 2026-05-14: `requirements-ci.lock` дополнен `qdrant-client==1.17.1`, чтобы launcher smoke не падал на `ModuleNotFoundError`.
+- DONE 2026-05-14: README quick start теперь устанавливает пакет через `pip install -e .`; добавлен fallback запуска с `PYTHONPATH=src` для fresh checkout.
 - Решить, нужен ли отдельный runtime lock.
 
 Done criteria:
