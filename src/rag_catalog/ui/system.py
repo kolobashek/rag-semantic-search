@@ -352,6 +352,7 @@ def _launch_indexer(
     workers: Optional[int] = None,
     max_chunks: Optional[int] = None,
     skip_inline_ocr: bool = False,
+    ocr_engine: str = "tesseract",
 ) -> int:
     """Запустить index_rag как фоновый процесс. Возвращает PID."""
     telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
@@ -390,6 +391,9 @@ def _launch_indexer(
         args.append("--recreate")
     if skip_inline_ocr:
         args.append("--no-ocr")
+    _ocr_eng = str(ocr_engine or "tesseract").strip().lower()
+    if _ocr_eng in ("rapidocr",):
+        args += ["--ocr-engine", _ocr_eng]
     log_fh = _open_log(PROJECT_ROOT / "logs" / "indexer.log", f"INDEXER  stage={stage}")
     try:
         proc = subprocess.Popen(
@@ -608,6 +612,7 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
                     workers=workers,
                     max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 2000),
                     skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
+                    ocr_engine=str(cfg_settings.get("ocr_engine") or "tesseract"),
                 )
         except RuntimeError as exc:
             _log_scheduler_event(

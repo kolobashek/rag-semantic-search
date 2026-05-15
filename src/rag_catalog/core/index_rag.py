@@ -29,6 +29,7 @@ from sentence_transformers import SentenceTransformer
 from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
 from .extractors import (
+    extract_doc_meta,
     extract_docx,
     extract_image,
     extract_pdf,
@@ -344,6 +345,7 @@ class RAGIndexer:
         synonym_map: Optional[Dict[str, List[str]]] = None,
         ocr_tesseract_cmd: str = "",
         ocr_poppler_bin: str = "",
+        ocr_engine: str = "tesseract",
         qdrant_timeout_sec: int = 60,
     ) -> None:
         # current_stage выставляется при каждом запуске index_directory(stage=...)
@@ -374,6 +376,8 @@ class RAGIndexer:
         self.synonym_map: Dict[str, List[str]] = synonym_map or {}
         self.ocr_tesseract_cmd = str(ocr_tesseract_cmd or "").strip()
         self.ocr_poppler_bin = str(ocr_poppler_bin or "").strip()
+        self.ocr_engine = str(ocr_engine or "tesseract").strip().lower()
+        self._use_rapid_ocr = self.ocr_engine == "rapidocr"
         if not self.ocr_tesseract_cmd or not self.ocr_poppler_bin:
             runtime = resolve_ocr_runtime(
                 {
@@ -385,6 +389,8 @@ class RAGIndexer:
             self.ocr_poppler_bin = self.ocr_poppler_bin or runtime.get("poppler_bin", "")
         if self.skip_ocr:
             logger.info("Inline OCR отключён (--no-ocr).")
+        elif self._use_rapid_ocr:
+            logger.info("OCR engine: RapidOCR + DirectML/GPU (poppler=%s)", self.ocr_poppler_bin or "auto")
         elif self.ocr_tesseract_cmd and self.ocr_poppler_bin:
             logger.info(
                 "OCR runtime: tesseract=%s, poppler=%s",
@@ -614,6 +620,7 @@ class RAGIndexer:
             filepath,
             tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
             poppler_bin=getattr(self, "ocr_poppler_bin", ""),
+            use_rapid=getattr(self, "_use_rapid_ocr", False),
         )
 
         try:
@@ -651,6 +658,7 @@ class RAGIndexer:
             filepath,
             tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
             max_pages=MAX_IMAGE_PAGES,
+            use_rapid=getattr(self, "_use_rapid_ocr", False),
         )
 
         try:
@@ -806,6 +814,7 @@ class RAGIndexer:
             "extension": filepath.suffix.lower(),
             "size_mb": round(stat.st_size / (1024 * 1024), 2),
             "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
             "path": str(relative_path),
             "full_path": str(filepath),
             "state_key": str(state_key or filepath),
@@ -906,6 +915,8 @@ class RAGIndexer:
             self._delete_file_vectors(filepath, payload_match=delete_payload_match)
 
         logger.info("Индексирование: %s", filepath)
+        doc_meta = extract_doc_meta(filepath)
+        payload_extra = {**(payload_extra or {}), **doc_meta}
         self._index_metadata(filepath, relative_path, state_key=file_key, payload_extra=payload_extra)
 
         ext = filepath.suffix.lower()
@@ -1046,6 +1057,9 @@ def main() -> None:
     parser.add_argument("--model", default=cfg["embedding_model"], help="Модель эмбеддинга")
     parser.add_argument("--collection", default=cfg["collection_name"], help="Имя коллекции")
     parser.add_argument("--recreate", action="store_true", help="Пересоздать коллекцию и очистить state")
+    parser.add_argument("--ocr-engine", default=str(cfg.get("ocr_engine") or "tesseract"),
+                        dest="ocr_engine", choices=("tesseract", "rapidocr"),
+                        help="OCR движок: tesseract (CPU, по умолчанию) или rapidocr (GPU/DirectML)")
     parser.add_argument("--no-ocr", action="store_true", dest="no_ocr",
                         help="Пропускать OCR для сканированных PDF (быстрее, текст не извлекается)")
     parser.add_argument("--max-chunks", type=int, default=int(cfg.get("index_max_chunks", 2000)), dest="max_chunks",
@@ -1132,6 +1146,7 @@ def main() -> None:
         ollama_url=str(cfg.get("ollama_url") or "http://localhost:11434"),
         ocr_tesseract_cmd=str(cfg.get("ocr_tesseract_cmd") or ""),
         ocr_poppler_bin=str(cfg.get("ocr_poppler_bin") or ""),
+        ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
     )
     run_id = indexer.telemetry.start_index_run(

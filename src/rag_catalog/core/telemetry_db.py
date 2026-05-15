@@ -860,6 +860,7 @@ class TelemetryDB:
             "skip_inline_ocr": False,
             "ocr_enabled": False,
             "ocr_min_text_len": 50,
+            "ocr_engine": "tesseract",
         }
         with self._lock:
             with self._connect() as conn:
@@ -894,6 +895,8 @@ class TelemetryDB:
         current["workers"] = max(0, min(32, int(current.get("workers") if current.get("workers") is not None else 4)))
         current["max_chunks"] = max(0, min(100_000, int(current.get("max_chunks") if current.get("max_chunks") is not None else 0)))
         current["ocr_min_text_len"] = max(1, min(100_000, int(current.get("ocr_min_text_len") if current.get("ocr_min_text_len") is not None else 50)))
+        ocr_engine = str(current.get("ocr_engine") or "tesseract").strip().lower()
+        current["ocr_engine"] = ocr_engine if ocr_engine in {"tesseract", "rapidocr"} else "tesseract"
         days = current.get("days")
         if not isinstance(days, list):
             days = []

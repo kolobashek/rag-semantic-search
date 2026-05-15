@@ -126,6 +126,8 @@ def recognize_single_file(
             "error": str(cached.get("error_text") or ""),
         }
 
+    use_rapid = str(_cfg.get("ocr_engine") or "tesseract").strip().lower() == "rapidocr"
+
     ext = path.suffix.lower()
     try:
         if ext == ".pdf":
@@ -133,10 +135,15 @@ def recognize_single_file(
                 ocr_pdf,
                 tesseract_cmd=ocr_rt["tesseract_cmd"],
                 poppler_bin=ocr_rt["poppler_bin"],
+                use_rapid=use_rapid,
             )
             text = extract_pdf(path, skip_ocr=False, ocr=_ocr_fn)
         elif ext in _IMAGE_EXTS:
-            text = extract_image(path, tesseract_cmd=ocr_rt["tesseract_cmd"])
+            text = extract_image(
+                path,
+                tesseract_cmd=ocr_rt["tesseract_cmd"],
+                use_rapid=use_rapid,
+            )
         else:
             return {"status": "unsupported", "text": "", "pages": 0, "chars": 0, "from_cache": False, "error": f"Формат не поддерживается: {ext}"}
     except Exception as exc:

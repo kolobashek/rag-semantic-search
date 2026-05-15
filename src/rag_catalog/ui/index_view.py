@@ -97,6 +97,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
     workers_now = int(settings.get("workers") or state.cfg.get("index_read_workers") or 4)
     chunks_now = int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000)
     skip_ocr_now = bool(settings.get("skip_inline_ocr"))
+    ocr_engine_now = str(settings.get("ocr_engine") or state.cfg.get("ocr_engine") or "tesseract")
     ocr_min_len_now = int(settings.get("ocr_min_text_len") or 50)
     def make_run_handler(stage_key: str) -> Any:
         def handler() -> None:
@@ -107,6 +108,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                     workers=workers_now,
                     max_chunks=chunks_now,
                     skip_inline_ocr=skip_ocr_now,
+                    ocr_engine=ocr_engine_now,
                 )
             except RuntimeError as exc:
                 ui.notify(str(exc), type="warning")
@@ -619,6 +621,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                     "skip_inline_ocr": bool(settings.get("skip_inline_ocr")),
                     "ocr_enabled": bool(settings.get("ocr_enabled")),
                     "ocr_min_text_len": int(settings.get("ocr_min_text_len") or 50),
+                    "ocr_engine": str(settings.get("ocr_engine") or state.cfg.get("ocr_engine") or "tesseract"),
                 }
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.icon("tune").classes("text-xl text-indigo-500")
@@ -642,6 +645,13 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                             min=1, max=100000, step=10,
                         ).props("dense outlined").classes("w-64")
                         ui.label("Если в PDF меньше указанного числа символов — файл считается сканом.").classes("rag-meta text-xs")
+                    with ui.column().classes("gap-0"):
+                        ocr_engine_input = ui.select(
+                            {"tesseract": "Tesseract (CPU)", "rapidocr": "RapidOCR + GPU (DirectML)"},
+                            label="Движок OCR",
+                            value=initial_index_settings["ocr_engine"],
+                        ).props("dense outlined").classes("w-56")
+                        ui.label("RapidOCR работает на AMD/Intel/NVIDIA без CUDA (DirectML).").classes("rag-meta text-xs")
 
                 action_row = ui.row().classes("rag-dirty-actions")
                 action_row.set_visibility(False)
@@ -655,6 +665,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                         "skip_inline_ocr": bool(skip_inline_ocr_input.value),
                         "ocr_enabled": bool(ocr_enabled_input.value),
                         "ocr_min_text_len": int(ocr_min_text_input.value or 50),
+                        "ocr_engine": str(ocr_engine_input.value or "tesseract"),
                     }
 
                 def refresh_index_dirty() -> None:
@@ -669,6 +680,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                     skip_inline_ocr_input.set_value(initial_index_settings["skip_inline_ocr"])
                     ocr_enabled_input.set_value(initial_index_settings["ocr_enabled"])
                     ocr_min_text_input.set_value(initial_index_settings["ocr_min_text_len"])
+                    ocr_engine_input.set_value(initial_index_settings["ocr_engine"])
                     action_row.set_visibility(False)
 
                 def save_index_settings() -> None:
@@ -686,6 +698,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 skip_inline_ocr_input.on_value_change(lambda _: refresh_index_dirty())
                 ocr_enabled_input.on_value_change(lambda _: refresh_index_dirty())
                 ocr_min_text_input.on_value_change(lambda _: refresh_index_dirty())
+                ocr_engine_input.on_value_change(lambda _: refresh_index_dirty())
                 dirty_ready[0] = True
 
                 with action_row:

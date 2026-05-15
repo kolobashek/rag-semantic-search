@@ -294,8 +294,24 @@ def _patch_pdf2image_popen_for_windows(pdf2image_module: Any) -> None:
     pdf2image_module._rag_hidden_popen_patched = True
 
 
-def ocr_pdf(filepath: Path, *, tesseract_cmd: str = "", poppler_bin: str = "") -> str:
-    """OCR scanned PDF through pytesseract + pdf2image."""
+def ocr_pdf(
+    filepath: Path,
+    *,
+    tesseract_cmd: str = "",
+    poppler_bin: str = "",
+    use_rapid: bool = False,
+) -> str:
+    """OCR scanned PDF.
+
+    use_rapid=True  → RapidOCR + DirectML/GPU (AMD/Intel/NVIDIA без CUDA)
+    use_rapid=False → Tesseract (default, CPU)
+    """
+    if use_rapid:
+        try:
+            from rag_catalog.core.extractors.ocr_rapid import ocr_pdf_rapid  # noqa: PLC0415
+            return ocr_pdf_rapid(filepath, poppler_bin=poppler_bin)
+        except Exception as exc:
+            logger.warning("RapidOCR PDF не удался, fallback на Tesseract: %s", exc)
     try:
         import pdf2image.pdf2image as pdf2image_impl  # type: ignore
         import pytesseract  # type: ignore
@@ -332,8 +348,24 @@ def ocr_pdf(filepath: Path, *, tesseract_cmd: str = "", poppler_bin: str = "") -
         return ""
 
 
-def extract_image(filepath: Path, *, tesseract_cmd: str = "", max_pages: int = 50) -> str:
-    """Extract text from an image through pytesseract OCR."""
+def extract_image(
+    filepath: Path,
+    *,
+    tesseract_cmd: str = "",
+    max_pages: int = 50,
+    use_rapid: bool = False,
+) -> str:
+    """Extract text from an image.
+
+    use_rapid=True  → RapidOCR + DirectML/GPU
+    use_rapid=False → Tesseract (default, CPU)
+    """
+    if use_rapid:
+        try:
+            from rag_catalog.core.extractors.ocr_rapid import ocr_image_rapid  # noqa: PLC0415
+            return ocr_image_rapid(filepath)
+        except Exception as exc:
+            logger.warning("RapidOCR image не удался, fallback на Tesseract: %s", exc)
     try:
         import pytesseract  # type: ignore
     except ImportError:
@@ -391,3 +423,98 @@ def extract_image(filepath: Path, *, tesseract_cmd: str = "", max_pages: int = 5
     except Exception as exc:
         logger.warning("OCR изображения не удался для %s: %s", filepath, exc)
         return ""
+
+
+# ─── document metadata extraction ────────────────────────────────────────────
+
+_OOXML_CORE_NS = {
+    "cp": "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "dcterms": "http://purl.org/dc/terms/",
+}
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _read_ooxml_core(zf: ZipFile) -> dict[str, str]:
+    """Parse docProps/core.xml from an Office Open XML ZIP archive."""
+    try:
+        with zf.open("docProps/core.xml") as fh:
+            root = ElementTree.parse(fh).getroot()
+    except (KeyError, ElementTree.ParseError):
+        return {}
+
+    def _t(tag: str) -> str:
+        el = root.find(tag, _OOXML_CORE_NS)
+        return (el.text or "").strip() if el is not None else ""
+
+    return {
+        "creator": _t("dc:creator"),
+        "last_editor": _t("cp:lastModifiedBy"),
+        "doc_created": _t("dcterms:created")[:10],
+    }
+
+
+def _docx_top_editor(zf: ZipFile) -> str:
+    """Return the author with the most tracked-change events (w:ins / w:del) in document.xml."""
+    try:
+        with zf.open("word/document.xml") as fh:
+            counts: dict[str, int] = {}
+            for _ev, elem in ElementTree.iterparse(fh, events=("start",)):
+                if elem.tag in (f"{{{_W_NS}}}ins", f"{{{_W_NS}}}del"):
+                    author = elem.attrib.get(f"{{{_W_NS}}}author", "").strip()
+                    if author:
+                        counts[author] = counts.get(author, 0) + 1
+                elem.clear()
+        return max(counts, key=lambda k: counts[k]) if counts else ""
+    except Exception:
+        return ""
+
+
+def _parse_pdf_date(raw: str) -> str:
+    """Convert PDF date string D:YYYYMMDDHHmmss... → YYYY-MM-DD."""
+    s = raw.lstrip("Dd:")
+    if len(s) >= 8:
+        try:
+            return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+        except Exception:
+            pass
+    return ""
+
+
+def extract_doc_meta(filepath: Path) -> dict[str, str]:
+    """Extract author metadata from document properties.
+
+    Returned keys (all str, empty when unavailable):
+      doc_author      — original creator (dc:creator / PDF Author)
+      doc_last_editor — last person to save (cp:lastModifiedBy)
+      doc_top_editor  — most-frequent tracked-change author (DOCX only)
+      doc_created     — document internal creation date YYYY-MM-DD
+    """
+    ext = filepath.suffix.lower()
+    out: dict[str, str] = {
+        "doc_author": "",
+        "doc_last_editor": "",
+        "doc_top_editor": "",
+        "doc_created": "",
+    }
+    if ext in {".docx", ".xlsx", ".xlsm", ".pptx", ".ppsx"}:
+        try:
+            with ZipFile(filepath, "r") as zf:
+                core = _read_ooxml_core(zf)
+                out["doc_author"] = core.get("creator", "")
+                out["doc_last_editor"] = core.get("last_editor", "")
+                out["doc_created"] = core.get("doc_created", "")
+                if ext == ".docx":
+                    out["doc_top_editor"] = _docx_top_editor(zf)
+        except Exception as exc:
+            logger.debug("Метаданные %s: %s", filepath.name, exc)
+    elif ext == ".pdf":
+        try:
+            import fitz  # noqa: PLC0415
+            with fitz.open(str(filepath)) as doc:
+                meta = doc.metadata or {}
+                out["doc_author"] = (meta.get("author") or "").strip()
+                out["doc_created"] = _parse_pdf_date(meta.get("creationDate") or "")
+        except Exception as exc:
+            logger.debug("Метаданные PDF %s: %s", filepath.name, exc)
+    return out
