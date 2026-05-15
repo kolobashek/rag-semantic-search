@@ -116,6 +116,20 @@ def is_available() -> bool:
         return False
 
 
+def is_dml_available() -> bool:
+    """Вернуть True если onnxruntime-directml установлен и GPU доступен."""
+    try:
+        from onnxruntime import get_available_providers  # noqa: PLC0415
+        return "DmlExecutionProvider" in get_available_providers()
+    except Exception:
+        return False
+
+
+def gpu_ocr_available() -> bool:
+    """Вернуть True если GPU-ускоренный OCR готов к использованию (rapidocr + DirectML)."""
+    return is_available() and is_dml_available()
+
+
 def active_device() -> str:
     """Вернуть 'DirectML' или 'CPU' (определяется после первого вызова engine)."""
     return _active_device

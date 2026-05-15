@@ -36,6 +36,8 @@ from .state import (
     _get_telemetry,
     _log_app_event,
 )
+from rag_catalog.core.extractors.ocr_rapid import gpu_ocr_available as _gpu_ocr_available
+
 from .system import (
     _STAGE_LABELS,
     _find_live_running_index_run,
@@ -636,6 +638,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.icon("document_scanner").classes("text-xl text-orange-500")
                     ui.label("OCR настройки").classes("font-semibold")
+                _has_gpu_ocr = _gpu_ocr_available()
+
                 with ui.row().classes("w-full gap-3 items-end flex-wrap"):
                     ocr_enabled_input = ui.checkbox("Запускать OCR после индексации", value=initial_index_settings["ocr_enabled"])
                     with ui.column().classes("gap-0"):
@@ -645,13 +649,16 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                             min=1, max=100000, step=10,
                         ).props("dense outlined").classes("w-64")
                         ui.label("Если в PDF меньше указанного числа символов — файл считается сканом.").classes("rag-meta text-xs")
-                    with ui.column().classes("gap-0"):
-                        ocr_engine_input = ui.select(
-                            {"tesseract": "Tesseract (CPU)", "rapidocr": "RapidOCR + GPU (DirectML)"},
-                            label="Движок OCR",
-                            value=initial_index_settings["ocr_engine"],
-                        ).props("dense outlined").classes("w-56")
-                        ui.label("RapidOCR работает на AMD/Intel/NVIDIA без CUDA (DirectML).").classes("rag-meta text-xs")
+                    if _has_gpu_ocr:
+                        with ui.column().classes("gap-0"):
+                            ocr_engine_input = ui.select(
+                                {"tesseract": "Tesseract (CPU)", "rapidocr": "RapidOCR + GPU (DirectML)"},
+                                label="Движок OCR",
+                                value=initial_index_settings["ocr_engine"],
+                            ).props("dense outlined").classes("w-56")
+                            ui.label("RapidOCR работает на AMD/Intel/NVIDIA без CUDA (DirectML).").classes("rag-meta text-xs")
+                    else:
+                        ocr_engine_input = None
 
                 action_row = ui.row().classes("rag-dirty-actions")
                 action_row.set_visibility(False)
@@ -665,7 +672,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                         "skip_inline_ocr": bool(skip_inline_ocr_input.value),
                         "ocr_enabled": bool(ocr_enabled_input.value),
                         "ocr_min_text_len": int(ocr_min_text_input.value or 50),
-                        "ocr_engine": str(ocr_engine_input.value or "tesseract"),
+                        "ocr_engine": str(ocr_engine_input.value if ocr_engine_input is not None else "tesseract"),
                     }
 
                 def refresh_index_dirty() -> None:
@@ -680,7 +687,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                     skip_inline_ocr_input.set_value(initial_index_settings["skip_inline_ocr"])
                     ocr_enabled_input.set_value(initial_index_settings["ocr_enabled"])
                     ocr_min_text_input.set_value(initial_index_settings["ocr_min_text_len"])
-                    ocr_engine_input.set_value(initial_index_settings["ocr_engine"])
+                    if ocr_engine_input is not None:
+                        ocr_engine_input.set_value(initial_index_settings["ocr_engine"])
                     action_row.set_visibility(False)
 
                 def save_index_settings() -> None:
@@ -698,7 +706,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 skip_inline_ocr_input.on_value_change(lambda _: refresh_index_dirty())
                 ocr_enabled_input.on_value_change(lambda _: refresh_index_dirty())
                 ocr_min_text_input.on_value_change(lambda _: refresh_index_dirty())
-                ocr_engine_input.on_value_change(lambda _: refresh_index_dirty())
+                if ocr_engine_input is not None:
+                    ocr_engine_input.on_value_change(lambda _: refresh_index_dirty())
                 dirty_ready[0] = True
 
                 with action_row:
