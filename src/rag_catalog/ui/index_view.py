@@ -128,6 +128,7 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 state.cfg,
                 min_text_len=ocr_min_len_now,
                 workers=workers_now,
+                ocr_engine=ocr_engine_now,
             )
         except RuntimeError as exc:
             ui.notify(str(exc), type="warning")

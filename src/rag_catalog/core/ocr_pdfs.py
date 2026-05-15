@@ -300,6 +300,13 @@ def main() -> int:
         default=4,
         help="Число повторов scroll-запросов к Qdrant при временных ошибках/таймаутах",
     )
+    parser.add_argument(
+        "--ocr-engine",
+        default=str(cfg.get("ocr_engine") or "tesseract"),
+        dest="ocr_engine",
+        choices=("tesseract", "rapidocr"),
+        help="OCR движок: tesseract (CPU, по умолчанию) или rapidocr (GPU/DirectML)",
+    )
     args = parser.parse_args()
     args.collection = resolve_embedding_collection_name(
         args.collection,
@@ -394,6 +401,8 @@ def main() -> int:
         "--stage",      "large",  # сканированные PDF — этап large
         # НЕТ --no-ocr: OCR включён
     ]
+    if str(args.ocr_engine or "tesseract").strip().lower() == "rapidocr":
+        cmd += ["--ocr-engine", "rapidocr"]
 
     logger.info("")
     logger.info("=" * 60)

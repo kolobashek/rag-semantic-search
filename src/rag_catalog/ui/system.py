@@ -411,7 +411,7 @@ def _launch_indexer(
     return proc.pid
 
 
-def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optional[int] = None) -> int:
+def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optional[int] = None, ocr_engine: str = "tesseract") -> int:
     """Запустить ocr_pdfs как фоновый процесс. Возвращает PID."""
     telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
     live_index = _find_live_running_index_run(telemetry)
@@ -441,6 +441,8 @@ def _launch_ocr(cfg: Dict[str, Any], *, min_text_len: int = 50, workers: Optiona
         "--workers",
         str(_effective_workers(workers if workers is not None else cfg.get("index_read_workers"), mode="ocr")),
     ]
+    if str(ocr_engine or "tesseract").strip().lower() == "rapidocr":
+        args += ["--ocr-engine", "rapidocr"]
     log_fh = _open_log(PROJECT_ROOT / "logs" / "ocr.log", "OCR")
     try:
         proc = subprocess.Popen(
@@ -604,7 +606,7 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
                         details={"id": sched_id, "stage": stage, "active_stage": launched_index_stage},
                     )
                     continue
-                pid = _launch_ocr(live_cfg, workers=workers)
+                pid = _launch_ocr(live_cfg, workers=workers, ocr_engine=str(cfg_settings.get("ocr_engine") or "tesseract"))
             else:
                 pid = _launch_indexer(
                     live_cfg,
@@ -751,6 +753,7 @@ def _recover_background_tasks(
     max_chunks = _safe_int(settings.get("max_chunks") or cfg.get("index_max_chunks") or 2000, 2000)
     skip_inline_ocr = bool(settings.get("skip_inline_ocr"))
     ocr_min_text_len = _safe_int(settings.get("ocr_min_text_len") or 50, 50)
+    ocr_engine_setting = str(settings.get("ocr_engine") or "tesseract")
 
     recovered_index_now = False
     live_index = _find_live_running_index_run(telemetry)
@@ -760,7 +763,7 @@ def _recover_background_tasks(
     if active_index and (not live_index or (active_index_pid_dead and live_index.get("_process_scan_only"))):
         recovery_stage = _resolve_index_recovery_stage(telemetry, active_index)
         telemetry.finalize_running_index_runs(status="cancelled", note=recovery_note)
-        _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr)
+        _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr, ocr_engine=ocr_engine_setting)
         recovered_index_now = True
     elif allow_failed_restart and not live_index:
         failed_rows = telemetry.fetch_dicts(
@@ -771,7 +774,7 @@ def _recover_background_tasks(
             failed_run_id = str(failed_run.get("run_id") or "")
             if _is_recent_failure(failed_run, now=now) and _can_attempt_failed_restart("index", failed_run_id, now_ts):
                 recovery_stage = _resolve_index_recovery_stage(telemetry, failed_run)
-                _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr)
+                _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr, ocr_engine=ocr_engine_setting)
                 _register_failed_restart("index", failed_run_id, now_ts)
                 recovered_index_now = True
 
@@ -786,7 +789,7 @@ def _recover_background_tasks(
     if active_ocr and (not live_ocr or (active_ocr_pid_dead and live_ocr.get("_process_scan_only"))):
         if hasattr(telemetry, "finalize_running_ocr_runs"):
             telemetry.finalize_running_ocr_runs(status="cancelled", note=recovery_note)
-        _launch_ocr(cfg, min_text_len=ocr_min_text_len, workers=workers)
+        _launch_ocr(cfg, min_text_len=ocr_min_text_len, workers=workers, ocr_engine=ocr_engine_setting)
         return
     if allow_failed_restart and not live_ocr and not _find_live_running_index_run(telemetry):
         failed_ocr_rows = telemetry.fetch_dicts(
@@ -797,7 +800,7 @@ def _recover_background_tasks(
         failed_ocr = failed_ocr_rows[0]
         failed_ocr_id = str(failed_ocr.get("ocr_run_id") or "")
         if _is_recent_failure(failed_ocr, now=now) and _can_attempt_failed_restart("ocr", failed_ocr_id, now_ts):
-            _launch_ocr(cfg, min_text_len=ocr_min_text_len, workers=workers)
+            _launch_ocr(cfg, min_text_len=ocr_min_text_len, workers=workers, ocr_engine=ocr_engine_setting)
             _register_failed_restart("ocr", failed_ocr_id, now_ts)
 
 
