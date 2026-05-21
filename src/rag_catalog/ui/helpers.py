@@ -340,7 +340,7 @@ def _read_log_entries(
                     break
             if len(collected) >= max_entries:
                 break
-        return list(reversed(collected))
+        return collected
     except Exception:
         return []
 

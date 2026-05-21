@@ -143,10 +143,10 @@ def read_history_tail_lines(
             continue
         current = text.splitlines()
         take = max(0, needed - len(lines))
-        lines = current[-take:] + lines
-    result = "\n".join(lines[-needed:])
+        lines.extend(reversed(current[-take:]))
+    result = "\n".join(lines[:needed])
     if len(result) > max_chars:
-        result = result[-max_chars:]
+        result = result[:max_chars]
     return result
 
 
