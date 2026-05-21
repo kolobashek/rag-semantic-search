@@ -1073,6 +1073,43 @@ class RAGIndexer:
         self.state_db.delete_entries(deleted_keys)
         return len(deleted_keys)
 
+    def process_index_queue_once(self, *, limit: int = 10, lease_seconds: int = 300) -> Dict[str, int]:
+        """Process a small batch from durable index_queue."""
+        if not hasattr(self, "state_db"):
+            return {"leased": 0, "completed": 0, "failed": 0, "missing": 0}
+        self.state_db.requeue_expired_index_tasks()
+        tasks = self.state_db.lease_index_tasks(limit=limit, lease_seconds=lease_seconds)
+        stats = {"leased": len(tasks), "completed": 0, "failed": 0, "missing": 0}
+        for task in tasks:
+            task_id = int(task["id"])
+            path = Path(str(task.get("full_path") or ""))
+            stage = str(task.get("stage") or "content")
+            try:
+                if not path.exists():
+                    self._delete_file_vectors(path)
+                    self.state_db.delete_entries([str(path)])
+                    self.state_db.complete_index_task(task_id)
+                    stats["missing"] += 1
+                    continue
+                if self._is_excluded_path(path):
+                    self.state_db.complete_index_task(task_id)
+                    stats["completed"] += 1
+                    continue
+                if path.suffix.lower() == ".zip":
+                    if stage == "all":
+                        self.index_all_stages()
+                    else:
+                        self.index_directory(stage=stage)
+                else:
+                    self.process_file(path)
+                self.state_db.complete_index_task(task_id)
+                stats["completed"] += 1
+            except Exception as exc:
+                logger.warning("Queue task failed for %s: %s", path, exc)
+                self.state_db.fail_index_task(task_id, error=str(exc))
+                stats["failed"] += 1
+        return stats
+
     def watch(self, stage: str = "content") -> None:
         """Watch catalog changes and incrementally reindex changed files."""
         try:
@@ -1081,19 +1118,23 @@ class RAGIndexer:
         except ImportError as exc:
             raise RuntimeError("Для --watch установите зависимость watchdog") from exc
 
-        work_queue: "queue.Queue[Path]" = queue.Queue()
+        wake_queue: "queue.Queue[None]" = queue.Queue()
+        watch_stage = "small" if stage == "all" else stage
 
         class _Handler(FileSystemEventHandler):
             def on_created(self, event):  # type: ignore[no-untyped-def]
-                self._enqueue(event)
+                self._enqueue(event, "created")
 
             def on_modified(self, event):  # type: ignore[no-untyped-def]
-                self._enqueue(event)
+                self._enqueue(event, "changed")
 
             def on_moved(self, event):  # type: ignore[no-untyped-def]
-                self._enqueue(event)
+                self._enqueue(event, "moved")
 
-            def _enqueue(self, event):  # type: ignore[no-untyped-def]
+            def on_deleted(self, event):  # type: ignore[no-untyped-def]
+                self._enqueue(event, "deleted")
+
+            def _enqueue(self, event, reason: str):  # type: ignore[no-untyped-def]
                 if getattr(event, "is_directory", False):
                     return
                 raw = str(getattr(event, "dest_path", "") or getattr(event, "src_path", "") or "")
@@ -1101,29 +1142,29 @@ class RAGIndexer:
                     return
                 path = Path(raw)
                 if path.suffix.lower() in SUPPORTED_EXTENSIONS and not path.name.startswith("~$"):
-                    work_queue.put(path)
+                    self_indexer.state_db.enqueue_index_task(
+                        str(path),
+                        stage=watch_stage,
+                        reason=f"watch:{reason}",
+                        priority=20,
+                    )
+                    wake_queue.put(None)
 
+        self_indexer = self
         observer = Observer()
         observer.schedule(_Handler(), str(self.catalog_path), recursive=True)
         observer.start()
         logger.info("Watch mode запущен: %s", self.catalog_path)
         try:
             while True:
-                path = work_queue.get()
-                if not path.exists() or self._is_excluded_path(path):
-                    continue
                 try:
-                    if path.suffix.lower() == ".zip":
-                        logger.info("ZIP изменён, запускаю stage-проход для архива: %s", path)
-                        if stage == "all":
-                            self.index_all_stages()
-                        else:
-                            self.index_directory(stage=stage)
-                    else:
-                        logger.info("Watch reindex: %s", path)
-                        self.process_file(path)
-                except Exception as exc:
-                    logger.warning("Watch reindex failed for %s: %s", path, exc)
+                    wake_queue.get(timeout=5.0)
+                except queue.Empty:
+                    pass
+                time.sleep(0.5)
+                stats = self.process_index_queue_once(limit=max(1, self.read_workers))
+                if stats.get("leased"):
+                    logger.info("Watch queue processed: %s", stats)
         finally:
             observer.stop()
             observer.join(timeout=10)
