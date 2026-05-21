@@ -71,6 +71,8 @@ from .helpers import (
 )
 from .state import (
     PageState,
+    capture_screen_state,
+    restore_screen_state,
     _get_auth_db,
     _get_telemetry,
     _is_saved_search,
@@ -199,6 +201,7 @@ def _build_page(initial_screen: str = "search") -> None:
     def set_screen(screen: str, *, close_drawer: bool = False) -> None:
         touch_activity()
         prev_screen = state.screen
+        capture_screen_state(state, prev_screen)
         ui.run_javascript(
             "(() => {"
             f"const key = 'rag-scroll-{prev_screen}';"
@@ -211,6 +214,7 @@ def _build_page(initial_screen: str = "search") -> None:
             except Exception:
                 pass
         state.screen = screen
+        restore_screen_state(state, screen)
         ui.run_javascript(f"history.pushState(null, '', '/{screen}')")
         _log_app_event(state, "navigation", "open_screen", details={"screen": screen})
         render()
@@ -2035,6 +2039,7 @@ def _build_page(initial_screen: str = "search") -> None:
             state.tg_login_timer = None
         update_nav()
         current_screen = state.screen
+        capture_screen_state(state, current_screen)
         content.clear()
         with content:
             if state.current_user is None:

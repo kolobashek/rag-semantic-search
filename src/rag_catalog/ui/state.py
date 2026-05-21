@@ -65,6 +65,7 @@ class PageState:
     explorer_tree_open: List[str] = field(default_factory=list)
     cloud_tab: str = "files"
     screen_scroll: Dict[str, int] = field(default_factory=dict)
+    screen_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     auth_db: Optional[UserAuthDB] = None
     current_user: Optional[Dict[str, Any]] = None
     auth_token: str = ""
@@ -84,6 +85,103 @@ class PageState:
     # Cache for _read_index_telemetry() to avoid blocking event loop on every render
     _telemetry_nav_cache: Optional[Dict[str, Any]] = None
     _telemetry_nav_cache_ts: float = 0.0
+
+
+def capture_screen_state(state: PageState, screen: Optional[str] = None) -> Dict[str, Any]:
+    """Persist volatile per-screen state before rebuilding NiceGUI content."""
+    current = screen or state.screen
+    snapshot: Dict[str, Any] = {}
+    if current == "search":
+        snapshot = {
+            "query": state.query,
+            "file_type": state.file_type,
+            "limit": state.limit,
+            "content_only": state.content_only,
+            "title_only": state.title_only,
+            "history": list(state.history),
+            "results": [dict(item) for item in state.results],
+            "search_error": state.search_error,
+            "search_stats_hint": state.search_stats_hint,
+            "search_lazy_loading": state.search_lazy_loading,
+            "searched_query": state.searched_query,
+            "expanded_query": state.expanded_query,
+            "rag_answer_text": state.rag_answer_text,
+            "rag_answer_loading": state.rag_answer_loading,
+            "rag_answer_ok": state.rag_answer_ok,
+            "rag_answer_sources": [dict(item) for item in state.rag_answer_sources],
+            "displayed_count": state.displayed_count,
+            "active_type_filter": state.active_type_filter,
+        }
+    elif current == "explorer":
+        snapshot = {
+            "explorer_path": state.explorer_path,
+            "explorer_filter": state.explorer_filter,
+            "explorer_ext": state.explorer_ext,
+            "explorer_sort": state.explorer_sort,
+            "explorer_desc": state.explorer_desc,
+            "explorer_view": state.explorer_view,
+            "explorer_page": state.explorer_page,
+            "explorer_cd_path": state.explorer_cd_path,
+            "explorer_tree_open": list(state.explorer_tree_open),
+        }
+    elif current == "cloud":
+        snapshot = {"cloud_tab": state.cloud_tab}
+    elif current == "settings":
+        snapshot = {"settings_section": state.settings_section}
+    if snapshot:
+        state.screen_cache[current] = snapshot
+    return snapshot
+
+
+def restore_screen_state(state: PageState, screen: Optional[str] = None) -> bool:
+    """Restore cached state for a screen without replacing the PageState object."""
+    current = screen or state.screen
+    snapshot = state.screen_cache.get(current)
+    if not snapshot:
+        return False
+
+    if current == "search":
+        state.query = str(snapshot.get("query") or "")
+        state.file_type = snapshot.get("file_type") or None
+        state.limit = int(snapshot.get("limit") or 50)
+        state.content_only = bool(snapshot.get("content_only"))
+        state.title_only = bool(snapshot.get("title_only"))
+        state.history = list(snapshot.get("history") or [])
+        state.results = [dict(item) for item in snapshot.get("results") or []]
+        state.search_error = str(snapshot.get("search_error") or "")
+        state.search_stats_hint = str(snapshot.get("search_stats_hint") or "")
+        state.search_lazy_loading = bool(snapshot.get("search_lazy_loading"))
+        state.searched_query = str(snapshot.get("searched_query") or "")
+        state.expanded_query = str(snapshot.get("expanded_query") or "")
+        state.rag_answer_text = str(snapshot.get("rag_answer_text") or "")
+        state.rag_answer_loading = bool(snapshot.get("rag_answer_loading"))
+        state.rag_answer_ok = bool(snapshot.get("rag_answer_ok", True))
+        state.rag_answer_sources = [dict(item) for item in snapshot.get("rag_answer_sources") or []]
+        state.displayed_count = int(snapshot.get("displayed_count") or 10)
+        state.active_type_filter = snapshot.get("active_type_filter") or None
+        return True
+
+    if current == "explorer":
+        state.explorer_path = snapshot.get("explorer_path") or None
+        state.explorer_filter = str(snapshot.get("explorer_filter") or "")
+        state.explorer_ext = str(snapshot.get("explorer_ext") or "Все")
+        state.explorer_sort = str(snapshot.get("explorer_sort") or "По имени")
+        state.explorer_desc = bool(snapshot.get("explorer_desc"))
+        state.explorer_view = str(snapshot.get("explorer_view") or "Таблица")
+        state.explorer_page = int(snapshot.get("explorer_page") or 0)
+        state.explorer_cd_path = str(snapshot.get("explorer_cd_path") or "")
+        state.explorer_tree_open = list(snapshot.get("explorer_tree_open") or [])
+        return True
+
+    if current == "cloud":
+        state.cloud_tab = str(snapshot.get("cloud_tab") or "files")
+        return True
+
+    if current == "settings":
+        state.settings_section = str(snapshot.get("settings_section") or "profile")
+        return True
+
+    return False
 
 
 # ─────────────────────────── config helpers ─────────────────────────────────

@@ -97,37 +97,148 @@ def _render_sync_tab(
     *,
     settings_fn: Optional[Callable[[str], None]] = None,
 ) -> None:
+    username = str((state.current_user or {}).get("username") or "").strip().lower()
+    is_admin = _is_admin(state)
+
     with ui.column().classes("rag-card w-full p-4 gap-3"):
         with ui.row().classes("w-full items-center gap-2"):
             ui.icon("sync", size="22px")
             ui.label("Синхронизация Cloud").classes("text-xl font-semibold")
             ui.space()
-            if settings_fn is not None:
+            if is_admin and settings_fn is not None:
                 ui.button(
                     "Пары синхронизации",
                     icon="tune",
-                    on_click=lambda: settings_fn("cloud_sync" if _is_admin(state) else "cloud_sync_user"),
+                    on_click=lambda: settings_fn("cloud_sync"),
                 ).props("outline dense no-caps")
-        ui.label("Подключённые клиенты, пары папок и конфликты ведутся в общей Cloud-зоне.").classes("rag-meta")
+        ui.label(
+            "Desktop sync-клиент синхронизирует выбранные папки компьютера с Cloud Drive. "
+            "Пользователь видит свои клиенты, папки и конфликты; администратор управляет общей конфигурацией."
+        ).classes("rag-meta")
         if service is None:
             ui.label("Cloud Drive не настроен.").classes("rag-meta")
             return
+
         try:
-            clients = service.list_sync_clients(include_offline=True, limit=8)
+            clients = service.list_sync_clients(
+                username="" if is_admin else username,
+                include_offline=True,
+                limit=20 if is_admin else 8,
+            )
+            pairs = service.list_sync_pairs(username="" if is_admin else username)
+            conflicts = service.list_sync_conflicts(
+                username="" if is_admin else username,
+                status="open",
+                limit=20,
+            )
         except Exception:
             clients = []
+            pairs = []
+            conflicts = []
+
+        connected = any(str(c.get("status") or "") == "online" for c in clients)
+        with ui.row().classes("w-full items-center gap-3 p-3 rag-explorer-item"):
+            ui.icon("sync" if connected else "sync_disabled", size="24px").classes(
+                "text-green-500" if connected else "text-slate-400"
+            )
+            with ui.column().classes("flex-1 min-w-0 gap-0"):
+                ui.label("Sync-клиент подключён" if connected else "Sync-клиент не подключён").classes("font-medium")
+                ui.label(
+                    f"Клиентов: {len(clients)} · папок: {len(pairs)} · открытых конфликтов: {len(conflicts)}"
+                ).classes("rag-meta text-xs")
+            ui.badge("online" if connected else "offline", color="positive" if connected else "grey-4").classes("text-xs")
+
+        async def open_install_dialog() -> None:
+            try:
+                origin = await ui.run_javascript("window.location.origin")
+            except Exception:
+                origin = "http://localhost:8080"
+            command = f"python rag_sync_client.py --server {origin}"
+            base_url = f"{origin}/api/cloud-drive/sync/client-download"
+            with ui.dialog() as dlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
+                ui.label("Установка sync-клиента").classes("text-base font-semibold")
+                ui.label(
+                    "Скачайте установщик и запустите на своём компьютере. "
+                    "При первом запуске клиент откроет браузер для входа."
+                ).classes("rag-meta text-sm")
+                ui.separator()
+                ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
+                with ui.row().classes("gap-3 items-center flex-wrap"):
+                    ui.link("Windows MSI", target=f"{base_url}?format=msi", new_tab=True).classes("rag-path text-sm")
+                    ui.label("·").classes("rag-meta")
+                    ui.link("Windows EXE", target=f"{base_url}?format=exe", new_tab=True).classes("rag-path text-sm")
+                    ui.label("·").classes("rag-meta")
+                    ui.link("Python .py", target=f"{base_url}?format=py", new_tab=True).classes("rag-meta text-sm")
+                ui.label("Шаг 2 — Python-скрипт можно запустить так:").classes("font-semibold text-sm")
+                with ui.row().classes("w-full gap-1 items-center"):
+                    cmd_input = ui.input(value=command).props("readonly dense outlined").classes("flex-1 font-mono text-xs")
+                    ui.button(
+                        icon="content_copy",
+                        on_click=lambda: ui.run_javascript(f"navigator.clipboard.writeText({repr(cmd_input.value)})"),
+                    ).props("flat dense round").tooltip("Копировать")
+                ui.button("Закрыть", on_click=dlg.close).props("flat dense")
+            dlg.open()
+
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Скачать клиент", icon="download", on_click=open_install_dialog).props("outline dense no-caps")
+
         if not clients:
             with ui.element("div").classes("cd-empty-state w-full"):
                 ui.icon("devices", size="28px").classes("opacity-30")
                 ui.label("Синхронизация пока не подключена.").classes("text-center")
-            return
-        with ui.column().classes("w-full gap-2"):
-            for client in clients:
+        else:
+            ui.label("Подключённые клиенты").classes("font-semibold")
+            with ui.column().classes("w-full gap-2"):
+                for client in clients:
+                    status = str(client.get("status") or "offline")
+                    color = "positive" if status == "online" else "warning" if status in {"paused", "error"} else "grey-4"
+                    with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                        ui.icon("computer", size="18px")
+                        with ui.column().classes("flex-1 min-w-0 gap-0"):
+                            ui.label(str(client.get("display_name") or client.get("device_name") or client.get("device_id") or "Устройство")).classes("font-medium truncate")
+                            ui.label(
+                                f"{client.get('username') or username} · {client.get('platform') or 'unknown'} · "
+                                f"last seen: {str(client.get('last_seen_at') or '')[:19].replace('T', ' ')}"
+                            ).classes("rag-meta text-xs truncate")
+                        ui.badge(status, color=color).classes("text-xs")
+
+        ui.separator()
+        ui.label("Папки синхронизации").classes("font-semibold")
+        if not pairs:
+            with ui.element("div").classes("cd-empty-state w-full py-3"):
+                ui.icon("folder_copy", size="24px").classes("opacity-30")
+                ui.label("Нет настроенных папок для синхронизации.").classes("text-center")
+                if is_admin:
+                    ui.label("Создайте пары в административной настройке Sync клиент.").classes("text-center rag-meta text-xs")
+                else:
+                    ui.label("Обратитесь к администратору, чтобы настроить пары папок.").classes("text-center rag-meta text-xs")
+        else:
+            policy_labels = {
+                "ask": "Спрашивать",
+                "cloud_wins": "Cloud Drive",
+                "local_wins": "Локальная",
+                "newest_wins": "Новая",
+            }
+            with ui.column().classes("w-full gap-1"):
+                for pair in pairs:
+                    with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                        ui.icon("folder_copy", size="20px").classes("text-indigo-400")
+                        with ui.column().classes("flex-1 min-w-0 gap-0"):
+                            ui.label(str(pair.get("local_path") or "(не задано)")).classes("text-sm font-medium truncate")
+                            ui.label(f"Cloud Drive: {pair.get('cloud_path') or 'Корень'}").classes("rag-meta text-xs truncate")
+                        policy = str(pair.get("conflict_policy") or "ask")
+                        ui.badge(policy_labels.get(policy, policy), color="grey-4").classes("text-xs")
+                        if not bool(pair.get("enabled", True)):
+                            ui.badge("выключено", color="warning").classes("text-xs")
+
+        if conflicts:
+            ui.separator()
+            ui.label("Открытые конфликты").classes("font-semibold")
+            for conflict in conflicts:
                 with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
-                    ui.icon("computer", size="18px")
-                    with ui.column().classes("flex-1 min-w-0 gap-0"):
-                        ui.label(str(client.get("device_name") or client.get("device_id") or "Устройство")).classes("font-medium truncate")
-                        ui.label(str(client.get("status") or "unknown")).classes("rag-meta text-xs")
+                    ui.icon("merge", size="18px").classes("text-orange-500")
+                    ui.label(str(conflict.get("path") or conflict.get("cloud_path") or "")).classes("text-sm flex-1 truncate")
+                    ui.badge(str(conflict.get("conflict_type") or "conflict"), color="warning").classes("text-xs")
 
 
 def _render_settings_tab(

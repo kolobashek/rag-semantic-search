@@ -1972,7 +1972,6 @@ def render_settings_screen(
     user_sections: List[tuple] = [
         ("profile",         "person",         "Профиль",                  ["имя", "аккаунт", "профиль"]),
         ("telegram_sync",   "sync",           "Telegram-синк",            ["telegram", "бот", "синхронизация", "файлы"]),
-        ("explorer",        "folder_open",    "Проводник",                ["файлы", "вид", "сортировка"]),
         ("favorites",       "star_border",    "Избранное",                ["закладки"]),
         ("saved_searches",  "bookmark",       "Сохранённые запросы",      ["запросы", "поиск", "сохранено"]),
         ("password",        "key",            "Пароль и выход",           ["смена", "выход", "logout"]),
@@ -1994,6 +1993,11 @@ def render_settings_screen(
         "telegram_bot": "Административная конфигурация бота, чаты, токен и системные настройки.",
     }
 
+    hidden_section_keys = {"explorer"}
+    visible_section_keys = {s[0] for s in user_sections + admin_sections}
+    all_section_keys = visible_section_keys | hidden_section_keys
+    if state.settings_section not in all_section_keys:
+        state.settings_section = "profile"
     active = [state.settings_section]  # сохраняем между ре-рендерами
     q_ref  = [""]
 
@@ -2146,99 +2150,6 @@ def render_settings_screen(
                         ui.button("Синхронизировать", icon="link", on_click=bind_tg).props("outline")
                         if linked_tg_id:
                             ui.button("Отвязать", icon="link_off", on_click=unlink_tg).props("flat color=negative")
-
-            elif sec == "cloud_sync_user":
-                with ui.column().classes("rag-card w-full p-4 gap-3"):
-                    ui.label("Cloud Sync").classes("text-xl font-semibold")
-                    ui.label(
-                        "Desktop sync-клиент синхронизирует выбранные папки вашего компьютера "
-                        "с Cloud Drive. Настройте пары папок и политику конфликтов."
-                    ).classes("rag-meta")
-                    cd_enabled2 = bool(state.cfg.get("cloud_drive_enabled"))
-                    if not cd_enabled2:
-                        with ui.element("div").classes("cd-empty-state w-full py-4"):
-                            ui.icon("cloud_off", size="28px").classes("opacity-30")
-                            ui.label("Cloud Drive не включён — обратитесь к администратору.").classes("text-center")
-                    else:
-                        svc = _cd_get_service(state.cfg)
-                        username = str(user.get("username") or "").strip().lower()
-                        clients = svc.list_sync_clients(username=username, limit=20) if svc is not None else []
-                        pairs = svc.list_sync_pairs(username=username) if svc is not None else []
-                        conflicts = svc.list_sync_conflicts(username=username, status="open", limit=20) if svc is not None else []
-                        connected = any(str(c.get("status") or "") == "online" for c in clients)
-                        with ui.row().classes("w-full items-center gap-3 p-3 rag-explorer-item"):
-                            ui.icon("sync" if connected else "sync_disabled", size="24px").classes(
-                                "text-green-500" if connected else "text-slate-400"
-                            )
-                            with ui.column().classes("flex-1 gap-0"):
-                                ui.label("Sync-клиент подключён" if connected else "Sync-клиент не подключён").classes("font-medium")
-                                ui.label(
-                                    f"Клиентов: {len(clients)} · папок: {len(pairs)} · открытых конфликтов: {len(conflicts)}"
-                                ).classes("rag-meta text-xs")
-                            ui.badge("online" if connected else "offline", color="positive" if connected else "grey-4").classes("text-xs")
-
-                        with ui.row().classes("w-full justify-end mt-1"):
-                            async def _open_user_install_dlg() -> None:
-                                try:
-                                    _origin = await ui.run_javascript("window.location.origin")
-                                except Exception:
-                                    _origin = "http://localhost:8080"
-                                _cmd = f"python rag_sync_client.py --server {_origin}"
-                                with ui.dialog() as _udlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
-                                    ui.label("Установка sync-клиента").classes("text-base font-semibold")
-                                    ui.label(
-                                        "Скачайте установщик и запустите на своём компьютере. "
-                                        "При первом запуске откроется браузер для входа — токен не нужен."
-                                    ).classes("rag-meta text-sm")
-                                    ui.separator()
-                                    ui.label("Шаг 1 — скачать").classes("font-semibold text-sm")
-                                    _base_url = f"{_origin}/api/cloud-drive/sync/client-download"
-                                    with ui.row().classes("gap-3 items-center flex-wrap"):
-                                        ui.link("Windows MSI", target=f"{_base_url}?format=msi", new_tab=True).classes("rag-path text-sm")
-                                        ui.label("·").classes("rag-meta")
-                                        ui.link("Windows EXE (установщик)", target=f"{_base_url}?format=exe", new_tab=True).classes("rag-path text-sm")
-                                        ui.label("·").classes("rag-meta")
-                                        ui.link("Python .py (Linux/Mac)", target=f"{_base_url}?format=py", new_tab=True).classes("rag-meta text-sm")
-                                    ui.label(
-                                        "MSI: тихая установка, поддержка групповых политик. "
-                                        "EXE: мастер настройки с полями сервера и токена."
-                                    ).classes("rag-meta text-xs")
-                                    ui.separator()
-                                    ui.label("Python-скрипт: запустить (браузер откроется автоматически)").classes("font-semibold text-sm")
-                                    with ui.row().classes("w-full gap-1 items-center"):
-                                        _run2 = ui.input(value=_cmd).props("readonly dense outlined").classes("flex-1 font-mono text-xs")
-                                        ui.button(icon="content_copy", on_click=lambda: ui.run_javascript(f"navigator.clipboard.writeText({repr(_run2.value)})" )).props("flat dense round").tooltip("Копировать")
-                                    ui.button("Закрыть", on_click=_udlg.close).props("flat dense")
-                                _udlg.open()
-                            ui.button("Скачать клиент", icon="download", on_click=_open_user_install_dlg).props("outline dense").classes("text-indigo-400")
-
-                        ui.separator()
-                        ui.label("Мои папки синхронизации").classes("font-semibold")
-
-                        if not pairs:
-                            with ui.element("div").classes("cd-empty-state w-full py-3"):
-                                ui.icon("folder_copy", size="24px").classes("opacity-30")
-                                ui.label("Нет настроенных папок для синхронизации.").classes("text-center")
-                                ui.label("Добавьте пары папок в Настройках → Sync клиент (доступно администраторам).").classes("text-center rag-meta text-xs")
-                        else:
-                            with ui.column().classes("w-full gap-1"):
-                                for _pair in pairs:
-                                    with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
-                                        ui.icon("folder_copy", size="20px").classes("text-indigo-400")
-                                        with ui.column().classes("flex-1 gap-0"):
-                                            ui.label(str(_pair.get("local_path") or "(не задано)")).classes("text-sm font-medium")
-                                            ui.label(f"→ Cloud Drive: {_pair.get('cloud_path') or 'Корень'}").classes("rag-meta text-xs")
-                                        _pol = str(_pair.get("conflict_policy") or "ask")
-                                        _pol_lbl = {"ask": "Спрашивать", "cloud_wins": "Cloud Drive", "local_wins": "Локальная", "newest_wins": "Новая"}.get(_pol, _pol)
-                                        ui.badge(_pol_lbl, color="grey-4").classes("text-xs")
-                        if conflicts:
-                            ui.separator()
-                            ui.label("Открытые конфликты").classes("font-semibold")
-                            for conflict in conflicts:
-                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-2"):
-                                    ui.icon("merge", size="18px").classes("text-orange-500")
-                                    ui.label(str(conflict.get("path") or conflict.get("cloud_path") or "")).classes("text-sm flex-1 truncate")
-                                    ui.badge(str(conflict.get("conflict_type") or "conflict"), color="warning").classes("text-xs")
 
             elif sec == "explorer":
                 with ui.column().classes("rag-card w-full p-4 gap-3"):
@@ -2396,8 +2307,6 @@ def render_settings_screen(
         render_section()
 
     # ── Инициализация из URL-хэша (поддержка прямых ссылок) ─────────────────
-    _all_section_keys = {s[0] for s in user_sections + admin_sections}
-
     async def _init_from_hash() -> None:
         try:
             raw = await ui.run_javascript(
@@ -2405,7 +2314,7 @@ def render_settings_screen(
                 timeout=3.0,
             )
             key = str(raw or "").strip()
-            if key and key in _all_section_keys and key != active[0]:
+            if key and key in all_section_keys and key != active[0]:
                 navigate(key)
         except Exception:
             pass
