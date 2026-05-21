@@ -389,6 +389,40 @@ def api_cloud_drive_index_coverage(sample_limit: int = 25, authorization: AuthHe
     )
 
 
+@app.post("/api/cloud-drive/index-coverage/repair")
+def api_cloud_drive_index_coverage_repair(
+    scopes: str = "missing,stale,error",
+    limit: int = 100,
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    index_state_path = Path(str(cfg.get("qdrant_db_path") or "")) / "index_state.db"
+    try:
+        result = service.enqueue_index_coverage_repair(
+            index_state_db_path=str(index_state_path),
+            scopes=scopes,
+            limit=limit,
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "index_coverage_repair",
+            ok=False,
+            details={"scopes": scopes, "limit": limit, "error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "index_coverage_repair",
+        details={"scopes": scopes, "limit": limit, "queued": result.get("queued")},
+    )
+    return result
+
+
 @app.get("/api/cloud-drive/node")
 def api_cloud_drive_node(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()

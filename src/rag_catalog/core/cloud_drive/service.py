@@ -229,31 +229,7 @@ class CloudDriveService:
         files = self.registry.list_active_file_index_records()
         sample_size = max(1, min(int(sample_limit or 25), 500))
         index_path = Path(str(index_state_db_path or "")).expanduser()
-        indexed_by_file: dict[str, list[dict[str, Any]]] = {}
-        indexed_by_path: dict[str, dict[str, Any]] = {}
-        index_available = index_path.is_file()
-        if index_available:
-            try:
-                with sqlite3.connect(str(index_path)) as conn:
-                    conn.row_factory = sqlite3.Row
-                    rows = conn.execute(
-                        """
-                        SELECT full_path, cloud_file_id, cloud_version_id, cloud_path,
-                               indexed_stage, status, last_error, updated_at
-                        FROM state_entries
-                        """
-                    ).fetchall()
-                for row in rows:
-                    row_dict = dict(row)
-                    full_path_key = self._index_coverage_path_key(str(row["full_path"] or ""))
-                    if full_path_key and full_path_key not in indexed_by_path:
-                        indexed_by_path[full_path_key] = row_dict
-                    file_id = str(row["cloud_file_id"] or "")
-                    if not file_id:
-                        continue
-                    indexed_by_file.setdefault(file_id, []).append(row_dict)
-            except sqlite3.Error:
-                index_available = False
+        index_available, indexed_by_file, indexed_by_path = self._load_index_coverage_state(index_path)
 
         missing: list[dict[str, Any]] = []
         stale: list[dict[str, Any]] = []
@@ -269,33 +245,25 @@ class CloudDriveService:
             is_indexable = self._is_indexable_registry_file(file_row)
             if is_indexable:
                 indexable_total += 1
-            file_id = str(file_row.get("id") or "")
-            current_version = str(file_row.get("current_version_id") or "")
-            rows = indexed_by_file.get(file_id) or []
-            current_rows = [
-                row for row in rows
-                if str(row.get("cloud_version_id") or "") == current_version
-            ]
-            best = current_rows[0] if current_rows else (rows[0] if rows else None)
-            legacy_path_match = False
-            if best is None:
-                source_key = self._index_coverage_path_key(str(file_row.get("source_path") or ""))
-                best = indexed_by_path.get(source_key) if source_key else None
-                legacy_path_match = best is not None
-            if best is None:
+            reason, best, legacy_path_match = self._classify_index_coverage_file(
+                file_row,
+                indexed_by_file=indexed_by_file,
+                indexed_by_path=indexed_by_path,
+            )
+            if reason == "missing":
                 missing.append(file_row)
                 if is_indexable:
                     indexable_missing.append(file_row)
                 else:
                     unsupported_missing.append(file_row)
                 continue
-            if str(best.get("status") or "") == "error":
+            if reason == "error":
                 error_row = {**file_row, "last_error": str(best.get("last_error") or "")}
                 errored.append(error_row)
                 if is_indexable:
                     indexable_errored.append(error_row)
                 continue
-            if not current_rows and not legacy_path_match:
+            if reason == "stale":
                 stale_row = {
                     **file_row,
                     "indexed_version_id": str(best.get("cloud_version_id") or ""),
@@ -345,6 +313,131 @@ class CloudDriveService:
             "stale_examples": stale[:sample_size],
             "error_examples": errored[:sample_size],
         }
+
+    def enqueue_index_coverage_repair(
+        self,
+        *,
+        index_state_db_path: str,
+        scopes: str | list[str] = "missing,stale,error",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        requested = {
+            str(item or "").strip().lower()
+            for item in (scopes.split(",") if isinstance(scopes, str) else scopes)
+            if str(item or "").strip()
+        }
+        allowed = {"missing", "stale", "error"}
+        clean_scopes = requested & allowed
+        if not clean_scopes:
+            raise RuntimeError(f"Не задан scope repair. Допустимо: {', '.join(sorted(allowed))}")
+        clean_limit = max(1, min(int(limit or 100), 1000))
+        index_path = Path(str(index_state_db_path or "")).expanduser()
+        index_available, indexed_by_file, indexed_by_path = self._load_index_coverage_state(index_path)
+        if not index_available:
+            raise RuntimeError(f"Index state DB недоступна: {index_path}")
+
+        candidates: list[tuple[dict[str, Any], str]] = []
+        for file_row in self.registry.list_active_file_index_records():
+            if not self._is_indexable_registry_file(file_row):
+                continue
+            reason, _best, _legacy_path_match = self._classify_index_coverage_file(
+                file_row,
+                indexed_by_file=indexed_by_file,
+                indexed_by_path=indexed_by_path,
+            )
+            if reason in clean_scopes:
+                candidates.append((file_row, reason))
+            if len(candidates) >= clean_limit:
+                break
+
+        latest_jobs = self.registry.list_latest_jobs_for_files(
+            [str(row.get("id") or "") for row, _reason in candidates],
+            job_types=["reindex"],
+        )
+        queued: list[dict[str, str]] = []
+        skipped_existing = 0
+        skipped_missing_file = 0
+        for file_row, reason in candidates:
+            file_id = str(file_row.get("id") or "")
+            latest = latest_jobs.get(file_id)
+            if latest is not None and latest.status in {"pending", "running"}:
+                skipped_existing += 1
+                continue
+            registry_file = self.registry.get_file_by_id(file_id)
+            if registry_file is None:
+                skipped_missing_file += 1
+                continue
+            job = self._queue_reindex_file(registry_file, reason=f"coverage_{reason}")
+            queued.append({"job_id": job.id, "file_id": file_id, "path": registry_file.path, "reason": reason})
+
+        return {
+            "ok": True,
+            "index_state_db_path": str(index_path),
+            "scopes": sorted(clean_scopes),
+            "limit": clean_limit,
+            "candidates": len(candidates),
+            "queued": len(queued),
+            "skipped_existing": skipped_existing,
+            "skipped_missing_file": skipped_missing_file,
+            "jobs": queued,
+        }
+
+    @staticmethod
+    def _classify_index_coverage_file(
+        file_row: dict[str, Any],
+        *,
+        indexed_by_file: dict[str, list[dict[str, Any]]],
+        indexed_by_path: dict[str, dict[str, Any]],
+    ) -> tuple[str, dict[str, Any], bool]:
+        file_id = str(file_row.get("id") or "")
+        current_version = str(file_row.get("current_version_id") or "")
+        rows = indexed_by_file.get(file_id) or []
+        current_rows = [
+            row for row in rows
+            if str(row.get("cloud_version_id") or "") == current_version
+        ]
+        best = current_rows[0] if current_rows else (rows[0] if rows else None)
+        legacy_path_match = False
+        if best is None:
+            source_key = CloudDriveService._index_coverage_path_key(str(file_row.get("source_path") or ""))
+            best = indexed_by_path.get(source_key) if source_key else None
+            legacy_path_match = best is not None
+        if best is None:
+            return "missing", {}, False
+        if str(best.get("status") or "") == "error":
+            return "error", best, legacy_path_match
+        if not current_rows and not legacy_path_match:
+            return "stale", best, legacy_path_match
+        return "current", best, legacy_path_match
+
+    @staticmethod
+    def _load_index_coverage_state(index_path: Path) -> tuple[bool, dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+        indexed_by_file: dict[str, list[dict[str, Any]]] = {}
+        indexed_by_path: dict[str, dict[str, Any]] = {}
+        index_available = index_path.is_file()
+        if index_available:
+            try:
+                with sqlite3.connect(str(index_path)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        """
+                        SELECT full_path, cloud_file_id, cloud_version_id, cloud_path,
+                               indexed_stage, status, last_error, updated_at
+                        FROM state_entries
+                        """
+                    ).fetchall()
+                for row in rows:
+                    row_dict = dict(row)
+                    full_path_key = CloudDriveService._index_coverage_path_key(str(row["full_path"] or ""))
+                    if full_path_key and full_path_key not in indexed_by_path:
+                        indexed_by_path[full_path_key] = row_dict
+                    file_id = str(row["cloud_file_id"] or "")
+                    if not file_id:
+                        continue
+                    indexed_by_file.setdefault(file_id, []).append(row_dict)
+            except sqlite3.Error:
+                index_available = False
+        return index_available, indexed_by_file, indexed_by_path
 
     @staticmethod
     def _is_indexable_registry_file(file_row: dict[str, Any]) -> bool:

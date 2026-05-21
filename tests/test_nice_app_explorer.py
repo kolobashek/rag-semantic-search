@@ -24,6 +24,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_download,
     api_cloud_drive_file_statuses,
     api_cloud_drive_index_coverage,
+    api_cloud_drive_index_coverage_repair,
     api_cloud_drive_job,
     api_cloud_drive_job_latest,
     api_cloud_drive_job_retry,
@@ -1369,6 +1370,44 @@ def test_cloud_drive_index_coverage_endpoint(monkeypatch, tmp_path) -> None:
     assert coverage["ok"] is True
     assert coverage["registry_files"] == 1
     assert coverage["indexed_current"] == 1
+
+
+def test_cloud_drive_index_coverage_repair_endpoint(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "qdrant_db_path": str(tmp_path / "qdrant"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    file_row = service.registry.upsert_file(
+        folder_id=root.id,
+        path="report.txt",
+        name="report.txt",
+        storage_key="objects/sha256/aa/bb/aabb.txt",
+        mime_type="text/plain",
+        size_bytes=12,
+        checksum="aabb",
+        source_path="",
+    )
+    state_dir = tmp_path / "qdrant"
+    state_dir.mkdir()
+    IndexStateDB(str(state_dir / "index_state.db"))
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+
+    result = api_cloud_drive_index_coverage_repair(scopes="missing", limit=10)
+
+    assert result["queued"] == 1
+    job = service.registry.get_latest_job(job_type="reindex")
+    assert job is not None
+    assert job.file_id == file_row.id
+    assert job.payload["reason"] == "coverage_missing"
 
 
 def test_cloud_drive_recover_stale_jobs_endpoint(monkeypatch, tmp_path) -> None:

@@ -361,3 +361,98 @@ def test_cloud_drive_index_coverage_accepts_legacy_source_path_entries(tmp_path:
     assert coverage["indexable_registry_files"] == 1
     assert coverage["indexable_indexed_current"] == 1
     assert coverage["missing"] == 0
+
+
+def test_cloud_drive_index_coverage_repair_queues_indexable_gaps(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    root = registry.ensure_root_folder(root_name="Обмен", source_path="")
+    stale = registry.upsert_file(
+        folder_id=root.id,
+        path="stale.txt",
+        name="stale.txt",
+        storage_key="objects/sha256/aa/aa/stale.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="aaaa",
+        source_path="",
+    )
+    failed = registry.upsert_file(
+        folder_id=root.id,
+        path="failed.txt",
+        name="failed.txt",
+        storage_key="objects/sha256/bb/bb/failed.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="bbbb",
+        source_path="",
+    )
+    registry.upsert_file(
+        folder_id=root.id,
+        path="missing.txt",
+        name="missing.txt",
+        storage_key="objects/sha256/cc/cc/missing.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="cccc",
+        source_path="",
+    )
+    registry.upsert_file(
+        folder_id=root.id,
+        path="ignored.dll",
+        name="ignored.dll",
+        storage_key="objects/sha256/dd/dd/ignored.dll",
+        mime_type="application/octet-stream",
+        size_bytes=1,
+        checksum="dddd",
+        source_path="",
+    )
+    registry.queue_job(
+        job_type="reindex",
+        status="pending",
+        file_id=stale.id,
+        version_id=stale.current_version_id,
+        payload={"path": stale.path, "reason": "existing"},
+    )
+    state_db_path = tmp_path / "index_state.db"
+    state_db = IndexStateDB(str(state_db_path))
+    state_db.upsert_many(
+        [
+            {
+                "full_path": "cloud:stale",
+                "stage": "content",
+                "cloud_file_id": stale.id,
+                "cloud_version_id": "old-version",
+                "cloud_path": stale.path,
+                "status": "ok",
+            },
+            {
+                "full_path": "cloud:failed",
+                "stage": "content",
+                "cloud_file_id": failed.id,
+                "cloud_version_id": failed.current_version_id,
+                "cloud_path": failed.path,
+                "status": "error",
+                "last_error": "boom",
+            },
+        ]
+    )
+
+    result = service.enqueue_index_coverage_repair(
+        index_state_db_path=str(state_db_path),
+        scopes="missing,stale,error",
+        limit=10,
+    )
+
+    assert result["candidates"] == 3
+    assert result["queued"] == 2
+    assert result["skipped_existing"] == 1
+    jobs = registry.list_pending_jobs(job_types=["reindex"], limit=10)
+    queued_paths = {str(job.payload.get("path") or "") for job in jobs}
+    assert {"missing.txt", "failed.txt", "stale.txt"} == queued_paths
+    repair_reasons = {
+        str(job.payload.get("reason") or "")
+        for job in jobs
+        if str(job.payload.get("path") or "") in {"missing.txt", "failed.txt"}
+    }
+    assert repair_reasons == {"coverage_missing", "coverage_error"}
