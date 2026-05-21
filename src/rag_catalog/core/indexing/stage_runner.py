@@ -443,7 +443,8 @@ class IndexStageRunner:
                     elapsed, size_mb, relative_path.name,
                 )
 
-            chunks = indexer._chunk_text(full_text) if full_text.strip() else []
+            chunk_items = indexer._chunk_text_with_provenance(full_text) if full_text.strip() else []
+            chunks = [str(item.get("text") or "") for item in chunk_items]
             content_hash = indexer._content_hash(full_text)
             duplicate_of = ""
             if content_hash and hasattr(indexer, "state_db"):
@@ -511,7 +512,8 @@ class IndexStageRunner:
             meta_payload.update(base_provenance)
             doc_id = str(base_provenance["doc_id"])
             content_payloads = []
-            for idx, chunk in enumerate(chunks):
+            for idx, item in enumerate(chunk_items):
+                chunk = str(item.get("text") or "")
                 clean_chunk = indexer._strip_provenance_markers(chunk) or chunk
                 content_payloads.append(
                     {
@@ -528,7 +530,12 @@ class IndexStageRunner:
                     "duplicate_of": duplicate_of,
                     **doc_meta,
                     **base_provenance,
-                    **indexer._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
+                    **indexer._chunk_provenance(
+                        chunk=chunk,
+                        chunk_index=idx,
+                        doc_id=doc_id,
+                        block=item.get("block"),
+                    ),
                     }
                 )
             return {
