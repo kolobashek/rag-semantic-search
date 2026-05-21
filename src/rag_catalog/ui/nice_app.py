@@ -32,6 +32,7 @@ from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
     OFFICE_PREVIEW_EXTENSIONS,
+    _apply_query_operators,
     _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
@@ -49,7 +50,6 @@ from .helpers import (
     _load_user_state,
     _merge_search_results,
     _my_recent_queries,
-    _apply_query_operators,
     _open_os_path,
     _parse_search_query,
     _popular_queries,
@@ -71,9 +71,6 @@ from .helpers import (
 )
 from .state import (
     PageState,
-    capture_screen_state,
-    restore_screen_state,
-    should_rebuild_screen_container,
     _get_auth_db,
     _get_telemetry,
     _is_saved_search,
@@ -81,6 +78,9 @@ from .state import (
     _refresh_current_user,
     _toggle_saved_search,
     _username,
+    capture_screen_state,
+    restore_screen_state,
+    should_rebuild_screen_container,
 )
 from .system import (
     _recover_cloud_drive_jobs,

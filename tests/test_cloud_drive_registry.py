@@ -34,7 +34,7 @@ def test_registry_root_folder_and_stats(tmp_path: Path) -> None:
     assert root.is_root is True
 
 
-def test_registry_permissions_inherit_from_folder_and_preserve_open_default(tmp_path: Path) -> None:
+def test_registry_user_permissions_close_open_default_for_regular_users(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')
     folder = registry.upsert_folder(path='Projects/A', name='A', parent_id=root.id, depth=2)

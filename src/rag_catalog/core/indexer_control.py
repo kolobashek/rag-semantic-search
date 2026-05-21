@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-
 INDEXER_CONTROL_FILENAME = "indexer_control.json"
 ALLOWED_COMMANDS = ("running", "pause", "cancel")
 

@@ -20,6 +20,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 from nicegui import run, ui
 
+from rag_catalog.core.extractors.ocr_rapid import gpu_ocr_available as _gpu_ocr_available
+
 from .helpers import (
     _CADENCE_LABELS,
     _DAY_LABELS,
@@ -40,8 +42,6 @@ from .state import (
     _get_telemetry,
     _log_app_event,
 )
-from rag_catalog.core.extractors.ocr_rapid import gpu_ocr_available as _gpu_ocr_available
-
 from .system import (
     _STAGE_LABELS,
     _find_live_running_index_run,
@@ -108,11 +108,6 @@ def render_index_screen(
         render_metric("Средняя длительность", _format_duration_seconds(overall.get("avg_duration_sec")), "timer")
 
     # ── Pipeline: запуск, прогресс и OCR ─────────────────────────────
-    workers_now = int(settings.get("workers") or state.cfg.get("index_read_workers") or 4)
-    chunks_now = int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000)
-    skip_ocr_now = bool(settings.get("skip_inline_ocr"))
-    ocr_engine_now = str(settings.get("ocr_engine") or state.cfg.get("ocr_engine") or "tesseract")
-    ocr_min_len_now = int(settings.get("ocr_min_text_len") or 50)
     def _set_phase_running(key: str, running: bool) -> None:
         refs = _phase_refs.get(key)
         if refs is None:

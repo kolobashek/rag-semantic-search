@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from rag_catalog.core.cloud_drive_db import (
-    CloudDriveConfig,
-    CloudDriveDB,
-    CloudDriveStats,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_RUNNING,
+    CloudDriveConfig,
+    CloudDriveDB,
+    CloudDriveStats,
 )
 
 

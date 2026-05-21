@@ -767,7 +767,6 @@ def _format_single_result(result: Dict[str, Any], *, index: int) -> str:
     lines = [f"📄 {title}"]
     if path:
         lines.append(path)
-    meta: List[str] = []
     if size_mb:
         lines.append(f"{float(size_mb):.1f} МБ" + (f"  •  {modified}" if modified else ""))
     elif modified:

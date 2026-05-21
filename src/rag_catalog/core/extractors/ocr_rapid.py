@@ -53,8 +53,6 @@ def _patch_ort_infer_session_for_dml() -> bool:
     available = get_available_providers()
     dml_available = "DmlExecutionProvider" in available
 
-    original_init = OrtInferSession.__init__
-
     def _patched_init(self: Any, config: Any) -> None:
         sess_opt = SessionOptions()
         sess_opt.log_severity_level = 4

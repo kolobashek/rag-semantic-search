@@ -1249,7 +1249,7 @@ def render_settings_screen(
                 elapsed = (now - last).total_seconds() / 60
                 remaining = max(0, interval_min - elapsed)
                 if remaining < 1:
-                    autosync_status_label.set_text(f"Автосинхронизация: выполняется или запускается")
+                    autosync_status_label.set_text("Автосинхронизация: выполняется или запускается")
                 else:
                     next_in = int(remaining) + 1
                     last_str = last.strftime(chr(37) + chr(72) + chr(58) + chr(37) + chr(77))

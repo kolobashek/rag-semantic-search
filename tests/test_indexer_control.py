@@ -1,7 +1,6 @@
 """Тесты кооперативного контроля индексатора (pause/cancel через JSON)."""
 from __future__ import annotations
 
-import json
 import threading
 import time
 from pathlib import Path

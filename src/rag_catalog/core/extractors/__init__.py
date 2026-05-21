@@ -1,9 +1,10 @@
 """File text extractors used by indexing pipelines."""
 
+from .contract import ExtractedDocument, TextBlock, blocks_from_legacy_text, document_from_legacy_text
 from .files import (
-    extract_doc_meta,
     extract_csv,
     extract_doc,
+    extract_doc_meta,
     extract_docx,
     extract_image,
     extract_pdf,
@@ -20,7 +21,6 @@ from .files import (
     extract_xlsx_document,
     ocr_pdf,
 )
-from .contract import ExtractedDocument, TextBlock, blocks_from_legacy_text, document_from_legacy_text
 
 __all__ = [
     "ExtractedDocument",

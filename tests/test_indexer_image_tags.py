@@ -19,13 +19,13 @@ import pytest
 # Убеждаемся что src в sys.path (pytest.ini: pythonpath = ["src"])
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from rag_catalog.core.extractors import TextBlock, blocks_from_legacy_text
 from rag_catalog.core.index_rag import (
     IMAGE_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     _file_category,
     _generate_tags,
 )
-from rag_catalog.core.extractors import TextBlock, blocks_from_legacy_text
 
 # ═══════════════════════════ _generate_tags ════════════════════════════════════
 

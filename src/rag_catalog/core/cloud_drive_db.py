@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
-
 # ── Schema ───────────────────────────────────────────────────────────────────
 
 _DDL = """

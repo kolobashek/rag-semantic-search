@@ -7,9 +7,9 @@ and log the concrete failure.
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
-import csv
 import re
 import shutil
 import subprocess
@@ -23,8 +23,9 @@ from zipfile import ZipFile
 from docx import Document
 from openpyxl import load_workbook
 
-from .contract import ExtractedDocument, TextBlock, document_from_legacy_text
 from rag_catalog.core.ocr_runtime import apply_tesseract_runtime
+
+from .contract import ExtractedDocument, TextBlock, document_from_legacy_text
 
 logger = logging.getLogger(__name__)
 

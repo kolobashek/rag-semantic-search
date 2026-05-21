@@ -20,7 +20,7 @@ from .helpers import (
     _format_relative_time,
 )
 from .state import PageState, _log_app_event
-from .system import _telemetry_db_path, _safe_int, _stop_managed_timer
+from .system import _safe_int, _stop_managed_timer, _telemetry_db_path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 

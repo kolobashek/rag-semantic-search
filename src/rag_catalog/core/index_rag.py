@@ -36,9 +36,9 @@ from .extractors import (
     ExtractedDocument,
     TextBlock,
     blocks_from_legacy_text,
-    extract_doc_meta,
     extract_csv,
     extract_doc,
+    extract_doc_meta,
     extract_docx,
     extract_image,
     extract_pdf,
@@ -79,9 +79,25 @@ logger = logging.getLogger(__name__)
 
 # Поддерживаемые расширения
 SUPPORTED_EXTENSIONS = {
-    ".doc", ".docx", ".xlsx", ".xls", ".pdf", ".pptx", ".rtf", ".txt", ".csv", ".zip",
+    ".doc",
+    ".docx",
+    ".xlsx",
+    ".xls",
+    ".pdf",
+    ".pptx",
+    ".rtf",
+    ".txt",
+    ".csv",
+    ".zip",
     # Изображения — OCR если есть текст
-    ".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".webp",
 }
 
 # Расширения изображений (подмножество SUPPORTED_EXTENSIONS)
@@ -127,10 +143,40 @@ DEFAULT_SYNONYM_MAP: Dict[str, List[str]] = _load_default_synonym_map()
 
 # Стоп-слова для тегов (не добавляем в список тегов)
 _TAG_STOPWORDS: Set[str] = {
-    "и", "в", "на", "по", "с", "для", "из", "от", "до", "при",
-    "или", "но", "а", "не", "что", "как", "так", "к", "о", "за",
-    "the", "and", "or", "for", "of", "to", "in", "is", "a",
-    "файл", "папка", "документ", "doc", "file",
+    "и",
+    "в",
+    "на",
+    "по",
+    "с",
+    "для",
+    "из",
+    "от",
+    "до",
+    "при",
+    "или",
+    "но",
+    "а",
+    "не",
+    "что",
+    "как",
+    "так",
+    "к",
+    "о",
+    "за",
+    "the",
+    "and",
+    "or",
+    "for",
+    "of",
+    "to",
+    "in",
+    "is",
+    "a",
+    "файл",
+    "папка",
+    "документ",
+    "doc",
+    "file",
 }
 
 # ─────────────────────────── этапы индексирования ─────────────────────────────
@@ -267,30 +313,30 @@ def _generate_tags(
     # ── 5. Детектируем тип документа по имени ────────────────────────
     name_lower = filepath.name.lower()
     DOC_TYPE_MAP = {
-        "акт":        "акт",
-        "договор":    "договор",
-        "счёт":       "счёт",
-        "счет":       "счёт",
-        "накладная":  "накладная",
-        "паспорт":    "паспорт",
-        "псм":        "паспорт самоходной машины",
-        "птс":        "паспорт транспортного средства",
+        "акт": "акт",
+        "договор": "договор",
+        "счёт": "счёт",
+        "счет": "счёт",
+        "накладная": "накладная",
+        "паспорт": "паспорт",
+        "псм": "паспорт самоходной машины",
+        "птс": "паспорт транспортного средства",
         "техпаспорт": "технический паспорт",
         "спецификация": "спецификация",
         "инструкция": "инструкция",
-        "отчёт":      "отчёт",
-        "отчет":      "отчёт",
-        "протокол":   "протокол",
-        "приказ":     "приказ",
-        "заявка":     "заявка",
+        "отчёт": "отчёт",
+        "отчет": "отчёт",
+        "протокол": "протокол",
+        "приказ": "приказ",
+        "заявка": "заявка",
         "сертификат": "сертификат",
-        "лицензия":   "лицензия",
-        "страховой":  "страховой полис",
-        "полис":      "страховой полис",
-        "фото":       "фотография",
-        "photo":      "фотография",
-        "скан":       "скан документа",
-        "scan":       "скан документа",
+        "лицензия": "лицензия",
+        "страховой": "страховой полис",
+        "полис": "страховой полис",
+        "фото": "фотография",
+        "photo": "фотография",
+        "скан": "скан документа",
+        "scan": "скан документа",
     }
     for key, label in DOC_TYPE_MAP.items():
         if key in name_lower:
@@ -303,6 +349,7 @@ def _generate_tags(
 
 
 # ═══════════════════════════ RAGIndexer ════════════════════════════════
+
 
 class RAGIndexer:
     """
@@ -356,11 +403,14 @@ class RAGIndexer:
         self.catalog_path = Path(catalog_path)
         if not self.catalog_path.exists():
             import time as _time
+
             wait_seconds = max(1, int(catalog_wait_seconds or 60))
             attempts = max(0, int(catalog_wait_attempts if catalog_wait_attempts is not None else 10))
             logger.warning(
                 "Папка каталога недоступна: %s — жду появления (%d попыток, каждые %ds)…",
-                catalog_path, attempts, wait_seconds,
+                catalog_path,
+                attempts,
+                wait_seconds,
             )
             for attempt in range(1, attempts + 1):
                 _time.sleep(wait_seconds)
@@ -386,12 +436,8 @@ class RAGIndexer:
         self.qdrant_timeout_sec = max(5, int(qdrant_timeout_sec or 60))
         self.exclude_patterns = self._normalize_exclude_patterns(exclude_patterns or [])
         self.ocr_max_image_pages = max(1, int(ocr_max_image_pages or MAX_IMAGE_PAGES))
-        self.small_office_mb = float(
-            DEFAULT_SMALL_OFFICE_MB if small_office_mb is None else small_office_mb
-        )
-        self.small_pdf_mb = float(
-            DEFAULT_SMALL_PDF_MB if small_pdf_mb is None else small_pdf_mb
-        )
+        self.small_office_mb = float(DEFAULT_SMALL_OFFICE_MB if small_office_mb is None else small_office_mb)
+        self.small_pdf_mb = float(DEFAULT_SMALL_PDF_MB if small_pdf_mb is None else small_pdf_mb)
         # Таблица синонимов для генерации тегов (дополняет DEFAULT_SYNONYM_MAP)
         self.synonym_map: Dict[str, List[str]] = synonym_map or {}
         self.ocr_tesseract_cmd = str(ocr_tesseract_cmd or "").strip()
@@ -428,8 +474,7 @@ class RAGIndexer:
         # Расширения, для которых индексируется только метадата (без чтения содержимого).
         # Полезно для быстрого первого прохода по скан-PDF: имя/путь/размер — за секунды.
         self.metadata_only_extensions = {
-            e.lower() if e.startswith(".") else f".{e.lower()}"
-            for e in (metadata_only_extensions or set())
+            e.lower() if e.startswith(".") else f".{e.lower()}" for e in (metadata_only_extensions or set())
         }
         telemetry_path = telemetry_db_path.strip() if telemetry_db_path else ""
         if not telemetry_path:
@@ -441,7 +486,8 @@ class RAGIndexer:
 
         if embedding_model.startswith("ollama:"):
             from .llm import OllamaEmbedder  # noqa: PLC0415
-            ollama_model_name = embedding_model[len("ollama:"):]
+
+            ollama_model_name = embedding_model[len("ollama:") :]
             logger.info("Загрузка OllamaEmbedder: %s (%s)", ollama_model_name, ollama_url)
             self.embedder = OllamaEmbedder(model=ollama_model_name, ollama_url=ollama_url)
         elif use_onnx:
@@ -728,8 +774,11 @@ class RAGIndexer:
                 pages = 1
             chars = len(text.strip())
             self.telemetry.save_ocr_file_result(
-                str(filepath), mtime,
-                text=text, pages=pages, chars=chars,
+                str(filepath),
+                mtime,
+                text=text,
+                pages=pages,
+                chars=chars,
                 status="ok" if chars > 0 else "empty",
             )
         except Exception:
@@ -763,8 +812,11 @@ class RAGIndexer:
             mtime = float(filepath.stat().st_mtime)
             chars = len(text.strip())
             self.telemetry.save_ocr_file_result(
-                str(filepath), mtime,
-                text=text, pages=1 if chars > 0 else 0, chars=chars,
+                str(filepath),
+                mtime,
+                text=text,
+                pages=1 if chars > 0 else 0,
+                chars=chars,
                 status="ok" if chars > 0 else "empty",
             )
         except Exception:
@@ -846,7 +898,11 @@ class RAGIndexer:
         block: Optional[TextBlock] = None,
     ) -> Dict[str, Any]:
         page = block.page if block and block.page is not None else self._extract_marker_int(chunk, r"Страница:\s*(\d+)")
-        row = block.row_start if block and block.row_start is not None else self._extract_marker_int(chunk, r"Строка:\s*(\d+)")
+        row = (
+            block.row_start
+            if block and block.row_start is not None
+            else self._extract_marker_int(chunk, r"Строка:\s*(\d+)")
+        )
         sheet = block.sheet if block and block.sheet else self._extract_marker_text(chunk, r"Лист:\s*([^\n\r]+)")
         slide = block.slide if block and block.slide is not None else None
         section = self._extract_section_title(chunk)
@@ -1010,7 +1066,9 @@ class RAGIndexer:
             state_key=file_key,
             payload_extra=payload_extra,
         )
-        payload_schema_version = int(getattr(self, "payload_schema_version", PAYLOAD_SCHEMA_VERSION) or PAYLOAD_SCHEMA_VERSION)
+        payload_schema_version = int(
+            getattr(self, "payload_schema_version", PAYLOAD_SCHEMA_VERSION) or PAYLOAD_SCHEMA_VERSION
+        )
         meta_payload: Dict[str, Any] = {
             "type": "file_metadata",
             "payload_schema_version": payload_schema_version,
@@ -1072,10 +1130,7 @@ class RAGIndexer:
             batch_size=max(1, min(256, int(self.batch_size or 64))),
             show_progress_bar=False,
         )
-        points = [
-            PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=p)
-            for v, p in zip(vectors, payloads)
-        ]
+        points = [PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=p) for v, p in zip(vectors, payloads)]
         written = upsert_points(
             self.qdrant,
             collection_name=self.collection_name,
@@ -1143,7 +1198,14 @@ class RAGIndexer:
             self.point_count = 0
             stage_stats = self.index_directory(stage=stage)
             totals["total_files"] = max(totals["total_files"], int(stage_stats.get("total_files", 0)))
-            for k in ("processed_files", "added_files", "updated_files", "skipped_files", "error_files", "points_added"):
+            for k in (
+                "processed_files",
+                "added_files",
+                "updated_files",
+                "skipped_files",
+                "error_files",
+                "points_added",
+            ):
                 totals[k] += int(stage_stats.get(k, 0))
         logger.info("✔ Все этапы завершены: %s", ", ".join(stages))
         return totals
@@ -1331,6 +1393,7 @@ class RAGIndexer:
 
 # ─────────────────────────── CLI entry point ───────────────────────────
 
+
 def main() -> None:
     cfg = load_config()
 
@@ -1360,42 +1423,74 @@ def main() -> None:
     )
     parser.add_argument("--catalog", default=cfg["catalog_path"], help="Папка для индексирования")
     parser.add_argument("--db", default=cfg["qdrant_db_path"], help="Путь к локальной базе Qdrant (SQLite режим)")
-    parser.add_argument("--url", default="", dest="qdrant_url",
-                        help="URL Qdrant-сервера (например http://localhost:6333). Если указан — используется вместо --db")
+    parser.add_argument(
+        "--url",
+        default="",
+        dest="qdrant_url",
+        help="URL Qdrant-сервера (например http://localhost:6333). Если указан — используется вместо --db",
+    )
     parser.add_argument("--model", default=cfg["embedding_model"], help="Модель эмбеддинга")
     parser.add_argument("--collection", default=cfg["collection_name"], help="Имя коллекции")
     parser.add_argument("--recreate", action="store_true", help="Пересоздать коллекцию и очистить state")
-    parser.add_argument("--ocr-engine", default=str(cfg.get("ocr_engine") or "tesseract"),
-                        dest="ocr_engine", choices=("tesseract", "rapidocr"),
-                        help="OCR движок: tesseract (CPU, по умолчанию) или rapidocr (GPU/DirectML)")
-    parser.add_argument("--no-ocr", action="store_true", dest="no_ocr",
-                        help="Пропускать OCR для сканированных PDF (быстрее, текст не извлекается)")
-    parser.add_argument("--max-chunks", type=int, default=int(cfg.get("index_max_chunks", 2000)), dest="max_chunks",
-                        help="Максимум чанков с одного файла (по умолчанию 2000; 0 = без ограничений)")
-    parser.add_argument("--workers", type=int, default=int(cfg.get("index_read_workers", 4)), dest="workers",
-                        help="Число параллельных потоков для чтения файлов (по умолчанию 4)")
-    parser.add_argument("--onnx", action="store_true", dest="use_onnx",
-                        help="Использовать ONNX Runtime для encode (быстрее, но может не работать на Python 3.14)")
+    parser.add_argument(
+        "--ocr-engine",
+        default=str(cfg.get("ocr_engine") or "tesseract"),
+        dest="ocr_engine",
+        choices=("tesseract", "rapidocr"),
+        help="OCR движок: tesseract (CPU, по умолчанию) или rapidocr (GPU/DirectML)",
+    )
+    parser.add_argument(
+        "--no-ocr",
+        action="store_true",
+        dest="no_ocr",
+        help="Пропускать OCR для сканированных PDF (быстрее, текст не извлекается)",
+    )
+    parser.add_argument(
+        "--max-chunks",
+        type=int,
+        default=int(cfg.get("index_max_chunks", 2000)),
+        dest="max_chunks",
+        help="Максимум чанков с одного файла (по умолчанию 2000; 0 = без ограничений)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(cfg.get("index_read_workers", 4)),
+        dest="workers",
+        help="Число параллельных потоков для чтения файлов (по умолчанию 4)",
+    )
+    parser.add_argument(
+        "--onnx",
+        action="store_true",
+        dest="use_onnx",
+        help="Использовать ONNX Runtime для encode (быстрее, но может не работать на Python 3.14)",
+    )
     default_stage = str(cfg.get("index_default_stage", "all")).strip().lower()
     if default_stage not in ("all", *STAGES):
         default_stage = "all"
-    parser.add_argument("--stage", default=default_stage, choices=("all", *STAGES),
-                        help="Этап индексирования. По умолчанию 'all' — прогон всех этапов "
-                             "(metadata → small → large). Можно запустить отдельный этап для "
-                             "дробного прогресса или для тонкой настройки фоновых задач.")
-    parser.add_argument("--metadata-only-for", default="", dest="metadata_only_for",
-                        help="[legacy] Список расширений через запятую для индексирования ТОЛЬКО "
-                             "метаданных (например: .pdf). Используется в рамках одного stage. "
-                             "Современный эквивалент: --stage metadata.")
-    parser.add_argument("--metadata-only", action="store_true", dest="metadata_only",
-                        help="[legacy] Псевдоним для --stage metadata.")
+    parser.add_argument(
+        "--stage",
+        default=default_stage,
+        choices=("all", *STAGES),
+        help="Этап индексирования. По умолчанию 'all' — прогон всех этапов "
+        "(metadata → small → large). Можно запустить отдельный этап для "
+        "дробного прогресса или для тонкой настройки фоновых задач.",
+    )
+    parser.add_argument(
+        "--metadata-only-for",
+        default="",
+        dest="metadata_only_for",
+        help="[legacy] Список расширений через запятую для индексирования ТОЛЬКО "
+        "метаданных (например: .pdf). Используется в рамках одного stage. "
+        "Современный эквивалент: --stage metadata.",
+    )
+    parser.add_argument(
+        "--metadata-only", action="store_true", dest="metadata_only", help="[legacy] Псевдоним для --stage metadata."
+    )
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help=(
-            "Только очистить индекс от файлов, которые удалены с диска, "
-            "без полного сканирования. Быстро (~1 мин)."
-        ),
+        help=("Только очистить индекс от файлов, которые удалены с диска, без полного сканирования. Быстро (~1 мин)."),
     )
     parser.add_argument(
         "--dry-run",
@@ -1413,10 +1508,13 @@ def main() -> None:
         help="Вывести JSON-отчёт качества индексирования и выйти без запуска индексации.",
     )
     parser.add_argument(
-        "--mark-stage-metadata-for", default="", dest="mark_stage_metadata_for",
+        "--mark-stage-metadata-for",
+        default="",
+        dest="mark_stage_metadata_for",
         help="Перед индексированием пометить уже имеющиеся в state записи указанных расширений "
-             "как stage=metadata (чтобы они переиндексировались на этапах small/large). "
-             "Пример: --mark-stage-metadata-for .pdf. Пригодится после legacy-прохода --metadata-only-for.")
+        "как stage=metadata (чтобы они переиндексировались на этапах small/large). "
+        "Пример: --mark-stage-metadata-for .pdf. Пригодится после legacy-прохода --metadata-only-for.",
+    )
     args = parser.parse_args()
     if bool(cfg.get("index_skip_ocr", False)) and "--no-ocr" not in sys.argv:
         args.no_ocr = True
@@ -1437,10 +1535,14 @@ def main() -> None:
     elif args.metadata_only_for:
         metadata_only_extensions = {
             e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
-            for e in args.metadata_only_for.split(",") if e.strip()
+            for e in args.metadata_only_for.split(",")
+            if e.strip()
         }
-        logger.info("Legacy --metadata-only-for для расширений: %s (в рамках --stage %s)",
-                    sorted(metadata_only_extensions), stage)
+        logger.info(
+            "Legacy --metadata-only-for для расширений: %s (в рамках --stage %s)",
+            sorted(metadata_only_extensions),
+            stage,
+        )
 
     telemetry_path = (cfg.get("telemetry_db_path") or "").strip()
     if not telemetry_path:
@@ -1507,15 +1609,15 @@ def main() -> None:
         else:
             exts = {
                 e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
-                for e in args.mark_stage_metadata_for.split(",") if e.strip()
+                for e in args.mark_stage_metadata_for.split(",")
+                if e.strip()
             }
             changed = indexer.state_db.update_stage_for_extensions(exts, stage="metadata")
-            logger.info("Миграция state: %d записей с расширениями %s помечены stage=metadata",
-                        changed, sorted(exts))
+            logger.info("Миграция state: %d записей с расширениями %s помечены stage=metadata", changed, sorted(exts))
 
     try:
         if args.cleanup:
-        # Режим только очистки: сканируем диск, удаляем «фантомы» и выходим
+            # Режим только очистки: сканируем диск, удаляем «фантомы» и выходим
             logger.info("Режим --cleanup: поиск и удаление удалённых файлов из индекса…")
             all_files = [
                 f
