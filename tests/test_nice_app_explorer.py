@@ -22,6 +22,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_delete,
     api_cloud_drive_download,
     api_cloud_drive_file_statuses,
+    api_cloud_drive_index_coverage,
     api_cloud_drive_job,
     api_cloud_drive_job_latest,
     api_cloud_drive_job_retry,
@@ -1209,6 +1210,53 @@ def test_cloud_drive_permissions_endpoint_grants_path_acl(monkeypatch, tmp_path)
     assert permission["subject_type"] == "role"
     assert permission["access_level"] == "viewer"
     assert service.user_can_access(username="maria", role="viewer", path="Team/readme.txt")
+
+
+def test_cloud_drive_index_coverage_endpoint(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "qdrant_db_path": str(tmp_path / "qdrant"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    file_row = service.registry.upsert_file(
+        folder_id=root.id,
+        path="report.txt",
+        name="report.txt",
+        storage_key="objects/sha256/aa/bb/aabb.txt",
+        mime_type="text/plain",
+        size_bytes=12,
+        checksum="aabb",
+        source_path="",
+    )
+    state_dir = tmp_path / "qdrant"
+    state_dir.mkdir()
+    state_db = IndexStateDB(str(state_dir / "index_state.db"))
+    state_db.upsert_many(
+        [
+            {
+                "full_path": "cloud:report",
+                "stage": "content",
+                "cloud_file_id": file_row.id,
+                "cloud_version_id": file_row.current_version_id,
+                "cloud_path": file_row.path,
+            }
+        ]
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+
+    coverage = api_cloud_drive_index_coverage()
+
+    assert coverage["ok"] is True
+    assert coverage["registry_files"] == 1
+    assert coverage["indexed_current"] == 1
 
 
 def test_cloud_drive_search_filter_uses_registry_acl(tmp_path) -> None:

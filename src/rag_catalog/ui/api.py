@@ -336,6 +336,18 @@ def api_cloud_drive_storage_health(authorization: AuthHeader = "") -> Dict[str, 
     }
 
 
+@app.get("/api/cloud-drive/index-coverage")
+def api_cloud_drive_index_coverage(sample_limit: int = 25, authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    index_state_path = Path(str(cfg.get("qdrant_db_path") or "")) / "index_state.db"
+    return service.get_index_coverage(
+        index_state_db_path=str(index_state_path),
+        sample_limit=max(1, min(int(sample_limit or 25), 500)),
+    )
+
+
 @app.get("/api/cloud-drive/node")
 def api_cloud_drive_node(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()

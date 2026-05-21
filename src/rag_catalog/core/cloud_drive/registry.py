@@ -1557,6 +1557,30 @@ class CloudDriveRegistryDB:
             root_path = str(root_row['path']) if root_row else ''
         return CloudDriveStats(folders=folders, files=files, versions=versions, pending_jobs=pending_jobs, root_path=root_path)
 
+    def list_active_file_index_records(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, path, name, current_version_id, storage_key, checksum, size_bytes, updated_at
+                FROM cloud_files
+                WHERE deleted_at=''
+                ORDER BY path
+                """
+            ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "path": str(row["path"] or ""),
+                "name": str(row["name"] or ""),
+                "current_version_id": str(row["current_version_id"] or ""),
+                "storage_key": str(row["storage_key"] or ""),
+                "checksum": str(row["checksum"] or ""),
+                "size_bytes": int(row["size_bytes"] or 0),
+                "updated_at": str(row["updated_at"] or ""),
+            }
+            for row in rows
+        ]
+
     # ── Analytics queries ────────────────────────────────────────────────────
 
     def get_top_changed_files(self, *, limit: int = 20, since: str = '') -> List[Dict[str, Any]]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -188,6 +189,80 @@ class CloudDriveService:
             "missing_examples": missing[:5],
             "ok": checked == 0 or not missing,
             "needs_backfill": bool(missing),
+        }
+
+    def get_index_coverage(self, *, index_state_db_path: str, sample_limit: int = 25) -> dict:
+        files = self.registry.list_active_file_index_records()
+        sample_size = max(1, min(int(sample_limit or 25), 500))
+        index_path = Path(str(index_state_db_path or "")).expanduser()
+        indexed_by_file: dict[str, list[dict[str, Any]]] = {}
+        index_available = index_path.is_file()
+        if index_available:
+            try:
+                with sqlite3.connect(str(index_path)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        """
+                        SELECT full_path, cloud_file_id, cloud_version_id, cloud_path,
+                               indexed_stage, status, last_error, updated_at
+                        FROM state_entries
+                        WHERE cloud_file_id != ''
+                        """
+                    ).fetchall()
+                for row in rows:
+                    file_id = str(row["cloud_file_id"] or "")
+                    if not file_id:
+                        continue
+                    indexed_by_file.setdefault(file_id, []).append(dict(row))
+            except sqlite3.Error:
+                index_available = False
+
+        missing: list[dict[str, Any]] = []
+        stale: list[dict[str, Any]] = []
+        errored: list[dict[str, Any]] = []
+        indexed_current = 0
+        for file_row in files:
+            file_id = str(file_row.get("id") or "")
+            current_version = str(file_row.get("current_version_id") or "")
+            rows = indexed_by_file.get(file_id) or []
+            current_rows = [
+                row for row in rows
+                if str(row.get("cloud_version_id") or "") == current_version
+            ]
+            best = current_rows[0] if current_rows else (rows[0] if rows else None)
+            if best is None:
+                missing.append(file_row)
+                continue
+            if str(best.get("status") or "") == "error":
+                errored.append({**file_row, "last_error": str(best.get("last_error") or "")})
+                continue
+            if not current_rows:
+                stale.append(
+                    {
+                        **file_row,
+                        "indexed_version_id": str(best.get("cloud_version_id") or ""),
+                        "indexed_path": str(best.get("full_path") or ""),
+                    }
+                )
+                continue
+            indexed_current += 1
+
+        total = len(files)
+        coverage_pct = round((indexed_current / total) * 100, 2) if total else 100.0
+        return {
+            "index_state_db_path": str(index_path),
+            "index_available": index_available,
+            "registry_files": total,
+            "indexed_current": indexed_current,
+            "missing": len(missing),
+            "stale": len(stale),
+            "errored": len(errored),
+            "coverage_pct": coverage_pct,
+            "ok": index_available and not missing and not stale and not errored,
+            "sample_limit": sample_size,
+            "missing_examples": missing[:sample_size],
+            "stale_examples": stale[:sample_size],
+            "error_examples": errored[:sample_size],
         }
 
     @staticmethod

@@ -12,6 +12,7 @@ from rag_catalog.core.cloud_drive.storage import (
     guess_mime_type,
     normalize_s3_credential,
 )
+from rag_catalog.core.index_state_db import IndexStateDB
 
 
 def test_local_storage_adapter_put_and_delete(tmp_path: Path) -> None:
@@ -208,3 +209,91 @@ def test_cloud_drive_storage_coverage_reports_missing_registry_objects(tmp_path:
     assert coverage["checked"] == 1
     assert coverage["missing"] == 1
     assert coverage["missing_examples"][0]["path"] == "report.pdf"
+
+
+def test_cloud_drive_index_coverage_reports_missing_stale_and_errors(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    root = registry.ensure_root_folder(root_name="Обмен", source_path="")
+    current = registry.upsert_file(
+        folder_id=root.id,
+        path="current.txt",
+        name="current.txt",
+        storage_key="objects/sha256/aa/aa/current.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="aaaa",
+        source_path="",
+    )
+    stale = registry.upsert_file(
+        folder_id=root.id,
+        path="stale.txt",
+        name="stale.txt",
+        storage_key="objects/sha256/bb/bb/stale.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="bbbb",
+        source_path="",
+    )
+    failed = registry.upsert_file(
+        folder_id=root.id,
+        path="failed.txt",
+        name="failed.txt",
+        storage_key="objects/sha256/cc/cc/failed.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="cccc",
+        source_path="",
+    )
+    registry.upsert_file(
+        folder_id=root.id,
+        path="missing.txt",
+        name="missing.txt",
+        storage_key="objects/sha256/dd/dd/missing.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="dddd",
+        source_path="",
+    )
+    state_db_path = tmp_path / "index_state.db"
+    state_db = IndexStateDB(str(state_db_path))
+    state_db.upsert_many(
+        [
+            {
+                "full_path": "cloud:current",
+                "stage": "content",
+                "cloud_file_id": current.id,
+                "cloud_version_id": current.current_version_id,
+                "cloud_path": current.path,
+                "status": "ok",
+            },
+            {
+                "full_path": "cloud:stale",
+                "stage": "content",
+                "cloud_file_id": stale.id,
+                "cloud_version_id": "old-version",
+                "cloud_path": stale.path,
+                "status": "ok",
+            },
+            {
+                "full_path": "cloud:failed",
+                "stage": "content",
+                "cloud_file_id": failed.id,
+                "cloud_version_id": failed.current_version_id,
+                "cloud_path": failed.path,
+                "status": "error",
+                "last_error": "boom",
+            },
+        ]
+    )
+
+    coverage = service.get_index_coverage(index_state_db_path=str(state_db_path), sample_limit=10)
+
+    assert coverage["ok"] is False
+    assert coverage["registry_files"] == 4
+    assert coverage["indexed_current"] == 1
+    assert coverage["stale"] == 1
+    assert coverage["errored"] == 1
+    assert coverage["missing"] == 1
+    assert coverage["stale_examples"][0]["path"] == "stale.txt"
+    assert coverage["error_examples"][0]["last_error"] == "boom"
