@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _utc_now() -> str:
@@ -89,6 +89,25 @@ class IndexStateDB:
 
                     CREATE INDEX IF NOT EXISTS idx_failed_paths_retry
                       ON failed_paths(next_retry_at);
+
+                    CREATE TABLE IF NOT EXISTS index_queue (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        full_path TEXT NOT NULL,
+                        stage TEXT NOT NULL DEFAULT 'content',
+                        reason TEXT NOT NULL DEFAULT 'changed',
+                        priority INTEGER NOT NULL DEFAULT 100,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        available_at REAL NOT NULL DEFAULT 0,
+                        locked_at REAL NOT NULL DEFAULT 0,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(full_path, stage)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_index_queue_status_priority
+                      ON index_queue(status, available_at, priority, updated_at);
                     """
                 )
                 existing_cols = {
@@ -137,6 +156,7 @@ class IndexStateDB:
             with self._connect() as conn:
                 conn.execute("DELETE FROM state_entries")
                 conn.execute("DELETE FROM failed_paths")
+                conn.execute("DELETE FROM index_queue")
 
     def get_config(self) -> Dict[str, str]:
         with self._lock:
@@ -337,6 +357,145 @@ class IndexStateDB:
                 ).fetchall()
                 return [dict(row) for row in rows]
 
+    def enqueue_index_task(
+        self,
+        full_path: str,
+        *,
+        stage: str = "content",
+        reason: str = "changed",
+        priority: int = 100,
+        available_at: Optional[float] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        key = str(full_path or "").strip()
+        if not key:
+            return {}
+        now_iso = _utc_now()
+        available = float(time.time() if available_at is None else available_at)
+        payload_json = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO index_queue (
+                        full_path, stage, reason, priority, status, attempts,
+                        available_at, locked_at, payload_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'pending', 0, ?, 0, ?, ?, ?)
+                    ON CONFLICT(full_path, stage) DO UPDATE SET
+                        reason=excluded.reason,
+                        priority=MIN(index_queue.priority, excluded.priority),
+                        status='pending',
+                        available_at=MIN(index_queue.available_at, excluded.available_at),
+                        locked_at=0,
+                        payload_json=excluded.payload_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (key, str(stage or "content"), str(reason or "changed"), int(priority), available, payload_json, now_iso, now_iso),
+                )
+                row = conn.execute(
+                    "SELECT * FROM index_queue WHERE full_path=? AND stage=?",
+                    (key, str(stage or "content")),
+                ).fetchone()
+                return dict(row) if row else {}
+
+    def lease_index_tasks(
+        self,
+        *,
+        limit: int = 1,
+        lease_seconds: int = 300,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        ts = float(time.time() if now is None else now)
+        lock_until = ts + max(1, int(lease_seconds))
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM index_queue
+                    WHERE status='pending' AND available_at <= ?
+                    ORDER BY priority ASC, updated_at ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (ts, max(1, int(limit))),
+                ).fetchall()
+                ids = [int(row["id"]) for row in rows]
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    now_iso = _utc_now()
+                    conn.execute(
+                        f"""
+                        UPDATE index_queue
+                        SET status='running',
+                            attempts=attempts + 1,
+                            locked_at=?,
+                            updated_at=?
+                        WHERE id IN ({placeholders}) AND status='pending'
+                        """,
+                        (lock_until, now_iso, *ids),
+                    )
+                    refreshed = conn.execute(
+                        f"SELECT * FROM index_queue WHERE id IN ({placeholders}) ORDER BY priority ASC, updated_at ASC, id ASC",
+                        ids,
+                    ).fetchall()
+                    return [dict(row) for row in refreshed]
+                return []
+
+    def requeue_expired_index_tasks(self, *, now: Optional[float] = None) -> int:
+        ts = float(time.time() if now is None else now)
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE index_queue
+                    SET status='pending', locked_at=0, updated_at=?
+                    WHERE status='running' AND locked_at <= ?
+                    """,
+                    (_utc_now(), ts),
+                )
+                return int(cur.rowcount or 0)
+
+    def complete_index_task(self, task_id: int) -> int:
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute("DELETE FROM index_queue WHERE id=?", (int(task_id),))
+                return int(cur.rowcount or 0)
+
+    def fail_index_task(
+        self,
+        task_id: int,
+        *,
+        error: str = "",
+        retry_delay_seconds: int = 300,
+    ) -> int:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute("SELECT attempts FROM index_queue WHERE id=?", (int(task_id),)).fetchone()
+                if not row:
+                    return 0
+                attempts = int(row["attempts"] or 0)
+                delay = min(86_400, max(1, int(retry_delay_seconds)) * (2 ** min(max(0, attempts - 1), 8)))
+                cur = conn.execute(
+                    """
+                    UPDATE index_queue
+                    SET status='pending',
+                        reason=?,
+                        available_at=?,
+                        locked_at=0,
+                        updated_at=?
+                    WHERE id=?
+                    """,
+                    (f"retry:{str(error or '')[:200]}", time.time() + delay, _utc_now(), int(task_id)),
+                )
+                return int(cur.rowcount or 0)
+
+    def queue_stats(self) -> Dict[str, int]:
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT status, COUNT(*) AS cnt FROM index_queue GROUP BY status"
+                ).fetchall()
+                return {str(row["status"]): int(row["cnt"]) for row in rows}
+
     def iter_entries(self) -> List[Dict[str, Any]]:
         with self._lock:
             with self._connect() as conn:
@@ -498,6 +657,9 @@ class IndexStateDB:
                     "SELECT COUNT(*) AS total, COALESCE(SUM(size_bytes), 0) AS total_size FROM state_entries"
                 ).fetchone()
                 failed_row = conn.execute("SELECT COUNT(*) AS total FROM failed_paths").fetchone()
+                queue_rows = conn.execute(
+                    "SELECT status, COUNT(*) AS cnt FROM index_queue GROUP BY status"
+                ).fetchall()
                 duplicate_rows = conn.execute(
                     """
                     SELECT content_hash, COUNT(*) AS cnt
@@ -533,6 +695,7 @@ class IndexStateDB:
         by_stage = {str(row["stage"]): int(row["cnt"]) for row in stage_rows}
         duplicate_groups = len(duplicate_rows)
         duplicate_files = sum(int(row["cnt"]) for row in duplicate_rows)
+        queue_by_status = {str(row["status"]): int(row["cnt"]) for row in queue_rows}
         return {
             "total": int(total_row["total"] if total_row else 0),
             "total_size_bytes": int(total_row["total_size"] if total_row else 0),
@@ -542,4 +705,5 @@ class IndexStateDB:
             "failed_paths": int(failed_row["total"] if failed_row else 0),
             "duplicate_groups": duplicate_groups,
             "duplicate_files": duplicate_files,
+            "queue_by_status": queue_by_status,
         }

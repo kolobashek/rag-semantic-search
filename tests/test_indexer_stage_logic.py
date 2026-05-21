@@ -253,6 +253,46 @@ def test_quality_report_summarizes_state_and_duplicates(tmp_path: Path) -> None:
     assert report["duplicate_groups"] == 1
 
 
+def test_process_index_queue_once_completes_existing_file(tmp_path: Path) -> None:
+    doc = tmp_path / "queued.txt"
+    doc.write_text("queued", encoding="utf-8")
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.read_workers = 1
+    idx._is_excluded_path = lambda _p: False
+    seen: list[Path] = []
+    idx.process_file = lambda path: seen.append(path)
+
+    task = idx.state_db.enqueue_index_task(str(doc), stage="small", reason="watch")
+    stats = idx.process_index_queue_once(limit=1)
+
+    assert stats["leased"] == 1
+    assert stats["completed"] == 1
+    assert seen == [doc]
+    assert idx.state_db.queue_stats() == {}
+    assert idx.state_db.complete_index_task(int(task["id"])) == 0
+
+
+def test_process_index_queue_once_deletes_missing_file(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.txt"
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.read_workers = 1
+    idx._delete_file_vectors = lambda _p: None
+    idx._is_excluded_path = lambda _p: False
+
+    idx.state_db.upsert_many(
+        [{"full_path": str(missing), "fingerprint": "1", "mtime": 1.0, "stage": "content", "size_bytes": 1, "extension": ".txt"}]
+    )
+    idx.state_db.enqueue_index_task(str(missing), stage="small", reason="deleted")
+
+    stats = idx.process_index_queue_once(limit=1)
+
+    assert stats["missing"] == 1
+    assert idx.state_db.get_entry(str(missing)) is None
+    assert idx.state_db.queue_stats() == {}
+
+
 def test_exclude_patterns_skip_matching_files(tmp_path: Path) -> None:
     keep = tmp_path / "keep.txt"
     ignored_dir = tmp_path / "node_modules"

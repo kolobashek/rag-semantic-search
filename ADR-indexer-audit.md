@@ -396,3 +396,22 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - `--watch` выполняет первичный stage-прогон, затем через `watchdog` переиндексирует изменённые файлы; ZIP-событие запускает stage-проход, чтобы обновить entries архива.
 - `DEFAULT_SYNONYM_MAP` загружается из `src/rag_catalog/core/default_synonyms.json`, который включён в package data; Python-константа сохранена как совместимый facade.
 - Служебные строки `Страница:`, `Лист:`, `Строка:` больше не попадают в embedding/content payload text; они используются только для вычисления `page`, `sheet`, `row_start`.
+
+---
+
+## Roadmap фазы 2: hardening индексации
+
+Цель фазы — сделать индексацию управляемым сервисным контуром, а не только CLI-проходом по дереву файлов.
+
+1. **[done 2026-05-21] Durable index queue.** Добавить SQLite-очередь `index_queue` с coalescing по `(path, stage)`, причинами `new/changed/watch/retry/manual`, приоритетами, попытками и lease-полями. Watch mode должен писать события в очередь и обрабатывать её последовательно.
+2. **[pending] Разделить progress stage и result status.** Сохранить обратную совместимость `state_entries.stage`, но добавить `status`, `indexed_stage`, `last_error`, `last_attempt_at`, `next_retry_at`, чтобы `metadata/content/error/empty` не смешивались в одном поле.
+3. **[pending] Structured extraction contract.** Перевести extractors с `str` на структуру `ExtractedDocument/TextBlock`, где page/sheet/row/slide живут в metadata блока, а не извлекаются regex из текста.
+4. **[pending] Watch backpressure.** Добавить debounce, bounded queue drain, coalescing burst-событий и ограничение частоты stage-проходов для ZIP.
+5. **[pending] ZIP member cleanup.** При изменении архива удалять из state/Qdrant старые `archive.zip::*`, которых больше нет внутри, без полного cleanup каталога.
+6. **[pending] Payload schema version.** Добавить `payload_schema_version` в payload и state config; при изменении схемы помечать документы к переиндексации.
+
+### Выполнение фазы 2
+
+- `IndexStateDB` получил durable `index_queue`: `enqueue_index_task`, lease, complete, fail/retry, requeue expired и queue stats.
+- `RAGIndexer.process_index_queue_once()` обрабатывает leased-задачи, переиндексирует существующие файлы, удаляет state/vector для missing path и переоткладывает сбои.
+- `--watch` больше не держит события только в памяти: filesystem handler coalesce-ит события в SQLite queue, а worker drain-ит очередь с коротким debounce.

@@ -150,6 +150,43 @@ def test_state_db_tracks_failed_paths_with_retry_backoff(tmp_path: Path) -> None
     assert db.get_failed_path("a.docx") is None
 
 
+def test_index_queue_coalesces_and_leases_tasks(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+
+    first = db.enqueue_index_task("a.txt", stage="small", reason="watch", priority=50, available_at=10.0)
+    second = db.enqueue_index_task("a.txt", stage="small", reason="changed", priority=10, available_at=5.0)
+    db.enqueue_index_task("b.txt", stage="small", reason="watch", priority=20, available_at=5.0)
+
+    assert first["id"] == second["id"]
+    assert second["reason"] == "changed"
+    assert second["priority"] == 10
+    assert second["available_at"] == 5.0
+    assert db.queue_stats() == {"pending": 2}
+
+    leased = db.lease_index_tasks(limit=2, now=5.0, lease_seconds=60)
+
+    assert [row["full_path"] for row in leased] == ["a.txt", "b.txt"]
+    assert all(row["status"] == "running" for row in leased)
+    assert all(int(row["attempts"]) == 1 for row in leased)
+    assert db.queue_stats() == {"running": 2}
+
+    assert db.complete_index_task(int(leased[0]["id"])) == 1
+    assert db.fail_index_task(int(leased[1]["id"]), error="locked", retry_delay_seconds=10) == 1
+    assert db.queue_stats() == {"pending": 1}
+    assert db.lease_index_tasks(limit=1, now=6.0) == []
+
+
+def test_index_queue_requeues_expired_running_tasks(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.enqueue_index_task("a.txt", stage="small", available_at=1.0)
+    leased = db.lease_index_tasks(limit=1, now=2.0, lease_seconds=5)
+
+    assert db.requeue_expired_index_tasks(now=6.0) == 0
+    assert db.requeue_expired_index_tasks(now=8.0) == 1
+    assert db.queue_stats() == {"pending": 1}
+    assert db.lease_index_tasks(limit=1, now=8.0)[0]["id"] == leased[0]["id"]
+
+
 def test_bootstrap_from_json_imports_only_once(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     legacy = tmp_path / "index_state.json"
