@@ -408,7 +408,7 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 3. **[done 2026-05-21] Structured extraction contract.** Ввести структуру `ExtractedDocument/TextBlock`, где page/sheet/row/slide живут в metadata блока; legacy-строки проходят через совместимый adapter до chunk payload.
 4. **[done 2026-05-21] Direct structured extractors.** Постепенно перевести PDF/XLSX/XLS/PPTX/OCR extractors на прямую выдачу `TextBlock`, чтобы marker adapter остался только для обратной совместимости.
 5. **[done 2026-05-21] Watch backpressure.** Добавить debounce, bounded queue drain, coalescing burst-событий и ограничение частоты stage-проходов для ZIP.
-6. **[pending] ZIP member cleanup.** При изменении архива удалять из state/Qdrant старые `archive.zip::*`, которых больше нет внутри, без полного cleanup каталога.
+6. **[done 2026-05-21] ZIP member cleanup.** При изменении архива удалять из state/Qdrant старые `archive.zip::*`, которых больше нет внутри, без полного cleanup каталога.
 7. **[pending] Payload schema version.** Добавить `payload_schema_version` в payload и state config; при изменении схемы помечать документы к переиндексации.
 
 ### Выполнение фазы 2
@@ -420,3 +420,4 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - Добавлен контракт `TextBlock/ExtractedDocument` и adapter `blocks_from_legacy_text`; `process_file` и stage runner строят chunk provenance из block metadata, а regex-marker чтение осталось fallback для старых payload paths.
 - PDF, XLSX/XLS и PPTX получили прямые `extract_*_document()` функции с page/sheet/row/slide metadata; основной index pipeline использует structured variants, legacy `extract_*()` продолжает возвращать прежний текстовый формат для совместимости.
 - Watch loop получил bounded wake queue (`maxsize=1`), `drain_index_queue()` с лимитом batch-ей за тик и debounce для ZIP-событий перед постановкой в durable queue.
+- Stage runner сверяет актуальные ZIP members с `state_entries` по prefix `archive.zip::` и удаляет устаревшие state/vector записи локально для архива, без полного cleanup всего каталога.

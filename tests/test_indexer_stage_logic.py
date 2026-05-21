@@ -80,6 +80,16 @@ class _FakeStateDB:
                 return dict(row)
         return None
 
+    def list_entries_by_prefix(self, prefix: str):
+        return sorted(key for key in self.entries if key.startswith(prefix))
+
+    def delete_entries(self, paths):
+        count = 0
+        for path in paths:
+            if self.entries.pop(str(path), None) is not None:
+                count += 1
+        return count
+
 
 def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx = RAGIndexer.__new__(RAGIndexer)
@@ -213,6 +223,33 @@ def test_zip_members_are_indexed_with_logical_archive_paths(tmp_path: Path) -> N
     payloads = [point.payload for point in idx.qdrant.points]
     assert any(payload.get("path") == "docs.zip/folder/readme.txt" for payload in payloads)
     assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
+
+
+def test_zip_member_cleanup_removes_stale_archive_entries(tmp_path: Path) -> None:
+    archive = tmp_path / "docs.zip"
+    with ZipFile(archive, "w", ZIP_DEFLATED) as zf:
+        zf.writestr("folder/readme.txt", "zip text")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    stale_key = f"{archive}::old.txt"
+    idx.state_db.upsert_many(
+        [
+            {
+                "full_path": stale_key,
+                "fingerprint": "old",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 1,
+                "extension": ".txt",
+            }
+        ]
+    )
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda path: deleted.append(path)
+
+    idx.index_directory(stage="small")
+
+    assert idx.state_db.get_entry(stale_key) is None
+    assert deleted == [Path(stale_key)]
 
 
 def test_dry_run_reports_work_without_writing_points_or_state(tmp_path: Path) -> None:

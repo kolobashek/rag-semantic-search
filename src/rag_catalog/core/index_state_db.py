@@ -701,6 +701,23 @@ class IndexStateDB:
                         candidates.append(path)
                 return candidates
 
+    def list_entries_by_prefix(self, prefix: str) -> List[str]:
+        value = str(prefix or "")
+        if not value:
+            return []
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT full_path
+                    FROM state_entries
+                    WHERE substr(full_path, 1, ?) = ?
+                    ORDER BY full_path
+                    """,
+                    (len(value), value),
+                ).fetchall()
+                return [str(row["full_path"]) for row in rows]
+
     def stats(self) -> Dict[str, Any]:
         with self._lock:
             with self._connect() as conn:

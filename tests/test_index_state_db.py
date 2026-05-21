@@ -147,6 +147,19 @@ def test_state_db_tracks_content_hash_duplicates(tmp_path: Path) -> None:
     assert stats["duplicate_files"] == 2
 
 
+def test_state_db_lists_entries_by_prefix(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many(
+        [
+            {"full_path": "docs.zip::a.txt", "fingerprint": "1", "mtime": 1.0, "stage": "content", "size_bytes": 1, "extension": ".txt"},
+            {"full_path": "docs.zip::b.txt", "fingerprint": "2", "mtime": 1.0, "stage": "content", "size_bytes": 1, "extension": ".txt"},
+            {"full_path": "other.zip::a.txt", "fingerprint": "3", "mtime": 1.0, "stage": "content", "size_bytes": 1, "extension": ".txt"},
+        ]
+    )
+
+    assert db.list_entries_by_prefix("docs.zip::") == ["docs.zip::a.txt", "docs.zip::b.txt"]
+
+
 def test_state_db_validates_embedding_config(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     db.validate_embedding_config(

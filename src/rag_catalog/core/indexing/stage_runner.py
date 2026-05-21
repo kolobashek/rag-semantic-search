@@ -114,6 +114,8 @@ class IndexStageRunner:
                 return "small"
             return "large"
 
+        zip_member_keys: Dict[str, set[str]] = {}
+
         def _zip_tasks(filepath: Path) -> List[Dict[str, Any]]:
             tasks: List[Dict[str, Any]] = []
             archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
@@ -149,6 +151,7 @@ class IndexStageRunner:
                                 "archive_category": _zip_member_category(ext, int(info.file_size)),
                             }
                         )
+                zip_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
             except Exception as exc:
                 self._logger.warning("ZIP %s не прочитан: %s", filepath, exc)
             return tasks
@@ -159,6 +162,17 @@ class IndexStageRunner:
                 all_tasks.extend(_zip_tasks(filepath))
             else:
                 all_tasks.append(_normal_task(filepath))
+
+        if hasattr(indexer, "state_db"):
+            for archive_path, current_keys in zip_member_keys.items():
+                prefix = f"{archive_path}::"
+                stale_keys = sorted(set(indexer.state_db.list_entries_by_prefix(prefix)) - set(current_keys))
+                if not stale_keys:
+                    continue
+                self._logger.info("ZIP cleanup: %s — удаляю %d устаревших entries", archive_path, len(stale_keys))
+                for key in stale_keys:
+                    indexer._delete_file_vectors(Path(key))
+                indexer.state_db.delete_entries(stale_keys)
 
         # Партиция по этапам: metadata берёт всё, small/large — свою категорию.
         if stage == "small":
