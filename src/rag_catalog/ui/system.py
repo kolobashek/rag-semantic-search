@@ -447,6 +447,7 @@ def _find_live_running_ocr_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any
             "worker_pid": _safe_int(marker.get("pid"), 0),
             "note": "runtime_marker",
             "_runtime_marker_only": True,
+            "_progress_unknown": True,
         }
     rows = telemetry.fetch_dicts(
         "SELECT * FROM ocr_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 20"
@@ -463,6 +464,7 @@ def _find_live_running_ocr_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any
             "worker_pid": process_pids[0],
             "note": "process_scan",
             "_process_scan_only": True,
+            "_progress_unknown": True,
         }
     return None
 

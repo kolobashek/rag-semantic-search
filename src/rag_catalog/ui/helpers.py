@@ -1397,6 +1397,7 @@ def _find_headless_active_ocr(db_path: Path) -> Optional[Dict[str, Any]]:
         "processed_pdfs": 0,
         "duration_sec": 0,
         "note": "process_scan",
+        "_progress_unknown": True,
     }
 
 

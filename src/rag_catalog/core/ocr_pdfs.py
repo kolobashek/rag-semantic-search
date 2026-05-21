@@ -334,6 +334,16 @@ def main() -> int:
             )
             return 2
 
+    # ── Создать запись OCR-прохода до долгого scan Qdrant ────────────────────
+    ocr_start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    ocr_run_id = telemetry.start_ocr_run(
+        collection_name=args.collection,
+        found_scanned=0,
+        note=f"searching_scanned_pdfs min_text_len={args.min_text_len}",
+        worker_pid=os.getpid(),
+    )
+    logger.info("OCR run_id: %s", ocr_run_id)
+
     # ── 1. Найти сканы в Qdrant ──────────────────────────────────────────────
     scanned = find_scanned_pdfs(
         qdrant_url=args.qdrant_url,
@@ -346,7 +356,19 @@ def main() -> int:
 
     if not scanned:
         logger.info("Сканированные PDF не найдены — OCR не требуется.")
+        telemetry.finish_ocr_run(
+            ocr_run_id=ocr_run_id,
+            status="completed",
+            processed_pdfs=0,
+            note="no_scanned_pdfs",
+        )
         return 0
+
+    telemetry.update_ocr_progress(
+        ocr_run_id=ocr_run_id,
+        found_scanned=len(scanned),
+        note=f"min_text_len={args.min_text_len}",
+    )
 
     logger.info("")
     logger.info("Файлы для OCR (%d):", len(scanned))
@@ -357,17 +379,13 @@ def main() -> int:
 
     if args.dry_run:
         logger.info("--dry-run: индексатор не запущен.")
+        telemetry.finish_ocr_run(
+            ocr_run_id=ocr_run_id,
+            status="completed",
+            processed_pdfs=0,
+            note=f"dry_run found_scanned={len(scanned)}",
+        )
         return 0
-
-    # ── Создать запись OCR-прохода в телеметрии ──────────────────────────────
-    ocr_start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    ocr_run_id = telemetry.start_ocr_run(
-        collection_name=args.collection,
-        found_scanned=len(scanned),
-        note=f"min_text_len={args.min_text_len}",
-        worker_pid=os.getpid(),
-    )
-    logger.info("OCR run_id: %s", ocr_run_id)
 
     # ── 2. Убрать их из state БД, чтобы индексатор переобработал ─────────────
     state_db_path = Path(args.state_dir) / "index_state.db"

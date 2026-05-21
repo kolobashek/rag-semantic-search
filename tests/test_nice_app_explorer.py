@@ -327,6 +327,7 @@ def test_index_telemetry_uses_process_scan_for_headless_ocr(monkeypatch, tmp_pat
     assert telemetry["active_ocr"]["status"] == "running"
     assert telemetry["active_ocr"]["worker_pid"] == 7264
     assert telemetry["active_ocr"]["note"] == "process_scan"
+    assert telemetry["active_ocr"]["_progress_unknown"] is True
 
 
 def test_index_telemetry_active_stages_only_include_running_stage(tmp_path) -> None:

@@ -356,17 +356,33 @@ def render_index_screen(
             is_running = status_str == "running"
             processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
             total_f = int(row.get("total_files") or row.get("found_scanned") or 0)
+            note_text = str(row.get("note") or row.get("run_note") or "").strip()
+            progress_unknown = bool(is_ocr and is_running and total_f <= 0 and (
+                row.get("_progress_unknown")
+                or note_text.startswith("searching_scanned_pdfs")
+                or note_text in {"process_scan", "runtime_marker"}
+            ))
             pct = min(1.0, processed / total_f) if total_f > 0 else (1.0 if status_str not in {"running", "idle"} else 0.0)
             duration_value = row.get("duration_sec", row.get("last_duration_sec"))
             last_ts = row.get("ts_finished") or row.get("ts_updated") or row.get("ts_started")
             status_cls = "running" if is_running else status_str
-            stats_text = (
-                f"найдено {int(row.get('found_scanned') or 0):,} · обработано {int(row.get('processed_pdfs') or 0):,}"
-                if is_ocr else
-                f"добавлено {int(row.get('added_files') or 0):,} · обновлено {int(row.get('updated_files') or 0):,} · "
-                f"пропущено {int(row.get('skipped_files') or 0):,} · ошибок {int(row.get('error_files') or 0):,} · "
-                f"точек {int(row.get('points_added') or 0):,}"
-            ).replace(",", " ")
+            if is_ocr and progress_unknown:
+                count_label = "поиск PDF"
+                pct_label = "—"
+                stats_text = "идёт поиск сканированных PDF"
+            elif is_ocr:
+                count_label = f"{processed:,} / {total_f:,}".replace(",", " ")
+                pct_label = f"{pct * 100:.0f}%"
+                stats_text = f"найдено {int(row.get('found_scanned') or 0):,} · обработано {int(row.get('processed_pdfs') or 0):,}"
+            else:
+                count_label = f"{processed:,} / {total_f:,}".replace(",", " ")
+                pct_label = f"{pct * 100:.0f}%"
+                stats_text = (
+                    f"добавлено {int(row.get('added_files') or 0):,} · обновлено {int(row.get('updated_files') or 0):,} · "
+                    f"пропущено {int(row.get('skipped_files') or 0):,} · ошибок {int(row.get('error_files') or 0):,} · "
+                    f"точек {int(row.get('points_added') or 0):,}"
+                )
+            stats_text = stats_text.replace(",", " ")
             status_icon_name = (
                 "sync" if is_running else
                 "check_circle" if status_str == "completed" else
@@ -396,7 +412,8 @@ def render_index_screen(
                 "processed": processed,
                 "total_f": total_f,
                 "pct": pct,
-                "pct_label": f"{pct * 100:.0f}%",
+                "count_label": count_label,
+                "pct_label": pct_label,
                 "duration_value": duration_value,
                 "last_ts": last_ts,
                 "status_cls": status_cls,
@@ -429,7 +446,7 @@ def render_index_screen(
                             on_click=lambda r=shared_row: show_stage_status_details(r),
                             color=None,
                         ).props("flat dense no-caps").classes(f"rag-chip rag-status-chip {d['status_cls']}")
-                        count_e = ui.label(f"{d['processed']:,} / {d['total_f']:,}".replace(",", " ")).classes("rag-meta")
+                        count_e = ui.label(d["count_label"]).classes("rag-meta")
                         ui.space()
                         pct_e = ui.label(d["pct_label"]).classes("rag-meta")
                         dur_e = ui.label(_format_duration_seconds(d["duration_value"])).classes("rag-meta")
@@ -482,7 +499,7 @@ def render_index_screen(
             refs["icon_e"].update()
             refs["time_e"].set_text(_format_relative_time(d["last_ts"]))
             refs["chip_e"].set_text(d["status_title"])
-            refs["count_e"].set_text(f"{d['processed']:,} / {d['total_f']:,}".replace(",", " "))
+            refs["count_e"].set_text(d["count_label"])
             refs["pct_e"].set_text(d["pct_label"])
             refs["dur_e"].set_text(_format_duration_seconds(d["duration_value"]))
             refs["prog_e"].set_value(d["pct"])
