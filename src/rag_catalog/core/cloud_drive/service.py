@@ -381,6 +381,21 @@ class CloudDriveService:
             ],
         }
 
+    def search_nodes(self, *, query: str, path: str = '', limit: int = 50) -> dict:
+        clean_query = str(query or '').strip()
+        if not clean_query:
+            return {'query': '', 'path': str(path or ''), 'items': [], 'count': 0}
+        clean_path = str(path or '').strip().replace('\\', '/').strip('/')
+        if clean_path and self.registry.get_folder_by_path(clean_path) is None:
+            raise RuntimeError(f'Каталог не найден: {path}')
+        items = self.registry.search_nodes(query=clean_query, path=clean_path, limit=limit)
+        return {
+            'query': clean_query,
+            'path': clean_path,
+            'items': items,
+            'count': len(items),
+        }
+
     def list_changes(self, *, since: str = '', limit: int = 500) -> dict:
         changes = self.registry.list_changes(since=since, limit=limit)
         next_cursor = changes[-1]['updated_at'] if changes else str(since or '')
