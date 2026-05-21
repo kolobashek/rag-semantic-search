@@ -1218,7 +1218,13 @@ class CloudDriveService:
                 )
                 if job is None:
                     break
-                completed.append(self.run_reindex_job(job.id, index_config=index_config))
+                try:
+                    completed.append(self.run_reindex_job(job.id, index_config=index_config))
+                except Exception as exc:
+                    logger.warning("Cloud Drive reindex job %s failed: %s", job.id, exc)
+                    failed = self.registry.get_job(job.id)
+                    if failed is not None:
+                        completed.append(failed)
         finally:
             self._shared_reindex_indexer = previous_shared
         return completed
