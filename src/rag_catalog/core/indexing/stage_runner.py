@@ -533,10 +533,13 @@ class IndexStageRunner:
             )
             meta_payload.update(base_provenance)
             doc_id = str(base_provenance["doc_id"])
-            content_payloads = [
-                {
+            content_payloads = []
+            for idx, chunk in enumerate(chunks):
+                clean_chunk = indexer._strip_provenance_markers(chunk) or chunk
+                content_payloads.append(
+                    {
                     "type": f"{file_type}_content",
-                    "text": chunk,
+                    "text": clean_chunk,
                     "filename": relative_path.name,
                     "extension": ext,
                     "path": logical_path_text,
@@ -549,9 +552,8 @@ class IndexStageRunner:
                     **doc_meta,
                     **base_provenance,
                     **indexer._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
-                }
-                for idx, chunk in enumerate(chunks)
-            ]
+                    }
+                )
             return {
                 "filepath": source_path,
                 "source_path": source_path,
@@ -634,8 +636,8 @@ class IndexStageRunner:
                 # Добавить метаданные и контентные чанки в буфер
                 pending_texts.append(result["meta_text"])
                 pending_payloads.append(result["meta_payload"])
-                for chunk, cpayload in zip(result["chunks"], result["content_payloads"]):
-                    pending_texts.append(chunk)
+                for cpayload in result["content_payloads"]:
+                    pending_texts.append(str(cpayload.get("text") or ""))
                     pending_payloads.append(cpayload)
                 if result.get("error"):
                     file_stage = "error"
