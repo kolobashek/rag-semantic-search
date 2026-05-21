@@ -363,6 +363,8 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 10. **[done 2026-05-21] [техдолг]** Убрать `self.state["files"]` зеркало SQLite из runtime-контракта индексатора (п. 1.4)
 11. **[done 2026-05-21] [техдолг]** Убрать proxy `__getattr__`/`__setattr__` из `IndexStageRunner` (п. 1.5)
 12. **[done 2026-05-21] [техдолг]** Добавить `chunk_group_size` вместо захардкоженного `chunk_index // 4` (п. 1.6)
+13. **[done 2026-05-21] [форматы]** Добавить поддержку `.rtf`, `.pptx`, `.doc` (п. 2.2)
+14. **[done 2026-05-21] [форматы]** Добавить индексирование поддерживаемых файлов внутри `.zip` с logical path `archive.zip/member` (п. 2.9)
 
 ### Реализация 2026-05-21
 
@@ -377,3 +379,5 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - `IndexStageRunner` теперь обращается к `RAGIndexer` явно через локальный `indexer`, без магического proxy.
 - Runtime-состояние файлов осталось только в `IndexStateDB`; тесты переведены на fake `state_db`.
 - Размер provenance-группы чанков задаётся через `chunk_group_size` с дефолтом `4`.
+- Добавлены pure-Python extractor'ы для `.rtf` и `.pptx`, а `.doc` читается best-effort через `antiword` или LibreOffice.
+- `.zip` раскрывается в pipeline как набор отдельных entries; state key хранится как `archive.zip::member`, а payload path как `archive.zip/member`.

@@ -4,6 +4,7 @@ import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
@@ -26,9 +27,11 @@ class _FakeEmbedder:
 class _FakeQdrant:
     def __init__(self) -> None:
         self.points_count = 0
+        self.points = []
 
     def upsert(self, collection_name, points):
         self.points_count += len(points)
+        self.points.extend(points)
 
     def get_collection(self, collection_name):
         return SimpleNamespace(points_count=self.points_count)
@@ -71,8 +74,11 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx.qdrant = _FakeQdrant()
     idx._delete_file_vectors = lambda _p: None
     idx._cleanup_deleted_files = lambda _files: 0
+    idx._extract_doc = lambda _p: extracted_text
     idx._extract_docx = lambda _p: extracted_text
     idx._extract_spreadsheet = lambda _p: extracted_text
+    idx._extract_rtf = lambda _p: extracted_text
+    idx._extract_pptx = lambda _p: extracted_text
     idx._extract_pdf = lambda _p: extracted_text
     idx._extract_text = lambda p: p.read_text(encoding="utf-8")
     idx._extract_csv = lambda p: p.read_text(encoding="utf-8")
@@ -109,6 +115,40 @@ def test_text_and_csv_files_are_indexed_as_content(tmp_path: Path) -> None:
 
     assert idx.state_db.get_entry(str(txt))["stage"] == "content"
     assert idx.state_db.get_entry(str(csv))["stage"] == "content"
+
+
+def test_rtf_pptx_and_doc_files_are_supported(tmp_path: Path) -> None:
+    rtf = tmp_path / "note.rtf"
+    pptx = tmp_path / "slides.pptx"
+    doc = tmp_path / "legacy.doc"
+    rtf.write_text("dummy", encoding="utf-8")
+    pptx.write_bytes(b"dummy")
+    doc.write_bytes(b"dummy")
+    idx = _make_indexer(tmp_path, extracted_text="extracted content")
+
+    idx.index_directory(stage="small")
+
+    assert idx.state_db.get_entry(str(rtf))["stage"] == "content"
+    assert idx.state_db.get_entry(str(pptx))["stage"] == "content"
+    assert idx.state_db.get_entry(str(doc)) is None
+
+    idx.index_directory(stage="large")
+    assert idx.state_db.get_entry(str(doc))["stage"] == "content"
+
+
+def test_zip_members_are_indexed_with_logical_archive_paths(tmp_path: Path) -> None:
+    archive = tmp_path / "docs.zip"
+    with ZipFile(archive, "w", ZIP_DEFLATED) as zf:
+        zf.writestr("folder/readme.txt", "zip text")
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    idx.index_directory(stage="small")
+
+    state_key = f"{archive}::folder/readme.txt"
+    assert idx.state_db.get_entry(state_key)["stage"] == "content"
+    payloads = [point.payload for point in idx.qdrant.points]
+    assert any(payload.get("path") == "docs.zip/folder/readme.txt" for payload in payloads)
+    assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
 
 
 def test_exclude_patterns_skip_matching_files(tmp_path: Path) -> None:

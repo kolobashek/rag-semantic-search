@@ -32,9 +32,12 @@ from .embedding_collections import resolve_embedding_collection_name
 from .extractors import (
     extract_doc_meta,
     extract_csv,
+    extract_doc,
     extract_docx,
     extract_image,
     extract_pdf,
+    extract_pptx,
+    extract_rtf,
     extract_spreadsheet,
     extract_text,
     ocr_pdf,
@@ -66,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 # Поддерживаемые расширения
 SUPPORTED_EXTENSIONS = {
-    ".docx", ".xlsx", ".xls", ".pdf", ".txt", ".csv",
+    ".doc", ".docx", ".xlsx", ".xls", ".pdf", ".pptx", ".rtf", ".txt", ".csv", ".zip",
     # Изображения — OCR если есть текст
     ".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp",
 }
@@ -173,7 +176,7 @@ def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) 
     except OSError:
         return "large"  # не можем прочитать stat — кидаем в «медленный» этап
     ext = filepath.suffix.lower()
-    if ext in (".txt", ".csv"):
+    if ext in (".txt", ".csv", ".rtf", ".pptx"):
         return "small"
     if ext in (".docx", ".xlsx", ".xls") and size_mb < small_office_mb:
         return "small"
@@ -593,6 +596,15 @@ class RAGIndexer:
         """Извлечь текст из DOCX (параграфы + таблицы)."""
         return extract_docx(filepath)
 
+    def _extract_doc(self, filepath: Path) -> str:
+        return extract_doc(filepath, max_chars=self._extractor_max_chars())
+
+    def _extract_rtf(self, filepath: Path) -> str:
+        return extract_rtf(filepath, max_chars=self._extractor_max_chars())
+
+    def _extract_pptx(self, filepath: Path) -> str:
+        return extract_pptx(filepath, max_chars=self._extractor_max_chars())
+
     def _extract_spreadsheet(self, filepath: Path) -> str:
         """
         Точка входа для всех табличных форматов.
@@ -827,9 +839,18 @@ class RAGIndexer:
         if ext == ".docx":
             full_text = self._extract_docx(filepath)
             file_type = "docx"
+        elif ext == ".doc":
+            full_text = self._extract_doc(filepath)
+            file_type = "doc"
         elif ext in (".xlsx", ".xls"):
             full_text = self._extract_spreadsheet(filepath)
             file_type = "xlsx"
+        elif ext == ".rtf":
+            full_text = self._extract_rtf(filepath)
+            file_type = "rtf"
+        elif ext == ".pptx":
+            full_text = self._extract_pptx(filepath)
+            file_type = "pptx"
         elif ext == ".txt":
             full_text = self._extract_text(filepath)
             file_type = "txt"
@@ -992,7 +1013,7 @@ class RAGIndexer:
         logger.info("✔ Все этапы завершены: %s", ", ".join(stages))
         return totals
 
-    def _cleanup_deleted_files(self, existing_files: List[Path]) -> int:
+    def _cleanup_deleted_files(self, existing_files: List[Path | str]) -> int:
         """Удалить из state БД и Qdrant файлы, которых больше нет на диске."""
         existing_paths = {str(f) for f in existing_files}
         deleted_keys = self.state_db.list_deleted_candidates(existing_paths)

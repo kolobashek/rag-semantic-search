@@ -128,6 +128,8 @@ python index_rag.py --recreate --stage all
 
 Индексное состояние хранится в SQLite `index_state.db`, а не в JSON. Это снижает риск file-lock ошибок на Windows и позволяет безопаснее продолжать долгие прогоны.
 
+Поддерживаемые форматы: `.doc`, `.docx`, `.xls`, `.xlsx`, `.pdf`, `.pptx`, `.rtf`, `.txt`, `.csv`, изображения с OCR и `.zip`-архивы с такими файлами внутри.
+
 ## OCR
 
 Рекомендуемый вариант — portable binaries внутри проекта:

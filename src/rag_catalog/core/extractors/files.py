@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import csv
+import re
+import shutil
 import subprocess
+import tempfile
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
@@ -122,6 +125,112 @@ def extract_docx(filepath: Path) -> str:
     except Exception as exc:
         logger.warning("Ошибка чтения DOCX %s: %s", filepath, exc)
         return ""
+
+
+def extract_rtf(filepath: Path, *, max_chars: int = 0) -> str:
+    """Extract text from RTF without requiring optional dependencies."""
+    try:
+        raw = _read_text_file(filepath, max_chars=0)
+        try:
+            from striprtf.striprtf import rtf_to_text  # type: ignore  # noqa: PLC0415
+
+            text = rtf_to_text(raw)
+            return text[:max_chars] if max_chars else text
+        except Exception:
+            pass
+
+        text = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
+        text = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", text)
+        text = text.replace(r"\~", " ").replace(r"\_", "-")
+        text = text.replace("{", " ").replace("}", " ").replace("\\", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars] if max_chars else text
+    except Exception as exc:
+        logger.warning("Ошибка чтения RTF %s: %s", filepath, exc)
+        return ""
+
+
+def extract_pptx(filepath: Path, *, max_chars: int = 0) -> str:
+    """Extract slide text from PPTX by reading slide XML."""
+    try:
+        parts: list[str] = []
+        total = 0
+        done = False
+        with ZipFile(filepath, "r") as zf:
+            slide_names = sorted(
+                name for name in zf.namelist()
+                if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+            )
+            for idx, name in enumerate(slide_names, start=1):
+                if done:
+                    break
+                root = ElementTree.parse(zf.open(name)).getroot()
+                texts = [node.text or "" for node in root.iter() if node.tag.endswith("}t") and (node.text or "").strip()]
+                slide_text = " ".join(text.strip() for text in texts if text.strip())
+                if slide_text:
+                    row = f"Слайд: {idx}\n{slide_text}"
+                    parts.append(row)
+                    total += len(row)
+                    if max_chars and total >= max_chars:
+                        done = True
+        return "\n".join(parts)
+    except Exception as exc:
+        logger.warning("Ошибка чтения PPTX %s: %s", filepath, exc)
+        return ""
+
+
+def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
+    """Best-effort extraction for legacy binary DOC via antiword or LibreOffice."""
+    antiword = shutil.which("antiword")
+    if antiword:
+        try:
+            proc = subprocess.run(
+                [antiword, str(filepath)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                encoding="utf-8",
+                errors="replace",
+                **_windows_hidden_popen_kwargs(),
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout[:max_chars] if max_chars else proc.stdout
+            logger.warning("antiword не извлёк DOC %s: %s", filepath, (proc.stderr or "").strip())
+        except Exception as exc:
+            logger.warning("antiword: ошибка чтения DOC %s: %s", filepath, exc)
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        try:
+            with tempfile.TemporaryDirectory(prefix="rag_doc_") as tmp:
+                proc = subprocess.run(
+                    [
+                        soffice,
+                        "--headless",
+                        "--convert-to",
+                        "txt:Text",
+                        "--outdir",
+                        tmp,
+                        str(filepath),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                    encoding="utf-8",
+                    errors="replace",
+                    **_windows_hidden_popen_kwargs(),
+                )
+                out_path = Path(tmp) / (filepath.stem + ".txt")
+                if proc.returncode == 0 and out_path.exists():
+                    text = _read_text_file(out_path, max_chars=max_chars)
+                    if text.strip():
+                        return text
+                logger.warning("LibreOffice не извлёк DOC %s: %s", filepath, (proc.stderr or "").strip())
+        except Exception as exc:
+            logger.warning("LibreOffice: ошибка чтения DOC %s: %s", filepath, exc)
+
+    logger.warning("DOC %s не прочитан: установите antiword или LibreOffice", filepath)
+    return ""
 
 
 def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
