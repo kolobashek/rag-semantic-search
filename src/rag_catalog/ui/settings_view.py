@@ -1971,7 +1971,7 @@ def render_settings_screen(
     # ── Реестр секций: (key, icon, label, keywords) ─────────────────
     user_sections: List[tuple] = [
         ("profile",         "person",         "Профиль",                  ["имя", "аккаунт", "профиль"]),
-        ("telegram_sync",   "sync",           "Синхронизация Telegram",   ["telegram", "бот", "синхронизация"]),
+        ("telegram_sync",   "sync",           "Telegram-синк",            ["telegram", "бот", "синхронизация", "файлы"]),
         ("cloud_sync_user", "sync_alt",       "Cloud Sync",               ["sync", "синхронизация", "папка", "desktop"]),
         ("explorer",        "folder_open",    "Проводник",                ["файлы", "вид", "сортировка"]),
         ("favorites",       "star_border",    "Избранное",                ["закладки"]),
@@ -1988,8 +1988,12 @@ def render_settings_screen(
         ("security",      "security",       "Сессии и безопасность",  ["сессии", "системные файлы"]),
         ("users",         "group",          "Пользователи",           ["роль", "статус", "логин"]),
         ("registrations", "person_add",     "Регистрации",            ["заявки", "одобрить"]),
-        ("telegram_bot",   "send",           "Telegram бот",           ["бот", "chat id", "telegram"]),
+        ("telegram_bot",   "send",           "Telegram-бот",           ["бот", "chat id", "telegram", "конфигурация"]),
     ]
+    section_tooltips = {
+        "telegram_sync": "Личная привязка Telegram: вход, получение файлов и команды бота от вашего имени.",
+        "telegram_bot": "Административная конфигурация бота, чаты, токен и системные настройки.",
+    }
 
     active = [state.settings_section]  # сохраняем между ре-рендерами
     q_ref  = [""]
@@ -2038,9 +2042,12 @@ def render_settings_screen(
                 for key, icon, label, _ in filtered:
                     is_active = active[0] == key
                     active_cls = " active" if is_active else ""
-                    with ui.row().classes(
+                    nav_item = ui.row().classes(
                         f"rag-settings-nav-item w-full items-center gap-2 px-2 py-1 cursor-pointer{active_cls}"
-                    ).style("user-select:none;flex-wrap:nowrap").on("click", lambda k=key: navigate(k)):
+                    ).style("user-select:none;flex-wrap:nowrap").on("click", lambda k=key: navigate(k))
+                    if key in section_tooltips:
+                        nav_item.tooltip(section_tooltips[key])
+                    with nav_item:
                         ui.icon(icon, size="16px").classes("shrink-0")
                         ui.label(label).classes("text-sm truncate")
 
@@ -2098,8 +2105,8 @@ def render_settings_screen(
                     linked_tg_id = str(user.get("telegram_chat_id") or "").strip()
                     linked_tg_un = str(user.get("telegram_username") or "").strip()
                     linked_label = f"@{linked_tg_un}" if linked_tg_un else linked_tg_id
-                    ui.label("Синхронизация Telegram").classes("text-xl font-semibold")
-                    ui.label("Связь нужна для входа через Telegram и команд бота от вашего имени.").classes("rag-meta")
+                    ui.label("Telegram-синк (получение файлов)").classes("text-xl font-semibold")
+                    ui.label("Личная привязка нужна для входа через Telegram, получения файлов и команд бота от вашего имени.").classes("rag-meta")
                     with ui.row().classes("w-full items-center gap-2"):
                         ui.icon("check_circle" if linked_tg_id else "radio_button_unchecked").classes(
                             "text-green-600" if linked_tg_id else "text-gray-400"
@@ -2338,6 +2345,12 @@ def render_settings_screen(
                 render_admin_search_aliases()
             elif sec == "indexing":
                 if index_dashboard_fn:
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button(
+                            "Управление",
+                            icon="open_in_new",
+                            on_click=lambda: ui.navigate.to("/index"),
+                        ).props("outline dense no-caps").tooltip("Открыть экран индекса")
                     index_dashboard_fn()
                 else:
                     with ui.column().classes("rag-card w-full p-4 gap-2"):
@@ -2354,7 +2367,8 @@ def render_settings_screen(
                     enabled = bool(state.cfg.get("telegram_enabled"))
                     token_set = bool(str(state.cfg.get("telegram_bot_token") or "").strip())
                     bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-                    ui.label("Управление Telegram ботом").classes("text-xl font-semibold")
+                    ui.label("Telegram-бот (конфигурация)").classes("text-xl font-semibold")
+                    ui.label("Административные настройки бота: статус, ссылка, чаты и аудит.").classes("rag-meta")
                     with ui.row().classes("gap-2 flex-wrap"):
                         ui.label(f"Статус: {'включен' if enabled else 'выключен'}").classes("rag-chip")
                         ui.label(f"Токен: {'задан' if token_set else 'не задан'}").classes("rag-chip")

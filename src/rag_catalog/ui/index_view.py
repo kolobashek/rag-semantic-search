@@ -54,7 +54,13 @@ from .system import (
 )
 
 
-def render_index_screen(state: PageState, *, render_fn: Callable, access_denied: Callable) -> None:  # noqa: C901
+def render_index_screen(
+    state: PageState,
+    *,
+    render_fn: Callable,
+    access_denied: Callable,
+    settings_fn: Optional[Callable[[], None]] = None,
+) -> None:  # noqa: C901
     if not _is_admin(state):
         access_denied(hint="Управление индексом и расписание индексации доступны только администраторам.")
         return
@@ -74,6 +80,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
         active_label = "Запущено: " + ", ".join(active_stage_names) if active_stage_names else "Нет активных задач"
         header_active_chip = ui.label(active_label).classes("rag-chip")
         ui.space()
+        if settings_fn is not None:
+            ui.button(icon="settings", on_click=settings_fn, color=None).props("flat round dense").tooltip("Настройки индексации")
     ui.label("Этапы, OCR, расписание и параметры индексирования.").classes("rag-meta")
 
     # ── Метрики ──────────────────────────────────────────────────────

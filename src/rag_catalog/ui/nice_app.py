@@ -208,6 +208,10 @@ def _build_page(initial_screen: str = "search") -> None:
         _log_app_event(state, "navigation", "open_screen", details={"screen": screen})
         render()
 
+    def go_settings_section(section: str, *, close_drawer: bool = False) -> None:
+        state.settings_section = section
+        set_screen("settings", close_drawer=close_drawer)
+
     def go_explorer(path: str) -> None:
         value = str(path or "").strip()
         if value:
@@ -221,6 +225,8 @@ def _build_page(initial_screen: str = "search") -> None:
         nav_items = [
             ("search",   "Поиск",      "search"),
             ("explorer", "Файлы",      "folder"),
+            ("cloud",    "Cloud",      "cloud"),
+            ("jobs",     "Задачи",     "queue"),
         ]
         if is_admin:
             nav_items += [
@@ -228,15 +234,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 ("stats", "Аналитика", "query_stats"),
             ]
 
-        def open_settings_section(section: str) -> None:
-            state.settings_section = section
-            set_screen("settings")
-
         # ── Header nav tabs (desktop) ──────────────────────
         header_nav.clear()
         if state.current_user:
             header_items = [
-                ("home", "Главная", "dashboard", lambda: set_screen("search"), False),
                 ("search", "Поиск", "search", lambda: set_screen("search"), state.screen == "search"),
                 ("explorer", "Файлы", "folder", lambda: set_screen("explorer"), state.screen == "explorer"),
                 ("cloud", "Cloud", "cloud", lambda: set_screen("cloud"), state.screen == "cloud"),
@@ -1627,6 +1628,7 @@ def _build_page(initial_screen: str = "search") -> None:
             state,
             render_fn=render,
             access_denied=render_access_denied,
+            settings_fn=lambda: go_settings_section("indexing"),
         )
 
     def render_index_dashboard() -> None:
@@ -2076,10 +2078,6 @@ def _build_page(initial_screen: str = "search") -> None:
                 render_explorer_screen()
             elif state.screen == "index":
                 render_index_screen()
-            elif state.screen == "telegram":
-                state.screen = "settings"
-                state.settings_section = "telegram_sync"
-                render_settings_screen()
             elif state.screen == "settings":
                 render_settings_screen()
             elif state.screen == "stats":
@@ -2141,11 +2139,6 @@ def index_page() -> None:
     _build_page("index")
 
 
-@ui.page("/telegram")
-def telegram_page() -> None:
-    _build_page("settings")
-
-
 @ui.page("/settings")
 def settings_page() -> None:
     _build_page("settings")
@@ -2154,6 +2147,16 @@ def settings_page() -> None:
 @ui.page("/stats")
 def stats_page() -> None:
     _build_page("stats")
+
+
+@ui.page("/jobs")
+def jobs_page() -> None:
+    _build_page("jobs")
+
+
+@ui.page("/cloud")
+def cloud_page() -> None:
+    _build_page("cloud")
 
 
 @ui.page("/auth/device")
