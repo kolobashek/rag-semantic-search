@@ -1779,7 +1779,7 @@ class CloudDriveRegistryDB:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, path, name, current_version_id, storage_key, checksum, size_bytes, updated_at
+                SELECT id, path, name, current_version_id, storage_key, checksum, size_bytes, source_path, updated_at
                 FROM cloud_files
                 WHERE deleted_at=''
                 ORDER BY path
@@ -1794,6 +1794,7 @@ class CloudDriveRegistryDB:
                 "storage_key": str(row["storage_key"] or ""),
                 "checksum": str(row["checksum"] or ""),
                 "size_bytes": int(row["size_bytes"] or 0),
+                "source_path": str(row["source_path"] or ""),
                 "updated_at": str(row["updated_at"] or ""),
             }
             for row in rows

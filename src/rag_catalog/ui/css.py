@@ -81,6 +81,7 @@ def _install_css() -> None:
           font-size: 87.5%;
           letter-spacing: 0;
           background-image: none;
+          overflow-x: hidden;
         }
         .material-icons,
         .q-icon.material-icons,
@@ -104,6 +105,9 @@ def _install_css() -> None:
         }
         .q-layout,
         .q-page-container,
+        .q-page {
+          overflow-x: hidden;
+        }
         .q-page,
         .q-drawer,
         .q-drawer__content {

@@ -297,3 +297,37 @@ def test_cloud_drive_index_coverage_reports_missing_stale_and_errors(tmp_path: P
     assert coverage["missing"] == 1
     assert coverage["stale_examples"][0]["path"] == "stale.txt"
     assert coverage["error_examples"][0]["last_error"] == "boom"
+
+
+def test_cloud_drive_index_coverage_accepts_legacy_source_path_entries(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    root = registry.ensure_root_folder(root_name="Обмен", source_path=str(tmp_path / "catalog"))
+    current = registry.upsert_file(
+        folder_id=root.id,
+        path="Folder/report.txt",
+        name="report.txt",
+        storage_key="objects/sha256/aa/aa/report.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="aaaa",
+        source_path=str(tmp_path / "catalog" / "Folder" / "report.txt"),
+    )
+    state_db_path = tmp_path / "index_state.db"
+    state_db = IndexStateDB(str(state_db_path))
+    state_db.upsert_many(
+        [
+            {
+                "full_path": current.source_path,
+                "stage": "content",
+                "status": "ok",
+            },
+        ]
+    )
+
+    coverage = service.get_index_coverage(index_state_db_path=str(state_db_path), sample_limit=10)
+
+    assert coverage["ok"] is True
+    assert coverage["registry_files"] == 1
+    assert coverage["indexed_current"] == 1
+    assert coverage["missing"] == 0

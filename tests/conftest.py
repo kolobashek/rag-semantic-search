@@ -13,6 +13,8 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _install_stub(name: str) -> types.ModuleType:
     """Зарегистрировать пустой stub-модуль если он ещё не установлен."""
@@ -65,3 +67,15 @@ if "tqdm" not in sys.modules:
         return iterable or []
 
     _tqdm_mod.tqdm = _tqdm
+
+
+@pytest.fixture(autouse=True)
+def _isolate_indexer_control(monkeypatch, tmp_path):
+    """Keep tests independent from local UI pause/cancel state."""
+    from rag_catalog.core import indexer_control
+
+    monkeypatch.setattr(
+        indexer_control,
+        "indexer_control_path",
+        lambda: tmp_path / "indexer_control.json",
+    )

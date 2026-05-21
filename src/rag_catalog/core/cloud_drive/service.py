@@ -209,6 +209,7 @@ class CloudDriveService:
         sample_size = max(1, min(int(sample_limit or 25), 500))
         index_path = Path(str(index_state_db_path or "")).expanduser()
         indexed_by_file: dict[str, list[dict[str, Any]]] = {}
+        indexed_by_path: dict[str, dict[str, Any]] = {}
         index_available = index_path.is_file()
         if index_available:
             try:
@@ -219,14 +220,17 @@ class CloudDriveService:
                         SELECT full_path, cloud_file_id, cloud_version_id, cloud_path,
                                indexed_stage, status, last_error, updated_at
                         FROM state_entries
-                        WHERE cloud_file_id != ''
                         """
                     ).fetchall()
                 for row in rows:
+                    row_dict = dict(row)
+                    full_path_key = self._index_coverage_path_key(str(row["full_path"] or ""))
+                    if full_path_key and full_path_key not in indexed_by_path:
+                        indexed_by_path[full_path_key] = row_dict
                     file_id = str(row["cloud_file_id"] or "")
                     if not file_id:
                         continue
-                    indexed_by_file.setdefault(file_id, []).append(dict(row))
+                    indexed_by_file.setdefault(file_id, []).append(row_dict)
             except sqlite3.Error:
                 index_available = False
 
@@ -243,13 +247,18 @@ class CloudDriveService:
                 if str(row.get("cloud_version_id") or "") == current_version
             ]
             best = current_rows[0] if current_rows else (rows[0] if rows else None)
+            legacy_path_match = False
+            if best is None:
+                source_key = self._index_coverage_path_key(str(file_row.get("source_path") or ""))
+                best = indexed_by_path.get(source_key) if source_key else None
+                legacy_path_match = best is not None
             if best is None:
                 missing.append(file_row)
                 continue
             if str(best.get("status") or "") == "error":
                 errored.append({**file_row, "last_error": str(best.get("last_error") or "")})
                 continue
-            if not current_rows:
+            if not current_rows and not legacy_path_match:
                 stale.append(
                     {
                         **file_row,
@@ -277,6 +286,13 @@ class CloudDriveService:
             "stale_examples": stale[:sample_size],
             "error_examples": errored[:sample_size],
         }
+
+    @staticmethod
+    def _index_coverage_path_key(path: str) -> str:
+        clean = str(path or "").strip().replace("\\", "/")
+        while "//" in clean:
+            clean = clean.replace("//", "/")
+        return clean.lower()
 
     @staticmethod
     def _immutable_storage_key(*, checksum: str, filename: str) -> str:
