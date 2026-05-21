@@ -58,3 +58,34 @@ def test_lexical_search_uses_search_aliases_for_company_card(tmp_path: Path) -> 
     )
 
     assert out[0]["filename"] == "Карточка предприятия Спецмаш Альфа-Банк 2026.docx"
+
+
+def test_clear_filesystem_cache_forces_rescan(tmp_path: Path) -> None:
+    (tmp_path / "old.pdf").write_bytes(b"%PDF")
+    s = _searcher_with_catalog(tmp_path)
+
+    first = s._lexical_catalog_search(
+        query="old",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+    assert [x["filename"] for x in first] == ["old.pdf"]
+
+    (tmp_path / "new.pdf").write_bytes(b"%PDF")
+    cached = s._lexical_catalog_search(
+        query="new",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+    assert cached == []
+
+    s.clear_filesystem_cache()
+    refreshed = s._lexical_catalog_search(
+        query="new",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+    assert [x["filename"] for x in refreshed] == ["new.pdf"]
