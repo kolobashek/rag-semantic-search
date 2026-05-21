@@ -26,7 +26,7 @@ from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .helpers import _cd_acl_allows, _resolve_catalog_file
 from .state import _users_db_path
-from .system import _read_cloud_bootstrap_status, _safe_int, _telemetry_db_path
+from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
 
 AuthHeader = Annotated[str, Header(alias="Authorization")]
 
@@ -208,6 +208,25 @@ def api_cloud_drive_bootstrap_status(authorization: AuthHeader = "") -> Dict[str
     return _read_cloud_bootstrap_status(cfg)
 
 
+@app.post("/api/cloud-drive/bootstrap-recover")
+def api_cloud_drive_bootstrap_recover(authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    result = _recover_cloud_drive_jobs(cfg)
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "bootstrap_recover",
+        ok=bool(result.get("ok")),
+        details={
+            "recovered_jobs": result.get("recovered_jobs"),
+            "legacy_state_recovered": result.get("legacy_state_recovered"),
+            "error": result.get("error", ""),
+        },
+    )
+    return result
+
+
 @app.get("/api/cloud-drive/bootstrap-jobs")
 def api_cloud_drive_bootstrap_jobs(limit: int = 20, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
     cfg = load_config()
@@ -310,6 +329,29 @@ def api_cloud_drive_list(path: str = "", authorization: AuthHeader = "") -> Dict
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "list_directory", ok=False, details={"path": path, "error": str(exc)})
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/cloud-drive/search")
+def api_cloud_drive_search(query: str = "", path: str = "", limit: int = 50, authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    _require_cloud_drive_path_access(cfg, user, path)
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        raise HTTPException(status_code=400, detail="Не задан query.")
+    service = CloudDriveService.from_config(cfg)
+    try:
+        result = service.search_nodes(query=clean_query, path=path, limit=max(1, min(int(limit or 50), 500)))
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "search_nodes", ok=False, details={"path": path, "query": clean_query, "error": str(exc)})
+        raise HTTPException(status_code=404, detail=str(exc))
+    result["items"] = [
+        item for item in result.get("items", [])
+        if _cd_acl_allows(cfg, user, str(item.get("path") or ""))
+    ]
+    result["count"] = len(result["items"])
+    _audit_cloud_drive_api_event(cfg, user, "search_nodes", details={"path": path, "query": clean_query, "count": result["count"]})
+    return result
 
 
 @app.get("/api/cloud-drive/changes")

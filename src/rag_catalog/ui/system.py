@@ -144,7 +144,62 @@ def _runtime_marker_path(kind: str) -> Path:
     return _RUNTIME_DIR / f"{kind}_active.json"
 
 
+def _cloud_bootstrap_state_path() -> Path:
+    _RUNTIME_DIR.mkdir(exist_ok=True)
+    return _RUNTIME_DIR / "cloud_bootstrap_state.json"
+
+
+def _read_legacy_cloud_bootstrap_state() -> Optional[Dict[str, Any]]:
+    path = _cloud_bootstrap_state_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "status": "unreadable",
+            "path": str(path),
+            "error": "legacy_state_json_unreadable",
+        }
+    if not isinstance(data, dict):
+        return {
+            "status": "unreadable",
+            "path": str(path),
+            "error": "legacy_state_json_not_object",
+        }
+    status = str(data.get("status") or "").strip()
+    pid = _safe_int(data.get("pid") or data.get("thread_id"), 0)
+    alive = _is_process_alive(pid) if pid > 0 else False
+    data["path"] = str(path)
+    data["pid"] = pid
+    data["process_alive"] = alive
+    data["stale"] = status in {"pending", "running"} and not alive
+    return data
+
+
+def _mark_legacy_cloud_bootstrap_state_recovered(*, reason: str) -> bool:
+    legacy = _read_legacy_cloud_bootstrap_state()
+    if not legacy or not bool(legacy.get("stale")):
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    legacy["status"] = "failed"
+    legacy["done"] = True
+    legacy["finished_at"] = now
+    legacy["error"] = str(reason or "server_restart_recovery")
+    legacy["legacy_recovered_at"] = now
+    legacy["stale"] = True
+    try:
+        _cloud_bootstrap_state_path().write_text(
+            json.dumps(legacy, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except OSError:
+        return False
+
+
 def _read_cloud_bootstrap_status(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    legacy = _read_legacy_cloud_bootstrap_state()
     try:
         service = CloudDriveService.from_config(cfg)
         job = service.get_latest_bootstrap_job()
@@ -156,21 +211,45 @@ def _read_cloud_bootstrap_status(cfg: Dict[str, Any]) -> Dict[str, Any]:
             progress["last_error"] = job.last_error
             progress["created_at"] = job.created_at
             progress["updated_at"] = job.updated_at
+            if legacy is not None:
+                progress["legacy_state"] = legacy
             return progress
+        if legacy is not None:
+            data = dict(legacy)
+            data.setdefault("job_status", "idle")
+            if bool(data.get("stale")):
+                data["status"] = "stale"
+            return data
         return {"status": "idle", "job_status": "idle"}
     except Exception as exc:
-        return {"status": "unavailable", "job_status": "unavailable", "error": str(exc)}
+        data = {"status": "unavailable", "job_status": "unavailable", "error": str(exc)}
+        if legacy is not None:
+            data["legacy_state"] = legacy
+        return data
 
 
-def _recover_cloud_drive_jobs(cfg: Dict[str, Any]) -> None:
+def _recover_cloud_drive_jobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "ok": True,
+        "recovered_jobs": 0,
+        "legacy_state_recovered": False,
+        "legacy_state": _read_legacy_cloud_bootstrap_state(),
+    }
     try:
         service = CloudDriveService.from_config(cfg)
-    except Exception:
-        return
-    try:
-        service.recover_bootstrap_jobs()
     except Exception as exc:
+        result.update({"ok": False, "error": str(exc)})
+        return result
+    try:
+        result["recovered_jobs"] = service.recover_bootstrap_jobs()
+    except Exception as exc:
+        result["ok"] = False
+        result["error"] = str(exc)
         print(f"[nice_app] cloud drive recovery skipped: {exc}", file=sys.stderr)
+    recovered_legacy = _mark_legacy_cloud_bootstrap_state_recovered(reason="server_restart_recovery")
+    result["legacy_state_recovered"] = recovered_legacy
+    result["legacy_state"] = _read_legacy_cloud_bootstrap_state()
+    return result
 
 
 def _start_cloud_drive_job_worker(cfg: Dict[str, Any]) -> None:

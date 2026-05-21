@@ -39,6 +39,7 @@ from .state import (
 )
 from .system import (
     _read_cloud_bootstrap_status,
+    _recover_cloud_drive_jobs,
     _safe_int,
     _stop_managed_timer,
 )
@@ -883,6 +884,14 @@ def render_settings_screen(
                     error_text = str(bootstrap_state.get("error") or "").strip()
                     if error_text:
                         ui.label(error_text).classes("text-negative text-sm")
+                    legacy_state = bootstrap_state.get("legacy_state")
+                    if isinstance(legacy_state, dict) and bool(legacy_state.get("stale")):
+                        with ui.element("div").classes("cd-alert cd-alert-warning w-full mt-1"):
+                            ui.icon("warning", size="16px")
+                            ui.label(
+                                "Найден старый runtime-маркер bootstrap: процесс уже не жив, "
+                                "а JSON всё ещё числился активным. Нажмите recovery, чтобы пометить его завершённым."
+                            ).classes("text-xs")
                     started_at = str(bootstrap_state.get("started_at") or "").strip()
                     finished_at = str(bootstrap_state.get("finished_at") or "").strip()
                     if started_at:
@@ -1018,6 +1027,27 @@ def render_settings_screen(
                         ui.notify(f"Хранилище недоступно: {health.error}", type="negative")
                 except Exception as exc:
                     ui.notify(f"Не удалось проверить хранилище: {exc}", type="negative")
+
+            async def recover_cloud_bootstrap() -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    result = await run.io_bound(_recover_cloud_drive_jobs, cfg)
+                    render_bootstrap_status()
+                    render_bootstrap_jobs()
+                    if result.get("ok"):
+                        recovered_jobs = int(result.get("recovered_jobs") or 0)
+                        legacy_recovered = bool(result.get("legacy_state_recovered"))
+                        if recovered_jobs or legacy_recovered:
+                            ui.notify(
+                                f"Recovery завершён: jobs={recovered_jobs}, legacy={'да' if legacy_recovered else 'нет'}.",
+                                type="positive",
+                            )
+                        else:
+                            ui.notify("Активных зависших bootstrap-задач не найдено.", type="positive")
+                    else:
+                        ui.notify(f"Recovery не выполнен: {result.get('error')}", type="negative")
+                except Exception as exc:
+                    ui.notify(f"Не удалось выполнить recovery: {exc}", type="negative")
 
             async def ensure_cloud_storage_container() -> None:
                 values = current_cloud_values()
@@ -1252,6 +1282,7 @@ def render_settings_screen(
             with ui.row().classes("w-full gap-2 flex-wrap items-center"):
                 ui.button("Инициализировать реестр", icon="database", on_click=init_confirm_dialog.open).props("outline")
                 ui.button("Проверить хранилище", icon="health_and_safety", on_click=check_cloud_storage).props("outline")
+                ui.button("Recovery bootstrap", icon="healing", on_click=recover_cloud_bootstrap).props("outline")
                 ensure_bucket_button = ui.button("Создать bucket", icon="create_new_folder", on_click=ensure_cloud_storage_container).props("outline")
                 ui.button("Добавить новые файлы", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
 

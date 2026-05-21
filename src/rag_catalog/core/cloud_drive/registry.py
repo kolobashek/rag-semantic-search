@@ -429,6 +429,78 @@ class CloudDriveRegistryDB:
             ).fetchall()
             return [self._file_from_row(row) for row in rows]
 
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return (
+            str(value or '')
+            .replace('\\', '\\\\')
+            .replace('%', '\\%')
+            .replace('_', '\\_')
+        )
+
+    @classmethod
+    def _like_contains(cls, value: str) -> str:
+        escaped = cls._escape_like(value)
+        return f'%{escaped}%'
+
+    def search_nodes(self, *, query: str, path: str = '', limit: int = 50) -> List[Dict[str, Any]]:
+        needle = str(query or '').strip()
+        if not needle:
+            return []
+        clean_path = self._normalize_path(path)
+        clean_limit = max(1, min(int(limit or 50), 500))
+        pattern = self._like_contains(needle)
+        params: list[Any] = [pattern, pattern]
+        folder_where = ["deleted_at=''", "(name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')"]
+        file_where = ["deleted_at=''", "(name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')"]
+        if clean_path:
+            folder_where.append("path LIKE ? ESCAPE '\\'")
+            file_where.append("path LIKE ? ESCAPE '\\'")
+            params.append(f"{self._escape_like(clean_path)}/%")
+        with self._connect() as conn:
+            folder_rows = conn.execute(
+                f"""
+                SELECT 'folder' AS node_type, id, name, path, source_path, 0 AS size_bytes,
+                       '' AS mime_type, created_at, updated_at
+                FROM cloud_folders
+                WHERE {' AND '.join(folder_where)}
+                ORDER BY updated_at DESC, name
+                LIMIT ?
+                """,
+                (*params, clean_limit),
+            ).fetchall()
+            remaining = clean_limit - len(folder_rows)
+            file_rows: list[sqlite3.Row] = []
+            if remaining > 0:
+                file_params: list[Any] = [pattern, pattern]
+                if clean_path:
+                    file_params.append(f"{self._escape_like(clean_path)}/%")
+                file_rows = conn.execute(
+                    f"""
+                    SELECT 'file' AS node_type, id, name, path, source_path, size_bytes,
+                           mime_type, created_at, updated_at
+                    FROM cloud_files
+                    WHERE {' AND '.join(file_where)}
+                    ORDER BY updated_at DESC, name
+                    LIMIT ?
+                    """,
+                    (*file_params, remaining),
+                ).fetchall()
+        return [
+            {
+                'node_type': str(row['node_type']),
+                'id': str(row['id']),
+                'name': str(row['name']),
+                'path': str(row['path']),
+                'source_path': str(row['source_path'] or ''),
+                'size_bytes': int(row['size_bytes'] or 0),
+                'mime_type': str(row['mime_type'] or ''),
+                'created_at': str(row['created_at'] or ''),
+                'updated_at': str(row['updated_at'] or ''),
+            }
+            for row in [*folder_rows, *file_rows]
+        ]
+
     def list_file_versions(self, *, path: str) -> List[Dict[str, Any]]:
         file_row = self.get_file_by_path(path)
         if file_row is None:

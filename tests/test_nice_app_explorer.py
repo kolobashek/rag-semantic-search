@@ -17,6 +17,7 @@ from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 from rag_catalog.ui.api import (
     api_cloud_drive_bootstrap_jobs,
+    api_cloud_drive_bootstrap_recover,
     api_cloud_drive_bootstrap_status,
     api_cloud_drive_create_folder,
     api_cloud_drive_delete,
@@ -33,6 +34,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_reindex,
     api_cloud_drive_rename,
     api_cloud_drive_restore,
+    api_cloud_drive_search,
     api_cloud_drive_storage_health,
     api_cloud_drive_sync_client_register,
     api_cloud_drive_sync_clients,
@@ -508,11 +510,81 @@ def test_cloud_drive_bootstrap_status_returns_idle_without_jobs(monkeypatch, tmp
     }
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
     monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(ui_system, "_RUNTIME_DIR", tmp_path / "runtime")
 
     status = api_cloud_drive_bootstrap_status()
 
     assert status["status"] == "idle"
     assert status["job_status"] == "idle"
+
+
+def test_cloud_drive_bootstrap_status_reports_stale_legacy_marker(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "cloud_bootstrap_state.json").write_text(
+        '{"status":"running","thread_id":999999,"imported_files":3,"total_files":10}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ui_system, "_RUNTIME_DIR", runtime_dir)
+
+    status = ui_system._read_cloud_bootstrap_status(cfg)
+
+    assert status["status"] == "stale"
+    assert status["stale"] is True
+    assert status["process_alive"] is False
+
+
+def test_cloud_drive_recovery_marks_db_jobs_and_legacy_marker(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    job = service.create_bootstrap_job(catalog_root="O:/Обмен", import_files=True)
+    service.registry.update_job(job.id, status="running", payload={"progress": {"status": "running"}})
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    marker = runtime_dir / "cloud_bootstrap_state.json"
+    marker.write_text('{"status":"running","thread_id":999999,"done":false}', encoding="utf-8")
+    monkeypatch.setattr(ui_system, "_RUNTIME_DIR", runtime_dir)
+
+    result = ui_system._recover_cloud_drive_jobs(cfg)
+
+    recovered = service.registry.get_job(job.id)
+    assert result["ok"] is True
+    assert result["recovered_jobs"] == 1
+    assert result["legacy_state_recovered"] is True
+    assert recovered is not None
+    assert recovered.status == "failed"
+    assert recovered.progress["status"] == "stale"
+    assert '"status": "failed"' in marker.read_text(encoding="utf-8")
+
+
+def test_cloud_drive_bootstrap_recover_api_reports_recovered_state(monkeypatch) -> None:
+    cfg = {"cloud_drive_db_path": "D:/cloud_drive.db"}
+    expected = {
+        "ok": True,
+        "recovered_jobs": 1,
+        "legacy_state_recovered": True,
+    }
+    events: list[dict[str, object]] = []
+
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(cloud_api, "_recover_cloud_drive_jobs", lambda current_cfg: expected if current_cfg == cfg else {})
+    monkeypatch.setattr(cloud_api, "_audit_cloud_drive_api_event", lambda *_args, **kwargs: events.append(dict(kwargs)))
+
+    result = api_cloud_drive_bootstrap_recover()
+
+    assert result == expected
+    assert events[0]["ok"] is True
+    assert events[0]["details"]["legacy_state_recovered"] is True  # type: ignore[index]
 
 
 def test_cloud_drive_bootstrap_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> None:
@@ -568,6 +640,45 @@ def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
     assert health["backend"] == "local"
     assert health["ok"] is True
     assert health["writable"] is True
+
+
+def test_cloud_drive_search_api_finds_files_by_name(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    folder = service.registry.upsert_folder(path="Docs", name="Docs", parent_id=root.id, depth=1, source_path="")
+    service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Docs/Contract Alpha.pdf",
+        name="Contract Alpha.pdf",
+        storage_key="objects/a",
+        mime_type="application/pdf",
+        size_bytes=12,
+        checksum="a",
+        source_path="",
+    )
+    service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Docs/Budget.xlsx",
+        name="Budget.xlsx",
+        storage_key="objects/b",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=8,
+        checksum="b",
+        source_path="",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+
+    result = api_cloud_drive_search(query="Alpha", path="Docs")
+
+    assert result["count"] == 1
+    assert result["items"][0]["node_type"] == "file"
+    assert result["items"][0]["path"] == "Docs/Contract Alpha.pdf"
 
 
 def test_cloud_drive_sync_api_contracts(monkeypatch, tmp_path) -> None:
