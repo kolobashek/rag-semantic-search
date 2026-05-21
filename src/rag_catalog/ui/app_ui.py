@@ -802,6 +802,15 @@ def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
     if st.sidebar.button("Переподключить", use_container_width=True):
         _init_searcher(cfg)
         st.rerun()
+    if searcher and st.sidebar.button(
+        "Обновить файловый кэш",
+        use_container_width=True,
+        help="Пересканировать имена файлов и папок для точного поиска по каталогу.",
+    ):
+        searcher.clear_filesystem_cache()
+        st.session_state.last_results = []
+        st.session_state.last_fact_answer = None
+        st.sidebar.success("Файловый кэш сброшен.")
 
     st.sidebar.divider()
 
@@ -970,6 +979,9 @@ def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
             cfg["telegram_allowed_chat_id"] = tg_chat.strip()
             cfg["telegram_bot_link"] = tg_link.strip()
             save_config(cfg)
+            existing = _get_searcher()
+            if existing:
+                existing.clear_filesystem_cache()
             st.session_state.searcher = None
             _init_searcher(cfg)
             st.success("Настройки сохранены")

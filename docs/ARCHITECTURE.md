@@ -17,6 +17,13 @@ Root-level files such as `app_ui.py`, `rag_core.py`, `index_rag.py`, and
 `telegram_bot.py` are compatibility shims. They add `src` to `sys.path` and
 delegate to package modules.
 
+The root `_platform_compat.py` shim intentionally remains for old scripts and
+tests that import `_platform_compat` directly.
+
+`rag_search_fixed.py` is a deprecated compatibility entrypoint. Keep it only
+for one transition release; new scripts should call `rag_search.py` or import
+`rag_catalog.cli.rag_search`.
+
 Existing commands continue to work:
 
 ```powershell
@@ -37,4 +44,3 @@ from rag_catalog.core.user_auth_db import UserAuthDB
 
 `config.json` and `icon.ico` remain in the project root. Package code resolves
 them through the project root to preserve desktop, web, and build compatibility.
-

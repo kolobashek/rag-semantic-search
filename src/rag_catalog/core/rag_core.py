@@ -379,6 +379,10 @@ class RAGSearcher:
         self._fs_cache = {"ts": now, "items": items}
         return items
 
+    def clear_filesystem_cache(self) -> None:
+        """Force the next lexical catalog search to rescan the filesystem."""
+        self._fs_cache = {"ts": 0.0, "items": []}
+
     def _lexical_catalog_search(
         self,
         *,
