@@ -155,7 +155,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 header_status_chip.set_visibility(False)
                 settings_button = ui.button(
                     icon="settings",
-                    on_click=lambda: set_screen("settings"),
+                    on_click=lambda: open_context_settings(),
                     color=None,
                 ).props("flat round dense").classes("rag-header-button")
                 settings_button.tooltip("Настройки")
@@ -250,6 +250,15 @@ def _build_page(initial_screen: str = "search") -> None:
         state.settings_section = section
         mark_screen_dirty("settings")
         set_screen("settings", close_drawer=close_drawer)
+
+    def open_context_settings() -> None:
+        if state.screen == "settings":
+            return
+        section = {
+            "explorer": "explorer",
+            "index": "indexing",
+        }.get(state.screen, state.settings_section or "profile")
+        go_settings_section(section)
 
     def go_explorer(path: str) -> None:
         value = str(path or "").strip()
@@ -2118,7 +2127,7 @@ def _build_page(initial_screen: str = "search") -> None:
         except Exception:
             pass
         try:
-            settings_button.set_visibility(True)
+            settings_button.set_visibility(state.screen != "settings")
         except Exception:
             pass
         dark_mode.set_value(state.theme == "dark")

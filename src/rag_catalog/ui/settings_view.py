@@ -2186,8 +2186,7 @@ def render_settings_screen(
                 with ui.column().classes("rag-card w-full p-4 gap-3"):
                     ui.label("Проводник").classes("text-xl font-semibold")
                     ui.label(
-                        "Настройки вида, сортировки и фильтра теперь находятся в самом Проводнике: "
-                        "используйте шестерёнку в панели инструментов."
+                        "Настройки вида, сортировки и фильтра для экрана «Файлы»."
                     ).classes("rag-meta")
                     ui.label(
                         f"Текущее состояние: {state.explorer_view} · {state.explorer_sort} · "

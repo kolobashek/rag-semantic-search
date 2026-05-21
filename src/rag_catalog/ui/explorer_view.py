@@ -1370,11 +1370,6 @@ def render_explorer_screen(
                 up_btn.disable()
             render_breadcrumbs(root, current_for_toolbar)
             ui.button(icon="refresh", on_click=lambda: render_fn(), color=None).props("flat round dense").tooltip("Обновить")
-            ui.button(
-                icon="settings",
-                on_click=lambda: ui.navigate.to("/settings#settings-explorer"),
-                color=None,
-            ).props("flat round dense").tooltip("Настройки проводника")
             render_star(current_for_toolbar, item_type="folder")
         with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
             ui.icon("search").classes("text-lg")

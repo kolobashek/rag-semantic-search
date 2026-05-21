@@ -80,8 +80,6 @@ def render_index_screen(
         active_label = "Запущено: " + ", ".join(active_stage_names) if active_stage_names else "Нет активных задач"
         header_active_chip = ui.label(active_label).classes("rag-chip")
         ui.space()
-        if settings_fn is not None:
-            ui.button(icon="settings", on_click=settings_fn, color=None).props("flat round dense").tooltip("Настройки индексации")
     ui.label("Этапы, OCR, расписание и параметры индексирования.").classes("rag-meta")
 
     # ── Метрики ──────────────────────────────────────────────────────
