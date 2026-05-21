@@ -456,3 +456,31 @@ def test_cloud_drive_index_coverage_repair_queues_indexable_gaps(tmp_path: Path)
         if str(job.payload.get("path") or "") in {"missing.txt", "failed.txt"}
     }
     assert repair_reasons == {"coverage_missing", "coverage_error"}
+
+
+def test_cloud_drive_index_coverage_repair_batches_past_existing_jobs(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    root = registry.ensure_root_folder(root_name="Обмен", source_path="")
+    for idx in range(3):
+        registry.upsert_file(
+            folder_id=root.id,
+            path=f"missing-{idx}.txt",
+            name=f"missing-{idx}.txt",
+            storage_key=f"objects/sha256/{idx}{idx}/{idx}{idx}/missing-{idx}.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            checksum=str(idx) * 4,
+            source_path="",
+        )
+    state_db_path = tmp_path / "index_state.db"
+    IndexStateDB(str(state_db_path))
+
+    first = service.enqueue_index_coverage_repair(index_state_db_path=str(state_db_path), scopes="missing", limit=1)
+    second = service.enqueue_index_coverage_repair(index_state_db_path=str(state_db_path), scopes="missing", limit=1)
+
+    assert first["queued"] == 1
+    assert second["queued"] == 1
+    jobs = registry.list_pending_jobs(job_types=["reindex"], limit=10)
+    queued_paths = {str(job.payload.get("path") or "") for job in jobs}
+    assert len(queued_paths) == 2

@@ -347,17 +347,22 @@ class CloudDriveService:
             )
             if reason in clean_scopes:
                 candidates.append((file_row, reason))
-            if len(candidates) >= clean_limit:
-                break
 
-        latest_jobs = self.registry.list_latest_jobs_for_files(
-            [str(row.get("id") or "") for row, _reason in candidates],
-            job_types=["reindex"],
-        )
+        latest_jobs: dict[str, CloudDriveJob] = {}
+        candidate_ids = [str(row.get("id") or "") for row, _reason in candidates]
+        for offset in range(0, len(candidate_ids), 500):
+            latest_jobs.update(
+                self.registry.list_latest_jobs_for_files(
+                    candidate_ids[offset:offset + 500],
+                    job_types=["reindex"],
+                )
+            )
         queued: list[dict[str, str]] = []
         skipped_existing = 0
         skipped_missing_file = 0
         for file_row, reason in candidates:
+            if len(queued) >= clean_limit:
+                break
             file_id = str(file_row.get("id") or "")
             latest = latest_jobs.get(file_id)
             if latest is not None and latest.status in {"pending", "running"}:
