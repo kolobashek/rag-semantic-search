@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from rag_catalog.core.extractors.files import extract_xlsx
+from rag_catalog.core.extractors.files import extract_xlsx, extract_xlsx_document
 
 
 def _write_case_broken_shared_strings_xlsx(path: Path) -> None:
@@ -150,6 +150,18 @@ def test_extract_xlsx_tolerates_shared_strings_case(tmp_path: Path) -> None:
 
     assert "Лист: Прайс" in text
     assert "Артикул | Алмаз" in text
+
+
+def test_extract_xlsx_document_returns_sheet_row_blocks(tmp_path: Path) -> None:
+    path = tmp_path / "case-broken.xlsx"
+    _write_case_broken_shared_strings_xlsx(path)
+
+    doc = extract_xlsx_document(path)
+
+    assert doc.blocks
+    assert doc.blocks[0].sheet == "Прайс"
+    assert doc.blocks[0].row_start == 1
+    assert doc.blocks[0].text == "Артикул | Алмаз"
 
 
 def test_extract_xlsx_tolerates_missing_shared_strings(tmp_path: Path) -> None:

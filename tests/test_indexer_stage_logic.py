@@ -9,6 +9,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 from index_rag import RAGIndexer
+from rag_catalog.core.extractors import document_from_legacy_text
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.telemetry_db import TelemetryDB
 
@@ -105,9 +106,12 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx._extract_doc = lambda _p: extracted_text
     idx._extract_docx = lambda _p: extracted_text
     idx._extract_spreadsheet = lambda _p: extracted_text
+    idx._extract_spreadsheet_document = lambda _p: document_from_legacy_text(extracted_text)
     idx._extract_rtf = lambda _p: extracted_text
     idx._extract_pptx = lambda _p: extracted_text
+    idx._extract_pptx_document = lambda _p: document_from_legacy_text(extracted_text)
     idx._extract_pdf = lambda _p: extracted_text
+    idx._extract_pdf_document = lambda _p: document_from_legacy_text(extracted_text)
     idx._extract_text = lambda p: p.read_text(encoding="utf-8")
     idx._extract_csv = lambda p: p.read_text(encoding="utf-8")
     return idx

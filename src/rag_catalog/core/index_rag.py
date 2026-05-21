@@ -32,6 +32,7 @@ from sentence_transformers import SentenceTransformer
 from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
 from .extractors import (
+    ExtractedDocument,
     TextBlock,
     blocks_from_legacy_text,
     extract_doc_meta,
@@ -40,9 +41,12 @@ from .extractors import (
     extract_docx,
     extract_image,
     extract_pdf,
+    extract_pdf_document,
     extract_pptx,
+    extract_pptx_document,
     extract_rtf,
     extract_spreadsheet,
+    extract_spreadsheet_document,
     extract_text,
     ocr_pdf,
 )
@@ -585,6 +589,9 @@ class RAGIndexer:
     def _extract_pptx(self, filepath: Path) -> str:
         return extract_pptx(filepath, max_chars=self._extractor_max_chars())
 
+    def _extract_pptx_document(self, filepath: Path) -> ExtractedDocument:
+        return extract_pptx_document(filepath, max_chars=self._extractor_max_chars())
+
     def _extract_spreadsheet(self, filepath: Path) -> str:
         """
         Точка входа для всех табличных форматов.
@@ -593,6 +600,9 @@ class RAGIndexer:
         к неочевидным варнингам при смешении форматов.
         """
         return extract_spreadsheet(filepath, max_chars=self._extractor_max_chars())
+
+    def _extract_spreadsheet_document(self, filepath: Path) -> ExtractedDocument:
+        return extract_spreadsheet_document(filepath, max_chars=self._extractor_max_chars())
 
     def _extract_text(self, filepath: Path) -> str:
         return extract_text(filepath, max_chars=self._extractor_max_chars())
@@ -611,6 +621,9 @@ class RAGIndexer:
         При пустом текстовом слое — OCR (если не --no-ocr).
         """
         return extract_pdf(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
+
+    def _extract_pdf_document(self, filepath: Path) -> ExtractedDocument:
+        return extract_pdf_document(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
 
     def _ocr_pdf(self, filepath: Path) -> str:
         """OCR сканированного PDF через pytesseract + pdf2image, с кэшем в telemetry DB."""
@@ -687,10 +700,11 @@ class RAGIndexer:
         """Разбить текст на перекрывающиеся чанки."""
         return chunk_text(text, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
 
-    def _chunk_text_with_provenance(self, text: str) -> List[Dict[str, Any]]:
+    def _chunk_text_with_provenance(self, text: str | ExtractedDocument) -> List[Dict[str, Any]]:
         """Chunk legacy extractor text through structured TextBlock metadata."""
         items: List[Dict[str, Any]] = []
-        for block in blocks_from_legacy_text(text):
+        blocks = list(text.blocks) if isinstance(text, ExtractedDocument) else blocks_from_legacy_text(str(text or ""))
+        for block in blocks:
             for chunk in self._chunk_text(block.text):
                 items.append({"text": chunk, "block": block})
         return items
@@ -841,6 +855,7 @@ class RAGIndexer:
 
         ext = filepath.suffix.lower()
         full_text = ""
+        extracted_doc: Optional[ExtractedDocument] = None
         file_type = ext.lstrip(".") or "file"
 
         if ext == ".docx":
@@ -850,13 +865,15 @@ class RAGIndexer:
             full_text = self._extract_doc(filepath)
             file_type = "doc"
         elif ext in (".xlsx", ".xls"):
-            full_text = self._extract_spreadsheet(filepath)
+            extracted_doc = self._extract_spreadsheet_document(filepath)
+            full_text = extracted_doc.text
             file_type = "xlsx"
         elif ext == ".rtf":
             full_text = self._extract_rtf(filepath)
             file_type = "rtf"
         elif ext == ".pptx":
-            full_text = self._extract_pptx(filepath)
+            extracted_doc = self._extract_pptx_document(filepath)
+            full_text = extracted_doc.text
             file_type = "pptx"
         elif ext == ".txt":
             full_text = self._extract_text(filepath)
@@ -865,7 +882,8 @@ class RAGIndexer:
             full_text = self._extract_csv(filepath)
             file_type = "csv"
         elif ext == ".pdf":
-            full_text = self._extract_pdf(filepath)
+            extracted_doc = self._extract_pdf_document(filepath)
+            full_text = extracted_doc.text
             file_type = "pdf"
         elif ext in IMAGE_EXTENSIONS:
             if not self.skip_ocr:
@@ -874,7 +892,8 @@ class RAGIndexer:
         else:
             logger.debug("Неподдерживаемый формат (только метаданные): %s", ext)
 
-        chunk_items = self._chunk_text_with_provenance(full_text) if full_text.strip() else []
+        chunk_source = extracted_doc if extracted_doc is not None else full_text
+        chunk_items = self._chunk_text_with_provenance(chunk_source) if full_text.strip() else []
         chunks = [str(item.get("text") or "") for item in chunk_items]
         content_hash = self._content_hash(full_text)
         duplicate_of = ""
@@ -888,7 +907,8 @@ class RAGIndexer:
                 len(chunks),
                 self.max_chunks_per_file,
             )
-            chunks = chunks[: self.max_chunks_per_file]
+            chunk_items = chunk_items[: self.max_chunks_per_file]
+            chunks = [str(item.get("text") or "") for item in chunk_items]
         if not chunks:
             logger.warning("Файл %s: контент пуст, сохраняю только metadata stage", filepath.name)
 

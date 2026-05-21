@@ -14,7 +14,7 @@ from zipfile import ZipFile
 from qdrant_client.models import PointStruct
 from tqdm import tqdm
 
-from ..extractors import extract_doc_meta
+from ..extractors import ExtractedDocument, extract_doc_meta
 from .qdrant_writer import upsert_points
 
 
@@ -336,10 +336,12 @@ class IndexStageRunner:
 
             t_start = time.monotonic()
             full_text = ""
+            extracted_doc: ExtractedDocument | None = None
             file_type = ""
             failure_error = ""
 
             _buf: list = [None, None]  # [result_text, exception]
+            _doc_fn = None
 
             # Режим «только метадата»: либо текущий этап = metadata,
             # либо расширение явно в metadata_only_extensions (legacy флаг).
@@ -355,13 +357,15 @@ class IndexStageRunner:
                 _fn = indexer._extract_doc
             elif ext in (".xlsx", ".xls"):
                 file_type = "xlsx"
-                _fn = indexer._extract_spreadsheet
+                _fn = None
+                _doc_fn = indexer._extract_spreadsheet_document
             elif ext == ".rtf":
                 file_type = "rtf"
                 _fn = indexer._extract_rtf
             elif ext == ".pptx":
                 file_type = "pptx"
-                _fn = indexer._extract_pptx
+                _fn = None
+                _doc_fn = indexer._extract_pptx_document
             elif ext == ".txt":
                 file_type = "txt"
                 _fn = indexer._extract_text
@@ -370,7 +374,8 @@ class IndexStageRunner:
                 _fn = indexer._extract_csv
             elif ext == ".pdf":
                 file_type = "pdf"
-                _fn = indexer._extract_pdf
+                _fn = None
+                _doc_fn = indexer._extract_pdf_document
             elif ext in self._image_extensions:
                 if indexer.skip_ocr:
                     file_type = "image"
@@ -381,7 +386,7 @@ class IndexStageRunner:
             else:
                 _fn = None
 
-            if _fn is not None:
+            if _fn is not None or _doc_fn is not None:
                 # Логируем тяжёлые файлы заранее — только для тех, что реально читаем
                 if size_mb >= 5:
                     self._logger.info("Читаю крупный файл (%.1f МБ): %s", size_mb, relative_path.name)
@@ -400,14 +405,15 @@ class IndexStageRunner:
                 else:
                     def _reader():
                         try:
+                            reader_fn = _doc_fn or _fn
                             if item.get("archive_path") and item.get("archive_member"):
                                 with tempfile.TemporaryDirectory(prefix="rag_zip_") as tmp:
                                     temp_path = Path(tmp) / Path(str(item["archive_member"])).name
                                     with ZipFile(Path(item["archive_path"]), "r") as zf:
                                         temp_path.write_bytes(zf.read(str(item["archive_member"])))
-                                    _buf[0] = _fn(temp_path)
+                                    _buf[0] = reader_fn(temp_path)
                             else:
-                                _buf[0] = _fn(source_path)
+                                _buf[0] = reader_fn(source_path)
                         except Exception as _e:
                             _buf[1] = _e
 
@@ -434,7 +440,11 @@ class IndexStageRunner:
                             full_text = ""
                             failure_error = str(_buf[1])
                         else:
-                            full_text = _buf[0] or ""
+                            if isinstance(_buf[0], ExtractedDocument):
+                                extracted_doc = _buf[0]
+                                full_text = extracted_doc.text
+                            else:
+                                full_text = _buf[0] or ""
 
             elapsed = time.monotonic() - t_start
             if elapsed >= 30:
@@ -443,7 +453,8 @@ class IndexStageRunner:
                     elapsed, size_mb, relative_path.name,
                 )
 
-            chunk_items = indexer._chunk_text_with_provenance(full_text) if full_text.strip() else []
+            chunk_source = extracted_doc if extracted_doc is not None else full_text
+            chunk_items = indexer._chunk_text_with_provenance(chunk_source) if full_text.strip() else []
             chunks = [str(item.get("text") or "") for item in chunk_items]
             content_hash = indexer._content_hash(full_text)
             duplicate_of = ""
@@ -455,7 +466,8 @@ class IndexStageRunner:
                     "Файл %s: %d чанков → обрезано до %d",
                     relative_path.name, len(chunks), indexer.max_chunks_per_file,
                 )
-                chunks = chunks[: indexer.max_chunks_per_file]
+                chunk_items = chunk_items[: indexer.max_chunks_per_file]
+                chunks = [str(item.get("text") or "") for item in chunk_items]
 
             # Генерируем теги для файла (по пути, содержимому, синонимам)
             tags = self._generate_tags(source_path, relative_path, full_text, getattr(indexer, "synonym_map", {}) or {})

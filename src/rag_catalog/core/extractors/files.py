@@ -23,6 +23,7 @@ from zipfile import ZipFile
 from docx import Document
 from openpyxl import load_workbook
 
+from .contract import ExtractedDocument, TextBlock, document_from_legacy_text
 from rag_catalog.core.ocr_runtime import apply_tesseract_runtime
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,34 @@ def extract_pptx(filepath: Path, *, max_chars: int = 0) -> str:
         return ""
 
 
+def extract_pptx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocument:
+    """Extract slide text from PPTX as structured slide blocks."""
+    try:
+        blocks: list[TextBlock] = []
+        total = 0
+        done = False
+        with ZipFile(filepath, "r") as zf:
+            slide_names = sorted(
+                name for name in zf.namelist()
+                if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+            )
+            for idx, name in enumerate(slide_names, start=1):
+                if done:
+                    break
+                root = ElementTree.parse(zf.open(name)).getroot()
+                texts = [node.text or "" for node in root.iter() if node.tag.endswith("}t") and (node.text or "").strip()]
+                slide_text = " ".join(text.strip() for text in texts if text.strip())
+                if slide_text:
+                    blocks.append(TextBlock(text=slide_text, slide=idx))
+                    total += len(slide_text)
+                    if max_chars and total >= max_chars:
+                        done = True
+        return ExtractedDocument(blocks=tuple(blocks))
+    except Exception as exc:
+        logger.warning("Ошибка чтения PPTX %s: %s", filepath, exc)
+        return ExtractedDocument(blocks=())
+
+
 def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
     """Best-effort extraction for legacy binary DOC via antiword or LibreOffice."""
     antiword = shutil.which("antiword")
@@ -277,6 +306,50 @@ def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
                 pass
 
 
+def extract_xlsx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocument:
+    """Extract XLSX rows as structured sheet/row blocks."""
+    wb: Any | None = None
+    try:
+        wb = _load_xlsx_workbook(filepath, read_only=True, data_only=True)
+        blocks: list[TextBlock] = []
+        total_chars = 0
+        done = False
+        for ws in wb.worksheets:
+            if done:
+                break
+            sheet_name = str(ws.title)
+            for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                row_text = " | ".join(str(c) if c is not None else "" for c in row)
+                if not row_text.strip():
+                    continue
+                blocks.append(TextBlock(text=row_text, sheet=sheet_name, row_start=row_idx, row_end=row_idx))
+                total_chars += len(row_text)
+                if max_chars and total_chars >= max_chars:
+                    done = True
+                    break
+        return ExtractedDocument(blocks=tuple(blocks))
+    except KeyError as exc:
+        if "xl/sharedStrings.xml" in str(exc):
+            try:
+                text = _extract_xlsx_zip_fallback(filepath, max_chars=max_chars)
+                logger.warning("XLSX %s прочитан через fallback без sharedStrings.xml", filepath)
+                return document_from_legacy_text(text)
+            except Exception as fallback_exc:
+                logger.warning("Ошибка fallback-чтения XLSX %s: %s", filepath, fallback_exc)
+                return ExtractedDocument(blocks=())
+        logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
+        return ExtractedDocument(blocks=())
+    except Exception as exc:
+        logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
+        return ExtractedDocument(blocks=())
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+
 def extract_xls(filepath: Path, *, max_chars: int = 0) -> str:
     """Extract text from legacy XLS files via xlrd."""
     try:
@@ -308,6 +381,38 @@ def extract_xls(filepath: Path, *, max_chars: int = 0) -> str:
         return ""
 
 
+def extract_xls_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocument:
+    """Extract XLS rows as structured sheet/row blocks."""
+    try:
+        import xlrd  # type: ignore
+    except ImportError:
+        logger.warning("xlrd не установлен. Установите: pip install xlrd")
+        return ExtractedDocument(blocks=())
+    try:
+        wb = xlrd.open_workbook(str(filepath))
+        blocks: list[TextBlock] = []
+        total_chars = 0
+        done = False
+        for sheet in wb.sheets():
+            if done:
+                break
+            for row_idx in range(sheet.nrows):
+                row = sheet.row_values(row_idx)
+                row_text = " | ".join(str(v) if v not in ("", None) else "" for v in row)
+                if not row_text.strip():
+                    continue
+                row_number = row_idx + 1
+                blocks.append(TextBlock(text=row_text, sheet=str(sheet.name), row_start=row_number, row_end=row_number))
+                total_chars += len(row_text)
+                if max_chars and total_chars >= max_chars:
+                    done = True
+                    break
+        return ExtractedDocument(blocks=tuple(blocks))
+    except Exception as exc:
+        logger.warning("Ошибка чтения XLS %s: %s", filepath, exc)
+        return ExtractedDocument(blocks=())
+
+
 def extract_spreadsheet(filepath: Path, *, max_chars: int = 0) -> str:
     """Route spreadsheet extraction by extension."""
     ext = filepath.suffix.lower()
@@ -319,6 +424,19 @@ def extract_spreadsheet(filepath: Path, *, max_chars: int = 0) -> str:
         return extract_xlsx(filepath, max_chars=max_chars)
     logger.warning("Неизвестное табличное расширение: %s", ext)
     return ""
+
+
+def extract_spreadsheet_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocument:
+    """Route structured spreadsheet extraction by extension."""
+    ext = filepath.suffix.lower()
+    if ext == ".xls":
+        logger.debug("Формат XLS — использую xlrd: %s", filepath.name)
+        return extract_xls_document(filepath, max_chars=max_chars)
+    if ext == ".xlsx":
+        logger.debug("Формат XLSX — использую openpyxl: %s", filepath.name)
+        return extract_xlsx_document(filepath, max_chars=max_chars)
+    logger.warning("Неизвестное табличное расширение: %s", ext)
+    return ExtractedDocument(blocks=())
 
 
 def _read_text_file(filepath: Path, *, max_chars: int = 0) -> str:
@@ -417,6 +535,59 @@ def extract_pdf(filepath: Path, *, skip_ocr: bool = False, ocr: Callable[[Path],
     except Exception as exc:
         logger.warning("pdfplumber: ошибка чтения %s: %s", filepath.name, exc)
         return ""
+
+
+def extract_pdf_document(
+    filepath: Path,
+    *,
+    skip_ocr: bool = False,
+    ocr: Callable[[Path], str] | None = None,
+) -> ExtractedDocument:
+    """Extract PDF text as page-level blocks, falling back to OCR legacy text."""
+    try:
+        import fitz  # pymupdf
+
+        blocks: list[TextBlock] = []
+        with fitz.open(str(filepath)) as doc:
+            for page_idx, page in enumerate(doc, start=1):
+                text = page.get_text()
+                if text and text.strip():
+                    blocks.append(TextBlock(text=text.strip(), page=page_idx))
+        if blocks:
+            return ExtractedDocument(blocks=tuple(blocks))
+        if skip_ocr:
+            logger.debug("Нет текстового слоя, OCR пропущен (--no-ocr): %s", filepath.name)
+            return ExtractedDocument(blocks=())
+        logger.info("Нет текстового слоя в %s — запуск OCR…", filepath.name)
+        return document_from_legacy_text(ocr(filepath) if ocr else "")
+    except ImportError:
+        logger.debug("pymupdf не установлен, использую pdfplumber")
+    except Exception as exc:
+        logger.warning("pymupdf: ошибка чтения %s: %s", filepath.name, exc)
+        return ExtractedDocument(blocks=())
+
+    try:
+        import pdfplumber  # type: ignore
+    except ImportError:
+        logger.warning("Ни pymupdf, ни pdfplumber не установлены. pip install pymupdf")
+        return ExtractedDocument(blocks=())
+    try:
+        blocks = []
+        with pdfplumber.open(filepath) as pdf:
+            for page_idx, page in enumerate(pdf.pages, start=1):
+                text = page.extract_text()
+                if text and text.strip():
+                    blocks.append(TextBlock(text=text.strip(), page=page_idx))
+        if blocks:
+            return ExtractedDocument(blocks=tuple(blocks))
+        if skip_ocr:
+            logger.debug("Нет текстового слоя, OCR пропущен (--no-ocr): %s", filepath.name)
+            return ExtractedDocument(blocks=())
+        logger.info("Нет текстового слоя в %s — запуск OCR…", filepath.name)
+        return document_from_legacy_text(ocr(filepath) if ocr else "")
+    except Exception as exc:
+        logger.warning("pdfplumber: ошибка чтения %s: %s", filepath.name, exc)
+        return ExtractedDocument(blocks=())
 
 
 def _windows_hidden_popen_kwargs() -> dict[str, Any]:
