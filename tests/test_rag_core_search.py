@@ -161,6 +161,24 @@ def test_search_can_expand_query_in_core_pipeline(monkeypatch) -> None:
     assert s.telemetry.search_calls[-1]["query_used"] == "паспорт расширенный"
 
 
+def test_search_uses_original_query_for_lexical_channel() -> None:
+    s = _make_searcher(connected=True)
+    s._search_alias_expansion = lambda query: {"aliases": ["alias-added"], "groups": []}  # type: ignore[method-assign]
+    s.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[])  # type: ignore[method-assign]
+    captured = {}
+
+    def lexical(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    s._lexical_catalog_search = lexical  # type: ignore[method-assign]
+
+    s.search("Налоговая Дзержинка", source="test")
+
+    assert s._embedder.last_query == "Налоговая Дзержинка alias-added"
+    assert captured["query"] == "Налоговая Дзержинка"
+
+
 def test_search_title_only_returns_only_metadata_points() -> None:
     s = _make_searcher(connected=True)
 
@@ -301,6 +319,20 @@ def test_refresh_fs_cache_uses_state_db_with_ancestor_and_empty_folders(tmp_path
     assert "a" in folders
     assert str(Path("a") / "b") in {Path(path).as_posix().replace("/", "\\") for path in folders}
     assert "empty" in folders
+
+
+def test_refresh_fs_cache_ignores_empty_catalog_path() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {}
+
+    assert s._refresh_fs_cache() == []
+
+
+def test_term_matches_latin_o_and_zero_vehicle_codes() -> None:
+    s = _make_searcher(connected=True)
+
+    assert s._term_matches("volkswagen touareg 050", "o50")
+    assert s._term_matches("volkswagen touareg o50", "050")
 
 
 def test_merge_ranked_results_applies_feedback_signal() -> None:

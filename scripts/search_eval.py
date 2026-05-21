@@ -53,6 +53,8 @@ def main() -> int:
     parser.add_argument("--output", default="", help="Optional JSON report path.")
     parser.add_argument("--markdown-output", default="", help="Optional Markdown summary path.")
     parser.add_argument("--fail-under-recall", type=float, default=0.0, help="Exit 1 if mean Recall@k is lower.")
+    parser.add_argument("--no-warmup", action="store_true", help="Do not warm embedder/filesystem caches before timing.")
+    parser.add_argument("--warmup-query", default="карточка предприятия", help="Query text used for eval warmup.")
     parser.add_argument(
         "--config-set",
         action="append",
@@ -65,6 +67,13 @@ def main() -> int:
     cfg = _apply_config_overrides(load_config(), list(args.config_set or []))
     searcher = RAGSearcher(cfg)
     golden = load_golden_queries(args.golden)
+    if not args.no_warmup:
+        try:
+            searcher.embedder.encode(str(args.warmup_query or "warmup"), normalize_embeddings=True)
+            if hasattr(searcher, "_refresh_fs_cache"):
+                searcher._refresh_fs_cache()
+        except Exception as exc:
+            print(f"warning: search eval warmup failed: {exc}", file=sys.stderr)
 
     def _search(query: str, limit: int) -> List[Dict[str, Any]]:
         return searcher.search(query, limit=limit)

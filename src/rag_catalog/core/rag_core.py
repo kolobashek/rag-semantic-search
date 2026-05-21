@@ -484,8 +484,9 @@ class RAGSearcher:
         if title_only:
             results = [item for item in results if str(item.get("type") or "") in metadata_types]
 
+        lexical_query = query_original_used or raw_query
         lexical_results = self._lexical_catalog_search(
-            query=query_used,
+            query=lexical_query,
             limit=max(limit * 4, 40),
             file_type=file_type,
             content_only=content_only,
@@ -494,7 +495,7 @@ class RAGSearcher:
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
             rerank_top_n = max(limit, int(self.config.get("retrieval_reranker_top_n", max(limit * 3, 30)) or limit))
             bm25_results = self._bm25_catalog_search(
-                query=query_used,
+                query=lexical_query,
                 limit=int(self.config.get("retrieval_bm25_top_k", max(limit * 4, 40)) or max(limit * 4, 40)),
                 file_type=file_type,
                 content_only=content_only,
@@ -573,12 +574,30 @@ class RAGSearcher:
         return self._terms_from_text(expanded_query)
 
     def _term_matches(self, haystack: str, term: str) -> bool:
-        if term in haystack:
-            return True
-        if len(term) >= 5:
-            stem = term.rstrip("аеиоуыьъйяю")
-            return len(stem) >= 4 and stem in haystack
+        for candidate in self._term_variants(term):
+            if candidate in haystack:
+                return True
+            if len(candidate) >= 5:
+                stem = candidate.rstrip("аеиоуыьъйяю")
+                if len(stem) >= 4 and stem in haystack:
+                    return True
         return False
+
+    def _term_variants(self, term: str) -> List[str]:
+        clean = str(term or "").lower().replace("ё", "е")
+        variants = [clean]
+        if "0" in clean or re.search(r"[oо].*\d|\d.*[oо]", clean, flags=re.IGNORECASE):
+            for src, dst in (("o", "0"), ("о", "0"), ("0", "o"), ("0", "о")):
+                alt = clean.replace(src, dst)
+                if alt and alt not in variants:
+                    variants.append(alt)
+            for idx, char in enumerate(clean):
+                if char == "0":
+                    for dst in ("o", "о"):
+                        alt = f"{clean[:idx]}{dst}{clean[idx + 1:]}"
+                        if alt and alt not in variants:
+                            variants.append(alt)
+        return variants
 
     def _modified_to_ts(self, value: Any) -> Optional[float]:
         if value is None:
@@ -620,7 +639,11 @@ class RAGSearcher:
             return cached
 
         config = getattr(self, "config", {})
-        root = Path(config.get("catalog_path", ""))
+        catalog_path = str(config.get("catalog_path") or "").strip()
+        if not catalog_path:
+            self._fs_cache = {"ts": now, "items": []}
+            return []
+        root = Path(catalog_path)
         if not root.exists():
             self._fs_cache = {"ts": now, "items": []}
             return []

@@ -26,12 +26,31 @@ def tokenize(text: str) -> List[str]:
 
 
 def _matches(token: str, query_term: str) -> bool:
-    if query_term in token:
-        return True
-    if len(query_term) >= 5:
-        stem = query_term.rstrip("аеиоуыьъйяю")
-        return len(stem) >= 4 and stem in token
+    for term in _term_variants(query_term):
+        if term in token:
+            return True
+        if len(term) >= 5:
+            stem = term.rstrip("аеиоуыьъйяю")
+            if len(stem) >= 4 and stem in token:
+                return True
     return False
+
+
+def _term_variants(term: str) -> List[str]:
+    clean = str(term or "").lower().replace("ё", "е")
+    variants = [clean]
+    if "0" in clean or re.search(r"[oо].*\d|\d.*[oо]", clean, flags=re.IGNORECASE):
+        for src, dst in (("o", "0"), ("о", "0"), ("0", "o"), ("0", "о")):
+            alt = clean.replace(src, dst)
+            if alt and alt not in variants:
+                variants.append(alt)
+        for idx, char in enumerate(clean):
+            if char == "0":
+                for dst in ("o", "о"):
+                    alt = f"{clean[:idx]}{dst}{clean[idx + 1:]}"
+                    if alt and alt not in variants:
+                        variants.append(alt)
+    return variants
 
 
 def bm25_rank_items(
