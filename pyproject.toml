@@ -41,6 +41,7 @@ dependencies = [
     "chardet>=3.0.2,<6",
     "psutil>=5.9.0",
     "boto3>=1.34.0",
+    "watchdog>=4.0.0",
 ]
 
 [project.optional-dependencies]

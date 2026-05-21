@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import sys
 import uuid
@@ -1086,6 +1087,61 @@ class RAGIndexer:
         self.state_db.delete_entries(deleted_keys)
         return len(deleted_keys)
 
+    def watch(self, stage: str = "content") -> None:
+        """Watch catalog changes and incrementally reindex changed files."""
+        try:
+            from watchdog.events import FileSystemEventHandler  # type: ignore
+            from watchdog.observers import Observer  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("Для --watch установите зависимость watchdog") from exc
+
+        work_queue: "queue.Queue[Path]" = queue.Queue()
+
+        class _Handler(FileSystemEventHandler):
+            def on_created(self, event):  # type: ignore[no-untyped-def]
+                self._enqueue(event)
+
+            def on_modified(self, event):  # type: ignore[no-untyped-def]
+                self._enqueue(event)
+
+            def on_moved(self, event):  # type: ignore[no-untyped-def]
+                self._enqueue(event)
+
+            def _enqueue(self, event):  # type: ignore[no-untyped-def]
+                if getattr(event, "is_directory", False):
+                    return
+                raw = str(getattr(event, "dest_path", "") or getattr(event, "src_path", "") or "")
+                if not raw:
+                    return
+                path = Path(raw)
+                if path.suffix.lower() in SUPPORTED_EXTENSIONS and not path.name.startswith("~$"):
+                    work_queue.put(path)
+
+        observer = Observer()
+        observer.schedule(_Handler(), str(self.catalog_path), recursive=True)
+        observer.start()
+        logger.info("Watch mode запущен: %s", self.catalog_path)
+        try:
+            while True:
+                path = work_queue.get()
+                if not path.exists() or self._is_excluded_path(path):
+                    continue
+                try:
+                    if path.suffix.lower() == ".zip":
+                        logger.info("ZIP изменён, запускаю stage-проход для архива: %s", path)
+                        if stage == "all":
+                            self.index_all_stages()
+                        else:
+                            self.index_directory(stage=stage)
+                    else:
+                        logger.info("Watch reindex: %s", path)
+                        self.process_file(path)
+                except Exception as exc:
+                    logger.warning("Watch reindex failed for %s: %s", path, exc)
+        finally:
+            observer.stop()
+            observer.join(timeout=10)
+
 
 # ─────────────────────────── CLI entry point ───────────────────────────
 
@@ -1111,6 +1167,7 @@ def main() -> None:
             "  --stage small         — содержимое docx/xlsx/xls + мелких PDF (десятки минут)\n"
             "  --stage large         — содержимое больших файлов + сканированные PDF (часы)\n"
             "  --stage all           — все этапы подряд (поведение по умолчанию)\n"
+            "  --watch               — после первичного прохода следить за изменениями каталога\n"
             "  --recreate            — пересоздать коллекцию и очистить state\n"
             "  --cleanup             — только удалить из индекса файлы, которых нет на диске\n"
         ),
@@ -1158,6 +1215,11 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Показать файлы, которые будут обработаны, и причины без записи в Qdrant/state.",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="После первичного прогона следить за изменениями каталога и индексировать события.",
     )
     parser.add_argument(
         "--quality-report",
@@ -1308,6 +1370,8 @@ def main() -> None:
                     note="dry-run",
                 )
                 return
+            if args.watch:
+                indexer.watch(stage=stage)
             run_totals["total_files"] = max(run_totals["total_files"], int(totals.get("total_files", 0)))
             for k in ("added_files", "updated_files", "skipped_files", "error_files", "points_added"):
                 run_totals[k] += int(totals.get(k, 0))
