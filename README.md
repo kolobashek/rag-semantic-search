@@ -227,11 +227,15 @@ POST /api/cloud-drive/delete
 GET  /api/cloud-drive/trash
 POST /api/cloud-drive/restore
 POST /api/cloud-drive/reindex
+POST /api/cloud-drive/permissions
 GET  /api/cloud-drive/jobs
 GET  /api/cloud-drive/changes
 GET  /api/cloud-drive/storage-health
 /api/cloud-drive/sync/*
 ```
+
+Если таблица `cloud_permissions` пуста, Cloud Drive сохраняет прежний open-access режим для совместимости.
+После первой grant-записи доступ к API проверяется по registry ACL с наследованием прав от папок.
 
 ## Поиск И RAG
 

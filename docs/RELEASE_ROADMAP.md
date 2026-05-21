@@ -115,6 +115,33 @@ Done criteria:
 - move/rename не создают дубли в поиске;
 - delete убирает результат из поиска, restore возвращает.
 
+### 5A. Cloud Drive Enterprise Product Roadmap
+
+Owner: Codex backend/security, Claude UI.
+
+P0:
+
+- DONE 2026-05-21: Registry-backed ACL/RBAC foundation: права на папки/файлы хранятся в `cloud_permissions`, наследуются от папок и применяются в Cloud Drive API read/write operations.
+- Search ACL: результаты RAG/Qdrant/BM25 по Cloud Drive фильтруются по тем же правам, что download/list.
+- Index consistency: для каждого `cloud_file_id + version_id` виден статус `not_indexed/queued/indexed/failed/stale`; есть repair/retry по scope.
+- Durable jobs: leases/heartbeat/backoff/dead-letter для bootstrap/reindex/cleanup/OCR/preview, с worker identity и failed-file UX.
+- Admin recovery center: stale jobs, missing storage objects, index drift, last successful bootstrap/sync, retry buttons.
+
+P1:
+
+- Registry search: ACL-aware поиск по имени/пути/типу/дате/размеру с pagination и фильтрами в Explorer.
+- Storage hardening: streaming download, multipart upload, checksum verification, object GC, lifecycle/retention policy.
+- Sync hardening: resumable transfer, device revoke, conflict inbox, push/SSE вместо одного polling.
+- RAG provenance: ссылка на конкретную версию Cloud Drive файла, page/sheet/chunk id в citation.
+- Bulk workflows: bulk move/delete/reindex/download ZIP, version restore, folder download.
+
+P2:
+
+- Enterprise integrations: AD/OIDC groups, service accounts, group sync.
+- Compliance: immutable audit export by user/document/action, legal hold, retention.
+- Governance: quotas, file classification, DLP/antivirus hooks.
+- Scale split: отдельный Cloud Drive worker/service, Postgres decision if multi-host writes become required.
+
 ## P1 Release Polish
 
 ### 6. UI Stabilization Against Hi-Fi

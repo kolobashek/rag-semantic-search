@@ -70,6 +70,66 @@ class CloudDriveService:
     def list_jobs(self, *, job_type: str = '', limit: int = 20) -> list[CloudDriveJob]:
         return self.registry.list_jobs(job_type=(job_type or None), limit=limit)
 
+    def grant_permission(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        resource_type: str,
+        resource_id: str,
+        access_level: str,
+    ) -> dict:
+        return self.registry.grant_permission(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            access_level=access_level,
+        )
+
+    def grant_path_permission(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        path: str = '',
+        access_level: str,
+    ) -> dict:
+        clean_path = str(path or '').strip().replace('\\', '/').strip('/')
+        if clean_path:
+            node = self.registry.get_node_by_path(clean_path)
+            if node is None:
+                raise RuntimeError(f'Узел не найден: {clean_path}')
+        else:
+            node = self.registry.get_root_folder()
+            if node is None:
+                raise RuntimeError('Cloud Drive registry ещё не инициализирован.')
+        resource_type = 'file' if hasattr(node, 'folder_id') else 'folder'
+        result = self.grant_permission(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            resource_type=resource_type,
+            resource_id=str(node.id),
+            access_level=access_level,
+        )
+        result['path'] = clean_path
+        return result
+
+    def user_can_access(
+        self,
+        *,
+        username: str,
+        role: str = '',
+        path: str = '',
+        required_level: str = 'viewer',
+    ) -> bool:
+        return self.registry.user_can_access(
+            username=username,
+            role=role,
+            path=path,
+            required_level=required_level,
+        )
+
     def get_storage_health(self) -> CloudDriveStorageHealth:
         result = dict(self.storage.healthcheck())
         return CloudDriveStorageHealth(

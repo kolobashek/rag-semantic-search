@@ -196,6 +196,8 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_folder ON cloud_files(folder_id, name);
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_storage_key ON cloud_files(storage_key);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_permissions_resource ON cloud_permissions(resource_type, resource_id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_clients_username ON cloud_sync_clients(username, status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_pairs_client ON cloud_sync_pairs(client_id, enabled, cloud_path);
@@ -428,6 +430,171 @@ class CloudDriveRegistryDB:
                 (folder_id,),
             ).fetchall()
             return [self._file_from_row(row) for row in rows]
+
+    @staticmethod
+    def _access_rank(access_level: str) -> int:
+        value = str(access_level or '').strip().lower()
+        if value in {'viewer', 'read', 'reader'}:
+            return 1
+        if value in {'editor', 'write', 'contributor'}:
+            return 2
+        if value in {'admin', 'owner'}:
+            return 3
+        return 0
+
+    def has_any_permissions(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute('SELECT 1 FROM cloud_permissions LIMIT 1').fetchone()
+            return row is not None
+
+    def grant_permission(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        resource_type: str,
+        resource_id: str,
+        access_level: str,
+    ) -> Dict[str, str]:
+        clean_subject_type = str(subject_type or '').strip().lower()
+        clean_subject_id = str(subject_id or '').strip().lower()
+        clean_resource_type = str(resource_type or '').strip().lower()
+        clean_resource_id = str(resource_id or '').strip()
+        clean_access = str(access_level or '').strip().lower()
+        if clean_subject_type not in {'user', 'role', 'group', '*'}:
+            raise RuntimeError('Недопустимый subject_type для Cloud Drive permission.')
+        if not clean_subject_id:
+            raise RuntimeError('Не задан subject_id для Cloud Drive permission.')
+        if clean_resource_type not in {'folder', 'file', 'path'}:
+            raise RuntimeError('Недопустимый resource_type для Cloud Drive permission.')
+        if not clean_resource_id:
+            raise RuntimeError('Не задан resource_id для Cloud Drive permission.')
+        if self._access_rank(clean_access) <= 0:
+            raise RuntimeError('Недопустимый access_level для Cloud Drive permission.')
+        now = _utc_now()
+        permission_id = str(uuid.uuid4())
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    '''
+                    INSERT INTO cloud_permissions (
+                        id, subject_type, subject_id, resource_type, resource_id, access_level, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        permission_id,
+                        clean_subject_type,
+                        clean_subject_id,
+                        clean_resource_type,
+                        clean_resource_id,
+                        clean_access,
+                        now,
+                    ),
+                )
+        return {
+            'id': permission_id,
+            'subject_type': clean_subject_type,
+            'subject_id': clean_subject_id,
+            'resource_type': clean_resource_type,
+            'resource_id': clean_resource_id,
+            'access_level': clean_access,
+            'created_at': now,
+        }
+
+    def user_can_access(
+        self,
+        *,
+        username: str,
+        role: str = '',
+        path: str = '',
+        required_level: str = 'viewer',
+    ) -> bool:
+        if str(role or '').strip().lower() == 'admin':
+            return True
+        if not self.has_any_permissions():
+            return True
+        required_rank = self._access_rank(required_level)
+        if required_rank <= 0:
+            required_rank = 1
+        clean_user = str(username or '').strip().lower()
+        clean_role = str(role or '').strip().lower()
+        clean_path = self._normalize_path(path)
+        subjects = [
+            ('*', '*'),
+            ('user', '*'),
+        ]
+        if clean_user:
+            subjects.append(('user', clean_user))
+        if clean_role:
+            subjects.extend([('role', clean_role), ('role', '*')])
+        subject_sql = ' OR '.join('(subject_type=? AND subject_id=?)' for _ in subjects)
+        subject_params: list[str] = [part for pair in subjects for part in pair]
+
+        with self._connect() as conn:
+            resource_pairs: list[tuple[str, str]] = []
+            if clean_path:
+                file_row = conn.execute(
+                    "SELECT id, folder_id FROM cloud_files WHERE path=? AND deleted_at=''",
+                    (clean_path,),
+                ).fetchone()
+                folder_row = conn.execute(
+                    "SELECT id, path FROM cloud_folders WHERE path=? AND deleted_at=''",
+                    (clean_path,),
+                ).fetchone()
+                if file_row is not None:
+                    resource_pairs.append(('file', str(file_row['id'])))
+                    folder_id = str(file_row['folder_id'])
+                    current = conn.execute(
+                        "SELECT id, parent_id FROM cloud_folders WHERE id=? AND deleted_at=''",
+                        (folder_id,),
+                    ).fetchone()
+                    while current is not None:
+                        resource_pairs.append(('folder', str(current['id'])))
+                        parent_id = current['parent_id']
+                        if parent_id is None:
+                            break
+                        current = conn.execute(
+                            "SELECT id, parent_id FROM cloud_folders WHERE id=? AND deleted_at=''",
+                            (str(parent_id),),
+                        ).fetchone()
+                elif folder_row is not None:
+                    current = conn.execute(
+                        "SELECT id, parent_id FROM cloud_folders WHERE id=? AND deleted_at=''",
+                        (str(folder_row['id']),),
+                    ).fetchone()
+                    while current is not None:
+                        resource_pairs.append(('folder', str(current['id'])))
+                        parent_id = current['parent_id']
+                        if parent_id is None:
+                            break
+                        current = conn.execute(
+                            "SELECT id, parent_id FROM cloud_folders WHERE id=? AND deleted_at=''",
+                            (str(parent_id),),
+                        ).fetchone()
+                resource_pairs.append(('path', clean_path))
+                parts = clean_path.split('/')
+                for idx in range(len(parts) - 1, 0, -1):
+                    resource_pairs.append(('path', '/'.join(parts[:idx])))
+            else:
+                root = conn.execute("SELECT id FROM cloud_folders WHERE is_root=1 AND deleted_at='' LIMIT 1").fetchone()
+                if root is not None:
+                    resource_pairs.append(('folder', str(root['id'])))
+                resource_pairs.append(('path', ''))
+
+            resource_pairs = list(dict.fromkeys(resource_pairs))
+            if not resource_pairs:
+                return False
+            resource_sql = ' OR '.join('(resource_type=? AND resource_id=?)' for _ in resource_pairs)
+            resource_params: list[str] = [part for pair in resource_pairs for part in pair]
+            rows = conn.execute(
+                f'''
+                SELECT access_level FROM cloud_permissions
+                WHERE ({subject_sql}) AND ({resource_sql})
+                ''',
+                (*subject_params, *resource_params),
+            ).fetchall()
+        return any(self._access_rank(str(row['access_level'] or '')) >= required_rank for row in rows)
 
     def list_file_versions(self, *, path: str) -> List[Dict[str, Any]]:
         file_row = self.get_file_by_path(path)

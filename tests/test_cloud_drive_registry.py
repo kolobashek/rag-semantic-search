@@ -97,6 +97,37 @@ def test_registry_compacts_duplicate_versions(tmp_path: Path) -> None:
     assert registry.get_file_by_path('same.txt').current_version_id == file_row.current_version_id  # type: ignore[union-attr]
 
 
+def test_registry_permissions_inherit_from_folder_and_preserve_open_default(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    folder = registry.upsert_folder(path='Projects', name='Projects', parent_id=root.id, depth=1, source_path='')
+    file_row = registry.upsert_file(
+        folder_id=folder.id,
+        path='Projects/plan.docx',
+        name='plan.docx',
+        storage_key='objects/plan',
+        mime_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        size_bytes=5,
+        checksum='abc',
+        source_path='',
+    )
+
+    assert registry.user_can_access(username='alice', role='user', path=file_row.path)
+
+    registry.grant_permission(
+        subject_type='user',
+        subject_id='alice',
+        resource_type='folder',
+        resource_id=folder.id,
+        access_level='viewer',
+    )
+
+    assert registry.user_can_access(username='alice', role='user', path=file_row.path)
+    assert not registry.user_can_access(username='bob', role='user', path=file_row.path)
+    assert not registry.user_can_access(username='alice', role='user', path=file_row.path, required_level='editor')
+    assert registry.user_can_access(username='anyone', role='admin', path=file_row.path, required_level='admin')
+
+
 def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     catalog = tmp_path / 'catalog'
     (catalog / 'Folder A').mkdir(parents=True)
