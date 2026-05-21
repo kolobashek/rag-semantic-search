@@ -1,4 +1,9 @@
-from rag_catalog.ui.state import PageState, capture_screen_state, restore_screen_state
+from rag_catalog.ui.state import (
+    PageState,
+    capture_screen_state,
+    restore_screen_state,
+    should_rebuild_screen_container,
+)
 
 
 def test_search_screen_state_cache_restores_query_filters_and_results() -> None:
@@ -58,3 +63,14 @@ def test_explorer_and_cloud_screen_state_cache_restore_independently() -> None:
 
     assert restore_screen_state(state, "cloud") is True
     assert state.cloud_tab == "sync"
+
+
+def test_search_container_cache_reuses_dom_only_on_navigation_return() -> None:
+    initialized = {"search", "explorer"}
+    dirty: set[str] = set()
+
+    assert should_rebuild_screen_container("search", "explorer", initialized, dirty) is False
+    assert should_rebuild_screen_container("search", "search", initialized, dirty) is True
+    assert should_rebuild_screen_container("explorer", "search", initialized, dirty) is True
+    assert should_rebuild_screen_container("search", "explorer", initialized, {"search"}) is True
+    assert should_rebuild_screen_container("cloud", "search", initialized, dirty) is True

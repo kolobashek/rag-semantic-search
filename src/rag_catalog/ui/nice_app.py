@@ -73,6 +73,7 @@ from .state import (
     PageState,
     capture_screen_state,
     restore_screen_state,
+    should_rebuild_screen_container,
     _get_auth_db,
     _get_telemetry,
     _is_saved_search,
@@ -171,6 +172,24 @@ def _build_page(initial_screen: str = "search") -> None:
     page_root = ui.column().classes("rag-page gap-5")
     with page_root:
         content = ui.column().classes("w-full gap-5")
+    screen_containers: Dict[str, Any] = {}
+    initialized_screens: set[str] = set()
+    dirty_screens: set[str] = set()
+    active_screen_ref: List[Optional[str]] = [None]
+
+    def mark_screen_dirty(screen: str) -> None:
+        dirty_screens.add(screen)
+
+    def screen_container(screen: str) -> Any:
+        if screen not in screen_containers:
+            with content:
+                container = ui.column().classes("w-full gap-5")
+                container.set_visibility(False)
+            screen_containers[screen] = container
+        return screen_containers[screen]
+
+    def current_content_container() -> Any:
+        return screen_containers.get(state.screen) or content
 
     def touch_activity() -> None:
         touch_session(state, min_interval_minutes=60)
@@ -221,6 +240,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def go_settings_section(section: str, *, close_drawer: bool = False) -> None:
         state.settings_section = section
+        mark_screen_dirty("settings")
         set_screen("settings", close_drawer=close_drawer)
 
     def go_explorer(path: str) -> None:
@@ -229,6 +249,7 @@ def _build_page(initial_screen: str = "search") -> None:
             p = Path(value)
             state.explorer_path = str(p.parent if p.is_file() else p)
             state.explorer_page = 0
+            mark_screen_dirty("explorer")
         set_screen("explorer")
 
     def update_nav() -> None:
@@ -714,11 +735,14 @@ def _build_page(initial_screen: str = "search") -> None:
             if _t is not None:
                 _stop_managed_timer(_t)
                 setattr(state, _timer_attr, None)
-        content.clear()
-        with content:
+        target = current_content_container()
+        target.clear()
+        initialized_screens.discard(state.screen)
+        with target:
             render_search_header()
             ui.spinner(size="lg").classes("mt-4")
             ui.label("Ищу совпадения...").classes("rag-meta")
+        initialized_screens.add(state.screen)
 
     def render_search_header() -> None:
         with ui.column().classes("w-full gap-2"):
@@ -2040,71 +2064,99 @@ def _build_page(initial_screen: str = "search") -> None:
         update_nav()
         current_screen = state.screen
         capture_screen_state(state, current_screen)
-        content.clear()
-        with content:
-            if state.current_user is None:
-                try:
-                    drawer.set_value(False)
-                except Exception:
-                    pass
-                try:
-                    drawer.set_visibility(False)
-                except Exception:
-                    pass
-                try:
-                    menu_button.set_visibility(False)
-                except Exception:
-                    pass
-                try:
-                    theme_button.set_visibility(False)
-                except Exception:
-                    pass
+        if state.current_user is None:
+            content.clear()
+            screen_containers.clear()
+            initialized_screens.clear()
+            dirty_screens.clear()
+            active_screen_ref[0] = None
+            try:
+                drawer.set_value(False)
+            except Exception:
+                pass
+            try:
+                drawer.set_visibility(False)
+            except Exception:
+                pass
+            try:
+                menu_button.set_visibility(False)
+            except Exception:
+                pass
+            try:
+                theme_button.set_visibility(False)
+            except Exception:
+                pass
+            with content:
                 render_login_screen()
-                return
-            if int((state.current_user or {}).get("must_change_password") or 0):
-                try:
-                    drawer.set_visibility(False)
-                except Exception:
-                    pass
-                try:
-                    menu_button.set_visibility(False)
-                except Exception:
-                    pass
+            return
+        if int((state.current_user or {}).get("must_change_password") or 0):
+            content.clear()
+            screen_containers.clear()
+            initialized_screens.clear()
+            dirty_screens.clear()
+            active_screen_ref[0] = None
+            try:
+                drawer.set_visibility(False)
+            except Exception:
+                pass
+            try:
+                menu_button.set_visibility(False)
+            except Exception:
+                pass
+            with content:
                 render_force_change_password_screen()
-                return
-            try:
-                drawer.set_visibility(True)
-            except Exception:
-                pass
-            try:
-                menu_button.set_visibility(True)
-            except Exception:
-                pass
-            try:
-                theme_button.set_visibility(True)
-                theme_button.set_icon("light_mode" if state.theme == "dark" else "dark_mode")
-            except Exception:
-                pass
-            dark_mode.set_value(state.theme == "dark")
-            touch_activity()
-            if state.screen == "explorer":
-                try:
-                    drawer.set_visibility(True)
-                except Exception:
-                    pass
-                render_explorer_screen()
-            elif state.screen == "index":
-                render_index_screen()
-            elif state.screen == "settings":
-                render_settings_screen()
-            elif state.screen == "stats":
-                render_stats_screen()
-            elif state.screen == "jobs":
-                render_jobs_screen()
-            elif state.screen == "cloud":
-                render_cloud_screen()
-            else:
-                render_search_screen()
+            return
+        try:
+            drawer.set_visibility(True)
+        except Exception:
+            pass
+        try:
+            menu_button.set_visibility(True)
+        except Exception:
+            pass
+        try:
+            theme_button.set_visibility(True)
+            theme_button.set_icon("light_mode" if state.theme == "dark" else "dark_mode")
+        except Exception:
+            pass
+        dark_mode.set_value(state.theme == "dark")
+        touch_activity()
+
+        target = screen_container(current_screen)
+        for screen_name, container in screen_containers.items():
+            container.set_visibility(screen_name == current_screen)
+
+        previous_screen = active_screen_ref[0]
+        rebuild = should_rebuild_screen_container(
+            current_screen,
+            previous_screen,
+            initialized_screens,
+            dirty_screens,
+        )
+        if rebuild:
+            target.clear()
+            with target:
+                if state.screen == "explorer":
+                    try:
+                        drawer.set_visibility(True)
+                    except Exception:
+                        pass
+                    render_explorer_screen()
+                elif state.screen == "index":
+                    render_index_screen()
+                elif state.screen == "settings":
+                    render_settings_screen()
+                elif state.screen == "stats":
+                    render_stats_screen()
+                elif state.screen == "jobs":
+                    render_jobs_screen()
+                elif state.screen == "cloud":
+                    render_cloud_screen()
+                else:
+                    render_search_screen()
+            initialized_screens.add(current_screen)
+            dirty_screens.discard(current_screen)
+        active_screen_ref[0] = current_screen
         ui.timer(
             0.05,
             lambda screen=current_screen: ui.run_javascript(

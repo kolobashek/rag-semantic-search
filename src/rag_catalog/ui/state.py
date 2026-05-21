@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Collection, Dict, List, Optional
 
 from nicegui import ui
 
@@ -182,6 +182,22 @@ def restore_screen_state(state: PageState, screen: Optional[str] = None) -> bool
         return True
 
     return False
+
+
+def should_rebuild_screen_container(
+    screen: str,
+    previous_screen: Optional[str],
+    initialized_screens: Collection[str],
+    dirty_screens: Collection[str],
+) -> bool:
+    """Return False only when a cached search DOM can be reused after navigation."""
+    if screen not in initialized_screens:
+        return True
+    if screen in dirty_screens:
+        return True
+    if screen == "search" and previous_screen != screen:
+        return False
+    return True
 
 
 # ─────────────────────────── config helpers ─────────────────────────────────
