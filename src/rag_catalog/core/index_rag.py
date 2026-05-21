@@ -353,6 +353,7 @@ class RAGIndexer:
         ocr_engine: str = "tesseract",
         qdrant_timeout_sec: int = 60,
         exclude_patterns: Optional[List[str]] = None,
+        ocr_max_image_pages: int = MAX_IMAGE_PAGES,
         catalog_wait_attempts: int = 10,
         catalog_wait_seconds: int = 60,
     ) -> None:
@@ -389,6 +390,7 @@ class RAGIndexer:
         self.read_workers = read_workers
         self.qdrant_timeout_sec = max(5, int(qdrant_timeout_sec or 60))
         self.exclude_patterns = self._normalize_exclude_patterns(exclude_patterns or [])
+        self.ocr_max_image_pages = max(1, int(ocr_max_image_pages or MAX_IMAGE_PAGES))
         self.small_office_mb = float(
             DEFAULT_SMALL_OFFICE_MB if small_office_mb is None else small_office_mb
         )
@@ -708,7 +710,7 @@ class RAGIndexer:
         text = extract_image(
             filepath,
             tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
-            max_pages=MAX_IMAGE_PAGES,
+            max_pages=int(getattr(self, "ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
             use_rapid=getattr(self, "_use_rapid_ocr", False),
         )
 
@@ -1206,6 +1208,7 @@ def main() -> None:
         ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
         exclude_patterns=list(cfg.get("index_exclude_patterns") or []),
+        ocr_max_image_pages=int(cfg.get("ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
         catalog_wait_attempts=int(cfg.get("catalog_wait_attempts", 10) or 10),
         catalog_wait_seconds=int(cfg.get("catalog_wait_seconds", 60) or 60),
     )

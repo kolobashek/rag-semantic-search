@@ -143,6 +143,7 @@ tools/poppler/bin/*
 
 - `ocr_tesseract_cmd`
 - `ocr_poppler_bin`
+- `ocr_max_image_pages` — лимит кадров/страниц для OCR многостраничных изображений.
 
 Или через env:
 

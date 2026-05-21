@@ -729,6 +729,32 @@ class TestExtractImageMultipage:
         assert mock_tess.image_to_string.call_count == MAX_IMAGE_PAGES
         assert "текст" in result
 
+    def test_configured_max_image_pages_limits_frames(self, tmp_path):
+        """Лимит кадров для OCR изображений берётся из настройки индексатора."""
+        indexer = self._make_indexer(tmp_path)
+        indexer.ocr_max_image_pages = 2
+        f = tmp_path / "configured.tiff"
+        f.write_bytes(b"II\x2a\x00")
+
+        mock_tess = MagicMock()
+        mock_tess.image_to_string.return_value = "текст"
+
+        mock_img = MagicMock()
+        mock_img.mode = "RGB"
+        mock_img.n_frames = 5
+        mock_img.__enter__ = lambda s: s
+        mock_img.__exit__ = MagicMock(return_value=False)
+        mock_img.copy.return_value = mock_img
+
+        mock_pil = MagicMock()
+        mock_pil.Image.open.return_value = mock_img
+
+        with patch.dict("sys.modules", {"pytesseract": mock_tess, "PIL": mock_pil, "PIL.Image": mock_pil.Image}):
+            result = indexer._extract_image(f)
+
+        assert mock_tess.image_to_string.call_count == 2
+        assert "текст" in result
+
 
 # ═══════════════════════════ skip_ocr для изображений ═════════════════════════
 
