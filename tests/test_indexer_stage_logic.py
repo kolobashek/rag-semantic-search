@@ -34,6 +34,21 @@ class _FakeQdrant:
         return SimpleNamespace(points_count=self.points_count)
 
 
+class _FakeStateDB:
+    def __init__(self) -> None:
+        self.entries: dict[str, dict] = {}
+
+    def get_entry(self, full_path: str):
+        row = self.entries.get(full_path)
+        return dict(row) if row else None
+
+    def upsert_many(self, entries):
+        for entry in entries:
+            key = str(entry.get("full_path") or "")
+            if key:
+                self.entries[key] = dict(entry)
+
+
 def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx = RAGIndexer.__new__(RAGIndexer)
     idx.current_stage = "small"
@@ -45,7 +60,7 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx.max_chunks_per_file = 0
     idx.read_workers = 1
     idx.metadata_only_extensions = set()
-    idx.state = {"files": {}}
+    idx.state_db = _FakeStateDB()
     idx._points_buffer = []
     idx.point_count = 0
     idx.run_id = ""
@@ -54,7 +69,6 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx.small_pdf_mb = 2.0
     idx.embedder = _FakeEmbedder()
     idx.qdrant = _FakeQdrant()
-    idx._save_state = lambda: None
     idx._delete_file_vectors = lambda _p: None
     idx._cleanup_deleted_files = lambda _files: 0
     idx._extract_docx = lambda _p: extracted_text
@@ -71,7 +85,7 @@ def test_small_stage_file_without_content_is_marked_empty_for_retry(tmp_path: Pa
     idx = _make_indexer(tmp_path, extracted_text="")
     stats = idx.index_directory(stage="small")
     key = str(p)
-    assert idx.state["files"][key]["stage"] == "empty"
+    assert idx.state_db.get_entry(key)["stage"] == "empty"
     assert stats["processed_files"] >= 1
 
 
@@ -81,7 +95,7 @@ def test_small_stage_file_with_content_becomes_content(tmp_path: Path) -> None:
     idx = _make_indexer(tmp_path, extracted_text="hello world")
     idx.index_directory(stage="small")
     key = str(p)
-    assert idx.state["files"][key]["stage"] == "content"
+    assert idx.state_db.get_entry(key)["stage"] == "content"
 
 
 def test_text_and_csv_files_are_indexed_as_content(tmp_path: Path) -> None:
@@ -93,8 +107,8 @@ def test_text_and_csv_files_are_indexed_as_content(tmp_path: Path) -> None:
 
     idx.index_directory(stage="small")
 
-    assert idx.state["files"][str(txt)]["stage"] == "content"
-    assert idx.state["files"][str(csv)]["stage"] == "content"
+    assert idx.state_db.get_entry(str(txt))["stage"] == "content"
+    assert idx.state_db.get_entry(str(csv))["stage"] == "content"
 
 
 def test_exclude_patterns_skip_matching_files(tmp_path: Path) -> None:
@@ -109,8 +123,8 @@ def test_exclude_patterns_skip_matching_files(tmp_path: Path) -> None:
 
     idx.index_directory(stage="small")
 
-    assert str(keep) in idx.state["files"]
-    assert str(ignored) not in idx.state["files"]
+    assert idx.state_db.get_entry(str(keep)) is not None
+    assert idx.state_db.get_entry(str(ignored)) is None
 
 
 def test_stage_runner_prioritizes_newer_files(tmp_path: Path) -> None:

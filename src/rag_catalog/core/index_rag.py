@@ -37,8 +37,6 @@ from .extractors import (
     extract_pdf,
     extract_spreadsheet,
     extract_text,
-    extract_xls,
-    extract_xlsx,
     ocr_pdf,
 )
 from .index_state_db import IndexStateDB
@@ -336,6 +334,7 @@ class RAGIndexer:
         chunk_size: int,
         chunk_overlap: int,
         batch_size: int,
+        chunk_group_size: int = 4,
         recreate_collection: bool = False,
         skip_ocr: bool = False,
         max_chunks_per_file: int = 0,
@@ -383,6 +382,7 @@ class RAGIndexer:
         self.vector_size = vector_size
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.chunk_group_size = max(1, int(chunk_group_size or 4))
         self.batch_size = batch_size
         self.recreate = recreate_collection
         self.skip_ocr = skip_ocr
@@ -483,12 +483,6 @@ class RAGIndexer:
             recreate=self.recreate,
         )
 
-        # Backward-compatible in-memory view for tests/helpers that construct
-        # RAGIndexer via __new__ and expect idx.state["files"][path] to exist.
-        # In normal runtime the source of truth is SQLite (state_db).
-        self.state: Dict[str, Any] = {"files": {}}
-
-        self._points_buffer: List[PointStruct] = []
         self.point_count = 0
 
     def set_run_id(self, run_id: str) -> None:
@@ -563,36 +557,19 @@ class RAGIndexer:
         # Для small/large пропускаем если у файла уже есть "content" или тот же этап
         return existing_stage in ("content", self.current_stage)
 
-    def _save_state(self) -> None:
-        """Compatibility shim for legacy JSON state (no-op with SQLite)."""
-        return
-
     def _get_state_entry(self, full_path: str) -> Optional[Dict[str, Any]]:
-        """Read state entry from SQLite when available, else from in-memory state."""
+        """Read state entry from SQLite."""
         if hasattr(self, "state_db"):
             try:
                 return self.state_db.get_entry(full_path)
             except Exception:
                 return None
-        state = getattr(self, "state", None)
-        files = state.get("files") if isinstance(state, dict) else None
-        if isinstance(files, dict) and full_path in files:
-            return dict(files.get(full_path) or {})
         return None
 
     def _upsert_state_entry(self, entry: Dict[str, Any]) -> None:
-        """Write state entry to SQLite when available and keep in-memory mirror."""
-        full_path = str(entry.get("full_path") or "")
+        """Write state entry to SQLite."""
         if hasattr(self, "state_db"):
-            try:
-                self.state_db.upsert_many([entry])
-            except Exception:
-                pass
-        if not hasattr(self, "state") or not isinstance(getattr(self, "state"), dict):
-            self.state = {"files": {}}
-        self.state.setdefault("files", {})
-        if full_path:
-            self.state["files"][full_path] = dict(entry)
+            self.state_db.upsert_many([entry])
 
     # ── Qdrant vector deletion ─────────────────────────────────────────
 
@@ -616,16 +593,6 @@ class RAGIndexer:
         """Извлечь текст из DOCX (параграфы + таблицы)."""
         return extract_docx(filepath)
 
-    def _extract_xlsx(self, filepath: Path) -> str:
-        """
-        Извлечь текст из XLSX через openpyxl.
-        Вызывается ТОЛЬКО для .xlsx-файлов — маршрутизация происходит
-        в process_file/_extract_spreadsheet, НЕ здесь.
-        Ранняя остановка: прекращает чтение строк, когда накоплено
-        достаточно текста для max_chunks_per_file чанков.
-        """
-        return extract_xlsx(filepath, max_chars=self._extractor_max_chars())
-
     def _extract_spreadsheet(self, filepath: Path) -> str:
         """
         Точка входа для всех табличных форматов.
@@ -640,11 +607,6 @@ class RAGIndexer:
 
     def _extract_csv(self, filepath: Path) -> str:
         return extract_csv(filepath, max_chars=self._extractor_max_chars())
-
-    def _extract_xls(self, filepath: Path) -> str:
-        """Извлечь текст из старого формата XLS через xlrd.
-        Ранняя остановка аналогична _extract_xlsx."""
-        return extract_xls(filepath, max_chars=self._extractor_max_chars())
 
     def _extractor_max_chars(self) -> int:
         return self.max_chunks_per_file * self.chunk_size if self.max_chunks_per_file else 0
@@ -779,7 +741,8 @@ class RAGIndexer:
         row = self._extract_marker_int(chunk, r"Строка:\s*(\d+)")
         sheet = self._extract_marker_text(chunk, r"Лист:\s*([^\n\r]+)")
         section = self._extract_section_title(chunk)
-        parent_id = f"{doc_id}:chunk-group:{chunk_index // 4}"
+        group_size = max(1, int(getattr(self, "chunk_group_size", 4) or 4))
+        parent_id = f"{doc_id}:chunk-group:{chunk_index // group_size}"
         return {
             "parent_id": parent_id,
             "section": section,
@@ -826,120 +789,6 @@ class RAGIndexer:
             break
         return ""
 
-    # ── indexing helpers ───────────────────────────────────────────────
-
-    def _add_points(self, points: List[PointStruct]) -> None:
-        self._points_buffer.extend(points)
-        self.point_count += len(points)
-        if len(self._points_buffer) >= self.batch_size:
-            self._flush_buffer()
-
-    def _flush_buffer(self) -> None:
-        if self._points_buffer:
-            upsert_points(
-                self.qdrant,
-                collection_name=self.collection_name,
-                points=self._points_buffer,
-                timeout_sec=self.qdrant_timeout_sec,
-            )
-            logger.info(
-                "Загружен батч: %d точек (итого %d)", len(self._points_buffer), self.point_count
-            )
-            self._points_buffer = []
-
-    def _index_metadata(
-        self,
-        filepath: Path,
-        relative_path: Path,
-        *,
-        state_key: Optional[str] = None,
-        payload_extra: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        stat = filepath.stat()
-        text = (
-            f"Файл: {filepath.name} | Путь: {relative_path} | Расширение: {filepath.suffix}"
-        )
-        vector = self.embedder.encode(text, normalize_embeddings=True).tolist()
-        payload: Dict[str, Any] = {
-            "type": "file_metadata",
-            "text": text,
-            "filename": filepath.name,
-            "extension": filepath.suffix.lower(),
-            "size_mb": round(stat.st_size / (1024 * 1024), 2),
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
-            "path": str(relative_path),
-            "full_path": str(filepath),
-            "state_key": str(state_key or filepath),
-        }
-        payload.update(
-            self._base_provenance(
-                filepath=filepath,
-                relative_path=relative_path,
-                state_key=state_key,
-                payload_extra=payload_extra,
-            )
-        )
-        if payload_extra:
-            payload.update(payload_extra)
-        point = PointStruct(
-            id=str(uuid.uuid4()),
-            vector=vector,
-            payload=payload,
-        )
-        self._add_points([point])
-
-    def _index_content(
-        self,
-        filepath: Path,
-        relative_path: Path,
-        file_type: str,
-        full_text: str,
-        *,
-        state_key: Optional[str] = None,
-        payload_extra: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        if not full_text.strip():
-            return
-        chunks = self._chunk_text(full_text)
-        # Ограничение: не более max_chunks_per_file чанков с одного файла
-        if self.max_chunks_per_file and len(chunks) > self.max_chunks_per_file:
-            logger.warning(
-                "Файл %s: %d чанков, обрезано до %d (--max-chunks-per-file)",
-                filepath.name, len(chunks), self.max_chunks_per_file,
-            )
-            chunks = chunks[: self.max_chunks_per_file]
-        # Batch-кодирование: encode сразу все чанки файла — 5-10x быстрее чем поштучно
-        vectors = self.embedder.encode(
-            chunks, normalize_embeddings=True, batch_size=64, show_progress_bar=False
-        )
-        ext = filepath.suffix.lower()
-        points = []
-        base_provenance = self._base_provenance(
-            filepath=filepath,
-            relative_path=relative_path,
-            state_key=state_key,
-            payload_extra=payload_extra,
-        )
-        doc_id = str(base_provenance["doc_id"])
-        for idx, (v, chunk) in enumerate(zip(vectors, chunks)):
-            payload: Dict[str, Any] = {
-                "type": f"{file_type}_content",
-                "text": chunk,
-                "filename": filepath.name,
-                "extension": ext,
-                "path": str(relative_path),
-                "full_path": str(filepath),
-                "chunk_index": idx,
-                "state_key": str(state_key or filepath),
-            }
-            payload.update(base_provenance)
-            payload.update(self._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id))
-            if payload_extra:
-                payload.update(payload_extra)
-            points.append(PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=payload))
-        self._add_points(points)
-
     # ── single file ────────────────────────────────────────────────────
 
     def process_file(
@@ -952,7 +801,7 @@ class RAGIndexer:
         fingerprint_override: str = "",
         delete_payload_match: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Обработать один файл: извлечь текст, нарезать, проиндексировать."""
+        """Обработать один файл: извлечь текст, нарезать и записать батчем."""
         relative_path = Path(logical_path) if logical_path else filepath.relative_to(self.catalog_path)
         fingerprint, mtime = self._get_file_fingerprint(filepath)
         if fingerprint_override:
@@ -970,11 +819,10 @@ class RAGIndexer:
         logger.info("Индексирование: %s", filepath)
         doc_meta = extract_doc_meta(filepath)
         payload_extra = {**(payload_extra or {}), **doc_meta}
-        self._index_metadata(filepath, relative_path, state_key=file_key, payload_extra=payload_extra)
 
         ext = filepath.suffix.lower()
         full_text = ""
-        file_type = ""
+        file_type = ext.lstrip(".") or "file"
 
         if ext == ".docx":
             full_text = self._extract_docx(filepath)
@@ -998,17 +846,94 @@ class RAGIndexer:
         else:
             logger.debug("Неподдерживаемый формат (только метаданные): %s", ext)
 
-        stage = "metadata"
-        if full_text:
-            self._index_content(filepath, relative_path, file_type, full_text, state_key=file_key, payload_extra=payload_extra)
-            stage = "content"
-        else:
+        chunks = self._chunk_text(full_text) if full_text.strip() else []
+        if self.max_chunks_per_file and len(chunks) > self.max_chunks_per_file:
+            logger.warning(
+                "Файл %s: %d чанков, обрезано до %d (--max-chunks-per-file)",
+                filepath.name,
+                len(chunks),
+                self.max_chunks_per_file,
+            )
+            chunks = chunks[: self.max_chunks_per_file]
+        if not chunks:
             logger.warning("Файл %s: контент пуст, сохраняю только metadata stage", filepath.name)
 
         try:
             size_bytes = int(filepath.stat().st_size)
         except OSError:
             size_bytes = 0
+        stat = filepath.stat()
+        tags = _generate_tags(filepath, relative_path, full_text, getattr(self, "synonym_map", {}) or {})
+        meta_text = f"Файл: {filepath.name} | Путь: {relative_path} | Расширение: {filepath.suffix}"
+        if doc_meta.get("doc_author"):
+            meta_text += f" | Автор: {doc_meta['doc_author']}"
+        if doc_meta.get("doc_last_editor"):
+            meta_text += f" | Редактор: {doc_meta['doc_last_editor']}"
+        if tags:
+            meta_text += f" | Теги: {', '.join(tags[:30])}"
+
+        base_provenance = self._base_provenance(
+            filepath=filepath,
+            relative_path=relative_path,
+            state_key=file_key,
+            payload_extra=payload_extra,
+        )
+        meta_payload: Dict[str, Any] = {
+            "type": "file_metadata",
+            "text": meta_text,
+            "filename": filepath.name,
+            "extension": ext,
+            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "path": str(relative_path),
+            "full_path": str(filepath),
+            "state_key": file_key,
+            "tags": tags,
+            **doc_meta,
+            **base_provenance,
+            **(payload_extra or {}),
+        }
+
+        texts = [meta_text, *chunks]
+        payloads: List[Dict[str, Any]] = [meta_payload]
+        doc_id = str(base_provenance["doc_id"])
+        for idx, chunk in enumerate(chunks):
+            payloads.append(
+                {
+                    "type": f"{file_type}_content",
+                    "text": chunk,
+                    "filename": filepath.name,
+                    "extension": ext,
+                    "path": str(relative_path),
+                    "full_path": str(filepath),
+                    "chunk_index": idx,
+                    "state_key": file_key,
+                    "tags": tags,
+                    **doc_meta,
+                    **base_provenance,
+                    **self._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
+                    **(payload_extra or {}),
+                }
+            )
+        vectors = self.embedder.encode(
+            texts,
+            normalize_embeddings=True,
+            batch_size=max(1, min(256, int(self.batch_size or 64))),
+            show_progress_bar=False,
+        )
+        points = [
+            PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=p)
+            for v, p in zip(vectors, payloads)
+        ]
+        written = upsert_points(
+            self.qdrant,
+            collection_name=self.collection_name,
+            points=points,
+            timeout_sec=self.qdrant_timeout_sec,
+        )
+        self.point_count += written
+        stage = "content" if chunks else "metadata"
         self._upsert_state_entry(
             {
                 "full_path": file_key,
@@ -1020,7 +945,6 @@ class RAGIndexer:
                 **(payload_extra or {}),
             }
         )
-        self._save_state()
 
     # ── directory scan ─────────────────────────────────────────────────
 
@@ -1190,6 +1114,7 @@ def main() -> None:
         vector_size=cfg["vector_size"],
         chunk_size=cfg["chunk_size"],
         chunk_overlap=cfg["chunk_overlap"],
+        chunk_group_size=int(cfg.get("chunk_group_size", 4) or 4),
         batch_size=cfg["batch_size"],
         recreate_collection=args.recreate,
         skip_ocr=args.no_ocr,

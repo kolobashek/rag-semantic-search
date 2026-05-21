@@ -34,22 +34,13 @@ class IndexStageRunner:
         generate_tags: Callable[..., List[str]],
         logger: logging.Logger,
     ) -> None:
-        object.__setattr__(self, "_indexer", indexer)
-        object.__setattr__(self, "_stages", tuple(stages))
-        object.__setattr__(self, "_supported_extensions", set(supported_extensions))
-        object.__setattr__(self, "_image_extensions", set(image_extensions))
-        object.__setattr__(self, "_file_category", file_category)
-        object.__setattr__(self, "_generate_tags", generate_tags)
-        object.__setattr__(self, "_logger", logger)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._indexer, name)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_"):
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._indexer, name, value)
+        self._indexer = indexer
+        self._stages = tuple(stages)
+        self._supported_extensions = set(supported_extensions)
+        self._image_extensions = set(image_extensions)
+        self._file_category = file_category
+        self._generate_tags = generate_tags
+        self._logger = logger
 
     def run(self, stage: str = "content") -> Dict[str, int]:
         """
@@ -70,7 +61,8 @@ class IndexStageRunner:
         """
         if stage not in (*self._stages, "content"):
             raise ValueError(f"Неизвестный stage: {stage!r}. Допустимо: {self._stages} или 'content'")
-        self.current_stage = stage
+        indexer = self._indexer
+        indexer.current_stage = stage
 
         ENCODE_BATCH = 256  # сколько чанков накапливать перед одним вызовом encode()
                             # 256 оптимально для CPU (OpenBLAS матричные операции)
@@ -79,20 +71,20 @@ class IndexStageRunner:
         # При массовых SMB-таймаутах без ограничения они накапливаются до OOM.
         # Лимит = 2 * read_workers: за один проход воркеров может зависнуть
         # не более read_workers файлов, запас ×2 на перекрытие таймаутов.
-        _reader_sem = threading.Semaphore(self.read_workers * 2)
+        _reader_sem = threading.Semaphore(indexer.read_workers * 2)
 
         self._logger.info(
             "════════ Этап '%s' (pipeline, workers=%d): %s ════════",
-            stage, self.read_workers, self.catalog_path,
+            stage, indexer.read_workers, indexer.catalog_path,
         )
 
         all_files = [
             f
-            for f in self.catalog_path.rglob("*")
+            for f in indexer.catalog_path.rglob("*")
             if f.is_file()
             and f.suffix.lower() in self._supported_extensions
             and not f.name.startswith("~$")  # пропускать временные файлы Office
-            and not self._is_excluded_path(f)
+            and not indexer._is_excluded_path(f)
         ]
         self._logger.info("Найдено файлов на диске: %d (поддерживаемые расширения)", len(all_files))
 
@@ -100,14 +92,14 @@ class IndexStageRunner:
         if stage == "small":
             scope_files = [
                 f for f in all_files
-                if self._file_category(f, self.small_office_mb, self.small_pdf_mb) == "small"
+                if self._file_category(f, indexer.small_office_mb, indexer.small_pdf_mb) == "small"
             ]
             self._logger.info("Отфильтровано для этапа 'small': %d файлов (docx/xlsx/xls + PDF < %g МБ)",
-                        len(scope_files), self.small_pdf_mb)
+                        len(scope_files), indexer.small_pdf_mb)
         elif stage == "large":
             scope_files = [
                 f for f in all_files
-                if self._file_category(f, self.small_office_mb, self.small_pdf_mb) == "large"
+                if self._file_category(f, indexer.small_office_mb, indexer.small_pdf_mb) == "large"
             ]
             self._logger.info("Отфильтровано для этапа 'large': %d файлов (крупные Office + большие/сканированные PDF)",
                         len(scope_files))
@@ -132,9 +124,9 @@ class IndexStageRunner:
         last_telemetry_push = time.monotonic()
         telemetry_push_interval_sec = 1.0
         telemetry_push_every_n = 25
-        if self.run_id:
-            self.telemetry.start_stage(
-                run_id=self.run_id,
+        if indexer.run_id:
+            indexer.telemetry.start_stage(
+                run_id=indexer.run_id,
                 stage=stage,
                 total_files=stage_stats["total_files"],
             )
@@ -157,7 +149,7 @@ class IndexStageRunner:
             for i in range(0, len(pending_texts), ENCODE_BATCH):
                 chunk_texts    = pending_texts[i : i + ENCODE_BATCH]
                 chunk_payloads = pending_payloads[i : i + ENCODE_BATCH]
-                vectors = self.embedder.encode(
+                vectors = indexer.embedder.encode(
                     chunk_texts, normalize_embeddings=True,
                     batch_size=256, show_progress_bar=False,
                 )
@@ -166,18 +158,18 @@ class IndexStageRunner:
                     for v, p in zip(vectors, chunk_payloads)
                 ]
                 written = upsert_points(
-                    self.qdrant,
-                    collection_name=self.collection_name,
+                    indexer.qdrant,
+                    collection_name=indexer.collection_name,
                     points=points,
-                    timeout_sec=int(getattr(self._indexer, "qdrant_timeout_sec", 60) or 60),
+                    timeout_sec=int(getattr(indexer, "qdrant_timeout_sec", 60) or 60),
                 )
-                self.point_count += written
+                indexer.point_count += written
                 stage_stats["points_added"] += written
             self._logger.info(
-                "Записан батч: %d точек (итого %d)", len(pending_texts), self.point_count
+                "Записан батч: %d точек (итого %d)", len(pending_texts), indexer.point_count
             )
-            if hasattr(self, "state_db"):
-                self.state_db.upsert_many(
+            if hasattr(indexer, "state_db"):
+                indexer.state_db.upsert_many(
                     [
                         {
                             "full_path": file_key,
@@ -192,7 +184,7 @@ class IndexStageRunner:
                 )
             else:
                 for file_key, fingerprint, mtime, file_stage, size_bytes, extension in pending_states:
-                    self._upsert_state_entry(
+                    indexer._upsert_state_entry(
                         {
                             "full_path": file_key,
                             "fingerprint": fingerprint,
@@ -202,7 +194,6 @@ class IndexStageRunner:
                             "extension": extension,
                         }
                     )
-            self._save_state()
             pending_texts.clear()
             pending_payloads.clear()
             pending_states.clear()
@@ -214,14 +205,14 @@ class IndexStageRunner:
             Не кодирует векторы (encode — в главном потоке).
             Возвращает None если файл не изменился.
             """
-            relative_path = filepath.relative_to(self.catalog_path)
-            fingerprint, mtime = self._get_file_fingerprint(filepath)
+            relative_path = filepath.relative_to(indexer.catalog_path)
+            fingerprint, mtime = indexer._get_file_fingerprint(filepath)
             file_key = str(filepath)
 
             # Stage-aware skip:
             #  - на этапе metadata пропускаем любой уже проиндексированный файл;
             #  - на этапах small/large пропускаем только те, что уже дошли до "content".
-            if self._should_skip_for_stage(file_key, fingerprint):
+            if indexer._should_skip_for_stage(file_key, fingerprint):
                 return {"skipped": True}
 
             ext = filepath.suffix.lower()
@@ -240,31 +231,31 @@ class IndexStageRunner:
             # Режим «только метадата»: либо текущий этап = metadata,
             # либо расширение явно в metadata_only_extensions (legacy флаг).
             # Содержимое не читается — файл попадает в индекс по имени/пути/размеру.
-            if self.current_stage == "metadata" or ext in self.metadata_only_extensions:
+            if indexer.current_stage == "metadata" or ext in indexer.metadata_only_extensions:
                 file_type = ext.lstrip(".") or "file"
                 _fn = None
             elif ext == ".docx":
                 file_type = "docx"
-                _fn = self._extract_docx
+                _fn = indexer._extract_docx
             elif ext in (".xlsx", ".xls"):
                 file_type = "xlsx"
-                _fn = self._extract_spreadsheet
+                _fn = indexer._extract_spreadsheet
             elif ext == ".txt":
                 file_type = "txt"
-                _fn = self._extract_text
+                _fn = indexer._extract_text
             elif ext == ".csv":
                 file_type = "csv"
-                _fn = self._extract_csv
+                _fn = indexer._extract_csv
             elif ext == ".pdf":
                 file_type = "pdf"
-                _fn = self._extract_pdf
+                _fn = indexer._extract_pdf
             elif ext in self._image_extensions:
-                if self.skip_ocr:
+                if indexer.skip_ocr:
                     file_type = "image"
                     _fn = None  # OCR отключён — только метаданные
                 else:
                     file_type = "image"
-                    _fn = self._extract_image
+                    _fn = indexer._extract_image
             else:
                 _fn = None
 
@@ -280,7 +271,7 @@ class IndexStageRunner:
                 if not _reader_sem.acquire(blocking=False):
                     self._logger.warning(
                         "Лимит daemon-потоков исчерпан (%d): пропускаю %s",
-                        self.read_workers * 2, filepath.name,
+                        indexer.read_workers * 2, filepath.name,
                     )
                     full_text = ""
                 else:
@@ -320,16 +311,16 @@ class IndexStageRunner:
                     elapsed, size_mb, filepath.name,
                 )
 
-            chunks = self._chunk_text(full_text) if full_text.strip() else []
-            if self.max_chunks_per_file and len(chunks) > self.max_chunks_per_file:
+            chunks = indexer._chunk_text(full_text) if full_text.strip() else []
+            if indexer.max_chunks_per_file and len(chunks) > indexer.max_chunks_per_file:
                 self._logger.warning(
                     "Файл %s: %d чанков → обрезано до %d",
-                    filepath.name, len(chunks), self.max_chunks_per_file,
+                    filepath.name, len(chunks), indexer.max_chunks_per_file,
                 )
-                chunks = chunks[: self.max_chunks_per_file]
+                chunks = chunks[: indexer.max_chunks_per_file]
 
             # Генерируем теги для файла (по пути, содержимому, синонимам)
-            tags = self._generate_tags(filepath, relative_path, full_text, getattr(self, "synonym_map", {}) or {})
+            tags = self._generate_tags(filepath, relative_path, full_text, getattr(indexer, "synonym_map", {}) or {})
 
             stat = filepath.stat()
             doc_meta = extract_doc_meta(filepath)
@@ -356,7 +347,7 @@ class IndexStageRunner:
                 "tags": tags,
                 **doc_meta,
             }
-            base_provenance = self._base_provenance(
+            base_provenance = indexer._base_provenance(
                 filepath=filepath,
                 relative_path=relative_path,
                 state_key=file_key,
@@ -376,7 +367,7 @@ class IndexStageRunner:
                     "tags": tags,
                     **doc_meta,
                     **base_provenance,
-                    **self._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
+                    **indexer._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
                 }
                 for idx, chunk in enumerate(chunks)
             ]
@@ -386,7 +377,7 @@ class IndexStageRunner:
                 "fingerprint": fingerprint,
                 "mtime": mtime,
                 "size_bytes": int(stat.st_size),
-                "was_indexed": self._get_state_entry(file_key) is not None,
+                "was_indexed": indexer._get_state_entry(file_key) is not None,
                 "meta_text": meta_text,
                 "meta_payload": meta_payload,
                 "chunks": chunks,
@@ -396,7 +387,7 @@ class IndexStageRunner:
             }
 
         # ── основной pipeline ────────────────────────────────────────
-        with ThreadPoolExecutor(max_workers=self.read_workers) as pool:
+        with ThreadPoolExecutor(max_workers=indexer.read_workers) as pool:
             futures = {pool.submit(extract_one, f): f for f in scope_files}
             for future in tqdm(as_completed(futures), total=len(scope_files),
                                 desc=f"Этап {stage}"):
@@ -414,12 +405,12 @@ class IndexStageRunner:
                 if result.get("skipped"):
                     stage_stats["skipped_files"] += 1
                     stage_stats["processed_files"] += 1
-                    if self.run_id and (
+                    if indexer.run_id and (
                         stage_stats["processed_files"] % telemetry_push_every_n == 0
                         or (time.monotonic() - last_telemetry_push) >= telemetry_push_interval_sec
                     ):
-                        self.telemetry.update_stage(
-                            run_id=self.run_id,
+                        indexer.telemetry.update_stage(
+                            run_id=indexer.run_id,
                             stage=stage,
                             processed_files=stage_stats["processed_files"],
                             added_files=stage_stats["added_files"],
@@ -436,7 +427,7 @@ class IndexStageRunner:
                 # Если файл уже был в индексе — удалить старые векторы
                 # (нужно и при изменении файла, и при апгрейде metadata→content)
                 if result["was_indexed"]:
-                    self._delete_file_vectors(result["filepath"])
+                    indexer._delete_file_vectors(result["filepath"])
                     stage_stats["updated_files"] += 1
                 else:
                     stage_stats["added_files"] += 1
@@ -471,12 +462,12 @@ class IndexStageRunner:
                 if len(pending_texts) >= ENCODE_BATCH:
                     flush()
 
-                if self.run_id and (
+                if indexer.run_id and (
                     stage_stats["processed_files"] % telemetry_push_every_n == 0
                     or (time.monotonic() - last_telemetry_push) >= telemetry_push_interval_sec
                 ):
-                    self.telemetry.update_stage(
-                        run_id=self.run_id,
+                    indexer.telemetry.update_stage(
+                        run_id=indexer.run_id,
                         stage=stage,
                         processed_files=stage_stats["processed_files"],
                         added_files=stage_stats["added_files"],
@@ -490,19 +481,19 @@ class IndexStageRunner:
         flush()  # финальный батч (остаток)
 
         self._logger.info("Этап '%s' завершён. Добавлено точек за сессию: %d",
-                    stage, self.point_count)
+                    stage, indexer.point_count)
 
         # Чистим «фантомы» только когда имеем полный список всех файлов на диске
         # (т.е. на этапах metadata и content). На small/large мы видим только
         # часть файлов и не должны по этому основанию удалять других.
         if stage in ("metadata", "content"):
-            self._run_deleted_files += self._cleanup_deleted_files(all_files)
+            indexer._run_deleted_files += indexer._cleanup_deleted_files(all_files)
 
-        info = self.qdrant.get_collection(self.collection_name)
-        self._logger.info("Коллекция '%s': %d точек", self.collection_name, info.points_count)
-        if self.run_id:
-            self.telemetry.finish_stage(
-                run_id=self.run_id,
+        info = indexer.qdrant.get_collection(indexer.collection_name)
+        self._logger.info("Коллекция '%s': %d точек", indexer.collection_name, info.points_count)
+        if indexer.run_id:
+            indexer.telemetry.finish_stage(
+                run_id=indexer.run_id,
                 stage=stage,
                 status="completed",
                 processed_files=stage_stats["processed_files"],

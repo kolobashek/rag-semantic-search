@@ -1183,6 +1183,7 @@ class CloudDriveService:
             vector_size=int(index_config.get('vector_size') or 384),
             chunk_size=int(index_config.get('chunk_size') or 500),
             chunk_overlap=int(index_config.get('chunk_overlap') or 100),
+            chunk_group_size=int(index_config.get('chunk_group_size') or 4),
             batch_size=int(index_config.get('batch_size') or index_config.get('index_batch_size') or 64),
             recreate_collection=False,
             skip_ocr=bool(index_config.get('skip_ocr_in_index') or index_config.get('index_skip_ocr')),
@@ -1211,7 +1212,6 @@ class CloudDriveService:
             fingerprint_override=str(file_row.checksum or ''),
             delete_payload_match={'cloud_file_id': file_row.id},
         )
-        indexer._flush_buffer()
         return True, max(0, int(indexer.point_count) - before)
 
     def _delete_index_vectors(self, *, index_config: Dict[str, object], payload_match: Dict[str, Any]) -> int:

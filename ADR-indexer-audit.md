@@ -358,6 +358,11 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 5. **[done 2026-05-21] [тривиально]** Добавить `exclude_patterns` в конфиг (п. 2.1)
 6. **[done 2026-05-21] [тривиально]** Добавить поддержку `.txt` и `.csv` (п. 2.2)
 7. **[done 2026-05-21] [техдолг]** Добавить `ocr_max_image_pages` в конфиг вместо жёсткого лимита `MAX_IMAGE_PAGES` (п. 1.10)
+8. **[done 2026-05-21] [техдолг]** Удалить zombie-методы `_index_metadata`, `_index_content`, `_extract_xlsx`, `_extract_xls` (п. 1.1)
+9. **[done 2026-05-21] [техдолг]** Удалить no-op `_save_state` и вызовы shim-сохранения (п. 1.3)
+10. **[done 2026-05-21] [техдолг]** Убрать `self.state["files"]` зеркало SQLite из runtime-контракта индексатора (п. 1.4)
+11. **[done 2026-05-21] [техдолг]** Убрать proxy `__getattr__`/`__setattr__` из `IndexStageRunner` (п. 1.5)
+12. **[done 2026-05-21] [техдолг]** Добавить `chunk_group_size` вместо захардкоженного `chunk_index // 4` (п. 1.6)
 
 ### Реализация 2026-05-21
 
@@ -368,3 +373,7 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - Добавлен конфиг `index_exclude_patterns` и фильтрация при основном проходе и cleanup.
 - Добавлены экстракторы `.txt` и `.csv`, расширения включены в `SUPPORTED_EXTENSIONS`.
 - Добавлен конфиг `ocr_max_image_pages`; `MAX_IMAGE_PAGES` остался только дефолтом для обратной совместимости.
+- `process_file()` больше не использует legacy `_index_metadata`/`_index_content`: одиночная индексация пишет metadata+content одним batch-upsert.
+- `IndexStageRunner` теперь обращается к `RAGIndexer` явно через локальный `indexer`, без магического proxy.
+- Runtime-состояние файлов осталось только в `IndexStateDB`; тесты переведены на fake `state_db`.
+- Размер provenance-группы чанков задаётся через `chunk_group_size` с дефолтом `4`.

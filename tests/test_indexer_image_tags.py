@@ -562,6 +562,12 @@ class TestChunkText:
         assert out["sheet"] == "Техника"
         assert out["section"] == "1. Характеристики"
 
+    def test_chunk_group_size_is_configurable(self):
+        idx = self._make_indexer(180, 20)
+        idx.chunk_group_size = 2
+        out = idx._chunk_provenance(chunk="Текст", chunk_index=5, doc_id="file:abc")
+        assert out["parent_id"] == "file:abc:chunk-group:2"
+
     def test_base_provenance_uses_cloud_file_id_when_available(self, tmp_path):
         idx = self._make_indexer(180, 20)
         path = tmp_path / "doc.pdf"
@@ -764,18 +770,41 @@ class TestSkipOcrFlag:
     def _make_indexer(self, tmp_path, skip_ocr: bool):
         """Создать RAGIndexer с минимальными заглушками."""
         from rag_catalog.core.index_rag import RAGIndexer
+
+        class _Vec:
+            def tolist(self):
+                return [0.1, 0.2, 0.3]
+
+        class _StateDB:
+            def __init__(self):
+                self.entries = {}
+
+            def get_entry(self, full_path):
+                row = self.entries.get(full_path)
+                return dict(row) if row else None
+
+            def upsert_many(self, entries):
+                for entry in entries:
+                    self.entries[str(entry["full_path"])] = dict(entry)
+
         idx = object.__new__(RAGIndexer)
         idx.catalog_path = tmp_path
         idx.skip_ocr = skip_ocr
         idx.synonym_map = {}
         idx.chunk_size = 512
         idx.chunk_overlap = 64
-        idx.state = {"files": {}}
+        idx.max_chunks_per_file = 0
+        idx.batch_size = 64
+        idx.qdrant_timeout_sec = 60
+        idx.point_count = 0
+        idx.state_db = _StateDB()
         # Заглушки для тяжёлых зависимостей
         idx.embedder = MagicMock()
-        idx.client = MagicMock()
+        idx.embedder.encode.side_effect = lambda texts, **_kwargs: [_Vec() for _ in texts]
+        idx.qdrant = MagicMock()
         idx.collection_name = "test_col"
         idx.telemetry = MagicMock()
+        idx._delete_file_vectors = MagicMock()
         return idx
 
     def test_skip_ocr_true_does_not_call_extract_image(self, tmp_path):
@@ -784,11 +813,7 @@ class TestSkipOcrFlag:
         f = tmp_path / "photo.jpg"
         f.write_bytes(b"\xff\xd8\xff")  # JPEG magic bytes
 
-        # Мокаем методы которые вызывает process_file
         with patch.object(indexer, "_get_file_fingerprint", return_value=("abc123", 12345.0)), \
-             patch.object(indexer, "_index_metadata"), \
-             patch.object(indexer, "_index_content"), \
-             patch.object(indexer, "_save_state"), \
              patch.object(indexer, "_extract_image") as mock_extract:
 
             indexer.process_file(f)
@@ -803,9 +828,6 @@ class TestSkipOcrFlag:
         f.write_bytes(b"\xff\xd8\xff")
 
         with patch.object(indexer, "_get_file_fingerprint", return_value=("abc123", 12345.0)), \
-             patch.object(indexer, "_index_metadata"), \
-             patch.object(indexer, "_index_content"), \
-             patch.object(indexer, "_save_state"), \
              patch.object(indexer, "_extract_image", return_value="ocr текст") as mock_extract:
 
             indexer.process_file(f)
@@ -818,23 +840,15 @@ class TestSkipOcrFlag:
         f = tmp_path / "scan.png"
         f.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        index_content_calls = []
-
-        def capture_index_content(filepath, relative_path, file_type, full_text):
-            index_content_calls.append((file_type, full_text))
-
         with patch.object(indexer, "_get_file_fingerprint", return_value=("abc123", 12345.0)), \
-             patch.object(indexer, "_index_metadata"), \
-             patch.object(indexer, "_index_content", side_effect=capture_index_content), \
-             patch.object(indexer, "_save_state"):
+             patch.object(indexer, "_extract_image") as mock_extract:
 
             indexer.process_file(f)
 
-        # _index_content не вызывается — текста нет
-        assert index_content_calls == []
+        mock_extract.assert_not_called()
         # Файл всё равно сохраняется в state
-        assert str(f) in indexer.state["files"]
-        assert indexer.state["files"][str(f)]["stage"] == "metadata"
+        assert indexer.state_db.get_entry(str(f)) is not None
+        assert indexer.state_db.get_entry(str(f))["stage"] == "metadata"
 
 
 # ═══════════════════════════ DEFAULT_SYNONYM_MAP (fix: liebherr) ══════════════

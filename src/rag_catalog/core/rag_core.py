@@ -58,6 +58,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "vector_size": 384,
     "chunk_size": 500,
     "chunk_overlap": 100,
+    "chunk_group_size": 4,
     "batch_size": 1000,
     "index_read_workers": 4,
     "index_max_chunks": 2000,
