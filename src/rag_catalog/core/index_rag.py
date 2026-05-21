@@ -694,6 +694,15 @@ class RAGIndexer:
     def _semantic_chunk_end(self, text: str, start: int, max_end: int) -> int:
         return semantic_chunk_end(text, start=start, max_end=max_end, chunk_size=self.chunk_size)
 
+    @staticmethod
+    def _strip_provenance_markers(text: str) -> str:
+        lines = []
+        for line in str(text or "").splitlines():
+            if re.match(r"^\s*(Страница|Лист|Строка):", line, flags=re.IGNORECASE):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
     def _doc_id(self, state_key: str, relative_path: Path, payload_extra: Optional[Dict[str, Any]] = None) -> str:
         if payload_extra:
             cloud_id = str(payload_extra.get("cloud_file_id") or "").strip()
@@ -908,14 +917,16 @@ class RAGIndexer:
             **(payload_extra or {}),
         }
 
-        texts = [meta_text, *chunks]
+        clean_chunks = [self._strip_provenance_markers(chunk) or chunk for chunk in chunks]
+        texts = [meta_text, *clean_chunks]
         payloads: List[Dict[str, Any]] = [meta_payload]
         doc_id = str(base_provenance["doc_id"])
         for idx, chunk in enumerate(chunks):
+            clean_chunk = clean_chunks[idx]
             payloads.append(
                 {
                     "type": f"{file_type}_content",
-                    "text": chunk,
+                    "text": clean_chunk,
                     "filename": filepath.name,
                     "extension": ext,
                     "path": str(relative_path),

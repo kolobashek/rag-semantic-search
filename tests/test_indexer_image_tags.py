@@ -568,6 +568,11 @@ class TestChunkText:
         out = idx._chunk_provenance(chunk="Текст", chunk_index=5, doc_id="file:abc")
         assert out["parent_id"] == "file:abc:chunk-group:2"
 
+    def test_strip_provenance_markers_removes_service_lines(self):
+        idx = self._make_indexer(180, 20)
+        text = idx._strip_provenance_markers("Страница: 5\nЛист: Смета\nСтрока: 7\nПолезный текст")
+        assert text == "Полезный текст"
+
     def test_base_provenance_uses_cloud_file_id_when_available(self, tmp_path):
         idx = self._make_indexer(180, 20)
         path = tmp_path / "doc.pdf"
