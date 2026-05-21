@@ -27,8 +27,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _STAGE_LABELS: Dict[str, str] = {
     "all": "все этапы",
     "metadata": "metadata",
-    "small": "small chunks",
-    "large": "large chunks",
+    "small": "быстрые файлы",
+    "large": "тяжёлые файлы",
     "ocr": "OCR",
 }
 

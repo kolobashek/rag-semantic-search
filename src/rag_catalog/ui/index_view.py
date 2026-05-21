@@ -289,7 +289,8 @@ def render_index_screen(
             ui.space()
             ui.button(icon="refresh", on_click=lambda: _refresh_progress()).props("flat dense round").tooltip("Обновить")
         ui.label(
-            "Запускаемые фазы: metadata, small chunks, large chunks и OCR. "
+            "Запускаемые фазы: metadata, быстрые файлы, тяжёлые файлы и OCR. "
+            "Быстрые и тяжёлые файлы — независимые корзины по типу и размеру, а не вложенные этапы. "
             "Покрытие содержимым показано отдельно, это агрегат state DB, а не отдельная команда запуска."
         ).classes("rag-meta")
 
@@ -304,7 +305,7 @@ def render_index_screen(
             _coverage_refs["bar"] = ui.linear_progress(value=0, show_value=False).props("color=indigo-5").classes("w-full mt-1")
             ui.label(
                 "Файлы со stage=content уже имеют проиндексированное содержимое. "
-                "Остальные пока представлены метаданными или ждут фаз small/large/OCR."
+                "Остальные пока представлены метаданными или ждут обработки в корзинах быстрых/тяжёлых файлов либо OCR."
             ).classes("rag-meta")
 
         progress_area = ui.column().classes("w-full gap-2")
@@ -798,10 +799,14 @@ def render_index_screen(
             ui.label("Статистика по этапам").classes("text-xl font-semibold")
         rows = telemetry.get("stage_summary") or []
         if rows:
+            table_rows = [
+                {**dict(row), "stage_label": _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or ""))}
+                for row in rows
+            ]
             ui.table(
-                rows=rows,
+                rows=table_rows,
                 columns=[
-                    {"name": "stage", "label": "Этап", "field": "stage"},
+                    {"name": "stage_label", "label": "Этап", "field": "stage_label"},
                     {"name": "status", "label": "Статус", "field": "status"},
                     {"name": "processed_files", "label": "Файлов", "field": "processed_files"},
                     {"name": "added_files", "label": "Добавлено", "field": "added_files"},
