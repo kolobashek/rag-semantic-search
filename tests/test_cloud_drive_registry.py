@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
 from rag_catalog.core.cloud_drive.service import CloudDriveJobCancelled, CloudDriveService
 from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter
@@ -582,6 +584,62 @@ def test_service_runs_pending_reindex_jobs_fifo(tmp_path: Path, monkeypatch) -> 
     assert [job.file_id for job in completed] == [first['id'], second['id']]
     assert seen == ['Folder A/a.txt', 'Folder A/b.txt']
     assert all(job.status == 'completed' for job in completed)
+
+
+def test_service_reindex_job_rejects_remote_storage_without_local_source(tmp_path: Path) -> None:
+    class _RemoteOnlyStorage:
+        def __init__(self) -> None:
+            self.keys: set[str] = set()
+
+        def put_file(self, source_path: Path, storage_key: str) -> None:
+            self.keys.add(storage_key)
+
+        def exists(self, storage_key: str) -> bool:
+            return storage_key in self.keys
+
+        def list_keys(self) -> set[str]:
+            return set(self.keys)
+
+        def move(self, old_storage_key: str, new_storage_key: str) -> None:
+            self.keys.discard(old_storage_key)
+            self.keys.add(new_storage_key)
+
+        def delete(self, storage_key: str) -> None:
+            self.keys.discard(storage_key)
+
+        def resolve_path(self, storage_key: str) -> str:
+            return f'https://storage.example/bucket/{storage_key}'
+
+        def healthcheck(self) -> dict:
+            return {'ok': True}
+
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = _RemoteOnlyStorage()
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    source = tmp_path / 'remote-only.txt'
+    source.write_text('hello', encoding='utf-8')
+    uploaded = service.upload_file(parent_path='Folder A', filename='hello.txt', source_path=str(source), mime_type='text/plain')
+    job = registry.get_latest_job(job_type='reindex')
+    assert job is not None
+
+    with pytest.raises(RuntimeError, match='удалённом storage'):
+        service.run_reindex_job(
+            job.id,
+            index_config={
+                'catalog_path': str(tmp_path / 'catalog'),
+                'qdrant_db_path': str(tmp_path / 'qdrant'),
+                'collection_name': 'catalog',
+            },
+        )
+
+    failed = registry.get_job(job.id)
+    assert failed is not None
+    assert failed.status == 'failed'
+    assert failed.file_id == uploaded['id']
+    assert failed.progress['status'] == 'failed'
+    assert 'удалённом storage' in failed.last_error
 
 
 def test_service_retry_job_requeues_reindex(tmp_path: Path) -> None:

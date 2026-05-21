@@ -1107,13 +1107,7 @@ class CloudDriveService:
             file_row = self._resolve_job_file(job)
             if file_row.deleted_at:
                 raise RuntimeError(f'Файл удалён и не может быть переиндексирован: {file_row.path}')
-            source_path = Path(file_row.source_path) if file_row.source_path else Path()
-            storage_path = Path(self.storage.resolve_path(file_row.storage_key))
-            source_exists = bool(source_path and source_path.exists() and source_path.is_file())
-            storage_exists = storage_path.exists() and storage_path.is_file()
-            target_path = source_path if source_exists else storage_path if storage_exists else Path()
-            if not target_path:
-                raise RuntimeError(f'Файл отсутствует в source_path и storage: {file_row.path}')
+            target_path, source_path_text, storage_ref, storage_origin = self._resolve_reindex_target_path(file_row)
 
             indexed = False
             points_added = 0
@@ -1131,9 +1125,10 @@ class CloudDriveService:
                     'path': file_row.path,
                     'file_id': file_row.id,
                     'version_id': file_row.current_version_id,
-                    'source_path': str(source_path) if source_path else '',
+                    'source_path': source_path_text,
                     'storage_key': file_row.storage_key,
-                    'storage_path': str(storage_path),
+                    'storage_path': storage_ref,
+                    'storage_origin': storage_origin,
                     'indexed': bool(indexed),
                     'points_added': int(points_added),
                     'finished_at': datetime.now(timezone.utc).isoformat(),
@@ -1150,6 +1145,42 @@ class CloudDriveService:
             )
             self.registry.update_job(job.id, status='failed', payload={'progress': progress}, last_error=str(exc))
             raise
+
+    def _resolve_reindex_target_path(self, file_row: Any) -> tuple[Path, str, str, str]:
+        source_path_text = str(getattr(file_row, 'source_path', '') or '').strip()
+        storage_key = str(getattr(file_row, 'storage_key', '') or '')
+        storage_ref = str(self.storage.resolve_path(storage_key) or '').strip() if storage_key else ''
+
+        if source_path_text:
+            source_path = Path(source_path_text)
+            if source_path.exists() and source_path.is_file():
+                return source_path, source_path_text, storage_ref, 'source_path'
+
+        if storage_ref and not self._is_remote_storage_ref(storage_ref):
+            storage_path = Path(storage_ref)
+            if storage_path.exists() and storage_path.is_file():
+                return storage_path, source_path_text, storage_ref, 'storage_path'
+
+        storage_exists = False
+        if storage_key:
+            try:
+                storage_exists = bool(self.storage.exists(storage_key))
+            except Exception:
+                storage_exists = False
+        if storage_exists and self._is_remote_storage_ref(storage_ref):
+            raise RuntimeError(
+                f'Файл доступен только в удалённом storage и не может быть переиндексирован локальным индексатором: '
+                f'{getattr(file_row, "path", "")} ({storage_ref})'
+            )
+        raise RuntimeError(
+            f'Файл отсутствует в source_path и local storage: {getattr(file_row, "path", "")} '
+            f'(source_path={source_path_text or "-"}, storage_path={storage_ref or "-"})'
+        )
+
+    @staticmethod
+    def _is_remote_storage_ref(value: str) -> bool:
+        lowered = str(value or '').strip().lower()
+        return lowered.startswith(('s3://', 'http://', 'https://'))
 
     def run_pending_reindex_jobs(self, *, index_config: Optional[Dict[str, object]] = None, limit: int = 5) -> list[CloudDriveJob]:
         completed: list[CloudDriveJob] = []
