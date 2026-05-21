@@ -423,6 +423,45 @@ def api_cloud_drive_index_coverage_repair(
     return result
 
 
+@app.post("/api/cloud-drive/index-coverage/quarantine-unavailable")
+def api_cloud_drive_index_coverage_quarantine_unavailable(
+    limit: int = 100,
+    dry_run: bool = True,
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    index_state_path = Path(str(cfg.get("qdrant_db_path") or "")) / "index_state.db"
+    try:
+        result = service.quarantine_unavailable_index_coverage(
+            index_state_db_path=str(index_state_path),
+            limit=limit,
+            dry_run=dry_run,
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "index_coverage_quarantine_unavailable",
+            ok=False,
+            details={"limit": limit, "dry_run": dry_run, "error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "index_coverage_quarantine_unavailable",
+        details={
+            "limit": limit,
+            "dry_run": dry_run,
+            "candidates": result.get("candidates"),
+            "quarantined": result.get("quarantined"),
+        },
+    )
+    return result
+
+
 @app.get("/api/cloud-drive/node")
 def api_cloud_drive_node(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()

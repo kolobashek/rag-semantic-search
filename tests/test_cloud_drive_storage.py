@@ -537,3 +537,45 @@ def test_cloud_drive_index_coverage_separates_unavailable_files(tmp_path: Path) 
     assert repair["candidates"] == 1
     assert repair["queued"] == 0
     assert repair["skipped_unavailable"] == 1
+
+
+def test_cloud_drive_index_coverage_quarantines_unavailable_files(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    root = registry.ensure_root_folder(root_name="Обмен", source_path="")
+    file_row = registry.upsert_file(
+        folder_id=root.id,
+        path="missing-storage.pdf",
+        name="missing-storage.pdf",
+        storage_key="legacy/missing-storage.pdf",
+        mime_type="application/pdf",
+        size_bytes=12,
+        checksum="abcd",
+        source_path=str(tmp_path / "missing-storage.pdf"),
+    )
+    state_db_path = tmp_path / "index_state.db"
+    IndexStateDB(str(state_db_path))
+
+    dry_run = service.quarantine_unavailable_index_coverage(
+        index_state_db_path=str(state_db_path),
+        limit=10,
+        dry_run=True,
+    )
+    result = service.quarantine_unavailable_index_coverage(
+        index_state_db_path=str(state_db_path),
+        limit=10,
+        dry_run=False,
+    )
+    coverage = service.get_index_coverage(index_state_db_path=str(state_db_path), sample_limit=10)
+
+    assert dry_run["candidates"] == 1
+    assert dry_run["quarantined"] == 0
+    assert result["quarantined"] == 1
+    assert result["items"][0]["path"] == "missing-storage.pdf"
+    assert registry.get_file_by_id(file_row.id).deleted_at
+    cleanup = registry.get_latest_job(job_type="cleanup")
+    assert cleanup is not None
+    assert cleanup.file_id == file_row.id
+    assert cleanup.payload["reason"] == "coverage_unavailable_missing"
+    assert coverage["ok"] is True
+    assert coverage["indexable_unavailable"] == 0

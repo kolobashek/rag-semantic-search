@@ -280,6 +280,9 @@ class CloudDriveService:
                 }
                 stale.append(stale_row)
                 if is_indexable:
+                    if not self._is_reindex_material_available(file_row):
+                        indexable_unavailable.append({**stale_row, "coverage_reason": "stale"})
+                        continue
                     indexable_stale.append(stale_row)
                 continue
             indexed_current += 1
@@ -402,6 +405,74 @@ class CloudDriveService:
             "skipped_missing_file": skipped_missing_file,
             "skipped_unavailable": skipped_unavailable,
             "jobs": queued,
+        }
+
+    def quarantine_unavailable_index_coverage(
+        self,
+        *,
+        index_state_db_path: str,
+        limit: int = 100,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        clean_limit = max(1, min(int(limit or 100), 1000))
+        index_path = Path(str(index_state_db_path or "")).expanduser()
+        index_available, indexed_by_file, indexed_by_path = self._load_index_coverage_state(index_path)
+        if not index_available:
+            raise RuntimeError(f"Index state DB недоступна: {index_path}")
+
+        candidates: list[tuple[dict[str, Any], str]] = []
+        for file_row in self.registry.list_active_file_index_records():
+            if len(candidates) >= clean_limit:
+                break
+            if not self._is_indexable_registry_file(file_row):
+                continue
+            reason, _best, _legacy_path_match = self._classify_index_coverage_file(
+                file_row,
+                indexed_by_file=indexed_by_file,
+                indexed_by_path=indexed_by_path,
+            )
+            if reason not in {"missing", "stale", "error"}:
+                continue
+            if self._is_reindex_material_available(file_row):
+                continue
+            candidates.append((file_row, reason))
+
+        quarantined: list[dict[str, str]] = []
+        if not dry_run:
+            for file_row, reason in candidates:
+                registry_file = self.registry.get_file_by_id(str(file_row.get("id") or ""))
+                if registry_file is None or registry_file.deleted_at:
+                    continue
+                self._queue_cleanup_file(
+                    registry_file,
+                    reason=f"coverage_unavailable_{reason}",
+                    path=registry_file.path,
+                )
+                deleted = self.registry.delete_file(registry_file.path)
+                quarantined.append(
+                    {
+                        "id": deleted.id,
+                        "path": deleted.path,
+                        "reason": reason,
+                        "deleted_at": deleted.deleted_at,
+                    }
+                )
+
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "index_state_db_path": str(index_path),
+            "limit": clean_limit,
+            "candidates": len(candidates),
+            "quarantined": len(quarantined),
+            "items": quarantined if not dry_run else [
+                {
+                    "id": str(row.get("id") or ""),
+                    "path": str(row.get("path") or ""),
+                    "reason": reason,
+                }
+                for row, reason in candidates
+            ],
         }
 
     @staticmethod

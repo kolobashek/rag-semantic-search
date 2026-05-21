@@ -25,6 +25,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_download,
     api_cloud_drive_file_statuses,
     api_cloud_drive_index_coverage,
+    api_cloud_drive_index_coverage_quarantine_unavailable,
     api_cloud_drive_index_coverage_repair,
     api_cloud_drive_job,
     api_cloud_drive_job_latest,
@@ -1412,6 +1413,44 @@ def test_cloud_drive_index_coverage_repair_endpoint(monkeypatch, tmp_path) -> No
     assert job is not None
     assert job.file_id == file_row.id
     assert job.payload["reason"] == "coverage_missing"
+
+
+def test_cloud_drive_index_coverage_quarantine_unavailable_endpoint(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "qdrant_db_path": str(tmp_path / "qdrant"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    file_row = service.registry.upsert_file(
+        folder_id=root.id,
+        path="missing-storage.pdf",
+        name="missing-storage.pdf",
+        storage_key="legacy/missing-storage.pdf",
+        mime_type="application/pdf",
+        size_bytes=12,
+        checksum="aabb",
+        source_path=str(tmp_path / "missing-storage.pdf"),
+    )
+    state_dir = tmp_path / "qdrant"
+    state_dir.mkdir()
+    IndexStateDB(str(state_dir / "index_state.db"))
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+
+    result = api_cloud_drive_index_coverage_quarantine_unavailable(limit=10, dry_run=False)
+
+    assert result["quarantined"] == 1
+    assert service.registry.get_file_by_id(file_row.id).deleted_at
+    cleanup = service.registry.get_latest_job(job_type="cleanup")
+    assert cleanup is not None
+    assert cleanup.file_id == file_row.id
 
 
 def test_cloud_drive_recover_stale_jobs_endpoint(monkeypatch, tmp_path) -> None:
