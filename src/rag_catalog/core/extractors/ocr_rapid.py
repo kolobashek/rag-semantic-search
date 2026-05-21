@@ -14,6 +14,7 @@ DirectML работает на любой DX12-видеокарте под Windo
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 _rapid_engine: Optional[Any] = None
 _active_device: str = "CPU"
+
+# Limit concurrent OCR jobs to avoid overloading GPU/RAM.
+# pdf2image loads entire PDFs into memory; multiple parallel jobs can OOM the system.
+_ocr_semaphore = threading.Semaphore(1)
 
 
 # ───────────────────────── DirectML monkey-patch ────────────────────────────
@@ -149,6 +154,11 @@ def _img_to_text(img_array: np.ndarray) -> str:
 
 def ocr_image_rapid(filepath: Path) -> str:
     """OCR одного изображения через RapidOCR."""
+    with _ocr_semaphore:
+        return _ocr_image_rapid_impl(filepath)
+
+
+def _ocr_image_rapid_impl(filepath: Path) -> str:
     try:
         from PIL import Image  # noqa: PLC0415
         with Image.open(filepath) as img:
@@ -180,6 +190,11 @@ def ocr_image_rapid(filepath: Path) -> str:
 
 def ocr_pdf_rapid(filepath: Path, *, poppler_bin: str = "") -> str:
     """OCR сканированного PDF через pdf2image + RapidOCR."""
+    with _ocr_semaphore:
+        return _ocr_pdf_rapid_impl(filepath, poppler_bin=poppler_bin)
+
+
+def _ocr_pdf_rapid_impl(filepath: Path, *, poppler_bin: str = "") -> str:
     try:
         import pdf2image.pdf2image as pdf2image_impl  # noqa: PLC0415  # type: ignore
         from pdf2image import convert_from_path  # noqa: PLC0415  # type: ignore

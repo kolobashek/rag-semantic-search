@@ -7,14 +7,18 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+_log = logging.getLogger(__name__)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-from nicegui import ui
+from nicegui import run, ui
 
 from .helpers import (
     _CADENCE_LABELS,
@@ -101,41 +105,56 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
     skip_ocr_now = bool(settings.get("skip_inline_ocr"))
     ocr_engine_now = str(settings.get("ocr_engine") or state.cfg.get("ocr_engine") or "tesseract")
     ocr_min_len_now = int(settings.get("ocr_min_text_len") or 50)
+    def _set_phase_running(key: str, running: bool) -> None:
+        refs = _phase_refs.get(key)
+        if refs is None:
+            return
+        refs["play_e"].set_visibility(not running)
+        refs["stop_e"].set_visibility(running)
+        if running:
+            refs["chip_e"].set_text("Запущено")
+            refs["icon_e"]._props["name"] = "sync"
+            refs["icon_e"].update()
+
     def make_run_handler(stage_key: str) -> Any:
-        def handler() -> None:
+        async def handler() -> None:
+            s = current_index_settings()
             try:
                 pid = _launch_indexer(
                     state.cfg,
                     stage=stage_key,
-                    workers=workers_now,
-                    max_chunks=chunks_now,
-                    skip_inline_ocr=skip_ocr_now,
-                    ocr_engine=ocr_engine_now,
+                    workers=s["workers"],
+                    max_chunks=s["max_chunks"],
+                    skip_inline_ocr=s["skip_inline_ocr"],
+                    ocr_engine=s["ocr_engine"],
                 )
             except RuntimeError as exc:
                 ui.notify(str(exc), type="warning")
                 return
+            _set_phase_running(stage_key, True)
             _log_app_event(state, "index", "run_now", details={"stage": stage_key, "pid": pid})
             ui.notify(f"Индексация «{_STAGE_LABELS.get(stage_key, stage_key)}» запущена (PID {pid}).", type="positive")
-            _refresh_progress()
+            await _refresh_progress()
             ui.timer(1.0, _refresh_progress, once=True)
 
         return handler
 
-    def run_ocr_now() -> None:
+    async def run_ocr_now() -> None:
+        s = current_index_settings()
         try:
             pid = _launch_ocr(
                 state.cfg,
-                min_text_len=ocr_min_len_now,
-                workers=workers_now,
-                ocr_engine=ocr_engine_now,
+                min_text_len=s["ocr_min_text_len"],
+                workers=s["workers"],
+                ocr_engine=s["ocr_engine"],
             )
         except RuntimeError as exc:
             ui.notify(str(exc), type="warning")
             return
+        _set_phase_running("ocr", True)
         _log_app_event(state, "index", "run_ocr_now", details={"pid": pid})
         ui.notify(f"OCR-проход запущен (PID {pid}).", type="positive")
-        _refresh_progress()
+        await _refresh_progress()
         ui.timer(1.0, _refresh_progress, once=True)
 
     stage_status_ctx: Dict[str, Any] = {
@@ -295,14 +314,40 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 ui.label("Статистика").classes("rag-meta font-semibold")
                 ui.label("Действия").classes("rag-meta font-semibold text-right")
 
-        def stop_phase(label: str, *, is_ocr: bool = False) -> None:
-            ok = stop_active_ocr(state.cfg) if is_ocr else stop_active_indexer(state.cfg)
+        async def stop_phase(label: str, *, is_ocr: bool = False) -> None:
+            ok = await run.io_bound(stop_active_ocr if is_ocr else stop_active_indexer, state.cfg)
             if ok:
                 ui.notify(f"«{label}» остановлен. Следующий запуск продолжит по state DB.", type="positive")
             else:
                 ui.notify(f"Активный процесс для «{label}» не найден или не удалось остановить.", type="warning")
-            _refresh_progress()
+            await _refresh_progress()
             ui.timer(1.0, _refresh_progress, once=True)
+
+        def _freshness_state(last_ts: Any, *, is_running: bool, status: str) -> Dict[str, Any]:
+            if is_running:
+                return {"kind": "running", "age_label": "идёт"}
+            if not last_ts:
+                return {"kind": "empty", "age_label": "никогда"}
+            if isinstance(last_ts, str):
+                try:
+                    last_ts = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                except Exception:
+                    return {"kind": "empty", "age_label": "—"}
+            now = datetime.now(timezone.utc)
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            age_sec = (now - last_ts).total_seconds()
+            if age_sec < 60:
+                age_h = "только что"
+            elif age_sec < 3600:
+                age_h = f"{int(age_sec // 60)} мин назад"
+            elif age_sec < 86400:
+                age_h = f"{int(age_sec // 3600)} ч назад"
+            else:
+                days = int(age_sec // 86400)
+                age_h = f"{days} {'день' if days == 1 else 'дня' if days < 5 else 'дней'} назад"
+            is_stale = age_sec > 7 * 86400 or (status in {"failed", "cancelled"} and age_sec > 4 * 3600)
+            return {"kind": "stale" if is_stale else "fresh", "age_label": age_h}
 
         def _phase_row_data(row: Dict[str, Any], *, label: str, is_ocr: bool) -> Dict[str, Any]:
             status_str = str(row.get("status") or "idle")
@@ -387,6 +432,12 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                         pct_e = ui.label(d["pct_label"]).classes("rag-meta")
                         dur_e = ui.label(_format_duration_seconds(d["duration_value"])).classes("rag-meta")
                     prog_e = ui.linear_progress(value=d["pct"], show_value=False).props("color=indigo-5" if d["is_running"] else "").classes("w-full rag-progressbar")
+                    freshness = _freshness_state(d["last_ts"], is_running=d["is_running"], status=d["status_str"])
+                    with ui.element("div").classes("rag-freshness"):
+                        fresh_bar = ui.element("div").classes(f"rag-freshness-bar {freshness['kind']}")
+                        with ui.element("div").classes("rag-freshness-label"):
+                            ui.label("свежесть:").style("opacity:.7")
+                            fresh_label = ui.label(freshness["age_label"]).classes(f"age {freshness['kind']}")
                 with ui.column().classes("gap-1 min-w-0"):
                     stats_e = ui.label(d["stats_text"]).classes("rag-meta")
                     issue_e = ui.label(d["issue_text"]).classes("rag-meta rag-stage-issue").props("title='Причина последнего сбоя'")
@@ -410,6 +461,8 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
                 "pct_e": pct_e,
                 "dur_e": dur_e,
                 "prog_e": prog_e,
+                "fresh_bar": fresh_bar,
+                "fresh_label": fresh_label,
                 "stats_e": stats_e,
                 "issue_e": issue_e,
                 "play_e": play_e,
@@ -438,6 +491,12 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             refs["play_e"].update()
             refs["play_e"].set_visibility(not d["is_running"])
             refs["stop_e"].set_visibility(d["is_running"])
+            new_fresh = _freshness_state(d["last_ts"], is_running=d["is_running"], status=d["status_str"])
+            refs["fresh_bar"].classes(remove="fresh running stale empty")
+            refs["fresh_bar"].classes(add=new_fresh["kind"])
+            refs["fresh_label"].set_text(new_fresh["age_label"])
+            refs["fresh_label"].classes(remove="fresh running stale empty")
+            refs["fresh_label"].classes(add=new_fresh["kind"])
 
         def _get_stage_rows(fresh: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             active_by_stage = {str(r.get("stage") or ""): r for r in (fresh.get("active_stages") or [])}
@@ -456,12 +515,24 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             ocr_row = dict(fresh.get("last_ocr") or {})
             if fresh.get("active_ocr"):
                 ocr_row.update(fresh.get("active_ocr") or {})
+                # OCR triggers index_rag --stage large; use its live progress counter
+                active_large = active_by_stage.get("large")
+                if active_large:
+                    ocr_row["processed_files"] = active_large.get("processed_files", 0)
+                    ocr_row["total_files"] = active_large.get("total_files") or ocr_row.get("found_scanned", 0)
             result["ocr"] = ocr_row
             return result
 
-        def _refresh_progress() -> None:
-            fresh = _read_index_telemetry(state.cfg)
-            stats = _read_index_stats(state.cfg)
+        async def _refresh_progress() -> None:
+            try:
+                fresh, stats = await asyncio.gather(
+                    run.io_bound(_read_index_telemetry, state.cfg),
+                    run.io_bound(_read_index_stats, state.cfg),
+                )
+            except Exception as exc:
+                _log.exception("_refresh_progress: data fetch failed")
+                ui.notify(f"Ошибка загрузки данных индекса: {exc}", type="negative")
+                return
             active_names = [
                 _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or ""))
                 for row in (fresh.get("active_stages") or [])
@@ -488,25 +559,29 @@ def render_index_screen(state: PageState, *, render_fn: Callable, access_denied:
             _coverage_refs["bar"].set_value(coverage_pct)
             stage_rows = _get_stage_rows(fresh)
             if not _progress_rendered[0]:
-                _progress_rendered[0] = True
-                progress_area.clear()
-                with progress_area:
-                    with ui.element("div").classes("rag-pipeline-row rag-pipeline-row-card rag-pipeline-head"):
-                        ui.label("Этап").classes("rag-meta font-semibold")
-                        ui.label("Прогресс").classes("rag-meta font-semibold")
-                        ui.label("Статистика").classes("rag-meta font-semibold")
-                        ui.label("Действия").classes("rag-meta font-semibold text-right")
-                    for stage_key in ["metadata", "small", "large"]:
-                        render_phase_row(key=stage_key, label=_STAGE_LABELS.get(stage_key, stage_key), row=stage_rows[stage_key])
-                    render_phase_row(key="ocr", label="OCR", row=stage_rows["ocr"], is_ocr=True)
+                try:
+                    progress_area.clear()
+                    with progress_area:
+                        with ui.element("div").classes("rag-pipeline-row rag-pipeline-row-card rag-pipeline-head"):
+                            ui.label("Этап").classes("rag-meta font-semibold")
+                            ui.label("Прогресс").classes("rag-meta font-semibold")
+                            ui.label("Статистика").classes("rag-meta font-semibold")
+                            ui.label("Действия").classes("rag-meta font-semibold text-right")
+                        for stage_key in ["metadata", "small", "large"]:
+                            render_phase_row(key=stage_key, label=_STAGE_LABELS.get(stage_key, stage_key), row=stage_rows[stage_key])
+                        render_phase_row(key="ocr", label="OCR", row=stage_rows["ocr"], is_ocr=True)
+                    _progress_rendered[0] = True
+                except Exception as exc:
+                    _log.exception("_refresh_progress: render failed")
+                    ui.notify(f"Ошибка отрисовки pipeline: {exc}", type="negative")
             else:
                 for stage_key in ["metadata", "small", "large"]:
                     update_phase_row(key=stage_key, label=_STAGE_LABELS.get(stage_key, stage_key), row=stage_rows[stage_key])
                 update_phase_row(key="ocr", label="OCR", row=stage_rows["ocr"], is_ocr=True)
 
-        # Initial render
-        _refresh_progress()
-        # Auto-refresh every 5 seconds
+        # ui.timer fires immediately after client connection (immediate=True default)
+        # and then every 5 s. Running inside the timer's slot context ensures
+        # ui.notify / element creation all have a valid slot stack.
         _stop_managed_timer(state.index_progress_timer)
         state.index_progress_timer = ui.timer(5.0, _refresh_progress)
 

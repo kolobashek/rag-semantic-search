@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Tuple
 from qdrant_client.models import PointStruct
 from tqdm import tqdm
 
+from ..extractors import extract_doc_meta
 from .qdrant_writer import upsert_points
 
 
@@ -319,10 +320,15 @@ class IndexStageRunner:
             tags = self._generate_tags(filepath, relative_path, full_text, getattr(self, "synonym_map", {}) or {})
 
             stat = filepath.stat()
+            doc_meta = extract_doc_meta(filepath)
             meta_text = (
                 f"Файл: {filepath.name} | Путь: {relative_path}"
                 f" | Расширение: {filepath.suffix}"
             )
+            if doc_meta.get("doc_author"):
+                meta_text += f" | Автор: {doc_meta['doc_author']}"
+            if doc_meta.get("doc_last_editor"):
+                meta_text += f" | Редактор: {doc_meta['doc_last_editor']}"
             if tags:
                 meta_text += f" | Теги: {', '.join(tags[:30])}"
             meta_payload: Dict[str, Any] = {
@@ -332,9 +338,11 @@ class IndexStageRunner:
                 "extension": ext,
                 "size_mb": round(stat.st_size / (1024 * 1024), 2),
                 "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
                 "path": str(relative_path),
                 "full_path": str(filepath),
                 "tags": tags,
+                **doc_meta,
             }
             base_provenance = self._base_provenance(
                 filepath=filepath,
@@ -354,6 +362,7 @@ class IndexStageRunner:
                     "full_path": str(filepath),
                     "chunk_index": idx,
                     "tags": tags,
+                    **doc_meta,
                     **base_provenance,
                     **self._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
                 }

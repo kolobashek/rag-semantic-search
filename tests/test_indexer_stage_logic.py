@@ -59,13 +59,13 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     return idx
 
 
-def test_small_stage_file_without_content_stays_metadata(tmp_path: Path) -> None:
+def test_small_stage_file_without_content_is_marked_small(tmp_path: Path) -> None:
     p = tmp_path / "a.docx"
     p.write_text("dummy", encoding="utf-8")
     idx = _make_indexer(tmp_path, extracted_text="")
     stats = idx.index_directory(stage="small")
     key = str(p)
-    assert idx.state["files"][key]["stage"] == "metadata"
+    assert idx.state["files"][key]["stage"] == "small"
     assert stats["processed_files"] >= 1
 
 

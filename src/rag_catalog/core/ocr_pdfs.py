@@ -360,6 +360,7 @@ def main() -> int:
         return 0
 
     # ── Создать запись OCR-прохода в телеметрии ──────────────────────────────
+    ocr_start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
     ocr_run_id = telemetry.start_ocr_run(
         collection_name=args.collection,
         found_scanned=len(scanned),
@@ -412,6 +413,21 @@ def main() -> int:
     logger.info("=" * 60)
     logger.info("")
 
+    def _actual_processed_count() -> int:
+        """Read the real processed_files count from index_stage_progress (large stage)."""
+        try:
+            rows = telemetry.fetch_dicts(
+                """SELECT processed_files FROM index_stage_progress
+                   WHERE stage='large' AND ts_started >= ?
+                   ORDER BY ts_started DESC LIMIT 1""",
+                (ocr_start_time,),
+            )
+            if rows:
+                return int(rows[0].get("processed_files") or 0)
+        except Exception:
+            pass
+        return 0
+
     try:
         run_kwargs: Dict[str, Any] = {"check": False}
         if os.name == "nt":
@@ -424,7 +440,7 @@ def main() -> int:
         telemetry.finish_ocr_run(
             ocr_run_id=ocr_run_id,
             status=status,
-            processed_pdfs=len(scanned),
+            processed_pdfs=_actual_processed_count(),
             note=f"exit_code={exit_code}",
         )
         return exit_code
@@ -433,6 +449,7 @@ def main() -> int:
         telemetry.finish_ocr_run(
             ocr_run_id=ocr_run_id,
             status="cancelled",
+            processed_pdfs=_actual_processed_count(),
             note="interrupted by user",
         )
         return 0
@@ -441,6 +458,7 @@ def main() -> int:
         telemetry.finish_ocr_run(
             ocr_run_id=ocr_run_id,
             status="failed",
+            processed_pdfs=_actual_processed_count(),
             note=str(exc),
         )
         return 1

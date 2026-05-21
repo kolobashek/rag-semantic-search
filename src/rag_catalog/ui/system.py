@@ -32,7 +32,7 @@ _STAGE_LABELS: Dict[str, str] = {
 _RECOVERY_LOCK = threading.Lock()
 _RECOVERY_WATCHDOG_STARTED = False
 _RECOVERY_WATCHDOG_INTERVAL_SEC = 45
-_FAILED_RUN_RECENCY_SEC = 10 * 60
+_FAILED_RUN_RECENCY_SEC = 4 * 3600  # 4 hours: covers server restarts and maintenance windows
 _FAILED_RESTART_COOLDOWN_SEC = 90
 _FAILED_RESTART_MAX_ATTEMPTS = 3
 _FAILED_RESTART_WINDOW_SEC = 15 * 60
@@ -43,6 +43,7 @@ _GLOBAL_SCHEDULER_STARTED = False
 _CLOUD_BOOTSTRAP_LOCK = threading.Lock()
 _CLOUD_JOB_WORKER_STARTED = False
 _CLOUD_JOB_WORKER_INTERVAL_SEC = 15
+_CLOUD_AUTOSYNC_LAST_RUN_TS = 0.0
 
 
 # ── Primitive helpers (no nicegui/state deps) ──────────────────────────────
@@ -181,6 +182,7 @@ def _start_cloud_drive_job_worker(cfg: Dict[str, Any]) -> None:
     _CLOUD_JOB_WORKER_STARTED = True
 
     def _loop() -> None:
+        global _CLOUD_AUTOSYNC_LAST_RUN_TS
         from rag_catalog.core.rag_core import load_config  # local import avoids a startup cycle
 
         while True:
@@ -189,11 +191,50 @@ def _start_cloud_drive_job_worker(cfg: Dict[str, Any]) -> None:
                 if bool(cfg_now.get("cloud_drive_enabled")):
                     service = CloudDriveService.from_config(cfg_now)
                     service.run_pending_reindex_jobs(index_config=cfg_now, limit=3)
+                    _cloud_autosync_tick(cfg_now, service)
             except Exception as exc:
                 print(f"[nice_app] cloud drive job worker skipped cycle: {exc}", file=sys.stderr)
             time.sleep(_CLOUD_JOB_WORKER_INTERVAL_SEC)
 
     threading.Thread(target=_loop, name="cloud-drive-job-worker", daemon=True).start()
+
+
+def _cloud_autosync_tick(cfg: Dict[str, Any], service: "CloudDriveService") -> None:
+    """Run bootstrap with import_files=True on the configured schedule (global, not UI-side)."""
+    global _CLOUD_AUTOSYNC_LAST_RUN_TS
+    autosync_minutes = _safe_int(cfg.get("cloud_drive_autosync_minutes"), 0)
+    if autosync_minutes <= 0:
+        return
+    now_ts = time.time()
+    if now_ts - _CLOUD_AUTOSYNC_LAST_RUN_TS < autosync_minutes * 60:
+        return
+    catalog = str(cfg.get("catalog_path") or "").strip()
+    if not catalog or not Path(catalog).exists():
+        return
+    # skip if any bootstrap job is already pending or running
+    active = service.registry.list_jobs(job_type="bootstrap", limit=5)
+    if any(j.status in ("pending", "running") for j in active):
+        return
+    try:
+        job = service.create_bootstrap_job(catalog_root=catalog, import_files=True)
+    except Exception as exc:
+        print(f"[nice_app] cloud autosync: could not queue job: {exc}", file=sys.stderr)
+        return
+    _CLOUD_AUTOSYNC_LAST_RUN_TS = now_ts
+
+    def _run(cfg_snapshot: Dict[str, Any], job_id: str) -> None:
+        try:
+            CloudDriveService.from_config(cfg_snapshot).run_bootstrap_job(job_id)
+        except Exception as exc:
+            print(f"[nice_app] cloud autosync bootstrap failed: {exc}", file=sys.stderr)
+
+    threading.Thread(
+        target=_run,
+        kwargs={"cfg_snapshot": cfg, "job_id": job.id},
+        name="cloud-autosync-bootstrap",
+        daemon=True,
+    ).start()
+    print(f"[nice_app] cloud autosync: queued bootstrap job {job.id} (every {autosync_minutes}m)", file=sys.stderr)
 
 
 def _read_runtime_marker(kind: str) -> Optional[Dict[str, Any]]:
@@ -670,6 +711,12 @@ def _stop_managed_timer(timer_obj: Any) -> None:
 # ── Recovery ──────────────────────────────────────────────────────────────
 
 def _resolve_index_recovery_stage(telemetry: TelemetryDB, active_run: Dict[str, Any]) -> str:
+    note = str(active_run.get("note") or "")
+    note_match = re.search(r"stage=(all|metadata|small|large)", note.lower())
+    # If the original run was "all", preserve that intent — don't downgrade to a sub-stage.
+    if note_match and note_match.group(1) == "all":
+        return "all"
+
     run_id = str(active_run.get("run_id") or "")
     if run_id:
         stage_rows = telemetry.fetch_dicts(
@@ -686,10 +733,8 @@ def _resolve_index_recovery_stage(telemetry: TelemetryDB, active_run: Dict[str, 
             candidate = str(stage_rows[0].get("stage") or "").strip().lower()
             if candidate in _STAGE_LABELS:
                 return candidate
-    note = str(active_run.get("note") or "")
-    match = re.search(r"stage=(all|metadata|small|large)", note.lower())
-    if match:
-        return match.group(1)
+    if note_match:
+        return note_match.group(1)
     return "all"
 
 
@@ -767,7 +812,10 @@ def _recover_background_tasks(
         recovered_index_now = True
     elif allow_failed_restart and not live_index:
         failed_rows = telemetry.fetch_dicts(
-            "SELECT * FROM index_runs WHERE status='failed' ORDER BY COALESCE(ts_finished, ts_started) DESC LIMIT 1"
+            """SELECT * FROM index_runs
+               WHERE status='failed'
+                  OR (status='cancelled' AND note LIKE '%recovery%')
+               ORDER BY COALESCE(ts_finished, ts_started) DESC LIMIT 1"""
         )
         if failed_rows:
             failed_run = failed_rows[0]

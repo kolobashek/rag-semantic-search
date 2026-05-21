@@ -353,7 +353,15 @@ class RAGIndexer:
         self.current_stage: str = "content"  # legacy-совместимый дефолт
         self.catalog_path = Path(catalog_path)
         if not self.catalog_path.exists():
-            raise FileNotFoundError(f"Папка каталога не найдена: {catalog_path}")
+            import time as _time
+            _wait = 60
+            logger.warning(
+                "Папка каталога недоступна: %s — жду появления (проверка каждые %ds)…",
+                catalog_path, _wait,
+            )
+            while not self.catalog_path.exists():
+                _time.sleep(_wait)
+            logger.info("Каталог доступен: %s", catalog_path)
 
         self.qdrant_db_path = Path(qdrant_db_path)
         self.collection_name = collection_name

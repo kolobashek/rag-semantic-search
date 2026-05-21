@@ -95,23 +95,32 @@ def run_command(args: list, description: str) -> bool:
         return False
 
 
+_CATALOG_WAIT_SEC = 60
+
+
 def check_prerequisites() -> bool:
     """Проверить наличие необходимых файлов и директорий."""
     logger.info("Проверка предварительных условий…")
-    ok = True
 
     script = Path(__file__).parent / "index_rag.py"
     if not script.exists():
         logger.error("ОШИБКА: index_rag.py не найден в %s", script.parent)
-        ok = False
+        return False
 
-    if not Path(CATALOG_PATH).exists():
-        logger.error("ОШИБКА: Папка каталога не найдена: %s", CATALOG_PATH)
-        ok = False
+    catalog = Path(CATALOG_PATH)
+    if not catalog.exists():
+        logger.warning(
+            "Каталог недоступен: %s — жду появления диска (проверка каждые %ds)…",
+            CATALOG_PATH, _CATALOG_WAIT_SEC,
+        )
+        while not catalog.exists():
+            time.sleep(_CATALOG_WAIT_SEC)
+            if catalog.exists():
+                break
+            logger.info("  … каталог %s всё ещё недоступен, жду…", CATALOG_PATH)
 
-    if ok:
-        logger.info("✓ Все условия выполнены")
-    return ok
+    logger.info("✓ Все условия выполнены")
+    return True
 
 
 # ─────────────────────────── main workflow ─────────────────────────────
