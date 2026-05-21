@@ -1036,34 +1036,64 @@ class TelemetryDB:
         skipped_files: int,
         error_files: int,
         points_added: int,
+        status: Optional[str] = None,
     ) -> None:
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
-                    """
-                    UPDATE index_stage_progress
-                    SET
-                        ts_updated=?,
-                        processed_files=?,
-                        added_files=?,
-                        updated_files=?,
-                        skipped_files=?,
-                        error_files=?,
-                        points_added=?
-                    WHERE run_id=? AND stage=?
-                    """,
-                    (
-                        _utc_now(),
-                        int(processed_files),
-                        int(added_files),
-                        int(updated_files),
-                        int(skipped_files),
-                        int(error_files),
-                        int(points_added),
-                        run_id,
-                        stage,
-                    ),
-                )
+                if status is None:
+                    conn.execute(
+                        """
+                        UPDATE index_stage_progress
+                        SET
+                            ts_updated=?,
+                            processed_files=?,
+                            added_files=?,
+                            updated_files=?,
+                            skipped_files=?,
+                            error_files=?,
+                            points_added=?
+                        WHERE run_id=? AND stage=?
+                        """,
+                        (
+                            _utc_now(),
+                            int(processed_files),
+                            int(added_files),
+                            int(updated_files),
+                            int(skipped_files),
+                            int(error_files),
+                            int(points_added),
+                            run_id,
+                            stage,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE index_stage_progress
+                        SET
+                            ts_updated=?,
+                            processed_files=?,
+                            added_files=?,
+                            updated_files=?,
+                            skipped_files=?,
+                            error_files=?,
+                            points_added=?,
+                            status=?
+                        WHERE run_id=? AND stage=?
+                        """,
+                        (
+                            _utc_now(),
+                            int(processed_files),
+                            int(added_files),
+                            int(updated_files),
+                            int(skipped_files),
+                            int(error_files),
+                            int(points_added),
+                            str(status),
+                            run_id,
+                            stage,
+                        ),
+                    )
 
     def finish_stage(
         self,

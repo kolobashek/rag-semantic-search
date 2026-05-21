@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,7 @@ from .extractors import (
     ocr_pdf,
 )
 from .index_state_db import IndexStateDB
+from .indexer_control import read_indexer_control
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .log_history import build_log_handler, install_env_log_handler
 from .ocr_runtime import resolve_ocr_runtime
@@ -89,6 +91,11 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".
 # Защита от случайных файлов с тысячами кадров, которые зависнут индексатор.
 MAX_IMAGE_PAGES: int = 50
 PAYLOAD_SCHEMA_VERSION: int = 2
+
+
+class IndexerCancelled(RuntimeError):
+    """Raised when cooperative indexer control requests cancellation."""
+
 
 # ─────────────────────────── таблица синонимов ────────────────────────────────
 # Сокращение → список синонимов/расшифровок.
@@ -477,6 +484,51 @@ class RAGIndexer:
 
     def set_run_id(self, run_id: str) -> None:
         self.run_id = run_id or ""
+
+    def _check_indexer_control(self, *, stage: str, stage_stats: Dict[str, int]) -> None:
+        """Apply cooperative pause/cancel commands written by the UI."""
+        command = str(read_indexer_control().get("command") or "running").lower()
+        if command == "cancel":
+            raise IndexerCancelled("Индексация отменена пользователем.")
+        if command != "pause":
+            return
+
+        logger.info("Индексация поставлена на паузу пользователем.")
+        if getattr(self, "run_id", ""):
+            try:
+                self.telemetry.update_stage(
+                    run_id=self.run_id,
+                    stage=stage,
+                    processed_files=int(stage_stats.get("processed_files", 0)),
+                    added_files=int(stage_stats.get("added_files", 0)),
+                    updated_files=int(stage_stats.get("updated_files", 0)),
+                    skipped_files=int(stage_stats.get("skipped_files", 0)),
+                    error_files=int(stage_stats.get("error_files", 0)),
+                    points_added=int(stage_stats.get("points_added", 0)),
+                    status="paused",
+                )
+            except Exception:
+                logger.debug("Не удалось обновить telemetry stage status=paused", exc_info=True)
+        while command == "pause":
+            time.sleep(1.0)
+            command = str(read_indexer_control().get("command") or "running").lower()
+            if command == "cancel":
+                raise IndexerCancelled("Индексация отменена пользователем.")
+        if getattr(self, "run_id", ""):
+            try:
+                self.telemetry.update_stage(
+                    run_id=self.run_id,
+                    stage=stage,
+                    processed_files=int(stage_stats.get("processed_files", 0)),
+                    added_files=int(stage_stats.get("added_files", 0)),
+                    updated_files=int(stage_stats.get("updated_files", 0)),
+                    skipped_files=int(stage_stats.get("skipped_files", 0)),
+                    error_files=int(stage_stats.get("error_files", 0)),
+                    points_added=int(stage_stats.get("points_added", 0)),
+                    status="running",
+                )
+            except Exception:
+                logger.debug("Не удалось обновить telemetry stage status=running", exc_info=True)
 
     # ── collection setup ───────────────────────────────────────────────
 
@@ -1521,7 +1573,7 @@ def main() -> None:
             points_added=run_totals["points_added"],
             note="ok",
         )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, IndexerCancelled) as exc:
         indexer.telemetry.finish_index_run(
             run_id=run_id,
             status="cancelled",
@@ -1532,9 +1584,9 @@ def main() -> None:
             deleted_files=indexer._run_deleted_files,
             error_files=run_totals["error_files"],
             points_added=run_totals["points_added"],
-            note="interrupted by user",
+            note=str(exc) or "interrupted by user",
         )
-        logger.warning("Индексация прервана пользователем.")
+        logger.warning("Индексация прервана: %s", exc)
         raise
     except Exception as exc:
         logger.exception("Индексация завершилась с ошибкой: %s", exc)

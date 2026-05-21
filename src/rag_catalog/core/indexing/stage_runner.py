@@ -596,9 +596,11 @@ class IndexStageRunner:
                     self._logger.error("Ошибка обработки %s: %s", fp, exc, exc_info=True)
                     stage_stats["error_files"] += 1
                     stage_stats["processed_files"] += 1
+                    indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
                     continue
 
                 if result is None:
+                    indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
                     continue  # файл не изменился
                 if result.get("skipped"):
                     stage_stats["skipped_files"] += 1
@@ -618,9 +620,11 @@ class IndexStageRunner:
                             points_added=stage_stats["points_added"],
                         )
                         last_telemetry_push = time.monotonic()
+                    indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
                     continue
 
                 stage_stats["processed_files"] += 1
+                indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
 
                 content_hash = str(result.get("content_hash") or "")
                 if content_hash:
