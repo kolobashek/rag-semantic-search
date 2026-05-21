@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from tempfile import SpooledTemporaryFile
 
 import pytest
@@ -1391,6 +1392,9 @@ def test_cloud_drive_index_coverage_repair_endpoint(monkeypatch, tmp_path) -> No
         checksum="aabb",
         source_path="",
     )
+    storage_target = tmp_path / "storage" / Path("objects/sha256/aa/bb/aabb.txt")
+    storage_target.parent.mkdir(parents=True, exist_ok=True)
+    storage_target.write_text("payload", encoding="utf-8")
     state_dir = tmp_path / "qdrant"
     state_dir.mkdir()
     IndexStateDB(str(state_dir / "index_state.db"))

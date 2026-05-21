@@ -15,6 +15,12 @@ from rag_catalog.core.cloud_drive.storage import (
 from rag_catalog.core.index_state_db import IndexStateDB
 
 
+def _write_local_storage_file(root: Path, storage_key: str, text: str = "payload") -> None:
+    target = root / Path(storage_key)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
 def test_local_storage_adapter_put_and_delete(tmp_path: Path) -> None:
     source = tmp_path / 'source.txt'
     source.write_text('payload', encoding='utf-8')
@@ -213,7 +219,8 @@ def test_cloud_drive_storage_coverage_reports_missing_registry_objects(tmp_path:
 
 def test_cloud_drive_index_coverage_reports_missing_stale_and_errors(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
-    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    storage_root = tmp_path / "storage"
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(storage_root)))
     root = registry.ensure_root_folder(root_name="Обмен", source_path="")
     current = registry.upsert_file(
         folder_id=root.id,
@@ -275,6 +282,13 @@ def test_cloud_drive_index_coverage_reports_missing_stale_and_errors(tmp_path: P
         checksum="ffff",
         source_path="",
     )
+    for storage_key in [
+        "objects/sha256/aa/aa/current.txt",
+        "objects/sha256/bb/bb/stale.txt",
+        "objects/sha256/cc/cc/failed.txt",
+        "objects/sha256/dd/dd/missing.txt",
+    ]:
+        _write_local_storage_file(storage_root, storage_key)
     state_db_path = tmp_path / "index_state.db"
     state_db = IndexStateDB(str(state_db_path))
     state_db.upsert_many(
@@ -365,7 +379,8 @@ def test_cloud_drive_index_coverage_accepts_legacy_source_path_entries(tmp_path:
 
 def test_cloud_drive_index_coverage_repair_queues_indexable_gaps(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
-    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    storage_root = tmp_path / "storage"
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(storage_root)))
     root = registry.ensure_root_folder(root_name="Обмен", source_path="")
     stale = registry.upsert_file(
         folder_id=root.id,
@@ -407,6 +422,12 @@ def test_cloud_drive_index_coverage_repair_queues_indexable_gaps(tmp_path: Path)
         checksum="dddd",
         source_path="",
     )
+    for storage_key in [
+        "objects/sha256/aa/aa/stale.txt",
+        "objects/sha256/bb/bb/failed.txt",
+        "objects/sha256/cc/cc/missing.txt",
+    ]:
+        _write_local_storage_file(storage_root, storage_key)
     registry.queue_job(
         job_type="reindex",
         status="pending",
@@ -460,19 +481,22 @@ def test_cloud_drive_index_coverage_repair_queues_indexable_gaps(tmp_path: Path)
 
 def test_cloud_drive_index_coverage_repair_batches_past_existing_jobs(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
-    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    storage_root = tmp_path / "storage"
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(storage_root)))
     root = registry.ensure_root_folder(root_name="Обмен", source_path="")
     for idx in range(3):
+        storage_key = f"objects/sha256/{idx}{idx}/{idx}{idx}/missing-{idx}.txt"
         registry.upsert_file(
             folder_id=root.id,
             path=f"missing-{idx}.txt",
             name=f"missing-{idx}.txt",
-            storage_key=f"objects/sha256/{idx}{idx}/{idx}{idx}/missing-{idx}.txt",
+            storage_key=storage_key,
             mime_type="text/plain",
             size_bytes=1,
             checksum=str(idx) * 4,
             source_path="",
         )
+        _write_local_storage_file(storage_root, storage_key)
     state_db_path = tmp_path / "index_state.db"
     IndexStateDB(str(state_db_path))
 
@@ -484,3 +508,32 @@ def test_cloud_drive_index_coverage_repair_batches_past_existing_jobs(tmp_path: 
     jobs = registry.list_pending_jobs(job_types=["reindex"], limit=10)
     queued_paths = {str(job.payload.get("path") or "") for job in jobs}
     assert len(queued_paths) == 2
+
+
+def test_cloud_drive_index_coverage_separates_unavailable_files(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / "registry.db"))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / "storage")))
+    root = registry.ensure_root_folder(root_name="Обмен", source_path="")
+    registry.upsert_file(
+        folder_id=root.id,
+        path="missing-storage.pdf",
+        name="missing-storage.pdf",
+        storage_key="legacy/missing-storage.pdf",
+        mime_type="application/pdf",
+        size_bytes=12,
+        checksum="abcd",
+        source_path=str(tmp_path / "missing-storage.pdf"),
+    )
+    state_db_path = tmp_path / "index_state.db"
+    IndexStateDB(str(state_db_path))
+
+    coverage = service.get_index_coverage(index_state_db_path=str(state_db_path), sample_limit=10)
+    repair = service.enqueue_index_coverage_repair(index_state_db_path=str(state_db_path), scopes="missing", limit=10)
+
+    assert coverage["ok"] is False
+    assert coverage["indexable_missing"] == 0
+    assert coverage["indexable_unavailable"] == 1
+    assert coverage["indexable_unavailable_examples"][0]["path"] == "missing-storage.pdf"
+    assert repair["candidates"] == 1
+    assert repair["queued"] == 0
+    assert repair["skipped_unavailable"] == 1

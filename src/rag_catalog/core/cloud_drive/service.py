@@ -240,6 +240,7 @@ class CloudDriveService:
         indexable_missing: list[dict[str, Any]] = []
         indexable_stale: list[dict[str, Any]] = []
         indexable_errored: list[dict[str, Any]] = []
+        indexable_unavailable: list[dict[str, Any]] = []
         indexed_current = 0
         indexable_total = 0
         indexable_indexed_current = 0
@@ -255,6 +256,9 @@ class CloudDriveService:
             if reason == "missing":
                 missing.append(file_row)
                 if is_indexable:
+                    if not self._is_reindex_material_available(file_row):
+                        indexable_unavailable.append({**file_row, "coverage_reason": "missing"})
+                        continue
                     indexable_missing.append(file_row)
                 else:
                     unsupported_missing.append(file_row)
@@ -263,6 +267,9 @@ class CloudDriveService:
                 error_row = {**file_row, "last_error": str(best.get("last_error") or "")}
                 errored.append(error_row)
                 if is_indexable:
+                    if not self._is_reindex_material_available(file_row):
+                        indexable_unavailable.append({**error_row, "coverage_reason": "error"})
+                        continue
                     indexable_errored.append(error_row)
                 continue
             if reason == "stale":
@@ -296,6 +303,7 @@ class CloudDriveService:
             "indexable_missing": len(indexable_missing),
             "indexable_stale": len(indexable_stale),
             "indexable_errored": len(indexable_errored),
+            "indexable_unavailable": len(indexable_unavailable),
             "unsupported_missing": len(unsupported_missing),
             "missing": len(missing),
             "stale": len(stale),
@@ -307,10 +315,12 @@ class CloudDriveService:
                 and not indexable_missing
                 and not indexable_stale
                 and not indexable_errored
+                and not indexable_unavailable
             ),
             "sample_limit": sample_size,
             "missing_examples": missing[:sample_size],
             "indexable_missing_examples": indexable_missing[:sample_size],
+            "indexable_unavailable_examples": indexable_unavailable[:sample_size],
             "unsupported_missing_examples": unsupported_missing[:sample_size],
             "stale_examples": stale[:sample_size],
             "error_examples": errored[:sample_size],
@@ -362,9 +372,13 @@ class CloudDriveService:
         queued: list[dict[str, str]] = []
         skipped_existing = 0
         skipped_missing_file = 0
+        skipped_unavailable = 0
         for file_row, reason in candidates:
             if len(queued) >= clean_limit:
                 break
+            if not self._is_reindex_material_available(file_row):
+                skipped_unavailable += 1
+                continue
             file_id = str(file_row.get("id") or "")
             latest = latest_jobs.get(file_id)
             if latest is not None and latest.status in {"pending", "running"}:
@@ -386,6 +400,7 @@ class CloudDriveService:
             "queued": len(queued),
             "skipped_existing": skipped_existing,
             "skipped_missing_file": skipped_missing_file,
+            "skipped_unavailable": skipped_unavailable,
             "jobs": queued,
         }
 
@@ -460,6 +475,20 @@ class CloudDriveService:
         while "//" in clean:
             clean = clean.replace("//", "/")
         return clean.lower()
+
+    def _is_reindex_material_available(self, file_row: dict[str, Any]) -> bool:
+        source_path_text = str(file_row.get("source_path") or "").strip()
+        if source_path_text:
+            source_path = Path(source_path_text)
+            if source_path.exists() and source_path.is_file():
+                return True
+        storage_key = str(file_row.get("storage_key") or "").strip()
+        if not storage_key:
+            return False
+        try:
+            return bool(self.storage.exists(storage_key))
+        except Exception:
+            return False
 
     @staticmethod
     def _immutable_storage_key(*, checksum: str, filename: str) -> str:
