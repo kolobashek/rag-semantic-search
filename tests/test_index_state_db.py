@@ -34,6 +34,8 @@ def test_state_db_upsert_get_delete_and_count(tmp_path: Path) -> None:
     row = db.get_entry(r"O:\docs\a.pdf")
     assert row is not None
     assert row["fingerprint"] == "100_1"
+    assert row["status"] == "ok"
+    assert row["indexed_stage"] == "metadata"
     deleted = db.delete_entries([r"O:\docs\a.pdf"])
     assert deleted == 1
     assert db.count() == 1
@@ -81,6 +83,52 @@ def test_state_db_stats_aggregates_by_extension(tmp_path: Path) -> None:
     assert stats["total_size_bytes"] == 15
     assert stats["by_ext"][".pdf"] == 2
     assert stats["by_ext_size"][".pdf"] == 12
+    assert stats["by_status"]["ok"] == 3
+    assert stats["by_indexed_stage"]["content"] == 2
+    assert stats["by_indexed_stage"]["metadata"] == 1
+
+
+def test_state_db_separates_legacy_stage_from_result_status(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many(
+        [
+            {
+                "full_path": "broken.pdf",
+                "fingerprint": "1",
+                "mtime": 1.0,
+                "stage": "error",
+                "indexed_stage": "large",
+                "status": "error",
+                "last_error": "locked",
+                "next_retry_at": 123.0,
+                "size_bytes": 10,
+                "extension": ".pdf",
+            },
+            {
+                "full_path": "empty.docx",
+                "fingerprint": "2",
+                "mtime": 2.0,
+                "stage": "empty",
+                "indexed_stage": "small",
+                "status": "empty",
+                "size_bytes": 20,
+                "extension": ".docx",
+            },
+        ]
+    )
+
+    broken = db.get_entry("broken.pdf")
+    stats = db.stats()
+
+    assert broken is not None
+    assert broken["stage"] == "error"
+    assert broken["indexed_stage"] == "large"
+    assert broken["status"] == "error"
+    assert broken["last_error"] == "locked"
+    assert broken["next_retry_at"] == 123.0
+    assert stats["by_stage"] == {"empty": 1, "error": 1}
+    assert stats["by_status"] == {"empty": 1, "error": 1}
+    assert stats["by_indexed_stage"] == {"large": 1, "small": 1}
 
 
 def test_state_db_tracks_content_hash_duplicates(tmp_path: Path) -> None:

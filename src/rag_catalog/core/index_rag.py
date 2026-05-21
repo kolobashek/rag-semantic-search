@@ -961,12 +961,17 @@ class RAGIndexer:
         )
         self.point_count += written
         stage = "content" if chunks else "metadata"
+        status = "ok" if chunks else "empty"
         self._upsert_state_entry(
             {
                 "full_path": file_key,
                 "fingerprint": fingerprint,
                 "mtime": mtime,
                 "stage": stage,
+                "indexed_stage": str(getattr(self, "current_stage", "") or "content"),
+                "status": status,
+                "last_error": "",
+                "next_retry_at": 0,
                 "size_bytes": size_bytes,
                 "extension": filepath.suffix.lower(),
                 "content_hash": content_hash,
@@ -1025,13 +1030,17 @@ class RAGIndexer:
         stats = self.state_db.stats()
         total = int(stats.get("total") or 0)
         by_stage = dict(stats.get("by_stage") or {})
+        by_status = dict(stats.get("by_status") or {})
+        by_indexed_stage = dict(stats.get("by_indexed_stage") or {})
         content_files = int(by_stage.get("content") or 0)
-        error_files = int(by_stage.get("error") or 0)
-        empty_files = int(by_stage.get("empty") or 0)
+        error_files = int((by_status.get("error") if by_status else by_stage.get("error")) or 0)
+        empty_files = int((by_status.get("empty") if by_status else by_stage.get("empty")) or 0)
         metadata_files = int(by_stage.get("metadata") or 0)
         report: Dict[str, Any] = {
             "total_files": total,
             "stage_distribution": by_stage,
+            "status_distribution": by_status,
+            "indexed_stage_distribution": by_indexed_stage,
             "by_extension": stats.get("by_ext") or {},
             "content_coverage_pct": round((content_files / total) * 100, 2) if total else 0.0,
             "metadata_only_files": metadata_files,

@@ -213,7 +213,8 @@ class IndexStageRunner:
                     reason = "changed"
                 else:
                     existing_stage = str(existing.get("stage") or "content")
-                    if existing_stage == "error":
+                    existing_status = str(existing.get("status") or ("error" if existing_stage == "error" else "ok"))
+                    if existing_status == "error":
                         if hasattr(indexer, "state_db") and not indexer.state_db.is_failed_retry_due(file_key):
                             skipped += 1
                             continue
@@ -254,8 +255,7 @@ class IndexStageRunner:
         # ── буферы для batch-encode ──────────────────────────────────
         pending_texts: List[str] = []
         pending_payloads: List[Dict[str, Any]] = []
-        # (file_key, fingerprint, mtime, stage, size_bytes, extension, content_hash)
-        pending_states: List[Tuple[str, str, float, str, int, str, str]] = []
+        pending_states: List[Dict[str, Any]] = []
         seen_content_hashes: Dict[str, str] = {}
 
         def flush() -> None:
@@ -290,33 +290,10 @@ class IndexStageRunner:
                 "Записан батч: %d точек (итого %d)", len(pending_texts), indexer.point_count
             )
             if hasattr(indexer, "state_db"):
-                indexer.state_db.upsert_many(
-                    [
-                        {
-                            "full_path": file_key,
-                            "fingerprint": fingerprint,
-                            "mtime": mtime,
-                            "stage": file_stage,
-                            "size_bytes": size_bytes,
-                            "extension": extension,
-                            "content_hash": content_hash,
-                        }
-                        for file_key, fingerprint, mtime, file_stage, size_bytes, extension, content_hash in pending_states
-                    ]
-                )
+                indexer.state_db.upsert_many(pending_states)
             else:
-                for file_key, fingerprint, mtime, file_stage, size_bytes, extension, content_hash in pending_states:
-                    indexer._upsert_state_entry(
-                        {
-                            "full_path": file_key,
-                            "fingerprint": fingerprint,
-                            "mtime": mtime,
-                            "stage": file_stage,
-                            "size_bytes": size_bytes,
-                            "extension": extension,
-                            "content_hash": content_hash,
-                        }
-                    )
+                for row in pending_states:
+                    indexer._upsert_state_entry(row)
             pending_texts.clear()
             pending_payloads.clear()
             pending_states.clear()
@@ -338,7 +315,7 @@ class IndexStageRunner:
             existing_entry = indexer._get_state_entry(file_key)
             if (
                 existing_entry
-                and str(existing_entry.get("stage") or "") == "error"
+                and str(existing_entry.get("status") or existing_entry.get("stage") or "") == "error"
                 and hasattr(indexer, "state_db")
                 and not indexer.state_db.is_failed_retry_due(file_key)
             ):
@@ -641,19 +618,29 @@ class IndexStageRunner:
                     pending_payloads.append(cpayload)
                 if result.get("error"):
                     file_stage = "error"
+                    status = "error"
+                    last_error = str(result.get("error") or "")
+                    next_retry_at = 0.0
                     stage_stats["error_files"] += 1
                     if hasattr(indexer, "state_db"):
-                        indexer.state_db.record_failed_path(
+                        failed_row = indexer.state_db.record_failed_path(
                             str(result["file_key"]),
                             fingerprint=str(result["fingerprint"]),
-                            error=str(result.get("error") or ""),
+                            error=last_error,
                         )
+                        try:
+                            next_retry_at = float(failed_row.get("next_retry_at") or 0.0)
+                        except (TypeError, ValueError):
+                            next_retry_at = 0.0
                 else:
                     if hasattr(indexer, "state_db"):
                         indexer.state_db.clear_failed_path(str(result["file_key"]))
                     file_stage = "metadata" if stage == "metadata" else (
                         "content" if result.get("has_content") else "empty"
                     )
+                    status = "empty" if file_stage == "empty" else "ok"
+                    last_error = ""
+                    next_retry_at = 0.0
                 if stage in ("small", "large") and not result.get("has_content"):
                     self._logger.warning(
                         "Этап %s: файл %s без контента, сохраняю stage=%s (будет повторная попытка)",
@@ -662,15 +649,19 @@ class IndexStageRunner:
                         file_stage,
                     )
                 pending_states.append(
-                    (
-                        result["file_key"],
-                        result["fingerprint"],
-                        result["mtime"],
-                        file_stage,
-                        int(result.get("size_bytes") or 0),
-                        str(result["meta_payload"].get("extension") or ""),
-                        str(result.get("content_hash") or ""),
-                    )
+                    {
+                        "full_path": result["file_key"],
+                        "fingerprint": result["fingerprint"],
+                        "mtime": result["mtime"],
+                        "stage": file_stage,
+                        "indexed_stage": stage,
+                        "status": status,
+                        "last_error": last_error,
+                        "next_retry_at": next_retry_at,
+                        "size_bytes": int(result.get("size_bytes") or 0),
+                        "extension": str(result["meta_payload"].get("extension") or ""),
+                        "content_hash": str(result.get("content_hash") or ""),
+                    }
                 )
 
                 # Достигли порога — кодируем и пишем в Qdrant

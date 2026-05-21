@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _utc_now() -> str:
@@ -120,10 +120,32 @@ class IndexStateDB:
                     "cloud_path": "TEXT NOT NULL DEFAULT ''",
                     "storage_key": "TEXT NOT NULL DEFAULT ''",
                     "content_hash": "TEXT NOT NULL DEFAULT ''",
+                    "indexed_stage": "TEXT NOT NULL DEFAULT ''",
+                    "status": "TEXT NOT NULL DEFAULT 'ok'",
+                    "last_error": "TEXT NOT NULL DEFAULT ''",
+                    "last_attempt_at": "TEXT NOT NULL DEFAULT ''",
+                    "next_retry_at": "REAL NOT NULL DEFAULT 0",
                 }
                 for name, ddl in optional_columns.items():
                     if name not in existing_cols:
                         conn.execute(f"ALTER TABLE state_entries ADD COLUMN {name} {ddl}")
+                conn.execute(
+                    """
+                    UPDATE state_entries
+                    SET status=CASE
+                            WHEN stage='error' THEN 'error'
+                            WHEN stage='empty' THEN 'empty'
+                            WHEN status='' THEN 'ok'
+                            ELSE status
+                        END,
+                        indexed_stage=CASE
+                            WHEN indexed_stage != '' THEN indexed_stage
+                            WHEN stage IN ('metadata', 'content', 'small', 'large') THEN stage
+                            ELSE indexed_stage
+                        END
+                    WHERE status='' OR stage IN ('error', 'empty') OR indexed_stage=''
+                    """
+                )
                 conn.executescript(
                     """
                     CREATE INDEX IF NOT EXISTS idx_state_entries_cloud_file
@@ -132,6 +154,10 @@ class IndexStateDB:
                       ON state_entries(cloud_version_id);
                     CREATE INDEX IF NOT EXISTS idx_state_entries_content_hash
                       ON state_entries(content_hash);
+                    CREATE INDEX IF NOT EXISTS idx_state_entries_status
+                      ON state_entries(status);
+                    CREATE INDEX IF NOT EXISTS idx_state_entries_indexed_stage
+                      ON state_entries(indexed_stage);
                     """
                 )
                 ensure_schema_version(
@@ -502,7 +528,8 @@ class IndexStateDB:
                 cur = conn.execute(
                     """
                     SELECT full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
-                           cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash
+                           cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash,
+                           indexed_stage, status, last_error, last_attempt_at, next_retry_at
                     FROM state_entries
                     ORDER BY full_path
                     """
@@ -545,6 +572,14 @@ class IndexStateDB:
             except (TypeError, ValueError):
                 mtime = 0.0
             stage = str(entry.get("stage") or "metadata")
+            indexed_stage = str(entry.get("indexed_stage") or (stage if stage in {"metadata", "content", "small", "large"} else ""))
+            status = str(entry.get("status") or ("error" if stage == "error" else "empty" if stage == "empty" else "ok"))
+            last_error = str(entry.get("last_error") or "")
+            last_attempt_at = str(entry.get("last_attempt_at") or now)
+            try:
+                next_retry_at = float(entry.get("next_retry_at") or 0.0)
+            except (TypeError, ValueError):
+                next_retry_at = 0.0
             try:
                 size_bytes = int(entry.get("size_bytes") or 0)
             except (TypeError, ValueError):
@@ -569,6 +604,11 @@ class IndexStateDB:
                     cloud_path,
                     storage_key,
                     content_hash,
+                    indexed_stage,
+                    status,
+                    last_error,
+                    last_attempt_at,
+                    next_retry_at,
                 )
             )
         if not rows:
@@ -579,8 +619,9 @@ class IndexStateDB:
                     """
                     INSERT INTO state_entries (
                         full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
-                        cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash,
+                        indexed_stage, status, last_error, last_attempt_at, next_retry_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(full_path) DO UPDATE SET
                         fingerprint=excluded.fingerprint,
                         mtime=excluded.mtime,
@@ -592,7 +633,12 @@ class IndexStateDB:
                         cloud_version_id=excluded.cloud_version_id,
                         cloud_path=excluded.cloud_path,
                         storage_key=excluded.storage_key,
-                        content_hash=excluded.content_hash
+                        content_hash=excluded.content_hash,
+                        indexed_stage=excluded.indexed_stage,
+                        status=excluded.status,
+                        last_error=excluded.last_error,
+                        last_attempt_at=excluded.last_attempt_at,
+                        next_retry_at=excluded.next_retry_at
                     """,
                     rows,
                 )
@@ -629,10 +675,15 @@ class IndexStateDB:
                 cur = conn.execute(
                     f"""
                     UPDATE state_entries
-                    SET stage=?, updated_at=?
+                    SET stage=?,
+                        indexed_stage=?,
+                        status='ok',
+                        last_error='',
+                        next_retry_at=0,
+                        updated_at=?
                     WHERE extension IN ({placeholders}) AND stage != ?
                     """,
-                    (stage, now, *exts, stage),
+                    (stage, stage, now, *exts, stage),
                 )
                 return int(cur.rowcount or 0)
 
@@ -690,9 +741,31 @@ class IndexStateDB:
                     ORDER BY cnt DESC
                     """
                 ).fetchall()
+                status_rows = conn.execute(
+                    """
+                    SELECT
+                        CASE WHEN status = '' THEN 'ok' ELSE status END AS status,
+                        COUNT(*) AS cnt
+                    FROM state_entries
+                    GROUP BY status
+                    ORDER BY cnt DESC
+                    """
+                ).fetchall()
+                indexed_stage_rows = conn.execute(
+                    """
+                    SELECT
+                        CASE WHEN indexed_stage = '' THEN '(unknown)' ELSE indexed_stage END AS indexed_stage,
+                        COUNT(*) AS cnt
+                    FROM state_entries
+                    GROUP BY indexed_stage
+                    ORDER BY cnt DESC
+                    """
+                ).fetchall()
         by_ext = {str(row["ext"]): int(row["cnt"]) for row in ext_rows}
         by_ext_size = {str(row["ext"]): int(row["size_sum"]) for row in ext_rows}
         by_stage = {str(row["stage"]): int(row["cnt"]) for row in stage_rows}
+        by_status = {str(row["status"]): int(row["cnt"]) for row in status_rows}
+        by_indexed_stage = {str(row["indexed_stage"]): int(row["cnt"]) for row in indexed_stage_rows}
         duplicate_groups = len(duplicate_rows)
         duplicate_files = sum(int(row["cnt"]) for row in duplicate_rows)
         queue_by_status = {str(row["status"]): int(row["cnt"]) for row in queue_rows}
@@ -702,6 +775,8 @@ class IndexStateDB:
             "by_ext": by_ext,
             "by_ext_size": by_ext_size,
             "by_stage": by_stage,
+            "by_status": by_status,
+            "by_indexed_stage": by_indexed_stage,
             "failed_paths": int(failed_row["total"] if failed_row else 0),
             "duplicate_groups": duplicate_groups,
             "duplicate_files": duplicate_files,

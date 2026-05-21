@@ -119,7 +119,10 @@ def test_small_stage_file_without_content_is_marked_empty_for_retry(tmp_path: Pa
     idx = _make_indexer(tmp_path, extracted_text="")
     stats = idx.index_directory(stage="small")
     key = str(p)
-    assert idx.state_db.get_entry(key)["stage"] == "empty"
+    row = idx.state_db.get_entry(key)
+    assert row["stage"] == "empty"
+    assert row["indexed_stage"] == "small"
+    assert row["status"] == "empty"
     assert stats["processed_files"] >= 1
 
 
@@ -136,7 +139,12 @@ def test_read_error_is_marked_error_and_backed_off(tmp_path: Path) -> None:
     stats = idx.index_directory(stage="small")
 
     key = str(p)
-    assert idx.state_db.get_entry(key)["stage"] == "error"
+    row = idx.state_db.get_entry(key)
+    assert row["stage"] == "error"
+    assert row["indexed_stage"] == "small"
+    assert row["status"] == "error"
+    assert row["last_error"] == "locked"
+    assert row["next_retry_at"] > time.time()
     assert idx.state_db.failures[key]["last_error"] == "locked"
     assert stats["error_files"] == 1
 
@@ -150,7 +158,10 @@ def test_small_stage_file_with_content_becomes_content(tmp_path: Path) -> None:
     idx = _make_indexer(tmp_path, extracted_text="hello world")
     idx.index_directory(stage="small")
     key = str(p)
-    assert idx.state_db.get_entry(key)["stage"] == "content"
+    row = idx.state_db.get_entry(key)
+    assert row["stage"] == "content"
+    assert row["indexed_stage"] == "small"
+    assert row["status"] == "ok"
 
 
 def test_text_and_csv_files_are_indexed_as_content(tmp_path: Path) -> None:
@@ -249,6 +260,8 @@ def test_quality_report_summarizes_state_and_duplicates(tmp_path: Path) -> None:
     assert report["total_files"] == 3
     assert report["content_coverage_pct"] == 66.67
     assert report["error_files"] == 1
+    assert report["status_distribution"]["error"] == 1
+    assert report["indexed_stage_distribution"]["content"] == 2
     assert report["failed_paths"] == 1
     assert report["duplicate_groups"] == 1
 
