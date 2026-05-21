@@ -41,7 +41,7 @@ from .system import (
     _STAGE_LABELS,
     PROJECT_ROOT,
     _find_module_process_pids,
-    _is_process_alive,
+    _process_matches_module,
     _telemetry_db_path,
 )
 
@@ -1292,7 +1292,7 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
         try:
             data = _json.loads(marker_path.read_text(encoding="utf-8"))
             pid = int(data.get("pid") or 0)
-            if pid > 0 and _is_process_alive(pid):
+            if pid > 0 and _process_matches_module(pid, "rag_catalog.core.index_rag"):
                 live_pid = pid
                 marker_stage = str(data.get("stage") or "").strip().lower()
         except Exception:
@@ -1351,6 +1351,53 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
         if r.get("status") == "cancelled":
             r["status"] = "running"
     return rows
+
+
+def _find_headless_active_ocr(db_path: Path) -> Optional[Dict[str, Any]]:
+    live_pid = 0
+    marker_path = PROJECT_ROOT / "runtime" / "ocr_active.json"
+    if marker_path.exists():
+        try:
+            data = json.loads(marker_path.read_text(encoding="utf-8"))
+            pid = int(data.get("pid") or 0)
+            if pid > 0 and _process_matches_module(pid, "rag_catalog.core.ocr_pdfs"):
+                live_pid = pid
+        except Exception:
+            pass
+
+    if not live_pid:
+        pids = _find_module_process_pids("rag_catalog.core.ocr_pdfs")
+        if pids:
+            live_pid = pids[0]
+
+    if not live_pid:
+        return None
+
+    rows = _db_query_dicts(
+        db_path,
+        """
+        SELECT *,
+               CAST((julianday(CURRENT_TIMESTAMP) - julianday(ts_started)) * 86400 AS INTEGER) AS duration_sec
+        FROM ocr_runs
+        WHERE worker_pid=?
+        ORDER BY ts_started DESC LIMIT 1
+        """,
+        (live_pid,),
+    )
+    if rows:
+        row = dict(rows[0])
+        if row.get("status") == "cancelled":
+            row["status"] = "running"
+        return row
+    return {
+        "ocr_run_id": "",
+        "status": "running",
+        "worker_pid": live_pid,
+        "found_scanned": 0,
+        "processed_pdfs": 0,
+        "duration_sec": 0,
+        "note": "process_scan",
+    }
 
 
 def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1494,6 +1541,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         LIMIT 1
         """,
     )
+    active_ocr_row = active_ocr[0] if active_ocr else _find_headless_active_ocr(db_path)
     last_ocr = _db_query_dicts(
         db_path,
         """
@@ -1522,7 +1570,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "latest_stages": latest_stages,
         "stage_summary": stage_summary,
         "overall": overall[0] if overall else {},
-        "active_ocr": active_ocr[0] if active_ocr else None,
+        "active_ocr": active_ocr_row,
         "last_ocr": last_ocr[0] if last_ocr else None,
         "ocr_summary": ocr_summary[0] if ocr_summary else {},
     }

@@ -90,6 +90,19 @@ def _is_process_alive(pid: int) -> bool:
     return True
 
 
+def _process_matches_module(pid: int, module_name: str) -> bool:
+    """Return True only when pid is alive and its command line runs module_name."""
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        proc = psutil.Process(int(pid))
+        cmdline = proc.cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+        return False
+    joined = " ".join(str(part) for part in (cmdline or []))
+    return bool(module_name and module_name in joined)
+
+
 def _terminate_process(pid: int, *, timeout_sec: float = 6.0) -> bool:
     if int(pid or 0) <= 0:
         return False
@@ -135,6 +148,14 @@ def _find_module_process_pids(module_name: str) -> List[int]:
         if pid > 0:
             pids.append(pid)
     return pids
+
+
+def _runtime_marker_module(kind: str) -> str:
+    if kind == "index":
+        return "rag_catalog.core.index_rag"
+    if kind == "ocr":
+        return "rag_catalog.core.ocr_pdfs"
+    return ""
 
 
 # ── Runtime markers ────────────────────────────────────────────────────────
@@ -326,7 +347,8 @@ def _read_runtime_marker(kind: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     pid = _safe_int(data.get("pid"), 0)
-    if not _is_process_alive(pid):
+    module_name = _runtime_marker_module(kind)
+    if not _is_process_alive(pid) or (module_name and not _process_matches_module(pid, module_name)):
         try:
             path.unlink()
         except OSError:
@@ -402,7 +424,7 @@ def _find_live_running_index_run(telemetry: TelemetryDB) -> Optional[Dict[str, A
     )
     for row in rows:
         pid = _safe_int(row.get("worker_pid"), 0)
-        if _is_process_alive(pid):
+        if _process_matches_module(pid, "rag_catalog.core.index_rag"):
             return row
     process_pids = _find_module_process_pids("rag_catalog.core.index_rag")
     if process_pids:
@@ -431,7 +453,7 @@ def _find_live_running_ocr_run(telemetry: TelemetryDB) -> Optional[Dict[str, Any
     )
     for row in rows:
         pid = _safe_int(row.get("worker_pid"), 0)
-        if _is_process_alive(pid):
+        if _process_matches_module(pid, "rag_catalog.core.ocr_pdfs"):
             return row
     process_pids = _find_module_process_pids("rag_catalog.core.ocr_pdfs")
     if process_pids:
@@ -482,6 +504,12 @@ def _launch_indexer(
         active_pid = _safe_int(active_run.get("worker_pid"), 0)
         raise RuntimeError(
             f"Индексация уже запущена (PID {active_pid}). Дождитесь завершения текущего процесса."
+        )
+    active_ocr = _find_live_running_ocr_run(telemetry)
+    if active_ocr:
+        active_pid = _safe_int(active_ocr.get("worker_pid"), 0)
+        raise RuntimeError(
+            f"OCR уже запущен (PID {active_pid}). Сначала дождитесь завершения OCR или остановите его."
         )
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
@@ -881,11 +909,14 @@ def _recover_background_tasks(
     ocr_engine_setting = str(settings.get("ocr_engine") or "tesseract")
 
     recovered_index_now = False
+    live_ocr = _find_live_running_ocr_run(telemetry)
     live_index = _find_live_running_index_run(telemetry)
     active_index = telemetry.get_active_index_run() if hasattr(telemetry, "get_active_index_run") else None
     active_index_pid = _safe_int((active_index or {}).get("worker_pid"), 0)
     active_index_pid_dead = bool(active_index and active_index_pid > 0 and not _is_process_alive(active_index_pid))
-    if active_index and (not live_index or (active_index_pid_dead and live_index.get("_process_scan_only"))):
+    if active_index and live_ocr and not live_index:
+        telemetry.finalize_running_index_runs(status="cancelled", note=f"{recovery_note}: active_ocr_running")
+    elif active_index and (not live_index or (active_index_pid_dead and live_index.get("_process_scan_only"))):
         recovery_stage = _resolve_index_recovery_stage(telemetry, active_index)
         telemetry.finalize_running_index_runs(status="cancelled", note=recovery_note)
         _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr, ocr_engine=ocr_engine_setting)
@@ -906,7 +937,7 @@ def _recover_background_tasks(
                 _register_failed_restart("index", failed_run_id, now_ts)
                 recovered_index_now = True
 
-    live_ocr = _find_live_running_ocr_run(telemetry)
+    live_ocr = live_ocr or _find_live_running_ocr_run(telemetry)
     active_ocr = telemetry.get_active_ocr_run() if hasattr(telemetry, "get_active_ocr_run") else None
     active_ocr_pid = _safe_int((active_ocr or {}).get("worker_pid"), 0)
     active_ocr_pid_dead = bool(active_ocr and active_ocr_pid > 0 and not _is_process_alive(active_ocr_pid))

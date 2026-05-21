@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.ui import system
 
 
@@ -65,6 +68,47 @@ def test_stop_active_indexer_returns_false_without_active_run(monkeypatch) -> No
     )
 
     assert system.stop_active_indexer({"telemetry_db_path": "unused.db"}) is False
+
+
+def test_find_live_indexer_ignores_reused_stale_pid(monkeypatch, tmp_path) -> None:
+    db = TelemetryDB(str(tmp_path / "telemetry.db"))
+    db.start_index_run(
+        catalog_path="O:\\Обмен",
+        collection_name="catalog",
+        recreate=False,
+        worker_pid=31124,
+    )
+
+    monkeypatch.setattr(
+        system,
+        "_process_matches_module",
+        lambda pid, module: int(pid) == 7936 and module == "rag_catalog.core.index_rag",
+    )
+    monkeypatch.setattr(system, "_find_module_process_pids", lambda module: [7936])
+
+    active = system._find_live_running_index_run(db)
+
+    assert active is not None
+    assert active["worker_pid"] == 7936
+    assert active["_process_scan_only"] is True
+
+
+def test_launch_indexer_is_blocked_while_ocr_is_running(monkeypatch) -> None:
+    class FakeTelemetryDB:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    monkeypatch.setattr(system, "TelemetryDB", FakeTelemetryDB)
+    monkeypatch.setattr(system, "_find_live_running_index_run", lambda telemetry: None)
+    monkeypatch.setattr(system, "_find_live_running_ocr_run", lambda telemetry: {"worker_pid": 7264})
+    monkeypatch.setattr(
+        system.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected indexer launch")),
+    )
+
+    with pytest.raises(RuntimeError, match="OCR уже запущен"):
+        system._launch_indexer({"catalog_path": "O:\\Обмен", "collection_name": "catalog"})
 
 
 def test_terminate_process_stops_children_before_parent(monkeypatch) -> None:

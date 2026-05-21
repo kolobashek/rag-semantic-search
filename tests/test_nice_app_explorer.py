@@ -300,13 +300,33 @@ def test_index_telemetry_uses_runtime_marker_before_run_row_exists(monkeypatch, 
     (runtime_dir / "index_active.json").write_text('{"pid": 4321, "stage": "small"}', encoding="utf-8")
 
     monkeypatch.setattr(ui_helpers, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(ui_helpers, "_is_process_alive", lambda pid: int(pid) == 4321)
+    monkeypatch.setattr(
+        ui_helpers,
+        "_process_matches_module",
+        lambda pid, module: int(pid) == 4321 and module == "rag_catalog.core.index_rag",
+    )
 
     telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
 
     assert telemetry["active_stages"][0]["stage"] == "small"
     assert telemetry["active_stages"][0]["status"] == "running"
     assert telemetry["active_stages"][0]["run_note"] == "runtime_marker"
+
+
+def test_index_telemetry_uses_process_scan_for_headless_ocr(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    TelemetryDB(str(db_path))
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+
+    monkeypatch.setattr(ui_helpers, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(ui_helpers, "_find_module_process_pids", lambda module: [7264] if module == "rag_catalog.core.ocr_pdfs" else [])
+
+    telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
+
+    assert telemetry["active_ocr"]["status"] == "running"
+    assert telemetry["active_ocr"]["worker_pid"] == 7264
+    assert telemetry["active_ocr"]["note"] == "process_scan"
 
 
 def test_index_telemetry_active_stages_only_include_running_stage(tmp_path) -> None:
@@ -405,6 +425,8 @@ def test_recover_background_tasks_restarts_dead_index_and_ocr(monkeypatch, tmp_p
     calls: dict[str, object] = {}
 
     monkeypatch.setattr(ui_system, "_is_process_alive", lambda pid: False)
+    monkeypatch.setattr(ui_system, "_process_matches_module", lambda pid, module: False)
+    monkeypatch.setattr(ui_system, "_find_module_process_pids", lambda module: [])
 
     def _fake_launch_indexer(cfg, **kwargs):
         calls["index"] = {"cfg": dict(cfg), "kwargs": dict(kwargs)}
@@ -455,6 +477,7 @@ def test_recover_background_tasks_does_not_restart_when_process_is_alive(monkeyp
     calls = {"index": 0, "ocr": 0}
 
     monkeypatch.setattr(ui_system, "_is_process_alive", lambda pid: True)
+    monkeypatch.setattr(ui_system, "_process_matches_module", lambda pid, module: True)
     monkeypatch.setattr(ui_system, "_launch_indexer", lambda cfg, **kwargs: calls.__setitem__("index", calls["index"] + 1) or 1)
     monkeypatch.setattr(ui_system, "_launch_ocr", lambda cfg, **kwargs: calls.__setitem__("ocr", calls["ocr"] + 1) or 1)
 
@@ -466,6 +489,41 @@ def test_recover_background_tasks_does_not_restart_when_process_is_alive(monkeyp
     active_ocr = db.get_active_ocr_run()
     assert active_index is not None and active_index["status"] == "running"
     assert active_ocr is not None and active_ocr["status"] == "running"
+
+
+def test_recover_background_tasks_does_not_restart_index_while_ocr_is_alive(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    index_run_id = db.start_index_run(
+        catalog_path="O:\\Обмен",
+        collection_name="catalog",
+        recreate=False,
+        note="stage=small",
+        worker_pid=10101,
+    )
+    db.start_stage(run_id=index_run_id, stage="small", total_files=100)
+    ocr_run_id = db.start_ocr_run(
+        collection_name="catalog",
+        found_scanned=5,
+        note="min_text_len=60",
+        worker_pid=20202,
+    )
+    calls = {"index": 0, "ocr": 0}
+
+    monkeypatch.setattr(ui_system, "_is_process_alive", lambda pid: int(pid) == 20202)
+    monkeypatch.setattr(ui_system, "_find_live_running_index_run", lambda telemetry: None)
+    monkeypatch.setattr(ui_system, "_find_live_running_ocr_run", lambda telemetry: {"worker_pid": 20202})
+    monkeypatch.setattr(ui_system, "_launch_indexer", lambda cfg, **kwargs: calls.__setitem__("index", calls["index"] + 1) or 1)
+    monkeypatch.setattr(ui_system, "_launch_ocr", lambda cfg, **kwargs: calls.__setitem__("ocr", calls["ocr"] + 1) or 1)
+
+    _recover_background_tasks({"telemetry_db_path": str(db_path), "qdrant_db_path": str(tmp_path / "qdrant")})
+
+    assert calls == {"index": 0, "ocr": 0}
+    index_row = db.fetch_dicts("SELECT status, note FROM index_runs WHERE run_id=?", [index_run_id])[0]
+    ocr_row = db.fetch_dicts("SELECT status FROM ocr_runs WHERE ocr_run_id=?", [ocr_run_id])[0]
+    assert index_row["status"] == "cancelled"
+    assert "active_ocr_running" in str(index_row["note"] or "")
+    assert ocr_row["status"] == "running"
 
 
 def test_save_config_patch_only_updates_allowed_path_keys(monkeypatch) -> None:
