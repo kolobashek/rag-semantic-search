@@ -5,13 +5,13 @@ from telegram_bot import (
     _main_menu,
     _message_file_info,
     _safe_filename,
-    build_interactive_search_response,
     chat_action,
     format_fact_answer,
     process_contact_message,
     process_message,
     process_query,
     send_chat_action,
+    send_search_results,
     set_bot_commands,
 )
 
@@ -153,24 +153,35 @@ def test_process_query_no_results() -> None:
     assert out == "Ничего не найдено."
 
 
-def test_interactive_search_response_has_file_buttons() -> None:
+def test_interactive_search_sends_result_and_nav_buttons(monkeypatch) -> None:
     s = _FakeSearcher(
         search_result=[
             {"filename": "паспорт.pdf", "full_path": r"O:\Обмен\паспорт.pdf", "extension": ".pdf", "score": 0.9},
             {"filename": "договор.docx", "full_path": r"O:\Обмен\договор.docx", "extension": ".docx", "score": 0.8},
         ]
     )
-    out = build_interactive_search_response(s, chat_id="777", query="паспорт", username="ivan")
-    assert "Варианты по запросу" in out["text"]
-    assert "📄 получить файл" in out["text"]
-    assert "score=" not in out["text"]
-    keyboard = out["reply_markup"]["inline_keyboard"]
-    assert keyboard[0][0]["text"] == "📄 Получить 1"
-    assert keyboard[0][1]["text"] == "👍 1"
-    assert keyboard[0][2]["text"] == "👎 1"
-    assert any(button["text"] == "Ещё варианты" for row in keyboard for button in row)
-    assert any(button["text"] == "PDF" for row in keyboard for button in row)
-    assert any(button["text"] == "Дополнить поиск" for row in keyboard for button in row)
+    sent = []
+
+    def fake_send_message(token, chat_id, text, reply_markup=None):
+        sent.append({"token": token, "chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        return len(sent)
+
+    monkeypatch.setattr(telegram_bot, "send_message", fake_send_message)
+
+    sid = send_search_results("token", s, chat_id="777", query="паспорт", username="ivan")
+
+    assert sid
+    assert len(sent) == 3
+    assert "паспорт.pdf" in sent[0]["text"]
+    assert "score=" not in sent[0]["text"]
+    first_keyboard = sent[0]["reply_markup"]["inline_keyboard"]
+    assert first_keyboard[0][0]["text"] == "📥 Получить"
+    assert first_keyboard[0][1]["text"] == "👍"
+    assert first_keyboard[0][2]["text"] == "👎"
+    nav_keyboard = sent[-1]["reply_markup"]["inline_keyboard"]
+    assert any(button["text"] == "Ещё ↓" for row in nav_keyboard for button in row)
+    assert any(button["text"] == "PDF" for row in nav_keyboard for button in row)
+    assert any(button["text"] == "Уточнить запрос" for row in nav_keyboard for button in row)
 
 
 def test_send_chat_action_calls_telegram_api(monkeypatch) -> None:
@@ -433,7 +444,8 @@ def test_process_message_help_is_logged() -> None:
         chat_id="777",
         allowed_chat_id="",
     )
-    assert "Отправьте вопрос по документам" in out
+    assert "Как искать:" in out
+    assert "Напишите что угодно" in out
     assert auth.events[-1]["event_type"] == "telegram_help"
 
 
@@ -447,7 +459,7 @@ def test_process_message_start_for_unauthorized_contains_chat_id() -> None:
         chat_id="777",
         allowed_chat_id="",
     )
-    assert "Ваш chat_id: 777" in out
+    assert "Ваш Telegram ID: 777" in out
 
 
 def test_process_message_start_verify_payload_confirms_user() -> None:
@@ -460,8 +472,8 @@ def test_process_message_start_verify_payload_confirms_user() -> None:
         chat_id="777",
         allowed_chat_id="",
     )
-    assert "Ок, вы авторизованы как ivan." in out
-    assert "Отправьте вопрос по документам" in out
+    assert "Авторизация прошла успешно" in out
+    assert "Как искать:" in out
 
 
 def test_process_message_start_link_payload_uses_token_flow() -> None:
@@ -478,7 +490,7 @@ def test_process_message_start_link_payload_uses_token_flow() -> None:
         allowed_chat_id="",
         telegram_username="ivan_tg",
     )
-    assert "Ок, вы авторизованы как ivan." in out
+    assert "Авторизация прошла успешно" in out
 
 
 def test_process_message_start_login_payload_confirms_login() -> None:

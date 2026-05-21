@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 import requests
 
+from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import RAGSearcher, load_config
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -48,7 +49,7 @@ def tg_call(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
-def send_message(token: str, chat_id: str, text: str, reply_markup: Dict[str, Any] | None = None) -> None:
+def send_message(token: str, chat_id: str, text: str, reply_markup: Dict[str, Any] | None = None) -> int:
     payload: Dict[str, Any] = {
         "chat_id": chat_id,
         "text": text,
@@ -56,11 +57,27 @@ def send_message(token: str, chat_id: str, text: str, reply_markup: Dict[str, An
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    tg_call(
-        token,
-        "sendMessage",
-        payload,
-    )
+    data = tg_call(token, "sendMessage", payload)
+    return int((data.get("result") or {}).get("message_id") or 0)
+
+
+def delete_message(token: str, chat_id: str, message_id: int) -> None:
+    if not message_id:
+        return
+    try:
+        tg_call(token, "deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+    except Exception:
+        pass
+
+
+def edit_message_reply_markup(token: str, *, chat_id: str, message_id: int, reply_markup: Dict[str, Any] | None) -> None:
+    try:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        tg_call(token, "editMessageReplyMarkup", payload)
+    except Exception:
+        pass
 
 
 def send_chat_action(token: str, chat_id: str, action: str = "typing") -> None:
@@ -392,7 +409,7 @@ def save_telegram_upload(
 def _main_menu(user: Dict[str, Any] | None = None) -> Dict[str, Any]:
     if user:
         rows = [
-            [{"text": "Поиск"}, {"text": "Добавить файл"}],
+            [{"text": "Поиск"}, {"text": "Каталог"}, {"text": "Добавить файл"}],
             [{"text": "Кто я"}, {"text": "Помощь"}],
         ]
     else:
@@ -443,24 +460,52 @@ def _admin_help_text() -> str:
 def _user_help_text(user: Dict[str, Any] | None, chat_id: str) -> str:
     if user:
         role = str(user.get("role") or "user")
+        username = str(user.get("username") or "")
         admin_block = f"\n\n{_admin_help_text()}" if role == "admin" else ""
         return (
-            f"Вы авторизованы как {user.get('username')}.\n"
-            f"Роль: {role}.\n\n"
-            "Отправьте вопрос по документам обычным сообщением.\n"
-            "Пример: Сколько весит PC300\n\n"
-            "Чтобы добавить файл, отправьте документ или фото в этот чат.\n\n"
+            f"Привет, {username}! Вы в боте поиска по документам компании.\n"
+            "\n"
+            "Как искать:\n"
+            "Напишите что угодно — название файла, фрагмент текста, вопрос.\n"
+            "Примеры: «договор с Ромашкой», «акт за март», «сколько весит PC300»\n"
+            "\n"
+            "Что получите в ответ:\n"
+            "• Список файлов с названием и путём\n"
+            "• «Получить» — бот пришлёт сам файл\n"
+            "• Кнопки 👍 / 👎 — оценка улучшает следующие поиски\n"
+            "• «Ещё варианты» — больше результатов\n"
+            "• «Дополнить поиск» — уточнить запрос\n"
+            "• Фильтр по типу файла: PDF / Word / Excel / Фото\n"
+            "• Сортировка: новые или старые сначала\n"
+            "\n"
+            "Загрузка файлов:\n"
+            "Отправьте документ или фото прямо сюда — файл сохранится в каталог\n"
+            "и появится в поиске после следующей индексации.\n"
+            "\n"
             "Команды:\n"
-            "/whoami — текущий пользователь\n"
-            "/upload — как добавить файл\n"
-            "/logout — отвязать Telegram"
+            "/whoami — кто вы в системе\n"
+            "/upload — инструкция по загрузке файлов\n"
+            "/help — эта справка\n"
+            "/logout — отвязать Telegram от аккаунта"
             f"{admin_block}"
         )
     return (
-        "Вы пока не авторизованы.\n\n"
-        "Откройте ссылку привязки или приглашения из Web UI.\n"
-        "Если ссылки нет, отправьте /register ФИО, чтобы создать заявку.\n"
-        f"Ваш chat_id: {chat_id}"
+        "Здравствуйте! Это бот поиска по документам компании.\n"
+        "\n"
+        "Чтобы пользоваться ботом, нужен доступ.\n"
+        "\n"
+        "Способ 1 — ссылка-приглашение:\n"
+        "Если администратор выдал вам ссылку — перейдите по ней.\n"
+        "Telegram привяжется к вашему аккаунту автоматически.\n"
+        "\n"
+        "Способ 2 — заявка:\n"
+        "Отправьте команду с вашим именем:\n"
+        "/register Иванов Иван Иванович\n"
+        "\n"
+        "Администратор рассмотрит заявку и откроет доступ.\n"
+        "Бот сообщит вам, когда это произойдёт.\n"
+        "\n"
+        f"Ваш Telegram ID: {chat_id}"
     )
 
 
@@ -699,59 +744,329 @@ def _filter_session_results(session: Dict[str, Any]) -> List[Dict[str, Any]]:
     return results
 
 
-def _search_keyboard(session_id: str, session: Dict[str, Any], visible_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _format_single_result(result: Dict[str, Any], *, index: int) -> str:
+    title = _result_title(result)
+    path = _clean_tg_text(_result_path(result), 220)
+    size_mb = result.get("size_mb")
+    modified = str(result.get("modified") or "")[:10]
+    lines = [f"📄 {title}"]
+    if path:
+        lines.append(path)
+    meta: List[str] = []
+    if size_mb:
+        lines.append(f"{float(size_mb):.1f} МБ" + (f"  •  {modified}" if modified else ""))
+    elif modified:
+        lines.append(modified)
+    return "\n".join(lines)
+
+
+def _result_keyboard(session_id: str, index: int, *, feedback_given: bool) -> Dict[str, Any]:
+    row: List[Dict[str, str]] = [
+        {"text": "📥 Получить", "callback_data": f"open:{session_id}:{index}"},
+    ]
+    if feedback_given:
+        row.append({"text": "✓ Оценено", "callback_data": f"fb_noop:{session_id}:{index}"})
+    else:
+        row += [
+            {"text": "👍", "callback_data": f"fb:{session_id}:{index}:pos"},
+            {"text": "👎", "callback_data": f"fb:{session_id}:{index}:neg"},
+        ]
+    return {"inline_keyboard": [row]}
+
+
+def _nav_keyboard(session_id: str) -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [
+            {"text": "Ещё ↓", "callback_data": f"more:{session_id}"},
+            {"text": "Уточнить запрос", "callback_data": f"refine:{session_id}"},
+        ],
+        [
+            {"text": "PDF",   "callback_data": f"ft:{session_id}:pdf"},
+            {"text": "Word",  "callback_data": f"ft:{session_id}:doc"},
+            {"text": "Excel", "callback_data": f"ft:{session_id}:xls"},
+            {"text": "Фото",  "callback_data": f"ft:{session_id}:img"},
+            {"text": "Все",   "callback_data": f"ft:{session_id}:all"},
+        ],
+        [
+            {"text": "Новые",    "callback_data": f"date:{session_id}:new"},
+            {"text": "Старые",   "callback_data": f"date:{session_id}:old"},
+            {"text": "↺ Сброс", "callback_data": f"date:{session_id}:none"},
+        ],
+    ]}
+
+
+def _send_result_messages(
+    token: str, chat_id: str, session_id: str, session: Dict[str, Any], results: List[Dict[str, Any]]
+) -> None:
+    """Send one message per result; append their message_ids to session."""
+    base = len(session.get("result_message_ids") or [])
+    feedback_given: set = session.setdefault("feedback_given", set())
+    for i, result in enumerate(results):
+        idx = base + i
+        text = _format_single_result(result, index=idx)
+        markup = _result_keyboard(session_id, idx, feedback_given=idx in feedback_given)
+        try:
+            msg_id = send_message(token, chat_id, text, markup)
+            session.setdefault("result_message_ids", []).append(msg_id)
+        except Exception as exc:
+            logger.warning("Не удалось отправить результат %d: %s", idx, exc)
+
+
+def _send_nav_message(token: str, chat_id: str, session_id: str, session: Dict[str, Any]) -> None:
+    """Delete previous nav message (if any) and send a fresh one at the bottom."""
+    results = _filter_session_results(session)
+    shown = len(session.get("result_message_ids") or [])
+    total = len(results)
+    query = str(session.get("query") or "")
+
+    filters: List[str] = []
+    ft = session.get("file_type", "")
+    ds = session.get("date_sort", "")
+    if ft:
+        filters.append(ft.upper())
+    if ds:
+        filters.append("новые" if ds == "new" else "старые")
+    filter_str = f"  [{', '.join(filters)}]" if filters else ""
+
+    if total == 0:
+        text = f"По запросу «{query}» ничего не найдено{filter_str}."
+    elif shown < total:
+        text = f"Показано {shown} из {total}{filter_str}."
+    else:
+        text = f"Все {total} результатов{filter_str}."
+
+    old_nav_id = int(session.get("nav_message_id") or 0)
+    if old_nav_id:
+        delete_message(token, chat_id, old_nav_id)
+
+    msg_id = send_message(token, chat_id, text, _nav_keyboard(session_id))
+    session["nav_message_id"] = msg_id
+
+
+def _reset_result_messages(token: str, chat_id: str, session: Dict[str, Any]) -> None:
+    """Delete all sent result messages and clear session tracking."""
+    for msg_id in session.get("result_message_ids") or []:
+        delete_message(token, chat_id, msg_id)
+    session["result_message_ids"] = []
+    session["feedback_given"] = set()
+
+
+# ---------------------------------------------------------------------------
+# Catalog browser
+# ---------------------------------------------------------------------------
+
+CATALOG_SESSIONS: Dict[str, Dict[str, Any]] = {}
+CATALOG_PAGE_SIZE = 8
+
+
+def _catalog_state_db_path(cfg: Dict[str, Any]) -> str:
+    qdrant_db_path = str(cfg.get("qdrant_db_path") or "").strip()
+    return str(Path(qdrant_db_path) / "index_state.db") if qdrant_db_path else ""
+
+
+def _catalog_load_paths(cfg: Dict[str, Any]) -> List[str]:
+    db_path = _catalog_state_db_path(cfg)
+    if not db_path or not Path(db_path).exists():
+        return []
+    try:
+        entries = IndexStateDB(db_path).iter_entries()
+        return [str(e["full_path"]) for e in entries if e.get("full_path")]
+    except Exception:
+        return []
+
+
+def _catalog_children(all_paths: List[str], current: str) -> tuple[List[str], List[str]]:
+    folders: set[str] = set()
+    files: List[str] = []
+    current_p = Path(current)
+    for p_str in all_paths:
+        try:
+            rel = Path(p_str).relative_to(current_p)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if len(parts) == 1:
+            files.append(p_str)
+        elif len(parts) > 1:
+            folders.add(str(current_p / parts[0]))
+    return sorted(folders), sorted(files)
+
+
+def _catalog_update_session(session: Dict[str, Any], current: str, offset: int = 0) -> None:
+    folders, files = _catalog_children(session["all_paths"], current)
+    session["current"] = current
+    session["items"] = [("d", p) for p in folders] + [("f", p) for p in files]
+    session["offset"] = offset
+
+
+def _catalog_text(session: Dict[str, Any]) -> str:
+    root = session["root"]
+    current = session["current"]
+    items: List[tuple[str, str]] = session["items"]
+    offset: int = session["offset"]
+    try:
+        rel_parts = Path(current).relative_to(Path(root)).parts
+        parts = [p for p in rel_parts if p not in (".", "")]
+        breadcrumb = " / ".join(parts) if parts else "Корень"
+    except ValueError:
+        breadcrumb = Path(current).name or current
+    total = len(items)
+    if total == 0:
+        return f"📂 {breadcrumb}\n\nПапка пуста."
+    end = min(offset + CATALOG_PAGE_SIZE, total)
+    return f"📂 {breadcrumb}\n{offset + 1}–{end} из {total}"
+
+
+def _catalog_keyboard(sid: str, session: Dict[str, Any]) -> Dict[str, Any]:
+    items: List[tuple[str, str]] = session["items"]
+    offset: int = session["offset"]
+    root: str = session["root"]
+    current: str = session["current"]
     rows: List[List[Dict[str, str]]] = []
-    for index, result in enumerate(visible_results):
-        number = index + 1
-        rows.append([
-            {"text": f"📄 Получить {number}", "callback_data": f"open:{session_id}:{index}"},
-            {"text": f"👍 {number}", "callback_data": f"fb:{session_id}:{index}:pos"},
-            {"text": f"👎 {number}", "callback_data": f"fb:{session_id}:{index}:neg"},
-        ])
-    rows.append([
-        {"text": "Ещё варианты", "callback_data": f"more:{session_id}"},
-        {"text": "Дополнить поиск", "callback_data": f"refine:{session_id}"},
-    ])
-    rows.append([
-        {"text": "PDF", "callback_data": f"ft:{session_id}:pdf"},
-        {"text": "Word", "callback_data": f"ft:{session_id}:doc"},
-        {"text": "Excel", "callback_data": f"ft:{session_id}:xls"},
-        {"text": "Фото", "callback_data": f"ft:{session_id}:img"},
-        {"text": "Все", "callback_data": f"ft:{session_id}:all"},
-    ])
-    rows.append([
-        {"text": "Новые", "callback_data": f"date:{session_id}:new"},
-        {"text": "Старые", "callback_data": f"date:{session_id}:old"},
-        {"text": "Без даты", "callback_data": f"date:{session_id}:none"},
-    ])
+    page = items[offset : offset + CATALOG_PAGE_SIZE]
+    for i, (kind, path) in enumerate(page):
+        name = _clean_tg_text(Path(path).name, 55)
+        abs_idx = offset + i
+        label = f"📁 {name}" if kind == "d" else f"📄 {name}"
+        rows.append([{"text": label, "callback_data": f"cat:{sid}:{kind}:{abs_idx}"}])
+    nav: List[Dict[str, str]] = []
+    if Path(current) != Path(root):
+        nav.append({"text": "⬆ Назад", "callback_data": f"cat:{sid}:up"})
+    if offset + CATALOG_PAGE_SIZE < len(items):
+        nav.append({"text": "Ещё ↓", "callback_data": f"cat:{sid}:pg:{offset + CATALOG_PAGE_SIZE}"})
+    if offset > 0:
+        nav.append({"text": "↑ Начало", "callback_data": f"cat:{sid}:pg:0"})
+    if nav:
+        rows.append(nav)
     return {"inline_keyboard": rows}
 
 
-def _format_search_page(session_id: str) -> tuple[str, Dict[str, Any] | None]:
-    session = SEARCH_SESSIONS.get(session_id)
+def _send_catalog_view(token: str, chat_id: str, sid: str, session: Dict[str, Any]) -> None:
+    text = _catalog_text(session)
+    keyboard = _catalog_keyboard(sid, session)
+    msg_id = int(session.get("message_id") or 0)
+    if msg_id:
+        try:
+            edit_message_text(token, chat_id=chat_id, message_id=msg_id, text=text, reply_markup=keyboard)
+            return
+        except Exception:
+            pass
+    session["message_id"] = send_message(token, chat_id, text, keyboard)
+
+
+def open_catalog(token: str, cfg: Dict[str, Any], chat_id: str) -> None:
+    root = str(cfg.get("catalog_path") or "").strip()
+    if not root or not Path(root).exists():
+        send_message(token, chat_id, "Каталог документов недоступен.")
+        return
+    all_paths = _catalog_load_paths(cfg)
+    if not all_paths:
+        send_message(token, chat_id, "Каталог пуст — индексация ещё не выполнялась.")
+        return
+    sid = _session_id()
+    session: Dict[str, Any] = {
+        "session_id": sid,
+        "chat_id": str(chat_id),
+        "root": root,
+        "current": root,
+        "all_paths": all_paths,
+        "items": [],
+        "offset": 0,
+        "message_id": 0,
+        "created_at": time.time(),
+    }
+    CATALOG_SESSIONS[sid] = session
+    _catalog_update_session(session, root)
+    _send_catalog_view(token, chat_id, sid, session)
+
+
+def _handle_catalog_callback(
+    token: str, chat_id: str, user: Dict[str, Any], sid: str, parts: List[str]
+) -> None:
+    session = CATALOG_SESSIONS.get(sid)
     if not session:
-        return "Сессия поиска устарела. Повторите запрос.", None
-    results = _filter_session_results(session)
-    limit = int(session.get("visible") or SEARCH_PAGE_SIZE)
-    shown = results[:limit]
-    query = str(session.get("query") or "")
-    if not shown:
-        return f"По запросу «{query}» ничего не найдено с текущими фильтрами.", _search_keyboard(session_id, session, [])
-    lines = [
-        f"Варианты по запросу «{query}\":",
-        "Кнопки ниже относятся к номерам результатов: 📄 получить файл, 👍 полезно, 👎 не то.",
-    ]
-    for index, result in enumerate(shown, 1):
-        path = _clean_tg_text(_result_path(result), 220)
-        lines.append(f"{index}. {_result_title(result)}\n{path}")
-    filters = []
-    if session.get("file_type"):
-        filters.append(f"тип={session['file_type']}")
-    if session.get("date_sort"):
-        filters.append(f"дата={session['date_sort']}")
-    if filters:
-        lines.append("\nФильтр: " + ", ".join(filters))
-    return "\n\n".join(lines), _search_keyboard(session_id, session, shown)
+        send_message(token, chat_id, "Сессия каталога устарела. Откройте каталог снова.", _main_menu(user))
+        return
+    if str(session.get("chat_id") or "") != chat_id:
+        return
+    subaction = parts[2] if len(parts) > 2 else ""
+    if subaction == "up":
+        current = session["current"]
+        root = session["root"]
+        parent = Path(current).parent
+        try:
+            parent.relative_to(Path(root))
+            _catalog_update_session(session, str(parent))
+            _send_catalog_view(token, chat_id, sid, session)
+        except ValueError:
+            pass  # already at root or above — ignore
+    elif subaction in ("d", "f") and len(parts) >= 4:
+        idx = int(parts[3])
+        items: List[tuple[str, str]] = session.get("items") or []
+        if idx < len(items):
+            kind, path = items[idx]
+            if subaction == "d" and kind == "d":
+                _catalog_update_session(session, path)
+                _send_catalog_view(token, chat_id, sid, session)
+            elif subaction == "f" and kind == "f":
+                try:
+                    with chat_action(token, chat_id, "upload_document"):
+                        send_document(token, chat_id, path, caption=Path(path).name)
+                except Exception as exc:
+                    send_message(token, chat_id, f"Не удалось отправить файл:\n{path}\n{exc}", _main_menu(user))
+    elif subaction == "pg" and len(parts) >= 4:
+        session["offset"] = int(parts[3])
+        _send_catalog_view(token, chat_id, sid, session)
+
+
+def send_search_results(
+    token: str,
+    searcher: RAGSearcher,
+    *,
+    chat_id: str,
+    query: str,
+    username: str,
+    previous_session_id: str = "",
+) -> str:
+    """Run search, send individual result messages + nav message. Returns session_id."""
+    q = (query or "").strip()
+    if previous_session_id and previous_session_id in SEARCH_SESSIONS:
+        old = SEARCH_SESSIONS[previous_session_id]
+        q = f"{old.get('query', '')} {q}".strip()
+    try:
+        results = searcher.search(
+            q, limit=30, content_only=False,
+            source=f"telegram_bot:{chat_id}", username=username,
+        )
+    except (ConnectionError, RuntimeError) as exc:
+        send_message(token, chat_id, f"Ошибка поиска: {exc}")
+        return ""
+    results = [item for item in (results or []) if isinstance(item, dict)]
+
+    sid = _session_id()
+    SEARCH_SESSIONS[sid] = {
+        "session_id": sid,
+        "query": q,
+        "chat_id": str(chat_id),
+        "username": username,
+        "results": results,
+        "visible": SEARCH_PAGE_SIZE,
+        "created_at": time.time(),
+        "file_type": "",
+        "date_sort": "",
+        "telemetry": getattr(searcher, "telemetry", None),
+        "result_message_ids": [],
+        "nav_message_id": 0,
+        "feedback_given": set(),
+    }
+    session = SEARCH_SESSIONS[sid]
+    _cleanup_search_sessions()
+
+    shown = _filter_session_results(session)[:SEARCH_PAGE_SIZE]
+    if shown:
+        _send_result_messages(token, chat_id, sid, session, shown)
+    _send_nav_message(token, chat_id, sid, session)
+    return sid
 
 
 def _record_result_feedback(
@@ -813,39 +1128,6 @@ def _record_visible_feedback(
         )
 
 
-def build_interactive_search_response(
-    searcher: RAGSearcher,
-    *,
-    chat_id: str,
-    query: str,
-    username: str,
-    previous_session_id: str = "",
-) -> Dict[str, Any]:
-    q = (query or "").strip()
-    if previous_session_id and previous_session_id in SEARCH_SESSIONS:
-        old = SEARCH_SESSIONS[previous_session_id]
-        q = f"{old.get('query', '')} {q}".strip()
-    try:
-        results = searcher.search(q, limit=30, content_only=False, source=f"telegram_bot:{chat_id}", username=username)
-    except (ConnectionError, RuntimeError) as exc:
-        return {"text": f"Ошибка инфраструктуры поиска: {exc}", "reply_markup": None}
-    results = [item for item in (results or []) if isinstance(item, dict)]
-    sid = _session_id()
-    SEARCH_SESSIONS[sid] = {
-        "session_id": sid,
-        "query": q,
-        "chat_id": str(chat_id),
-        "username": username,
-        "results": results,
-        "visible": SEARCH_PAGE_SIZE,
-        "created_at": time.time(),
-        "file_type": "",
-        "date_sort": "",
-        "telemetry": getattr(searcher, "telemetry", None),
-    }
-    text, markup = _format_search_page(sid)
-    return {"text": text, "reply_markup": markup, "session_id": sid}
-
 
 def handle_callback_query(
     *,
@@ -858,7 +1140,6 @@ def handle_callback_query(
     msg = callback_query.get("message") or {}
     chat = msg.get("chat") or {}
     chat_id = str(chat.get("id") or "")
-    message_id = int(msg.get("message_id") or 0)
     user = get_authorized_telegram_user(auth_db, chat_id)
     if query_id:
         answer_callback_query(token, query_id)
@@ -870,6 +1151,11 @@ def handle_callback_query(
     if len(parts) < 2:
         return
     action, sid = parts[0], parts[1]
+
+    if action == "cat":
+        _handle_catalog_callback(token, chat_id, user, sid, parts)
+        return
+
     session = SEARCH_SESSIONS.get(sid)
     if not session:
         send_message(token, chat_id, "Сессия поиска устарела. Повторите запрос.", _main_menu(user))
@@ -907,26 +1193,31 @@ def handle_callback_query(
         index = int(parts[2])
         value = 1 if parts[3] == "pos" else -1
         results = _filter_session_results(session)
-        if index >= len(results):
-            send_message(token, chat_id, "Результат уже недоступен.", _main_menu(user))
-            return
-        result = results[index]
-        _record_result_feedback(
-            auth_db=auth_db,
-            session=session,
-            result=result,
-            username=str(user.get("username") or ""),
-            chat_id=chat_id,
-            value=3 if value > 0 else -3,
-            rank=index + 1,
-            reason="explicit",
-        )
-        send_message(
-            token,
-            chat_id,
-            "Оценка сохранена. Следующие поиски будут учитывать этот результат.",
-            _main_menu(user),
-        )
+        if index < len(results):
+            result = results[index]
+            _record_result_feedback(
+                auth_db=auth_db,
+                session=session,
+                result=result,
+                username=str(user.get("username") or ""),
+                chat_id=chat_id,
+                value=3 if value > 0 else -3,
+                rank=index + 1,
+                reason="explicit",
+            )
+            feedback_given: set = session.setdefault("feedback_given", set())
+            feedback_given.add(index)
+            result_msg_ids = session.get("result_message_ids") or []
+            if index < len(result_msg_ids):
+                edit_message_reply_markup(
+                    token,
+                    chat_id=chat_id,
+                    message_id=result_msg_ids[index],
+                    reply_markup=_result_keyboard(sid, index, feedback_given=True),
+                )
+        return
+
+    if action == "fb_noop":
         return
 
     if action == "more":
@@ -938,16 +1229,38 @@ def handle_callback_query(
             value=-1,
             reason="more_variants",
         )
-        session["visible"] = int(session.get("visible") or SEARCH_PAGE_SIZE) + SEARCH_PAGE_SIZE
-    elif action == "ft" and len(parts) >= 3:
-        value = parts[2]
-        session["file_type"] = "" if value == "all" else value
+        old_visible = int(session.get("visible") or SEARCH_PAGE_SIZE)
+        session["visible"] = old_visible + SEARCH_PAGE_SIZE
+        results = _filter_session_results(session)
+        new_batch = results[old_visible : session["visible"]]
+        if new_batch:
+            _send_result_messages(token, chat_id, sid, session, new_batch)
+        _send_nav_message(token, chat_id, sid, session)
+        return
+
+    if action == "ft" and len(parts) >= 3:
+        ft_value = parts[2]
+        session["file_type"] = "" if ft_value == "all" else ft_value
         session["visible"] = SEARCH_PAGE_SIZE
-    elif action == "date" and len(parts) >= 3:
-        value = parts[2]
-        session["date_sort"] = "" if value == "none" else value
+        _reset_result_messages(token, chat_id, session)
+        results = _filter_session_results(session)[:SEARCH_PAGE_SIZE]
+        if results:
+            _send_result_messages(token, chat_id, sid, session, results)
+        _send_nav_message(token, chat_id, sid, session)
+        return
+
+    if action == "date" and len(parts) >= 3:
+        date_value = parts[2]
+        session["date_sort"] = "" if date_value == "none" else date_value
         session["visible"] = SEARCH_PAGE_SIZE
-    elif action == "refine":
+        _reset_result_messages(token, chat_id, session)
+        results = _filter_session_results(session)[:SEARCH_PAGE_SIZE]
+        if results:
+            _send_result_messages(token, chat_id, sid, session, results)
+        _send_nav_message(token, chat_id, sid, session)
+        return
+
+    if action == "refine":
         _record_visible_feedback(
             auth_db=auth_db,
             session=session,
@@ -959,11 +1272,6 @@ def handle_callback_query(
         PENDING_REFINEMENTS[chat_id] = sid
         send_message(token, chat_id, "Напишите уточнение к запросу следующим сообщением.", _main_menu(user))
         return
-    text, markup = _format_search_page(sid)
-    if message_id:
-        edit_message_text(token, chat_id=chat_id, message_id=message_id, text=text, reply_markup=markup)
-    else:
-        send_message(token, chat_id, text, markup)
 
 
 def _is_menu_or_command_text(text: str) -> bool:
@@ -1012,6 +1320,8 @@ def process_message(
         parts = [raw]
     elif low == "поиск":
         return "Напишите поисковый запрос обычным сообщением. Я покажу варианты кнопками."
+    elif low == "каталог":
+        return "Для просмотра каталога необходима авторизация."
     elif low in {"добавить файл", "/upload"}:
         return "Отправьте сюда документ или фото. Я сохраню файл в каталог Telegram Uploads, после индексации он появится в поиске."
     elif low == "заявка":
@@ -1066,7 +1376,7 @@ def process_message(
                     return "Вход подтверждён. Вернитесь в приложение."
                 if str(out.get("purpose") or purpose) == "register":
                     return "Заявка отправлена администратору. После одобрения бот сообщит, что доступ открыт."
-                return f"Ок, вы авторизованы как {username}.\n\n{_user_help_text(user, chat_id)}"
+                return f"Авторизация прошла успешно.\n\n{_user_help_text(user, chat_id)}"
             _log_tg_auth_event(
                 auth_db,
                 chat_id=chat_id,
@@ -1510,21 +1820,27 @@ def main() -> int:
                 )
                 user = get_authorized_telegram_user(auth_db, chat_id)
                 if user and not _is_menu_or_command_text(text):
+                    if text.strip().lower() == "каталог":
+                        with chat_action(token, chat_id, "typing"):
+                            open_catalog(token, cfg, chat_id)
+                        _log_tg_message_event(
+                            auth_db,
+                            chat_id=chat_id,
+                            username=str(user.get("username") or ""),
+                            event_type="telegram_catalog_open",
+                            ok=True,
+                        )
+                        continue
                     pending_sid = PENDING_REFINEMENTS.pop(chat_id, "")
                     with chat_action(token, chat_id, "typing"):
-                        response = build_interactive_search_response(
+                        send_search_results(
+                            token,
                             searcher,
                             chat_id=chat_id,
                             query=text,
                             username=str(user.get("username") or ""),
                             previous_session_id=pending_sid,
                         )
-                    send_message(
-                        token,
-                        chat_id,
-                        str(response.get("text") or ""),
-                        response.get("reply_markup") or _main_menu(user),
-                    )
                     _log_tg_message_event(
                         auth_db,
                         chat_id=chat_id,
