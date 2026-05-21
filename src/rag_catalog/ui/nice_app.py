@@ -20,7 +20,6 @@ from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
-from . import cloud_view as _cloud_view
 from . import explorer_view as _explorer_view
 from . import index_view as _index_view
 from . import jobs_view as _jobs_view
@@ -225,6 +224,8 @@ def _build_page(initial_screen: str = "search") -> None:
         _log_app_event(state, "ui", "theme_toggle", details={"theme": state.theme})
 
     def set_screen(screen: str, *, close_drawer: bool = False) -> None:
+        if screen == "cloud":
+            screen = "explorer"
         touch_activity()
         prev_screen = state.screen
         capture_screen_state(state, prev_screen)
@@ -264,7 +265,6 @@ def _build_page(initial_screen: str = "search") -> None:
         nav_items = [
             ("search",   "Поиск",      "search"),
             ("explorer", "Файлы",      "folder"),
-            ("cloud",    "Cloud",      "cloud"),
             ("jobs",     "Задачи",     "queue"),
         ]
         if is_admin:
@@ -279,7 +279,6 @@ def _build_page(initial_screen: str = "search") -> None:
             header_items = [
                 ("search", "Поиск", "search", lambda: set_screen("search"), state.screen == "search"),
                 ("explorer", "Файлы", "folder", lambda: set_screen("explorer"), state.screen == "explorer"),
-                ("cloud", "Cloud", "cloud", lambda: set_screen("cloud"), state.screen == "cloud"),
             ]
             if is_admin:
                 header_items.append(("index", "Индекс", "filter_center_focus", lambda: set_screen("index"), state.screen == "index"))
@@ -2011,13 +2010,6 @@ def _build_page(initial_screen: str = "search") -> None:
     def render_jobs_screen() -> None:
         _jobs_view.render_jobs_screen(state, render_fn=render)
 
-    def render_cloud_screen() -> None:
-        _cloud_view.render_cloud_drive_screen(
-            state,
-            render_fn=render,
-            settings_fn=go_settings_section,
-        )
-
     def render() -> None:
         page_root.classes(remove="search")
         if state.screen == "search":
@@ -2029,7 +2021,6 @@ def _build_page(initial_screen: str = "search") -> None:
             "settings": "Настройки",
             "stats": "Аналитика",
             "jobs": "Задачи",
-            "cloud": "Cloud Drive",
         }.get(state.screen, "Поиск"))
         if state.header_breadcrumbs is not None:
             state.header_breadcrumbs.clear()
@@ -2161,8 +2152,6 @@ def _build_page(initial_screen: str = "search") -> None:
                     render_stats_screen()
                 elif state.screen == "jobs":
                     render_jobs_screen()
-                elif state.screen == "cloud":
-                    render_cloud_screen()
                 else:
                     render_search_screen()
             initialized_screens.add(current_screen)
@@ -2246,7 +2235,7 @@ def jobs_page() -> None:
 
 @ui.page("/cloud")
 def cloud_page() -> None:
-    _build_page("cloud")
+    ui.navigate.to("/explorer")
 
 
 @ui.page("/auth/device")
