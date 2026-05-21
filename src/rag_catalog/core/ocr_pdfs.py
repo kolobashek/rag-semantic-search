@@ -541,6 +541,7 @@ def main() -> int:
         "--collection", args.collection,
         "--workers",    str(workers_effective),
         "--stage",      "large",  # сканированные PDF — этап large
+        "--force-ocr",
         # НЕТ --no-ocr: OCR включён
     ]
     if str(args.ocr_engine or "tesseract").strip().lower() == "rapidocr":

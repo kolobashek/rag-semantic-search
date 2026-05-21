@@ -1448,6 +1448,12 @@ def main() -> None:
         help="Пропускать OCR для сканированных PDF (быстрее, текст не извлекается)",
     )
     parser.add_argument(
+        "--force-ocr",
+        action="store_true",
+        dest="force_ocr",
+        help="Принудительно выполнять OCR, даже если в config включён index_skip_ocr.",
+    )
+    parser.add_argument(
         "--max-chunks",
         type=int,
         default=int(cfg.get("index_max_chunks", 2000)),
@@ -1518,7 +1524,9 @@ def main() -> None:
         "Пример: --mark-stage-metadata-for .pdf. Пригодится после legacy-прохода --metadata-only-for.",
     )
     args = parser.parse_args()
-    if bool(cfg.get("index_skip_ocr", False)) and "--no-ocr" not in sys.argv:
+    if args.force_ocr:
+        args.no_ocr = False
+    elif bool(cfg.get("index_skip_ocr", False)) and "--no-ocr" not in sys.argv:
         args.no_ocr = True
     args.collection = resolve_embedding_collection_name(
         args.collection,
