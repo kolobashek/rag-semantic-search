@@ -32,6 +32,8 @@ from sentence_transformers import SentenceTransformer
 from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
 from .extractors import (
+    TextBlock,
+    blocks_from_legacy_text,
     extract_doc_meta,
     extract_csv,
     extract_doc,
@@ -685,6 +687,14 @@ class RAGIndexer:
         """Разбить текст на перекрывающиеся чанки."""
         return chunk_text(text, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
 
+    def _chunk_text_with_provenance(self, text: str) -> List[Dict[str, Any]]:
+        """Chunk legacy extractor text through structured TextBlock metadata."""
+        items: List[Dict[str, Any]] = []
+        for block in blocks_from_legacy_text(text):
+            for chunk in self._chunk_text(block.text):
+                items.append({"text": chunk, "block": block})
+        return items
+
     def _content_hash(self, text: str) -> str:
         normalized = "\n".join(line.strip() for line in str(text or "").splitlines() if line.strip())
         if not normalized:
@@ -741,10 +751,12 @@ class RAGIndexer:
         chunk: str,
         chunk_index: int,
         doc_id: str,
+        block: Optional[TextBlock] = None,
     ) -> Dict[str, Any]:
-        page = self._extract_marker_int(chunk, r"Страница:\s*(\d+)")
-        row = self._extract_marker_int(chunk, r"Строка:\s*(\d+)")
-        sheet = self._extract_marker_text(chunk, r"Лист:\s*([^\n\r]+)")
+        page = block.page if block and block.page is not None else self._extract_marker_int(chunk, r"Страница:\s*(\d+)")
+        row = block.row_start if block and block.row_start is not None else self._extract_marker_int(chunk, r"Строка:\s*(\d+)")
+        sheet = block.sheet if block and block.sheet else self._extract_marker_text(chunk, r"Лист:\s*([^\n\r]+)")
+        slide = block.slide if block and block.slide is not None else None
         section = self._extract_section_title(chunk)
         group_size = max(1, int(getattr(self, "chunk_group_size", 4) or 4))
         parent_id = f"{doc_id}:chunk-group:{chunk_index // group_size}"
@@ -753,6 +765,7 @@ class RAGIndexer:
             "section": section,
             "page": page,
             "sheet": sheet,
+            "slide": slide,
             "row_start": row,
             "row_end": row,
             "provenance": {
@@ -761,6 +774,7 @@ class RAGIndexer:
                 "section": section,
                 "page": page,
                 "sheet": sheet,
+                "slide": slide,
                 "row_start": row,
                 "row_end": row,
             },
@@ -860,7 +874,8 @@ class RAGIndexer:
         else:
             logger.debug("Неподдерживаемый формат (только метаданные): %s", ext)
 
-        chunks = self._chunk_text(full_text) if full_text.strip() else []
+        chunk_items = self._chunk_text_with_provenance(full_text) if full_text.strip() else []
+        chunks = [str(item.get("text") or "") for item in chunk_items]
         content_hash = self._content_hash(full_text)
         duplicate_of = ""
         if content_hash and hasattr(self, "state_db"):
@@ -921,8 +936,10 @@ class RAGIndexer:
         texts = [meta_text, *clean_chunks]
         payloads: List[Dict[str, Any]] = [meta_payload]
         doc_id = str(base_provenance["doc_id"])
-        for idx, chunk in enumerate(chunks):
+        for idx, item in enumerate(chunk_items):
+            chunk = str(item.get("text") or "")
             clean_chunk = clean_chunks[idx]
+            block = item.get("block")
             payloads.append(
                 {
                     "type": f"{file_type}_content",
@@ -939,7 +956,12 @@ class RAGIndexer:
                     "duplicate_of": duplicate_of,
                     **doc_meta,
                     **base_provenance,
-                    **self._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
+                    **self._chunk_provenance(
+                        chunk=chunk,
+                        chunk_index=idx,
+                        doc_id=doc_id,
+                        block=block if isinstance(block, TextBlock) else None,
+                    ),
                     **(payload_extra or {}),
                 }
             )

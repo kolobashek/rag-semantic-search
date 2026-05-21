@@ -15,8 +15,13 @@ from .files import (
     extract_xlsx,
     ocr_pdf,
 )
+from .contract import ExtractedDocument, TextBlock, blocks_from_legacy_text, document_from_legacy_text
 
 __all__ = [
+    "ExtractedDocument",
+    "TextBlock",
+    "blocks_from_legacy_text",
+    "document_from_legacy_text",
     "extract_doc_meta",
     "extract_csv",
     "extract_doc",

@@ -25,6 +25,7 @@ from rag_catalog.core.index_rag import (
     _file_category,
     _generate_tags,
 )
+from rag_catalog.core.extractors import TextBlock, blocks_from_legacy_text
 
 # ═══════════════════════════ _generate_tags ════════════════════════════════════
 
@@ -561,6 +562,27 @@ class TestChunkText:
         assert out["page"] == 12
         assert out["sheet"] == "Техника"
         assert out["section"] == "1. Характеристики"
+
+    def test_chunk_provenance_accepts_structured_block_metadata(self):
+        idx = self._make_indexer(180, 20)
+        block = TextBlock(text="1. Характеристики\nМасса 1000 кг", page=12, sheet="Техника", row_start=7, slide=3)
+
+        out = idx._chunk_provenance(chunk=block.text, chunk_index=1, doc_id="file:abc", block=block)
+
+        assert out["page"] == 12
+        assert out["sheet"] == "Техника"
+        assert out["row_start"] == 7
+        assert out["slide"] == 3
+        assert out["provenance"]["slide"] == 3
+
+    def test_legacy_marker_text_converts_to_structured_blocks(self):
+        blocks = blocks_from_legacy_text("Страница: 5\nЛист: Смета\nСтрока: 7\nПолезный текст")
+
+        assert len(blocks) == 1
+        assert blocks[0].text == "Полезный текст"
+        assert blocks[0].page == 5
+        assert blocks[0].sheet == "Смета"
+        assert blocks[0].row_start == 7
 
     def test_chunk_group_size_is_configurable(self):
         idx = self._make_indexer(180, 20)
