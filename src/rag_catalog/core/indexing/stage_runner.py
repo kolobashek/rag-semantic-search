@@ -508,6 +508,7 @@ class IndexStageRunner:
                 meta_text += f" | Теги: {', '.join(tags[:30])}"
             meta_payload: Dict[str, Any] = {
                 "type": "file_metadata",
+                "payload_schema_version": int(getattr(indexer, "payload_schema_version", 1) or 1),
                 "text": meta_text,
                 "filename": relative_path.name,
                 "extension": ext,
@@ -544,6 +545,7 @@ class IndexStageRunner:
                 content_payloads.append(
                     {
                     "type": f"{file_type}_content",
+                    "payload_schema_version": int(getattr(indexer, "payload_schema_version", 1) or 1),
                     "text": clean_chunk,
                     "filename": relative_path.name,
                     "extension": ext,

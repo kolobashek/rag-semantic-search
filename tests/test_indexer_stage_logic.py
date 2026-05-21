@@ -8,7 +8,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
-from index_rag import RAGIndexer
+from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
 from rag_catalog.core.extractors import document_from_legacy_text
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.telemetry_db import TelemetryDB
@@ -105,6 +105,7 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx.state_db = _FakeStateDB()
     idx._points_buffer = []
     idx.point_count = 0
+    idx.payload_schema_version = PAYLOAD_SCHEMA_VERSION
     idx.run_id = ""
     idx._run_deleted_files = 0
     idx.small_office_mb = 20.0
@@ -281,6 +282,46 @@ def test_duplicate_content_is_marked_in_payload(tmp_path: Path) -> None:
     payloads = [point.payload for point in idx.qdrant.points if point.payload.get("filename") == "b.txt"]
     assert any(payload.get("is_duplicate") is True for payload in payloads)
     assert idx.state_db.get_entry(str(second))["content_hash"] == idx.state_db.get_entry(str(first))["content_hash"]
+
+
+def test_payload_schema_version_is_written_to_payloads(tmp_path: Path) -> None:
+    doc = tmp_path / "versioned.txt"
+    doc.write_text("versioned text", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    idx.index_directory(stage="small")
+
+    assert idx.qdrant.points
+    assert {point.payload.get("payload_schema_version") for point in idx.qdrant.points} == {PAYLOAD_SCHEMA_VERSION}
+
+
+def test_payload_schema_change_marks_existing_state_for_reindex(tmp_path: Path) -> None:
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.recreate = False
+    idx.payload_schema_version = PAYLOAD_SCHEMA_VERSION
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.state_db.upsert_many(
+        [
+            {
+                "full_path": "a.txt",
+                "fingerprint": "1",
+                "mtime": 1.0,
+                "stage": "content",
+                "indexed_stage": "small",
+                "status": "ok",
+                "size_bytes": 1,
+                "extension": ".txt",
+            }
+        ]
+    )
+    idx.state_db.set_config_many({"payload_schema_version": str(PAYLOAD_SCHEMA_VERSION - 1)})
+
+    changed = idx._ensure_payload_schema_version()
+
+    row = idx.state_db.get_entry("a.txt")
+    assert changed == 1
+    assert row["stage"] == "metadata"
+    assert idx.state_db.get_config()["payload_schema_version"] == str(PAYLOAD_SCHEMA_VERSION)
 
 
 def test_quality_report_summarizes_state_and_duplicates(tmp_path: Path) -> None:

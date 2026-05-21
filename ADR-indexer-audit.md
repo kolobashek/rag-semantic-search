@@ -409,7 +409,7 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 4. **[done 2026-05-21] Direct structured extractors.** Постепенно перевести PDF/XLSX/XLS/PPTX/OCR extractors на прямую выдачу `TextBlock`, чтобы marker adapter остался только для обратной совместимости.
 5. **[done 2026-05-21] Watch backpressure.** Добавить debounce, bounded queue drain, coalescing burst-событий и ограничение частоты stage-проходов для ZIP.
 6. **[done 2026-05-21] ZIP member cleanup.** При изменении архива удалять из state/Qdrant старые `archive.zip::*`, которых больше нет внутри, без полного cleanup каталога.
-7. **[pending] Payload schema version.** Добавить `payload_schema_version` в payload и state config; при изменении схемы помечать документы к переиндексации.
+7. **[done 2026-05-21] Payload schema version.** Добавить `payload_schema_version` в payload и state config; при изменении схемы помечать документы к переиндексации.
 
 ### Выполнение фазы 2
 
@@ -421,3 +421,4 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - PDF, XLSX/XLS и PPTX получили прямые `extract_*_document()` функции с page/sheet/row/slide metadata; основной index pipeline использует structured variants, legacy `extract_*()` продолжает возвращать прежний текстовый формат для совместимости.
 - Watch loop получил bounded wake queue (`maxsize=1`), `drain_index_queue()` с лимитом batch-ей за тик и debounce для ZIP-событий перед постановкой в durable queue.
 - Stage runner сверяет актуальные ZIP members с `state_entries` по prefix `archive.zip::` и удаляет устаревшие state/vector записи локально для архива, без полного cleanup всего каталога.
+- Payload-и получают `payload_schema_version`; текущая версия хранится в `index_config`, а mismatch помечает существующие `state_entries` как `metadata`, чтобы следующий content/small/large проход переиндексировал документы под новый контракт.

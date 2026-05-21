@@ -160,6 +160,30 @@ def test_state_db_lists_entries_by_prefix(tmp_path: Path) -> None:
     assert db.list_entries_by_prefix("docs.zip::") == ["docs.zip::a.txt", "docs.zip::b.txt"]
 
 
+def test_state_db_marks_all_entries_for_reindex(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many(
+        [
+            {
+                "full_path": "a.txt",
+                "fingerprint": "1",
+                "mtime": 1.0,
+                "stage": "content",
+                "indexed_stage": "small",
+                "status": "ok",
+                "size_bytes": 1,
+                "extension": ".txt",
+            }
+        ]
+    )
+
+    assert db.mark_all_for_reindex(stage="metadata") == 1
+    row = db.get_entry("a.txt")
+    assert row["stage"] == "metadata"
+    assert row["indexed_stage"] == "metadata"
+    assert row["status"] == "ok"
+
+
 def test_state_db_validates_embedding_config(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     db.validate_embedding_config(

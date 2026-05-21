@@ -687,6 +687,25 @@ class IndexStateDB:
                 )
                 return int(cur.rowcount or 0)
 
+    def mark_all_for_reindex(self, *, stage: str = "metadata") -> int:
+        now = _utc_now()
+        target_stage = str(stage or "metadata")
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE state_entries
+                    SET stage=?,
+                        indexed_stage=?,
+                        status='ok',
+                        last_error='',
+                        next_retry_at=0,
+                        updated_at=?
+                    """,
+                    (target_stage, target_stage, now),
+                )
+                return int(cur.rowcount or 0)
+
     def list_deleted_candidates(self, existing_paths: Iterable[str]) -> List[str]:
         existing = {str(path or "").strip() for path in existing_paths if str(path or "").strip()}
         if not existing:

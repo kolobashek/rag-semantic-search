@@ -88,6 +88,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".
 # Максимум страниц/кадров при OCR многостраничного изображения (TIFF, GIF).
 # Защита от случайных файлов с тысячами кадров, которые зависнут индексатор.
 MAX_IMAGE_PAGES: int = 50
+PAYLOAD_SCHEMA_VERSION: int = 2
 
 # ─────────────────────────── таблица синонимов ────────────────────────────────
 # Сокращение → список синонимов/расшифровок.
@@ -429,6 +430,7 @@ class RAGIndexer:
         self.telemetry = TelemetryDB(telemetry_path)
         self.run_id: str = ""
         self._run_deleted_files = 0
+        self.payload_schema_version = PAYLOAD_SCHEMA_VERSION
 
         if embedding_model.startswith("ollama:"):
             from .llm import OllamaEmbedder  # noqa: PLC0415
@@ -469,6 +471,7 @@ class RAGIndexer:
             collection_name=self.collection_name,
             recreate=self.recreate,
         )
+        self._ensure_payload_schema_version()
 
         self.point_count = 0
 
@@ -487,6 +490,29 @@ class RAGIndexer:
         if recreated:
             self.state_db.clear()
             logger.info("state_entries очищен (--recreate)")
+
+    def _ensure_payload_schema_version(self) -> int:
+        desired = str(int(getattr(self, "payload_schema_version", PAYLOAD_SCHEMA_VERSION) or PAYLOAD_SCHEMA_VERSION))
+        current = str((self.state_db.get_config() or {}).get("payload_schema_version") or "")
+        if current == desired:
+            return 0
+        changed = 0
+        has_existing_state = False
+        try:
+            has_existing_state = self.state_db.count() > 0
+        except Exception:
+            has_existing_state = False
+        if has_existing_state and not getattr(self, "recreate", False):
+            changed = self.state_db.mark_all_for_reindex(stage="metadata")
+            if changed:
+                logger.warning(
+                    "Payload schema changed: stored=%s current=%s; %d files marked for reindex",
+                    current or "(unset)",
+                    desired,
+                    changed,
+                )
+        self.state_db.set_config_many({"payload_schema_version": desired})
+        return changed
 
     # ── fingerprint ────────────────────────────────────────────────────
 
@@ -932,8 +958,10 @@ class RAGIndexer:
             state_key=file_key,
             payload_extra=payload_extra,
         )
+        payload_schema_version = int(getattr(self, "payload_schema_version", PAYLOAD_SCHEMA_VERSION) or PAYLOAD_SCHEMA_VERSION)
         meta_payload: Dict[str, Any] = {
             "type": "file_metadata",
+            "payload_schema_version": payload_schema_version,
             "text": meta_text,
             "filename": filepath.name,
             "extension": ext,
@@ -963,6 +991,7 @@ class RAGIndexer:
             payloads.append(
                 {
                     "type": f"{file_type}_content",
+                    "payload_schema_version": payload_schema_version,
                     "text": clean_chunk,
                     "filename": filepath.name,
                     "extension": ext,
