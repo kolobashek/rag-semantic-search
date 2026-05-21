@@ -27,6 +27,7 @@ ocr_pdfs.py — OCR-проход по сканированным PDF в RAG-ка
 import argparse
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -87,6 +88,111 @@ def _effective_workers(requested: int) -> int:
 
 # ─────────────────────────── Qdrant helpers ──────────────────────────────────
 
+def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) -> List[str]:
+    """Return large PDF paths that state DB still has without indexed content."""
+    db_path = Path(state_dir) / "index_state.db"
+    if not db_path.exists():
+        return []
+    min_size = max(0, int(float(small_pdf_mb or 2.0) * 1_048_576))
+    try:
+        with sqlite3.connect(str(db_path), timeout=30.0) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT full_path
+                FROM state_entries
+                WHERE lower(extension)=?
+                  AND COALESCE(size_bytes, 0) >= ?
+                  AND (
+                        stage != 'content'
+                     OR status IN ('empty', 'error')
+                     OR indexed_stage IN ('', 'metadata', 'small')
+                  )
+                ORDER BY size_bytes DESC, updated_at DESC, full_path
+                """,
+                (".pdf", min_size),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("Не удалось прочитать OCR-кандидатов из state DB: %s", exc)
+        return []
+    paths: List[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        path = str(row["full_path"] or "").strip()
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _payload_schema_field_names(collection_info: Any) -> set[str]:
+    schema = getattr(collection_info, "payload_schema", None) or {}
+    if isinstance(schema, dict):
+        return {str(key) for key in schema.keys()}
+    try:
+        return {str(key) for key in schema}
+    except Exception:
+        return set()
+
+
+def ensure_ocr_payload_indexes(client: Any, collection: str, *, collection_info: Any = None, timeout_sec: int = 300) -> None:
+    """Ensure Qdrant can filter OCR candidate scans without full collection walks."""
+    try:
+        from qdrant_client.models import PayloadSchemaType
+    except ImportError:
+        return
+
+    try:
+        info = collection_info if collection_info is not None else client.get_collection(collection)
+        indexed_fields = _payload_schema_field_names(info)
+    except Exception as exc:
+        logger.warning("Не удалось проверить payload-index Qdrant для OCR: %s", exc)
+        return
+
+    queued_fields: set[str] = set()
+    for field_name in ("type", "extension"):
+        if field_name in indexed_fields:
+            continue
+        try:
+            logger.info("Ставлю в очередь payload-index Qdrant для OCR: %s=keyword", field_name)
+            client.create_payload_index(
+                collection_name=collection,
+                field_name=field_name,
+                field_schema=PayloadSchemaType.KEYWORD,
+                wait=False,
+                timeout=min(60, max(5, int(timeout_sec or 300))),
+            )
+            queued_fields.add(field_name)
+        except Exception as exc:
+            logger.warning(
+                "Не удалось создать payload-index Qdrant для поля %s: %s. OCR-поиск продолжится медленным scan.",
+                field_name,
+                exc,
+            )
+
+    if not queued_fields:
+        return
+
+    deadline = time.monotonic() + max(300, int(timeout_sec or 300), 1800)
+    pending = set(queued_fields)
+    while pending and time.monotonic() < deadline:
+        time.sleep(5)
+        try:
+            indexed_fields = _payload_schema_field_names(client.get_collection(collection))
+        except Exception as exc:
+            logger.debug("Ожидание payload-index Qdrant для OCR: %s", exc)
+            continue
+        pending = {field for field in queued_fields if field not in indexed_fields}
+
+    if pending:
+        logger.warning(
+            "Payload-index Qdrant для OCR ещё не готов: %s. OCR-поиск продолжится, но может быть медленным.",
+            ", ".join(sorted(pending)),
+        )
+    else:
+        logger.info("Payload-index Qdrant для OCR готов: %s", ", ".join(sorted(queued_fields)))
+
+
 def find_scanned_pdfs(
     qdrant_url: str,
     collection: str,
@@ -129,7 +235,13 @@ def find_scanned_pdfs(
                 path=str(cfg["qdrant_db_path"]),
                 timeout=max(5, int(qdrant_timeout_sec or 60)),
             )
-        client.get_collection(collection)
+        collection_info = client.get_collection(collection)
+        ensure_ocr_payload_indexes(
+            client,
+            collection,
+            collection_info=collection_info,
+            timeout_sec=max(5, int(qdrant_timeout_sec or 60)),
+        )
     except Exception as exc:
         logger.error("Не удалось подключиться к Qdrant: %s", exc)
         return []
@@ -344,15 +456,26 @@ def main() -> int:
     )
     logger.info("OCR run_id: %s", ocr_run_id)
 
-    # ── 1. Найти сканы в Qdrant ──────────────────────────────────────────────
-    scanned = find_scanned_pdfs(
-        qdrant_url=args.qdrant_url,
-        collection=args.collection,
-        min_text_len=args.min_text_len,
-        scroll_limit=max(50, int(args.scroll_limit or 256)),
-        qdrant_timeout_sec=max(5, int(args.qdrant_timeout or 60)),
-        scroll_retries=max(1, int(args.scroll_retries or 1)),
+    # ── 1. Найти кандидаты на OCR ────────────────────────────────────────────
+    scanned = find_state_db_ocr_candidates(
+        Path(args.state_dir),
+        small_pdf_mb=float(cfg.get("small_pdf_mb") or 2.0),
     )
+    if scanned:
+        logger.info(
+            "Быстрый список OCR-кандидатов из state DB (PDF >= %g МБ, без content): %d",
+            float(cfg.get("small_pdf_mb") or 2.0),
+            len(scanned),
+        )
+    else:
+        scanned = find_scanned_pdfs(
+            qdrant_url=args.qdrant_url,
+            collection=args.collection,
+            min_text_len=args.min_text_len,
+            scroll_limit=max(50, int(args.scroll_limit or 256)),
+            qdrant_timeout_sec=max(5, int(args.qdrant_timeout or 60)),
+            scroll_retries=max(1, int(args.scroll_retries or 1)),
+        )
 
     if not scanned:
         logger.info("Сканированные PDF не найдены — OCR не требуется.")
