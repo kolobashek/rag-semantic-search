@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
 from .embedding_collections import resolve_collection_name_from_config
+from .exact_tokens import numeric_exact_tokens, query_numeric_tokens, repair_mojibake_text
 from .index_state_db import IndexStateDB
 from .retrieval import bm25_rank_items, rrf_fuse
 from .telemetry_db import TelemetryDB
@@ -351,6 +353,41 @@ class RAGSearcher:
             )
             raise ConnectionError("Нет подключения к Qdrant")
 
+        lexical_query = query_original_used or raw_query
+        if not title_only:
+            early_numeric_tokens = [
+                token for token in query_numeric_tokens(lexical_query) if len(token) >= 5
+            ]
+            early_numeric_results = self._spreadsheet_numeric_exact_scan(
+                query=lexical_query,
+                tokens=early_numeric_tokens,
+                limit=limit,
+                file_type=file_type,
+            )
+            if early_numeric_results:
+                results = self._merge_ranked_results(
+                    early_numeric_results,
+                    [],
+                    limit=limit,
+                    query=query_used,
+                )
+                results = [self._repair_result_display_fields(item) for item in results]
+                self.telemetry.log_search(
+                    source=source,
+                    query=query_original_used,
+                    limit_value=limit,
+                    file_type=file_type,
+                    content_only=content_only,
+                    results_count=len(results),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    ok=True,
+                    error=truncated_note,
+                    username=username,
+                    query_original=query_original_used,
+                    query_used=query_used,
+                )
+                return results
+
         try:
             query_vector = self.embedder.encode(
                 query_used, normalize_embeddings=True
@@ -484,7 +521,13 @@ class RAGSearcher:
         if title_only:
             results = [item for item in results if str(item.get("type") or "") in metadata_types]
 
-        lexical_query = query_original_used or raw_query
+        numeric_exact_results = self._numeric_exact_search(
+            query=lexical_query,
+            limit=max(limit * 2, 20),
+            file_type=file_type,
+            content_only=content_only,
+            title_only=title_only,
+        )
         lexical_results = self._lexical_catalog_search(
             query=lexical_query,
             limit=max(limit * 4, 40),
@@ -501,12 +544,13 @@ class RAGSearcher:
                 content_only=content_only,
                 title_only=title_only,
             )
-            channels = [lexical_results, bm25_results, results]
+            channels = [numeric_exact_results, lexical_results, bm25_results, results]
             fused = rrf_fuse(channels, limit=max(limit * 4, 40))
             results = self._merge_ranked_results([], fused, limit=rerank_top_n, query=query_used)
             results = self._rerank_results(query_used, results, limit=limit)
         else:
-            results = self._merge_ranked_results(lexical_results, results, limit=limit, query=query_used)
+            results = self._merge_ranked_results([*numeric_exact_results, *lexical_results], results, limit=limit, query=query_used)
+        results = [self._repair_result_display_fields(item) for item in results]
 
         self.telemetry.log_search(
             source=source,
@@ -650,8 +694,7 @@ class RAGSearcher:
 
         items: List[Dict[str, Any]] = []
         max_items = int(config.get("filesystem_search_max_items", FS_CACHE_MAX_ITEMS))
-        qdrant_db_path = str(config.get("qdrant_db_path") or "").strip()
-        state_db_path = Path(qdrant_db_path) / "index_state.db" if qdrant_db_path else Path()
+        state_db_path = self._state_db_path()
         if state_db_path and state_db_path.exists():
             try:
                 entries = IndexStateDB(str(state_db_path)).iter_entries()
@@ -757,6 +800,21 @@ class RAGSearcher:
         self._fs_cache = {"ts": now, "items": items}
         return items
 
+    def _state_db_path(self) -> Optional[Path]:
+        config = getattr(self, "config", {}) or {}
+        candidates: list[Path] = []
+        qdrant_db_path = str(config.get("qdrant_db_path") or "").strip()
+        if qdrant_db_path:
+            candidates.append(Path(qdrant_db_path) / "index_state.db")
+        catalog_path = str(config.get("catalog_path") or "").strip()
+        default_catalog = str(DEFAULT_CONFIG.get("catalog_path") or "").strip()
+        if catalog_path and os.path.normcase(os.path.normpath(catalog_path)) == os.path.normcase(os.path.normpath(default_catalog)):
+            candidates.append(PROJECT_ROOT / "data" / "index_state.db")
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
     def clear_filesystem_cache(self) -> None:
         """Force the next lexical catalog search to rescan the filesystem."""
         self._fs_cache = {"ts": 0.0, "items": []}
@@ -811,6 +869,347 @@ class RAGSearcher:
                 }
             )
         return out
+
+    def _numeric_exact_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        file_type: Optional[str],
+        content_only: bool,
+        title_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if title_only or not getattr(self, "connected", False):
+            return []
+        tokens = query_numeric_tokens(query)
+        if not tokens:
+            return []
+
+        strong_tokens = sorted({token for token in tokens if len(token) >= 5}, key=len, reverse=True)
+        if not strong_tokens:
+            return []
+
+        filters: list[tuple[list[str], float]] = []
+        for token in strong_tokens[:4]:
+            filters.append(([token], 0.9995))
+        query_groups = re.findall(r"\d{3,}", str(query or ""))
+        if len(query_groups) >= 2:
+            filters.append((query_groups[:4], 0.9985))
+
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in self._spreadsheet_numeric_exact_scan(
+            query=query,
+            tokens=strong_tokens,
+            limit=limit,
+            file_type=file_type,
+        ):
+            key = f"{item.get('full_path')}::{item.get('chunk_index')}::{item.get('type')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+            if len(out) >= limit:
+                return out
+        if out:
+            return out
+
+        scroll_timeout = int((getattr(self, "config", {}) or {}).get("numeric_exact_qdrant_timeout_sec", 2) or 2)
+        for required_tokens, score in filters:
+            must = [
+                FieldCondition(key="numeric_tokens", match=MatchValue(value=token))
+                for token in required_tokens
+            ]
+            if file_type:
+                must.append(FieldCondition(key="extension", match=MatchValue(value=file_type.lower())))
+            if content_only:
+                must.append(
+                    FieldCondition(
+                        key="type",
+                        match=MatchAny(any=["docx_content", "doc_content", "xlsx_content", "pdf_content", "txt_content", "csv_content", "rtf_content", "pptx_content", "image_content"]),
+                    )
+                )
+            try:
+                points, _offset = self.qdrant.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=Filter(must=must),
+                    limit=max(1, min(limit, 50)),
+                    with_payload=True,
+                    with_vectors=False,
+                    timeout=scroll_timeout,
+                )
+            except Exception as exc:
+                logger.debug("Numeric exact search failed for %s: %s", required_tokens, exc)
+                continue
+            for point in points:
+                payload = point.payload or {}
+                key = f"{payload.get('full_path')}::{payload.get('chunk_index')}::{payload.get('type')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(self._result_from_payload(payload, score=score, rank_reason="точное совпадение номера", retrieval_source="numeric_exact"))
+                if len(out) >= limit:
+                    return out
+        return out
+
+    def _spreadsheet_numeric_exact_scan(
+        self,
+        *,
+        query: str,
+        tokens: List[str],
+        limit: int,
+        file_type: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if limit <= 0:
+            return []
+        if file_type and file_type.lower() not in {".xlsx", ".xls", ".csv"}:
+            return []
+        query_groups = re.findall(r"\d{3,}", str(query or ""))
+        if not query_groups:
+            return []
+        text_terms = [term for term in self._terms_from_text(query) if not term.isdigit()]
+        if not text_terms:
+            return []
+
+        started = time.perf_counter()
+        max_seconds = float((getattr(self, "config", {}) or {}).get("numeric_exact_fs_scan_seconds", 4.0) or 4.0)
+        max_candidates = int((getattr(self, "config", {}) or {}).get("numeric_exact_fs_scan_candidates", 200) or 200)
+        candidates = self._spreadsheet_numeric_candidates(
+            text_terms=text_terms,
+            file_type=file_type,
+            max_candidates=max_candidates,
+        )
+
+        cache = getattr(self, "_numeric_file_cache", {})
+        out: list[dict[str, Any]] = []
+        for item in candidates:
+            if time.perf_counter() - started > max_seconds:
+                break
+            full_path = str(item.get("full_path") or "")
+            path_obj = Path(full_path)
+            if not path_obj.exists() or not path_obj.is_file():
+                continue
+            try:
+                mtime = path_obj.stat().st_mtime
+            except OSError:
+                continue
+            cached = cache.get(full_path)
+            if cached and cached.get("mtime") == mtime:
+                file_tokens = set(cached.get("tokens") or [])
+                text = str(cached.get("text") or "")
+            else:
+                try:
+                    if path_obj.suffix.lower() == ".csv":
+                        from .extractors import extract_csv  # noqa: PLC0415
+
+                        text = extract_csv(path_obj)
+                    else:
+                        from .extractors import extract_spreadsheet_document  # noqa: PLC0415
+
+                        doc = extract_spreadsheet_document(path_obj)
+                        text = doc.text
+                except Exception as exc:
+                    logger.debug("Spreadsheet numeric scan failed for %s: %s", full_path, exc)
+                    continue
+                file_tokens = set(numeric_exact_tokens(text, max_tokens=5000))
+                cache[full_path] = {"mtime": mtime, "tokens": sorted(file_tokens), "text": text}
+            if not file_tokens:
+                continue
+            matched_joined = any(token in file_tokens for token in tokens if len(token) >= 5)
+            matched_groups = all(group in file_tokens for group in query_groups[:4])
+            if not (matched_joined or matched_groups):
+                continue
+            snippet_tokens = [token for token in tokens if len(token) >= 5] or query_groups
+            snippet = self._numeric_snippet(text, snippet_tokens)
+            result = {
+                "score": 0.999,
+                "type": f"{path_obj.suffix.lower().lstrip('.')}_content",
+                "text": snippet or f"Точное совпадение номера в файле: {item.get('filename')}",
+                "filename": item.get("filename", path_obj.name),
+                "path": item.get("path", str(path_obj)),
+                "full_path": full_path,
+                "size_mb": item.get("size_mb"),
+                "modified": item.get("modified"),
+                "extension": path_obj.suffix.lower(),
+                "chunk_index": None,
+                "rank_reason": "точное совпадение номера в таблице",
+                "retrieval_source": "numeric_fs_exact",
+            }
+            out.append(self._repair_result_display_fields(result))
+            if len(out) >= limit or matched_joined:
+                break
+        self._numeric_file_cache = cache
+        return out
+
+    def _spreadsheet_numeric_candidates(
+        self,
+        *,
+        text_terms: List[str],
+        file_type: Optional[str],
+        max_candidates: int,
+    ) -> List[Dict[str, Any]]:
+        exts = {".xlsx", ".xls", ".csv"}
+        if file_type:
+            exts = {file_type.lower()} & exts
+        if not exts:
+            return []
+
+        def term_hit(haystack: str) -> bool:
+            return any(
+                self._term_matches(haystack, term)
+                or (term == "стс" and "тс" in haystack)
+                for term in text_terms
+            )
+
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        state_db_path = self._state_db_path()
+        root = Path(str((getattr(self, "config", {}) or {}).get("catalog_path") or ""))
+        if state_db_path:
+            try:
+                con = sqlite3.connect(state_db_path)
+                con.row_factory = sqlite3.Row
+                placeholders = ",".join("?" for _ in sorted(exts))
+                rows = con.execute(
+                    f"""
+                    SELECT full_path, extension, size_bytes, mtime, stage
+                    FROM state_entries
+                    WHERE extension IN ({placeholders})
+                      AND status = 'ok'
+                    ORDER BY
+                      CASE WHEN stage = 'content' THEN 0 ELSE 1 END,
+                      length(full_path) ASC
+                    """,
+                    tuple(sorted(exts)),
+                ).fetchall()
+            except sqlite3.Error as exc:
+                logger.debug("Spreadsheet candidate state DB query failed: %s", exc)
+                rows = []
+            finally:
+                try:
+                    con.close()  # type: ignore[name-defined]
+                except Exception:
+                    pass
+
+            for row in rows:
+                full_path = str(row["full_path"] or "")
+                if not full_path or full_path in seen:
+                    continue
+                hay = full_path.lower().replace("ё", "е")
+                if not term_hit(hay):
+                    continue
+                path_obj = Path(full_path)
+                try:
+                    rel = str(path_obj.relative_to(root)) if root else full_path
+                except ValueError:
+                    rel = full_path
+                mtime = float(row["mtime"] or 0.0)
+                size_b = int(row["size_bytes"] or 0)
+                candidates.append(
+                    {
+                        "kind": "file",
+                        "filename": path_obj.name,
+                        "path": rel,
+                        "full_path": full_path,
+                        "extension": str(row["extension"] or path_obj.suffix.lower()),
+                        "size_mb": round(size_b / 1_048_576, 2) if size_b > 0 else None,
+                        "modified": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime)) if mtime > 0 else None,
+                    }
+                )
+                seen.add(full_path)
+                if len(candidates) >= max_candidates:
+                    return candidates
+
+        for item in self._refresh_fs_cache():
+            if item.get("kind") != "file":
+                continue
+            ext = str(item.get("extension") or "").lower()
+            if ext not in {".xlsx", ".xls", ".csv"}:
+                continue
+            if file_type and ext != file_type.lower():
+                continue
+            full_path = str(item.get("full_path") or "")
+            if not full_path or full_path in seen:
+                continue
+            hay = f"{item.get('filename') or ''} {item.get('path') or ''}".lower().replace("ё", "е")
+            if not term_hit(hay):
+                continue
+            candidates.append(item)
+            seen.add(full_path)
+            if len(candidates) >= max_candidates:
+                break
+        return candidates
+
+    def _numeric_snippet(self, text: str, tokens: List[str]) -> str:
+        value = str(text or "")
+        matches = list(re.finditer(r"\d{3,}", value))
+        token_set = set(tokens)
+        for idx, match in enumerate(matches):
+            nearby = "".join(
+                item.group(0)
+                for item in matches[max(0, idx - 1) : min(len(matches), idx + 2)]
+            )
+            if match.group(0) in token_set or any(token in nearby for token in token_set):
+                start = max(0, match.start() - 220)
+                end = min(len(value), match.end() + 420)
+                return value[start:end].strip()
+        return value[:600].strip()
+
+    def _result_from_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        score: float,
+        rank_reason: str = "",
+        retrieval_source: str = "",
+    ) -> Dict[str, Any]:
+        result = {
+            "score": round(float(score), 6),
+            "type": payload.get("type", ""),
+            "text": payload.get("text", ""),
+            "filename": payload.get("filename", ""),
+            "path": payload.get("path", ""),
+            "full_path": payload.get("full_path", ""),
+            "size_mb": payload.get("size_mb"),
+            "modified": payload.get("modified"),
+            "created": payload.get("created"),
+            "extension": payload.get("extension", ""),
+            "doc_author": payload.get("doc_author", ""),
+            "doc_last_editor": payload.get("doc_last_editor", ""),
+            "doc_top_editor": payload.get("doc_top_editor", ""),
+            "doc_created": payload.get("doc_created", ""),
+            "chunk_index": payload.get("chunk_index"),
+            "cloud_file_id": payload.get("cloud_file_id", ""),
+            "cloud_version_id": payload.get("cloud_version_id", ""),
+            "cloud_path": payload.get("cloud_path", ""),
+            "storage_key": payload.get("storage_key", ""),
+            "doc_id": payload.get("doc_id", ""),
+            "parent_id": payload.get("parent_id", ""),
+            "section": payload.get("section", ""),
+            "page": payload.get("page"),
+            "sheet": payload.get("sheet", ""),
+            "row_start": payload.get("row_start"),
+            "row_end": payload.get("row_end"),
+            "provenance": payload.get("provenance") or {},
+        }
+        if rank_reason:
+            result["rank_reason"] = rank_reason
+        if retrieval_source:
+            result["retrieval_source"] = retrieval_source
+        return self._repair_result_display_fields(result)
+
+    def _repair_result_display_fields(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        repaired = dict(item)
+        for key in ("filename", "path"):
+            value = str(repaired.get(key) or "")
+            fixed = repair_mojibake_text(value)
+            if fixed != value:
+                repaired[key] = fixed
+        text = str(repaired.get("text") or "")
+        fixed_text = repair_mojibake_text(text)
+        if fixed_text != text:
+            repaired["text"] = fixed_text
+        return repaired
 
     def _lexical_catalog_search(
         self,

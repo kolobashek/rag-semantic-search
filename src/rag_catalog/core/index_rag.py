@@ -51,6 +51,7 @@ from .extractors import (
     extract_text,
     ocr_pdf,
 )
+from .exact_tokens import add_numeric_tokens
 from .index_state_db import IndexStateDB
 from .indexer_control import read_indexer_control
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
@@ -1089,6 +1090,7 @@ class RAGIndexer:
             **base_provenance,
             **(payload_extra or {}),
         }
+        add_numeric_tokens(meta_payload, meta_text, filepath.name, str(relative_path))
 
         clean_chunks = [self._strip_provenance_markers(chunk) or chunk for chunk in chunks]
         texts = [meta_text, *clean_chunks]
@@ -1098,8 +1100,7 @@ class RAGIndexer:
             chunk = str(item.get("text") or "")
             clean_chunk = clean_chunks[idx]
             block = item.get("block")
-            payloads.append(
-                {
+            chunk_payload = {
                     "type": f"{file_type}_content",
                     "payload_schema_version": payload_schema_version,
                     "text": clean_chunk,
@@ -1123,7 +1124,8 @@ class RAGIndexer:
                     ),
                     **(payload_extra or {}),
                 }
-            )
+            add_numeric_tokens(chunk_payload, clean_chunk, filepath.name, str(relative_path))
+            payloads.append(chunk_payload)
         vectors = self.embedder.encode(
             texts,
             normalize_embeddings=True,

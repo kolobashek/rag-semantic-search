@@ -347,6 +347,20 @@ def _build_page(initial_screen: str = "search") -> None:
             if state.current_user:
                 ui.button("Выйти", icon="logout", on_click=do_logout, color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
+    def render_safely() -> None:
+        if not _client_alive():
+            return
+        try:
+            render()
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "client this element belongs to has been deleted" in message
+                or "parent element this slot belongs to has been deleted" in message
+            ):
+                return
+            raise
+
     async def run_search(explicit_query: Optional[str] = None) -> None:
         touch_activity()
         raw = explicit_query if explicit_query is not None else state.query
@@ -383,8 +397,7 @@ def _build_page(initial_screen: str = "search") -> None:
         searcher = _ensure_searcher(state)
         if searcher is None or not searcher.connected:
             state.search_error = state.searcher_error or "Нет подключения к Qdrant."
-            if _client_alive():
-                render()
+            render_safely()
             return
 
         llm_enabled = bool(state.cfg.get("llm_enabled"))
@@ -409,7 +422,34 @@ def _build_page(initial_screen: str = "search") -> None:
             state.search_lazy_loading = True
             if not _client_alive():
                 return
-            render()
+            has_numeric_exact = any(
+                str(item.get("retrieval_source") or "") in {"numeric_fs_exact", "numeric_exact"}
+                for item in quick_results
+            )
+            if has_numeric_exact:
+                state.search_lazy_loading = False
+                exact_item = quick_results[0]
+                fname = str(exact_item.get("filename") or exact_item.get("path") or "файле")
+                fragment = re.sub(r"\s+", " ", str(exact_item.get("text") or "")).strip()
+                state.rag_answer_ok = True
+                state.rag_answer_sources = [dict(exact_item)]
+                state.rag_answer_text = (
+                    f"Найдено точное совпадение номера в файле: {fname}."
+                    + (f"\n\nФрагмент: {fragment[:700]}" if fragment else "")
+                )
+                _log_app_event(
+                    state,
+                    "search",
+                    "run_quick",
+                    details={
+                        "query": query,
+                        "results": len(quick_results),
+                        "exact_matches": exact_count,
+                        "numeric_exact": True,
+                    },
+                )
+                render_safely()
+                return
             _log_app_event(
                 state,
                 "search",
@@ -433,8 +473,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     "error": str(exc),
                 },
             )
-            if _client_alive():
-                render()
+            render_safely()
             return
 
         # Ленивая догрузка: сначала, при необходимости, расширяем запрос через LLM.
@@ -514,6 +553,10 @@ def _build_page(initial_screen: str = "search") -> None:
             if not state.results:
                 state.search_error = str(exc)
 
+        if state.search_request_id == request_id:
+            state.search_lazy_loading = False
+            render_safely()
+
         # RAG Q&A — только после полной догрузки
         if llm_enabled and state.results and not state.search_error and state.search_request_id == request_id:
             searcher_for_answer = _ensure_searcher(state)
@@ -521,7 +564,6 @@ def _build_page(initial_screen: str = "search") -> None:
                 state.rag_answer_loading = True
                 if not _client_alive():
                     return
-                render()
                 try:
                     ans = await run.io_bound(
                         searcher_for_answer.answer_documents,
@@ -544,8 +586,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
         if state.search_request_id == request_id:
             state.search_lazy_loading = False
-            if _client_alive():
-                render()
+            render_safely()
 
     async def choose_query(query: str) -> None:
         # Прямой async-обработчик: пресеты больше не зависят от ui.timer и гонок с перерисовкой.

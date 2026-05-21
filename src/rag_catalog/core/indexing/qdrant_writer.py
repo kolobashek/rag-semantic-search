@@ -18,6 +18,7 @@ from qdrant_client.models import (
     Filter,
     FilterSelector,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     VectorParams,
 )
@@ -45,6 +46,7 @@ def ensure_collection(
             create_collection(client, collection_name=collection_name, vector_size=vector_size)
             return True
         logger.info("Коллекция %s уже существует.", collection_name)
+        ensure_payload_indexes(client, collection_name=collection_name)
         return False
 
     create_collection(client, collection_name=collection_name, vector_size=vector_size)
@@ -57,6 +59,22 @@ def create_collection(client: Any, *, collection_name: str, vector_size: int) ->
         collection_name=collection_name,
         vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
     )
+    ensure_payload_indexes(client, collection_name=collection_name)
+
+
+def ensure_payload_indexes(client: Any, *, collection_name: str) -> None:
+    """Best-effort payload indexes for exact filters used by search."""
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="numeric_tokens",
+            field_schema=PayloadSchemaType.KEYWORD,
+            wait=False,
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        if "already exists" not in message and "exists" not in message:
+            logger.debug("Не удалось создать payload index numeric_tokens: %s", exc)
 
 
 def delete_file_vectors(

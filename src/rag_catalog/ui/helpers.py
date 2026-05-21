@@ -27,6 +27,7 @@ from rag_catalog.core.log_history import (
     read_history_tail,
     read_history_tail_lines,
 )
+from rag_catalog.core.exact_tokens import query_numeric_tokens
 from rag_catalog.core.rag_core import RAGSearcher
 
 from .state import (
@@ -773,6 +774,21 @@ def _run_quick_name_search(
     limit: int,
     file_type: Optional[str],
 ) -> List[Dict[str, Any]]:
+    exact: List[Dict[str, Any]] = []
+    numeric_tokens = [token for token in query_numeric_tokens(query) if len(token) >= 5]
+    if numeric_tokens:
+        try:
+            exact = _normalize_search_results(
+                searcher._spreadsheet_numeric_exact_scan(  # noqa: SLF001
+                    query=query,
+                    tokens=numeric_tokens,
+                    limit=limit,
+                    file_type=file_type,
+                )
+            )
+        except Exception:
+            exact = []
+
     quick = _normalize_search_results(
         searcher._lexical_catalog_search(  # noqa: SLF001
             query=query,
@@ -793,7 +809,7 @@ def _run_quick_name_search(
         return (exact_name, exact_path, score, -len(path))
 
     quick.sort(key=sort_key, reverse=True)
-    return quick[:limit]
+    return _merge_search_results(exact, quick, limit=limit)
 
 
 def _count_exact_name_matches(query: str, results: List[Dict[str, Any]]) -> int:
@@ -802,6 +818,9 @@ def _count_exact_name_matches(query: str, results: List[Dict[str, Any]]) -> int:
         return 0
     count = 0
     for item in results:
+        if str(item.get("retrieval_source") or "") in {"numeric_fs_exact", "numeric_exact"}:
+            count += 1
+            continue
         name = str(item.get("filename") or "").lower().replace("ё", "е")
         path = str(item.get("path") or "").lower().replace("ё", "е")
         if needle in name or needle in path:

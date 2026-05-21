@@ -67,6 +67,16 @@ class _FakeQdrant:
         return SimpleNamespace(points=[])
 
 
+class _FakeQdrantScroll:
+    def __init__(self, payloads):
+        self.payloads = payloads
+        self.last_kwargs = {}
+
+    def scroll(self, **kwargs):
+        self.last_kwargs = kwargs
+        return [SimpleNamespace(payload=payload) for payload in self.payloads], None
+
+
 class _FakeReranker:
     def predict(self, pairs):
         return [10.0 if "target" in text else 1.0 for _query, text in pairs]
@@ -266,6 +276,33 @@ def test_bm25_catalog_search_returns_metadata_channel(tmp_path: Path) -> None:
     assert out[0]["filename"] == exact.name
     assert out[0]["type"] == "file_metadata"
     assert out[0]["retrieval_source"] == "bm25"
+
+
+def test_numeric_exact_search_uses_payload_tokens() -> None:
+    s = _make_searcher(connected=True)
+    s.qdrant = _FakeQdrantScroll([
+        {
+            "type": "xlsx_content",
+            "filename": "тс полный список.xlsx",
+            "path": "тс полный список.xlsx",
+            "full_path": r"O:\Обмен\тс полный список.xlsx",
+            "extension": ".xlsx",
+            "text": "HONDA | СТС 9941�210904",
+            "numeric_tokens": ["9941", "210904", "9941210904"],
+        }
+    ])
+
+    out = s._numeric_exact_search(
+        query="стс 9941 210904",
+        limit=5,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert out
+    assert out[0]["filename"] == "тс полный список.xlsx"
+    assert out[0]["score"] > 0.99
+    assert out[0]["retrieval_source"] == "numeric_exact"
 
 
 def test_rerank_results_reorders_top_candidates_with_cross_encoder_scores() -> None:

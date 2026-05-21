@@ -15,6 +15,7 @@ from qdrant_client.models import PointStruct
 from tqdm import tqdm
 
 from ..extractors import ExtractedDocument, extract_doc_meta
+from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
 from .qdrant_writer import upsert_points
 
 
@@ -125,7 +126,8 @@ class IndexStageRunner:
                     for info in zf.infolist():
                         if info.is_dir():
                             continue
-                        member = info.filename.replace("\\", "/").lstrip("/")
+                        archive_member = info.filename.replace("\\", "/").lstrip("/")
+                        member = repair_zip_member_name(archive_member)
                         ext = Path(member).suffix.lower()
                         if ext not in self._supported_extensions or ext == ".zip":
                             continue
@@ -147,7 +149,8 @@ class IndexStageRunner:
                                 "size_bytes": int(info.file_size),
                                 "sort_mtime": float(archive_mtime),
                                 "archive_path": filepath,
-                                "archive_member": member,
+                                "archive_member": archive_member,
+                                "archive_member_display": member,
                                 "archive_category": _zip_member_category(ext, int(info.file_size)),
                             }
                         )
@@ -422,7 +425,7 @@ class IndexStageRunner:
                             reader_fn = _doc_fn or _fn
                             if item.get("archive_path") and item.get("archive_member"):
                                 with tempfile.TemporaryDirectory(prefix="rag_zip_") as tmp:
-                                    temp_path = Path(tmp) / Path(str(item["archive_member"])).name
+                                    temp_path = Path(tmp) / Path(str(item.get("archive_member_display") or item["archive_member"])).name
                                     with ZipFile(Path(item["archive_path"]), "r") as zf:
                                         temp_path.write_bytes(zf.read(str(item["archive_member"])))
                                     _buf[0] = reader_fn(temp_path)
@@ -490,7 +493,7 @@ class IndexStageRunner:
             logical_path_text = relative_path.as_posix()
             if item.get("archive_path") and item.get("archive_member"):
                 with tempfile.TemporaryDirectory(prefix="rag_zip_meta_") as tmp:
-                    temp_path = Path(tmp) / Path(str(item["archive_member"])).name
+                    temp_path = Path(tmp) / Path(str(item.get("archive_member_display") or item["archive_member"])).name
                     with ZipFile(Path(item["archive_path"]), "r") as zf:
                         temp_path.write_bytes(zf.read(str(item["archive_member"])))
                     doc_meta = extract_doc_meta(temp_path)
@@ -528,8 +531,10 @@ class IndexStageRunner:
                     {
                         "archive_path": str(item["archive_path"]),
                         "archive_member": str(item["archive_member"]),
+                        "archive_member_display": str(item.get("archive_member_display") or item["archive_member"]),
                     }
                 )
+            add_numeric_tokens(meta_payload, meta_text, relative_path.name, logical_path_text)
             base_provenance = indexer._base_provenance(
                 filepath=Path(file_key),
                 relative_path=relative_path,
@@ -542,8 +547,7 @@ class IndexStageRunner:
             for idx, item in enumerate(chunk_items):
                 chunk = str(item.get("text") or "")
                 clean_chunk = indexer._strip_provenance_markers(chunk) or chunk
-                content_payloads.append(
-                    {
+                chunk_payload = {
                     "type": f"{file_type}_content",
                     "payload_schema_version": int(getattr(indexer, "payload_schema_version", 1) or 1),
                     "text": clean_chunk,
@@ -564,8 +568,9 @@ class IndexStageRunner:
                         doc_id=doc_id,
                         block=item.get("block"),
                     ),
-                    }
-                )
+                }
+                add_numeric_tokens(chunk_payload, clean_chunk, relative_path.name, logical_path_text)
+                content_payloads.append(chunk_payload)
             return {
                 "filepath": source_path,
                 "source_path": source_path,
