@@ -15,6 +15,27 @@ from .models import CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
 from .registry import CloudDriveRegistryDB
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
 
+INDEXABLE_EXTENSIONS = {
+    ".doc",
+    ".docx",
+    ".xlsx",
+    ".xls",
+    ".pdf",
+    ".pptx",
+    ".rtf",
+    ".txt",
+    ".csv",
+    ".zip",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".webp",
+}
+
 
 class CloudDriveJobCancelled(RuntimeError):
     pass
@@ -237,8 +258,17 @@ class CloudDriveService:
         missing: list[dict[str, Any]] = []
         stale: list[dict[str, Any]] = []
         errored: list[dict[str, Any]] = []
+        unsupported_missing: list[dict[str, Any]] = []
+        indexable_missing: list[dict[str, Any]] = []
+        indexable_stale: list[dict[str, Any]] = []
+        indexable_errored: list[dict[str, Any]] = []
         indexed_current = 0
+        indexable_total = 0
+        indexable_indexed_current = 0
         for file_row in files:
+            is_indexable = self._is_indexable_registry_file(file_row)
+            if is_indexable:
+                indexable_total += 1
             file_id = str(file_row.get("id") or "")
             current_version = str(file_row.get("current_version_id") or "")
             rows = indexed_by_file.get(file_id) or []
@@ -254,38 +284,72 @@ class CloudDriveService:
                 legacy_path_match = best is not None
             if best is None:
                 missing.append(file_row)
+                if is_indexable:
+                    indexable_missing.append(file_row)
+                else:
+                    unsupported_missing.append(file_row)
                 continue
             if str(best.get("status") or "") == "error":
-                errored.append({**file_row, "last_error": str(best.get("last_error") or "")})
+                error_row = {**file_row, "last_error": str(best.get("last_error") or "")}
+                errored.append(error_row)
+                if is_indexable:
+                    indexable_errored.append(error_row)
                 continue
             if not current_rows and not legacy_path_match:
-                stale.append(
-                    {
-                        **file_row,
-                        "indexed_version_id": str(best.get("cloud_version_id") or ""),
-                        "indexed_path": str(best.get("full_path") or ""),
-                    }
-                )
+                stale_row = {
+                    **file_row,
+                    "indexed_version_id": str(best.get("cloud_version_id") or ""),
+                    "indexed_path": str(best.get("full_path") or ""),
+                }
+                stale.append(stale_row)
+                if is_indexable:
+                    indexable_stale.append(stale_row)
                 continue
             indexed_current += 1
+            if is_indexable:
+                indexable_indexed_current += 1
 
         total = len(files)
         coverage_pct = round((indexed_current / total) * 100, 2) if total else 100.0
+        indexable_coverage_pct = (
+            round((indexable_indexed_current / indexable_total) * 100, 2)
+            if indexable_total
+            else 100.0
+        )
         return {
             "index_state_db_path": str(index_path),
             "index_available": index_available,
             "registry_files": total,
             "indexed_current": indexed_current,
+            "indexable_registry_files": indexable_total,
+            "indexable_indexed_current": indexable_indexed_current,
+            "indexable_missing": len(indexable_missing),
+            "indexable_stale": len(indexable_stale),
+            "indexable_errored": len(indexable_errored),
+            "unsupported_missing": len(unsupported_missing),
             "missing": len(missing),
             "stale": len(stale),
             "errored": len(errored),
             "coverage_pct": coverage_pct,
-            "ok": index_available and not missing and not stale and not errored,
+            "indexable_coverage_pct": indexable_coverage_pct,
+            "ok": (
+                index_available
+                and not indexable_missing
+                and not indexable_stale
+                and not indexable_errored
+            ),
             "sample_limit": sample_size,
             "missing_examples": missing[:sample_size],
+            "indexable_missing_examples": indexable_missing[:sample_size],
+            "unsupported_missing_examples": unsupported_missing[:sample_size],
             "stale_examples": stale[:sample_size],
             "error_examples": errored[:sample_size],
         }
+
+    @staticmethod
+    def _is_indexable_registry_file(file_row: dict[str, Any]) -> bool:
+        ext = Path(str(file_row.get("path") or file_row.get("name") or "")).suffix.lower()
+        return ext in INDEXABLE_EXTENSIONS
 
     @staticmethod
     def _index_coverage_path_key(path: str) -> str:

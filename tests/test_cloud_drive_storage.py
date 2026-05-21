@@ -255,6 +255,16 @@ def test_cloud_drive_index_coverage_reports_missing_stale_and_errors(tmp_path: P
         checksum="dddd",
         source_path="",
     )
+    registry.upsert_file(
+        folder_id=root.id,
+        path="ignored.dll",
+        name="ignored.dll",
+        storage_key="objects/sha256/ee/ee/ignored.dll",
+        mime_type="application/octet-stream",
+        size_bytes=1,
+        checksum="eeee",
+        source_path="",
+    )
     state_db_path = tmp_path / "index_state.db"
     state_db = IndexStateDB(str(state_db_path))
     state_db.upsert_many(
@@ -290,11 +300,19 @@ def test_cloud_drive_index_coverage_reports_missing_stale_and_errors(tmp_path: P
     coverage = service.get_index_coverage(index_state_db_path=str(state_db_path), sample_limit=10)
 
     assert coverage["ok"] is False
-    assert coverage["registry_files"] == 4
+    assert coverage["registry_files"] == 5
     assert coverage["indexed_current"] == 1
+    assert coverage["indexable_registry_files"] == 4
+    assert coverage["indexable_indexed_current"] == 1
+    assert coverage["indexable_missing"] == 1
+    assert coverage["indexable_stale"] == 1
+    assert coverage["indexable_errored"] == 1
+    assert coverage["unsupported_missing"] == 1
     assert coverage["stale"] == 1
     assert coverage["errored"] == 1
-    assert coverage["missing"] == 1
+    assert coverage["missing"] == 2
+    assert coverage["indexable_missing_examples"][0]["path"] == "missing.txt"
+    assert coverage["unsupported_missing_examples"][0]["path"] == "ignored.dll"
     assert coverage["stale_examples"][0]["path"] == "stale.txt"
     assert coverage["error_examples"][0]["last_error"] == "boom"
 
@@ -330,4 +348,6 @@ def test_cloud_drive_index_coverage_accepts_legacy_source_path_entries(tmp_path:
     assert coverage["ok"] is True
     assert coverage["registry_files"] == 1
     assert coverage["indexed_current"] == 1
+    assert coverage["indexable_registry_files"] == 1
+    assert coverage["indexable_indexed_current"] == 1
     assert coverage["missing"] == 0
