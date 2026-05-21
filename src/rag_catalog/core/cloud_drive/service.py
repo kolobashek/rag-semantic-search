@@ -1153,15 +1153,20 @@ class CloudDriveService:
 
     def run_pending_reindex_jobs(self, *, index_config: Optional[Dict[str, object]] = None, limit: int = 5) -> list[CloudDriveJob]:
         completed: list[CloudDriveJob] = []
-        for _ in range(max(1, int(limit or 1))):
-            job = self.registry.claim_pending_job(
-                job_types=['reindex', 'cleanup'],
-                worker_id='nicegui-cloud-worker',
-                lease_seconds=900,
-            )
-            if job is None:
-                break
-            completed.append(self.run_reindex_job(job.id, index_config=index_config))
+        previous_shared = getattr(self, "_shared_reindex_indexer", None)
+        self._shared_reindex_indexer = self._build_shared_reindex_indexer(index_config or {})
+        try:
+            for _ in range(max(1, int(limit or 1))):
+                job = self.registry.claim_pending_job(
+                    job_types=['reindex', 'cleanup'],
+                    worker_id='nicegui-cloud-worker',
+                    lease_seconds=900,
+                )
+                if job is None:
+                    break
+                completed.append(self.run_reindex_job(job.id, index_config=index_config))
+        finally:
+            self._shared_reindex_indexer = previous_shared
         return completed
 
     def run_bootstrap_job(self, job_id: str) -> CloudDriveStats:
@@ -1523,9 +1528,45 @@ class CloudDriveService:
                 logical_path = None
             except Exception:
                 index_root = target_path.parent
+        shared_indexer = getattr(self, "_shared_reindex_indexer", None)
+        indexer = (
+            shared_indexer
+            if shared_indexer is not None and self._indexer_root_matches(shared_indexer, index_root)
+            else self._build_reindex_indexer(index_config, index_root)
+        )
+        before = int(indexer.point_count)
+        payload_extra = self._cloud_payload(file_row)
+        indexer._delete_file_vectors(target_path, payload_match={'cloud_file_id': file_row.id})
+        indexer.process_file(
+            target_path,
+            logical_path=logical_path,
+            state_key=self._cloud_state_key(file_row),
+            payload_extra=payload_extra,
+            fingerprint_override=str(file_row.checksum or ''),
+            delete_payload_match={'cloud_file_id': file_row.id},
+        )
+        return True, max(0, int(indexer.point_count) - before)
+
+    def _build_shared_reindex_indexer(self, index_config: Dict[str, object]):
+        catalog_root = Path(str(index_config.get('catalog_path') or ''))
+        if not catalog_root.exists():
+            return None
+        if not str(index_config.get('qdrant_db_path') or '').strip() and not str(index_config.get('qdrant_url') or '').strip():
+            return None
+        return self._build_reindex_indexer(index_config, catalog_root)
+
+    @staticmethod
+    def _indexer_root_matches(indexer, index_root: Path) -> bool:  # noqa: ANN001
+        try:
+            return Path(indexer.catalog_path).resolve() == index_root.resolve()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _build_reindex_indexer(index_config: Dict[str, object], index_root: Path):
         from rag_catalog.core.index_rag import RAGIndexer
 
-        indexer = RAGIndexer(
+        return RAGIndexer(
             catalog_path=str(index_root),
             qdrant_db_path=str(index_config.get('qdrant_db_path') or ''),
             embedding_model=str(index_config.get('embedding_model') or 'sentence-transformers/all-MiniLM-L6-v2'),
@@ -1551,18 +1592,6 @@ class CloudDriveService:
             qdrant_timeout_sec=int(index_config.get('qdrant_timeout_sec') or 60),
             ocr_max_image_pages=int(index_config.get('ocr_max_image_pages') or 50),
         )
-        before = int(indexer.point_count)
-        payload_extra = self._cloud_payload(file_row)
-        indexer._delete_file_vectors(target_path, payload_match={'cloud_file_id': file_row.id})
-        indexer.process_file(
-            target_path,
-            logical_path=logical_path,
-            state_key=self._cloud_state_key(file_row),
-            payload_extra=payload_extra,
-            fingerprint_override=str(file_row.checksum or ''),
-            delete_payload_match={'cloud_file_id': file_row.id},
-        )
-        return True, max(0, int(indexer.point_count) - before)
 
     def _delete_index_vectors(self, *, index_config: Dict[str, object], payload_match: Dict[str, Any]) -> int:
         if not payload_match:
