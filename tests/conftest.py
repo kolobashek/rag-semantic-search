@@ -50,7 +50,7 @@ if "qdrant_client" not in sys.modules:
         # Минимальные stubs для того, чтобы index_rag.py смог импортироваться
         for _cls in (
             "QdrantClient", "Distance", "FieldCondition", "Filter", "FilterSelector",
-            "MatchValue", "PointStruct", "VectorParams",
+            "MatchAny", "MatchValue", "PointStruct", "VectorParams",
         ):
             setattr(_qc, _cls, MagicMock())
             setattr(_qc_models, _cls, MagicMock())
