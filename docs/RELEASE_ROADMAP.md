@@ -14,6 +14,20 @@
 - ops: launcher, Docker compose, CI, README и config examples воспроизводимо поднимают стек;
 - tests: CI green, focused smoke для launcher/docker/search/cloud/index проходит.
 
+### Current RC Status 2026-05-21
+
+Статус: not ready.
+
+- DONE 2026-05-21: `main` синхронизирован с `origin/main`; рабочее дерево после release-stage коммитов чистое.
+- DONE 2026-05-21: `python -m ruff check src tests scripts` green.
+- DONE 2026-05-21: `python -m pytest -q` green: 465 passed, 3 warnings.
+- DONE 2026-05-21: launcher smoke green: web, Qdrant и Telegram bot подняты через `python -m rag_catalog.cli.launcher restart`.
+- DONE 2026-05-21: Cloud Drive storage health live smoke green: S3 backend writable (`http://127.0.0.1:9000/rag/`).
+- BLOCKED 2026-05-21: Cloud Drive index coverage не проходит release gate: 69 119 / 71 362 indexable files current-indexed, 2 243 indexable files missing, indexable coverage 96.86%.
+- BLOCKED 2026-05-21: Cloud Drive jobs API показывает failed bootstrap jobs с `server_restart_recovery`; нужен admin recovery pass и повторная проверка после repair/retry.
+- BLOCKED 2026-05-21: UI smoke screenshots подтверждены только для 1280 px; 480/900 px ещё не закрыты.
+- BLOCKED 2026-05-21: Docker compose config проходит, но полноценный compose smoke не выполнен из-за занятых локальных портов работающим стеком.
+
 ## P0 До Релиза
 
 ### 1. Security Hardening
@@ -44,6 +58,7 @@ Owner: Codex.
 - DONE 2026-05-14: baseline eval снят на 32 запросах (`runtime/eval/baseline.*` локально): Recall@10=0.875, zero-result=0.000, steady-state p50=472 ms, p95=919 ms; cold-start первого запроса ~20 сек из-за загрузки модели.
 - DONE 2026-05-14: release gate rerun после index/cloud fixes: `pytest -q` = 375 passed; `search_eval` latest = Recall@10 0.875, zero-result 0.000, p50 790 ms, p95 1684 ms. Один cold/slow folder query 27.8s остаётся performance-риск для P1.
 - DONE 2026-05-14: NiceGUI теперь переиспользует общий `RAGSearcher` между сессиями и запускает фоновый warmup embedder + name/path cache при старте (`search_warmup_enabled=true`).
+- DONE 2026-05-21: release_v2 final eval rerun с warmup: Recall@10=0.890625, MRR=0.953125, zero-result=0.000, p50=979 ms, p95=2527 ms при `--fail-under-recall 0.875`.
 
 Done criteria:
 
@@ -60,6 +75,7 @@ Owner: Codex.
 - Запускать `scripts/search_eval.py` в CI как optional/manual gate сначала, затем как required для retrieval changes.
 - DONE 2026-05-14: eval report включает Recall/MRR/nDCG, zero-result rate, latency p50/p95; CLI умеет JSON и Markdown artifacts.
 - DONE 2026-05-14: `python scripts/search_eval.py --golden eval/search_golden.json --limit 10 --output runtime/eval/latest.json --markdown-output runtime/eval/latest.md` проходит локально на текущем индексе.
+- DONE 2026-05-21: `scripts/search_eval.py` прогревает embedder/filesystem cache по умолчанию; добавлены `--no-warmup` и `--warmup-query`, чтобы release latency не мерилась как cold-start модели.
 
 Done criteria:
 
@@ -106,6 +122,8 @@ Codex:
 - DONE 2026-05-21: registry-backed ACL/RBAC включён поверх существующей `cloud_permissions`: folder/file/path grants, viewer/editor/admin levels, наследование по folder/path, enforcement в Cloud Drive API и фильтрация Cloud Drive search results перед RAG.
 - DONE 2026-05-21: добавлена диагностика покрытия индекса `GET /api/cloud-drive/index-coverage`: registry files vs `index_state.db`, missing/stale/error examples, current-version coverage.
 - DONE 2026-05-21: Cloud Drive jobs переведены на durable leases: `lease_owner`, `lease_until`, claim pending jobs, recovery expired/stuck jobs, admin endpoint `POST /api/cloud-drive/jobs/recover-stale`.
+- DONE 2026-05-21: index coverage диагностика разделяет total registry coverage и indexable coverage, учитывает legacy `source_path` state entries и не считает временные Office `~$*` файлы release-blocker.
+- BLOCKED 2026-05-21: live Cloud Drive coverage показывает 2 243 missing indexable files; нужен repair/reindex по scope до release.
 
 Claude:
 
@@ -168,16 +186,16 @@ Done criteria:
 
 Owner: Codex.
 
-- Усилить verifier: числа, даты, суммы, веса, conflicting sources.
-- При слабом evidence выводить “не нашёл подтверждения”, а не уверенный ответ.
-- Добавить source provenance: файл, страница/лист/строка, chunk id.
-- В Telegram явно отделить search result от generated answer.
+- DONE 2026-05-21: verifier проверяет числа, даты, суммы, веса, проценты и conflicting facts.
+- DONE 2026-05-21: при слабом evidence возвращается безопасный fallback вместо unsupported generated answer.
+- DONE 2026-05-21: source provenance дополнен `source_id`/citation labels для RAG sources.
+- DONE 2026-05-21: Telegram явно отделяет подтверждённый ответ от неподтверждённого fallback.
 
 Done criteria:
 
-- тесты на unsupported/conflicting facts;
+- DONE 2026-05-21: тесты на unsupported/conflicting facts.
 - UI показывает sources рядом с answer;
-- Telegram не выдаёт unsupported facts как факт.
+- DONE 2026-05-21: Telegram не выдаёт unsupported facts как факт.
 
 ### 8. Documentation And Config Freeze
 
