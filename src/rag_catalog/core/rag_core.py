@@ -1210,11 +1210,15 @@ class RAGSearcher:
         verification = self._verify_rag_answer(answer, sources)
         ok = bool(answer and "нет данных для ответа" not in answer.lower() and verification["ok"])
         error = "" if ok else str(verification.get("error") or "weak_answer")
-        self._log_rag_answer(q, answer, ok, started, error)
+        safe_answer = answer or "Модель не дала ответа."
+        if not ok:
+            verification["model_answer"] = safe_answer
+            safe_answer = self._grounded_fallback_answer(verification)
+        self._log_rag_answer(q, safe_answer, ok, started, error)
         return {
             "ok": ok,
             "question": q,
-            "answer": answer or "Модель не дала ответа.",
+            "answer": safe_answer,
             "sources": sources,
             "results": results,
             "duration_ms": int((time.perf_counter() - started) * 1000),
@@ -1233,8 +1237,11 @@ class RAGSearcher:
             if not key or key in seen:
                 continue
             seen.add(key)
+            source_number = len(sources) + 1
             sources.append(
                 {
+                    "source_id": f"S{source_number}",
+                    "citation": self._source_citation(item, source_number),
                     "filename": item.get("filename", ""),
                     "path": item.get("path", ""),
                     "full_path": item.get("full_path", ""),
@@ -1278,6 +1285,7 @@ class RAGSearcher:
         source_text = "\n".join(str(src.get("excerpt") or "") for src in sources)
         source_facts = self._extract_verifiable_facts(source_text)
         missing = sorted(answer_facts - source_facts)
+        conflicts = self._conflicting_answer_facts(answer_facts, source_facts)
         if missing:
             return {
                 "ok": False,
@@ -1285,16 +1293,98 @@ class RAGSearcher:
                 "missing_facts": missing,
                 "error": "unsupported_facts",
             }
+        if conflicts:
+            return {
+                "ok": False,
+                "checked_facts": sorted(answer_facts),
+                "missing_facts": [],
+                "conflicting_facts": conflicts,
+                "error": "conflicting_facts",
+            }
         return {"ok": True, "checked_facts": sorted(answer_facts), "missing_facts": []}
 
     def _extract_verifiable_facts(self, text: str) -> set[str]:
         facts: set[str] = set()
-        normalized = str(text or "").lower().replace(",", ".")
-        for match in re.finditer(r"\b\d{1,4}(?:\.\d+)?\b", normalized):
-            facts.add(match.group(0).rstrip("."))
+        normalized = re.sub(r"\[(?:s|источник)\s*\d+\]", "", str(text or "").lower(), flags=re.IGNORECASE)
+        normalized = normalized.replace(",", ".")
         for match in re.finditer(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", normalized):
-            facts.add(match.group(0).replace("/", ".").replace("-", "."))
+            facts.add(f"date:{match.group(0).replace('/', '.').replace('-', '.')}")
+        for match in re.finditer(
+            r"\b(\d[\d\s.]{0,15})\s*(кг|килограмм(?:а|ов)?|т|тн|тонн(?:а|ы|)?|руб(?:\.|лей|ля|ль)?|₽|%)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            value = self._normalize_fact_number(match.group(1))
+            unit = self._normalize_fact_unit(match.group(2))
+            if value:
+                facts.add(f"{unit}:{value}")
+        for match in re.finditer(r"\b\d{1,4}(?:\.\d+)?\b", normalized):
+            facts.add(f"num:{match.group(0).rstrip('.')}")
         return facts
+
+    def _normalize_fact_number(self, value: str) -> str:
+        clean = re.sub(r"\s+", "", str(value or "").strip()).rstrip(".")
+        if not clean:
+            return ""
+        try:
+            as_float = float(clean)
+        except ValueError:
+            return clean
+        if as_float.is_integer():
+            return str(int(as_float))
+        return f"{as_float:.4f}".rstrip("0").rstrip(".")
+
+    def _normalize_fact_unit(self, unit: str) -> str:
+        clean = str(unit or "").lower().strip().rstrip(".")
+        if clean in {"кг", "килограмм", "килограмма", "килограммов"}:
+            return "weight_kg"
+        if clean in {"т", "тн", "тонн", "тонна", "тонны"}:
+            return "weight_t"
+        if clean in {"₽", "руб", "рублей", "рубля", "рубль"}:
+            return "money_rub"
+        if clean == "%":
+            return "percent"
+        return clean or "num"
+
+    def _conflicting_answer_facts(self, answer_facts: set[str], source_facts: set[str]) -> Dict[str, List[str]]:
+        conflicts: Dict[str, List[str]] = {}
+        for fact in answer_facts:
+            if ":" not in fact:
+                continue
+            kind, value = fact.split(":", 1)
+            if kind in {"num", "date"}:
+                continue
+            source_values = sorted({src.split(":", 1)[1] for src in source_facts if src.startswith(f"{kind}:")})
+            if value in source_values and len(source_values) > 1:
+                conflicts[kind] = source_values
+        return conflicts
+
+    def _grounded_fallback_answer(self, verification: Dict[str, Any]) -> str:
+        if verification.get("conflicting_facts"):
+            return "Нашёл противоречивые данные в источниках. Не могу дать подтверждённый ответ без ручной проверки."
+        return "Не нашёл подтверждения этому ответу в найденных фрагментах документов."
+
+    def _source_citation(self, item: Dict[str, Any], source_number: int) -> str:
+        label = f"S{source_number}"
+        filename = str(item.get("filename") or item.get("path") or "источник")
+        parts = [f"[{label}] {filename}"]
+        page = item.get("page")
+        if page not in (None, ""):
+            parts.append(f"стр. {page}")
+        sheet = str(item.get("sheet") or "").strip()
+        if sheet:
+            parts.append(f"лист {sheet}")
+        row_start = item.get("row_start")
+        row_end = item.get("row_end")
+        if row_start not in (None, ""):
+            row_label = f"строка {row_start}"
+            if row_end not in (None, "") and row_end != row_start:
+                row_label += f"-{row_end}"
+            parts.append(row_label)
+        chunk_index = item.get("chunk_index")
+        if chunk_index not in (None, ""):
+            parts.append(f"chunk {chunk_index}")
+        return " · ".join(parts)
 
     def answer_fact_question(self, question: str, limit: int = 20) -> Dict[str, Any]:
         """

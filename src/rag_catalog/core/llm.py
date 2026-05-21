@@ -97,7 +97,8 @@ _RAG_SYSTEM = (
     "Ты — корпоративный ассистент. Отвечай строго на основе предоставленных фрагментов документов. "
     "Если ответа в документах нет — скажи об этом честно. "
     "Отвечай на русском языке, кратко и по делу. "
-    "В конце укажи источники (имена файлов) в формате «Источники: файл1, файл2»."
+    "Для фактов с числами, датами, суммами и весами опирайся только на явно видимые значения. "
+    "В конце укажи источники в формате «Источники: [S1], [S2]»."
 )
 
 _RAG_PROMPT_TMPL = """\
@@ -144,7 +145,16 @@ def rag_answer(
             continue
         seen_files.add(fname)
         excerpt = text[:max_chars_per_chunk]
-        context_parts.append(f"[{fname}]\n{excerpt}")
+        source_id = f"S{len(context_parts) + 1}"
+        location_bits = []
+        if r.get("page") not in (None, ""):
+            location_bits.append(f"стр. {r.get('page')}")
+        if str(r.get("sheet") or "").strip():
+            location_bits.append(f"лист {r.get('sheet')}")
+        if r.get("chunk_index") not in (None, ""):
+            location_bits.append(f"chunk {r.get('chunk_index')}")
+        location = " · " + " · ".join(location_bits) if location_bits else ""
+        context_parts.append(f"[{source_id}] {fname}{location}\n{excerpt}")
         if len(context_parts) >= top_k:
             break
 

@@ -682,7 +682,8 @@ def _looks_like_question(text: str) -> bool:
 
 def format_rag_answer(result: Dict[str, Any]) -> str:
     answer = _clean_tg_text(str(result.get("answer") or "Модель не дала ответа."), 2500)
-    lines = [answer]
+    prefix = "Ответ по документам:" if result.get("ok") else "Ответ не подтверждён:"
+    lines = [prefix, answer]
     sources = result.get("sources") or []
     if sources:
         lines.append("")
@@ -690,7 +691,9 @@ def format_rag_answer(result: Dict[str, Any]) -> str:
         for idx, src in enumerate(sources[:5], 1):
             filename = _clean_tg_text(str(src.get("filename") or src.get("path") or "источник"), 120)
             path = _clean_tg_text(str(src.get("full_path") or src.get("path") or ""), 180)
-            lines.append(f"{idx}. {filename}" + (f" — {path}" if path else ""))
+            citation = _clean_tg_text(str(src.get("citation") or ""), 220)
+            label = citation or f"{idx}. {filename}" + (f" — {path}" if path else "")
+            lines.append(label)
     return "\n".join(lines)
 
 

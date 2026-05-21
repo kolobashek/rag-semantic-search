@@ -335,6 +335,55 @@ def test_term_matches_latin_o_and_zero_vehicle_codes() -> None:
     assert s._term_matches("volkswagen touareg o50", "050")
 
 
+def test_verify_rag_answer_rejects_unsupported_numbers() -> None:
+    s = _make_searcher(connected=True)
+    sources = [{"excerpt": "В документе указана масса 3200 кг."}]
+
+    verification = s._verify_rag_answer("Масса составляет 3400 кг.", sources)
+
+    assert verification["ok"] is False
+    assert verification["error"] == "unsupported_facts"
+    assert "weight_kg:3400" in verification["missing_facts"]
+
+
+def test_verify_rag_answer_rejects_conflicting_weight_sources() -> None:
+    s = _make_searcher(connected=True)
+    sources = [{"excerpt": "ПСМ: масса 3400 кг."}, {"excerpt": "СТС: масса 3600 кг."}]
+
+    verification = s._verify_rag_answer("Масса составляет 3400 кг.", sources)
+
+    assert verification["ok"] is False
+    assert verification["error"] == "conflicting_facts"
+    assert verification["conflicting_facts"]["weight_kg"] == ["3400", "3600"]
+
+
+def test_answer_documents_replaces_unsupported_model_answer(monkeypatch) -> None:
+    from rag_catalog.core import llm
+
+    s = _make_searcher(connected=True)
+    s.config = {"llm_answer_top_k": 2, "llm_rag_model": "fake", "ollama_url": "http://ollama.test"}
+    s.search = lambda *args, **kwargs: [  # type: ignore[method-assign]
+        {
+            "filename": "psm.pdf",
+            "path": "Документы/psm.pdf",
+            "full_path": r"O:\Документы\psm.pdf",
+            "text": "В документе указана масса 3200 кг.",
+            "score": 0.9,
+            "page": 4,
+            "chunk_index": 2,
+        }
+    ]
+    monkeypatch.setattr(llm, "rag_answer", lambda *args, **kwargs: "Масса составляет 3400 кг.")
+
+    result = s.answer_documents("Сколько весит техника?", source="test")
+
+    assert result["ok"] is False
+    assert result["answer"] == "Не нашёл подтверждения этому ответу в найденных фрагментах документов."
+    assert result["verification"]["model_answer"] == "Масса составляет 3400 кг."
+    assert result["sources"][0]["source_id"] == "S1"
+    assert "стр. 4" in result["sources"][0]["citation"]
+
+
 def test_merge_ranked_results_applies_feedback_signal() -> None:
     s = _make_searcher(connected=True)
 
@@ -485,7 +534,8 @@ def test_answer_documents_rejects_unsupported_numeric_facts(monkeypatch) -> None
 
     assert out["ok"] is False
     assert out["error"] == "unsupported_facts"
-    assert "999" in out["verification"]["missing_facts"]
+    assert "money_rub:999" in out["verification"]["missing_facts"]
+    assert out["answer"] == "Не нашёл подтверждения этому ответу в найденных фрагментах документов."
 
 
 def test_answer_fact_question_handles_search_error() -> None:

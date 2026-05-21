@@ -138,13 +138,14 @@ def test_process_query_returns_rag_answer_for_question() -> None:
         answer_result={
             "ok": True,
             "answer": "В документах указано, что договор действует до 2026 года.",
-            "sources": [{"filename": "договор.docx", "full_path": r"O:\Обмен\договор.docx"}],
+            "sources": [{"filename": "договор.docx", "full_path": r"O:\Обмен\договор.docx", "citation": "[S1] договор.docx · chunk 2"}],
         },
     )
     out = process_query(s, "когда действует договор?", username="ivan")
+    assert "Ответ по документам:" in out
     assert "действует до 2026" in out
     assert "Источники:" in out
-    assert "договор.docx" in out
+    assert "[S1] договор.docx" in out
 
 
 def test_process_query_no_results() -> None:
