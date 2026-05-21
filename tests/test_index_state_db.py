@@ -83,6 +83,22 @@ def test_state_db_stats_aggregates_by_extension(tmp_path: Path) -> None:
     assert stats["by_ext_size"][".pdf"] == 12
 
 
+def test_state_db_tracks_content_hash_duplicates(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many(
+        [
+            {"full_path": "a.txt", "fingerprint": "1", "mtime": 1.0, "stage": "content", "size_bytes": 1, "extension": ".txt", "content_hash": "same"},
+            {"full_path": "b.txt", "fingerprint": "2", "mtime": 2.0, "stage": "content", "size_bytes": 1, "extension": ".txt", "content_hash": "same"},
+            {"full_path": "c.txt", "fingerprint": "3", "mtime": 3.0, "stage": "content", "size_bytes": 1, "extension": ".txt", "content_hash": "other"},
+        ]
+    )
+
+    assert db.find_by_content_hash("same", exclude_path="b.txt")["full_path"] == "a.txt"
+    stats = db.stats()
+    assert stats["duplicate_groups"] == 1
+    assert stats["duplicate_files"] == 2
+
+
 def test_state_db_validates_embedding_config(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     db.validate_embedding_config(

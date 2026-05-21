@@ -254,8 +254,9 @@ class IndexStageRunner:
         # ── буферы для batch-encode ──────────────────────────────────
         pending_texts: List[str] = []
         pending_payloads: List[Dict[str, Any]] = []
-        # (file_key, fingerprint, mtime, stage, size_bytes, extension)
-        pending_states: List[Tuple[str, str, float, str, int, str]] = []
+        # (file_key, fingerprint, mtime, stage, size_bytes, extension, content_hash)
+        pending_states: List[Tuple[str, str, float, str, int, str, str]] = []
+        seen_content_hashes: Dict[str, str] = {}
 
         def flush() -> None:
             """
@@ -298,12 +299,13 @@ class IndexStageRunner:
                             "stage": file_stage,
                             "size_bytes": size_bytes,
                             "extension": extension,
+                            "content_hash": content_hash,
                         }
-                        for file_key, fingerprint, mtime, file_stage, size_bytes, extension in pending_states
+                        for file_key, fingerprint, mtime, file_stage, size_bytes, extension, content_hash in pending_states
                     ]
                 )
             else:
-                for file_key, fingerprint, mtime, file_stage, size_bytes, extension in pending_states:
+                for file_key, fingerprint, mtime, file_stage, size_bytes, extension, content_hash in pending_states:
                     indexer._upsert_state_entry(
                         {
                             "full_path": file_key,
@@ -312,6 +314,7 @@ class IndexStageRunner:
                             "stage": file_stage,
                             "size_bytes": size_bytes,
                             "extension": extension,
+                            "content_hash": content_hash,
                         }
                     )
             pending_texts.clear()
@@ -464,6 +467,11 @@ class IndexStageRunner:
                 )
 
             chunks = indexer._chunk_text(full_text) if full_text.strip() else []
+            content_hash = indexer._content_hash(full_text)
+            duplicate_of = ""
+            if content_hash and hasattr(indexer, "state_db"):
+                duplicate = indexer.state_db.find_by_content_hash(content_hash, exclude_path=file_key)
+                duplicate_of = str((duplicate or {}).get("full_path") or "")
             if indexer.max_chunks_per_file and len(chunks) > indexer.max_chunks_per_file:
                 self._logger.warning(
                     "Файл %s: %d чанков → обрезано до %d",
@@ -505,6 +513,9 @@ class IndexStageRunner:
                 "path": logical_path_text,
                 "full_path": file_key,
                 "tags": tags,
+                "content_hash": content_hash,
+                "is_duplicate": bool(duplicate_of),
+                "duplicate_of": duplicate_of,
                 **doc_meta,
             }
             if item.get("archive_path") and item.get("archive_member"):
@@ -532,6 +543,9 @@ class IndexStageRunner:
                     "full_path": file_key,
                     "chunk_index": idx,
                     "tags": tags,
+                    "content_hash": content_hash,
+                    "is_duplicate": bool(duplicate_of),
+                    "duplicate_of": duplicate_of,
                     **doc_meta,
                     **base_provenance,
                     **indexer._chunk_provenance(chunk=chunk, chunk_index=idx, doc_id=doc_id),
@@ -551,6 +565,7 @@ class IndexStageRunner:
                 "chunks": chunks,
                 "content_payloads": content_payloads,
                 "has_content": bool(chunks),
+                "content_hash": content_hash,
                 "error": failure_error,
                 "skipped": False,
             }
@@ -592,6 +607,21 @@ class IndexStageRunner:
                     continue
 
                 stage_stats["processed_files"] += 1
+
+                content_hash = str(result.get("content_hash") or "")
+                if content_hash:
+                    duplicate_of = seen_content_hashes.get(content_hash, "")
+                    if not duplicate_of and hasattr(indexer, "state_db"):
+                        duplicate = indexer.state_db.find_by_content_hash(content_hash, exclude_path=str(result["file_key"]))
+                        duplicate_of = str((duplicate or {}).get("full_path") or "")
+                    if duplicate_of:
+                        result["meta_payload"]["is_duplicate"] = True
+                        result["meta_payload"]["duplicate_of"] = duplicate_of
+                        for cpayload in result["content_payloads"]:
+                            cpayload["is_duplicate"] = True
+                            cpayload["duplicate_of"] = duplicate_of
+                    else:
+                        seen_content_hashes[content_hash] = str(result["file_key"])
 
                 # Если файл уже был в индексе — удалить старые векторы
                 # (нужно и при изменении файла, и при апгрейде metadata→content)
@@ -637,6 +667,7 @@ class IndexStageRunner:
                         file_stage,
                         int(result.get("size_bytes") or 0),
                         str(result["meta_payload"].get("extension") or ""),
+                        str(result.get("content_hash") or ""),
                     )
                 )
 

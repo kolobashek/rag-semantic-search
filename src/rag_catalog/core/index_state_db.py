@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _utc_now() -> str:
@@ -100,6 +100,7 @@ class IndexStateDB:
                     "cloud_version_id": "TEXT NOT NULL DEFAULT ''",
                     "cloud_path": "TEXT NOT NULL DEFAULT ''",
                     "storage_key": "TEXT NOT NULL DEFAULT ''",
+                    "content_hash": "TEXT NOT NULL DEFAULT ''",
                 }
                 for name, ddl in optional_columns.items():
                     if name not in existing_cols:
@@ -110,6 +111,8 @@ class IndexStateDB:
                       ON state_entries(cloud_file_id);
                     CREATE INDEX IF NOT EXISTS idx_state_entries_cloud_version
                       ON state_entries(cloud_version_id);
+                    CREATE INDEX IF NOT EXISTS idx_state_entries_content_hash
+                      ON state_entries(content_hash);
                     """
                 )
                 ensure_schema_version(
@@ -340,12 +343,35 @@ class IndexStateDB:
                 cur = conn.execute(
                     """
                     SELECT full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
-                           cloud_file_id, cloud_version_id, cloud_path, storage_key
+                           cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash
                     FROM state_entries
                     ORDER BY full_path
                     """
                 )
                 return [dict(row) for row in cur.fetchall()]
+
+    def find_by_content_hash(self, content_hash: str, *, exclude_path: str = "") -> Optional[Dict[str, Any]]:
+        value = str(content_hash or "").strip()
+        if not value:
+            return None
+        with self._lock:
+            with self._connect() as conn:
+                if exclude_path:
+                    row = conn.execute(
+                        """
+                        SELECT * FROM state_entries
+                        WHERE content_hash=? AND full_path != ?
+                        ORDER BY updated_at ASC
+                        LIMIT 1
+                        """,
+                        (value, str(exclude_path)),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT * FROM state_entries WHERE content_hash=? ORDER BY updated_at ASC LIMIT 1",
+                        (value,),
+                    ).fetchone()
+                return dict(row) if row else None
 
     def upsert_many(self, entries: Iterable[Dict[str, Any]]) -> None:
         now = _utc_now()
@@ -369,6 +395,7 @@ class IndexStateDB:
             cloud_version_id = str(entry.get("cloud_version_id") or "")
             cloud_path = str(entry.get("cloud_path") or "")
             storage_key = str(entry.get("storage_key") or "")
+            content_hash = str(entry.get("content_hash") or "")
             rows.append(
                 (
                     full_path,
@@ -382,6 +409,7 @@ class IndexStateDB:
                     cloud_version_id,
                     cloud_path,
                     storage_key,
+                    content_hash,
                 )
             )
         if not rows:
@@ -392,8 +420,8 @@ class IndexStateDB:
                     """
                     INSERT INTO state_entries (
                         full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
-                        cloud_file_id, cloud_version_id, cloud_path, storage_key
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(full_path) DO UPDATE SET
                         fingerprint=excluded.fingerprint,
                         mtime=excluded.mtime,
@@ -404,7 +432,8 @@ class IndexStateDB:
                         cloud_file_id=excluded.cloud_file_id,
                         cloud_version_id=excluded.cloud_version_id,
                         cloud_path=excluded.cloud_path,
-                        storage_key=excluded.storage_key
+                        storage_key=excluded.storage_key,
+                        content_hash=excluded.content_hash
                     """,
                     rows,
                 )
@@ -469,6 +498,15 @@ class IndexStateDB:
                     "SELECT COUNT(*) AS total, COALESCE(SUM(size_bytes), 0) AS total_size FROM state_entries"
                 ).fetchone()
                 failed_row = conn.execute("SELECT COUNT(*) AS total FROM failed_paths").fetchone()
+                duplicate_rows = conn.execute(
+                    """
+                    SELECT content_hash, COUNT(*) AS cnt
+                    FROM state_entries
+                    WHERE content_hash != ''
+                    GROUP BY content_hash
+                    HAVING COUNT(*) > 1
+                    """
+                ).fetchall()
                 ext_rows = conn.execute(
                     """
                     SELECT
@@ -493,6 +531,8 @@ class IndexStateDB:
         by_ext = {str(row["ext"]): int(row["cnt"]) for row in ext_rows}
         by_ext_size = {str(row["ext"]): int(row["size_sum"]) for row in ext_rows}
         by_stage = {str(row["stage"]): int(row["cnt"]) for row in stage_rows}
+        duplicate_groups = len(duplicate_rows)
+        duplicate_files = sum(int(row["cnt"]) for row in duplicate_rows)
         return {
             "total": int(total_row["total"] if total_row else 0),
             "total_size_bytes": int(total_row["total_size"] if total_row else 0),
@@ -500,4 +540,6 @@ class IndexStateDB:
             "by_ext_size": by_ext_size,
             "by_stage": by_stage,
             "failed_paths": int(failed_row["total"] if failed_row else 0),
+            "duplicate_groups": duplicate_groups,
+            "duplicate_files": duplicate_files,
         }

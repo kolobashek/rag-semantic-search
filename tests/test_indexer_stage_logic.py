@@ -9,6 +9,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 from index_rag import RAGIndexer
+from rag_catalog.core.index_state_db import IndexStateDB
+from rag_catalog.core.telemetry_db import TelemetryDB
 
 
 class _FakeVec:
@@ -70,6 +72,12 @@ class _FakeStateDB:
     def is_failed_retry_due(self, full_path: str):
         row = self.failures.get(full_path)
         return not row or float(row.get("next_retry_at") or 0) <= time.time()
+
+    def find_by_content_hash(self, content_hash: str, *, exclude_path: str = ""):
+        for key, row in self.entries.items():
+            if key != exclude_path and row.get("content_hash") == content_hash:
+                return dict(row)
+        return None
 
 
 def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
@@ -204,6 +212,45 @@ def test_dry_run_reports_work_without_writing_points_or_state(tmp_path: Path) ->
     assert stats["processed_files"] == 1
     assert idx.qdrant.points == []
     assert idx.state_db.get_entry(str(doc)) is None
+
+
+def test_duplicate_content_is_marked_in_payload(tmp_path: Path) -> None:
+    first = tmp_path / "a.txt"
+    second = tmp_path / "b.txt"
+    first.write_text("same text", encoding="utf-8")
+    second.write_text("same text", encoding="utf-8")
+    now = time.time()
+    os.utime(first, (now, now))
+    os.utime(second, (now - 10, now - 10))
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    idx.index_directory(stage="small")
+
+    payloads = [point.payload for point in idx.qdrant.points if point.payload.get("filename") == "b.txt"]
+    assert any(payload.get("is_duplicate") is True for payload in payloads)
+    assert idx.state_db.get_entry(str(second))["content_hash"] == idx.state_db.get_entry(str(first))["content_hash"]
+
+
+def test_quality_report_summarizes_state_and_duplicates(tmp_path: Path) -> None:
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.telemetry = TelemetryDB(str(tmp_path / "telemetry.db"))
+    idx.state_db.upsert_many(
+        [
+            {"full_path": "a.txt", "fingerprint": "1", "mtime": 1.0, "stage": "content", "size_bytes": 1, "extension": ".txt", "content_hash": "same"},
+            {"full_path": "b.txt", "fingerprint": "2", "mtime": 2.0, "stage": "content", "size_bytes": 1, "extension": ".txt", "content_hash": "same"},
+            {"full_path": "c.pdf", "fingerprint": "3", "mtime": 3.0, "stage": "error", "size_bytes": 1, "extension": ".pdf"},
+        ]
+    )
+    idx.state_db.record_failed_path("c.pdf", error="locked")
+
+    report = idx.quality_report()
+
+    assert report["total_files"] == 3
+    assert report["content_coverage_pct"] == 66.67
+    assert report["error_files"] == 1
+    assert report["failed_paths"] == 1
+    assert report["duplicate_groups"] == 1
 
 
 def test_exclude_patterns_skip_matching_files(tmp_path: Path) -> None:

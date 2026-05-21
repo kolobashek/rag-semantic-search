@@ -367,6 +367,8 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 14. **[done 2026-05-21] [форматы]** Добавить индексирование поддерживаемых файлов внутри `.zip` с logical path `archive.zip/member` (п. 2.9)
 15. **[done 2026-05-21] [надёжность]** Добавить `failed_paths` с retry/backoff для ошибок чтения (п. 2.3)
 16. **[done 2026-05-21] [операции]** Добавить `--dry-run` для просмотра файлов к обработке без записи в индекс/state (п. 2.10)
+17. **[done 2026-05-21] [качество]** Добавить `content_hash` и маркировку дублей через `is_duplicate` / `duplicate_of` (п. 2.6)
+18. **[done 2026-05-21] [качество]** Добавить `RAGIndexer.quality_report()` и CLI `--quality-report` (п. 2.8)
 
 ### Реализация 2026-05-21
 
@@ -385,3 +387,5 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - `.zip` раскрывается в pipeline как набор отдельных entries; state key хранится как `archive.zip::member`, а payload path как `archive.zip/member`.
 - `IndexStateDB` получил таблицу `failed_paths`; ошибки чтения сохраняются со stage `error`, retry-счётчиком и `next_retry_at`.
 - `--dry-run` строит план `new` / `changed` / `stage_upgrade` / `retry_error` без batch-encode, Qdrant upsert и state mutations.
+- В `state_entries` добавлен `content_hash`; payload metadata/content получает `is_duplicate` и `duplicate_of` для одинакового извлечённого текста.
+- `quality_report()` возвращает покрытие content-stage, распределение stage/ext, failed paths, duplicate groups/files и OCR summary из telemetry.
