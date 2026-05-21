@@ -83,6 +83,40 @@ def test_state_db_stats_aggregates_by_extension(tmp_path: Path) -> None:
     assert stats["by_ext_size"][".pdf"] == 12
 
 
+def test_state_db_validates_embedding_config(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.validate_embedding_config(
+        embedding_model="model-a",
+        vector_size=384,
+        collection_name="catalog",
+    )
+    assert db.get_config()["embedding_model"] == "model-a"
+
+    db.validate_embedding_config(
+        embedding_model="model-a",
+        vector_size=384,
+        collection_name="catalog",
+    )
+
+    with pytest.raises(RuntimeError, match="--recreate"):
+        db.validate_embedding_config(
+            embedding_model="model-b",
+            vector_size=384,
+            collection_name="catalog",
+        )
+
+    db.validate_embedding_config(
+        embedding_model="model-b",
+        vector_size=768,
+        collection_name="catalog_v2",
+        recreate=True,
+    )
+    cfg = db.get_config()
+    assert cfg["embedding_model"] == "model-b"
+    assert cfg["vector_size"] == "768"
+    assert cfg["collection_name"] == "catalog_v2"
+
+
 def test_bootstrap_from_json_imports_only_once(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     legacy = tmp_path / "index_state.json"

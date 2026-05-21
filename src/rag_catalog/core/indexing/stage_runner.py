@@ -92,8 +92,9 @@ class IndexStageRunner:
             if f.is_file()
             and f.suffix.lower() in self._supported_extensions
             and not f.name.startswith("~$")  # пропускать временные файлы Office
+            and not self._is_excluded_path(f)
         ]
-        self._logger.info("Найдено файлов на диске: %d (DOCX/XLSX/XLS/PDF)", len(all_files))
+        self._logger.info("Найдено файлов на диске: %d (поддерживаемые расширения)", len(all_files))
 
         # Партиция по этапам: metadata берёт всё, small/large — свою категорию.
         if stage == "small":
@@ -113,6 +114,11 @@ class IndexStageRunner:
         else:
             # metadata или legacy "content" — работаем со всем
             scope_files = all_files
+        scope_files = sorted(
+            scope_files,
+            key=lambda f: f.stat().st_mtime if f.exists() else 0.0,
+            reverse=True,
+        )
 
         stage_stats: Dict[str, int] = {
             "total_files": len(scope_files),
@@ -243,6 +249,12 @@ class IndexStageRunner:
             elif ext in (".xlsx", ".xls"):
                 file_type = "xlsx"
                 _fn = self._extract_spreadsheet
+            elif ext == ".txt":
+                file_type = "txt"
+                _fn = self._extract_text
+            elif ext == ".csv":
+                file_type = "csv"
+                _fn = self._extract_csv
             elif ext == ".pdf":
                 file_type = "pdf"
                 _fn = self._extract_pdf
@@ -436,14 +448,13 @@ class IndexStageRunner:
                     pending_texts.append(chunk)
                     pending_payloads.append(cpayload)
                 file_stage = "metadata" if stage == "metadata" else (
-                    "content" if result.get("has_content") else stage
+                    "content" if result.get("has_content") else "empty"
                 )
                 if stage in ("small", "large") and not result.get("has_content"):
                     self._logger.warning(
-                        "Этап %s: файл %s без контента, сохраняю stage=%s (повторного прохода не будет)",
+                        "Этап %s: файл %s без контента, сохраняю stage=empty (будет повторная попытка)",
                         stage,
                         result["filepath"].name,
-                        stage,
                     )
                 pending_states.append(
                     (

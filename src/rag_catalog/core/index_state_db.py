@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _utc_now() -> str:
@@ -71,6 +71,12 @@ class IndexStateDB:
                       ON state_entries(updated_at);
                     CREATE INDEX IF NOT EXISTS idx_state_entries_extension
                       ON state_entries(extension);
+
+                    CREATE TABLE IF NOT EXISTS index_config (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
                     """
                 )
                 existing_cols = {
@@ -115,6 +121,61 @@ class IndexStateDB:
         with self._lock:
             with self._connect() as conn:
                 conn.execute("DELETE FROM state_entries")
+
+    def get_config(self) -> Dict[str, str]:
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute("SELECT key, value FROM index_config").fetchall()
+                return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def set_config_many(self, values: Dict[str, Any]) -> None:
+        now = _utc_now()
+        rows = [(str(key), str(value), now) for key, value in values.items()]
+        if not rows:
+            return
+        with self._lock:
+            with self._connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO index_config (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at
+                    """,
+                    rows,
+                )
+
+    def validate_embedding_config(
+        self,
+        *,
+        embedding_model: str,
+        vector_size: int,
+        collection_name: str,
+        recreate: bool = False,
+    ) -> None:
+        desired = {
+            "embedding_model": str(embedding_model or ""),
+            "vector_size": str(int(vector_size or 0)),
+            "collection_name": str(collection_name or ""),
+        }
+        current = self.get_config()
+        keys = ("embedding_model", "vector_size", "collection_name")
+        if recreate or not any(current.get(key) for key in keys):
+            self.set_config_many(desired)
+            return
+        mismatches = {
+            key: (current.get(key, ""), desired[key])
+            for key in keys
+            if current.get(key, "") != desired[key]
+        }
+        if mismatches:
+            details = ", ".join(f"{key}: stored={old!r}, current={new!r}" for key, (old, new) in mismatches.items())
+            raise RuntimeError(
+                "Индекс создан с другой embedding-конфигурацией. "
+                f"{details}. Запустите индексатор с --recreate или используйте отдельную collection."
+            )
+        self.set_config_many(desired)
 
     def bootstrap_from_json(self, json_path: Path) -> int:
         """

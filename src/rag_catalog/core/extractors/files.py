@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import csv
 import subprocess
 from io import BytesIO
 from pathlib import Path
@@ -209,6 +210,54 @@ def extract_spreadsheet(filepath: Path, *, max_chars: int = 0) -> str:
         return extract_xlsx(filepath, max_chars=max_chars)
     logger.warning("Неизвестное табличное расширение: %s", ext)
     return ""
+
+
+def _read_text_file(filepath: Path, *, max_chars: int = 0) -> str:
+    raw = filepath.read_bytes()
+    if max_chars:
+        raw = raw[: max(max_chars * 4, 4096)]
+    for encoding in ("utf-8-sig", "utf-8", "cp1251", "cp866", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+            return text[:max_chars] if max_chars else text
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")[:max_chars] if max_chars else raw.decode("utf-8", errors="replace")
+
+
+def extract_text(filepath: Path, *, max_chars: int = 0) -> str:
+    """Extract plain text files with common Windows/Russian encodings."""
+    try:
+        return _read_text_file(filepath, max_chars=max_chars)
+    except Exception as exc:
+        logger.warning("Ошибка чтения TXT %s: %s", filepath, exc)
+        return ""
+
+
+def extract_csv(filepath: Path, *, max_chars: int = 0) -> str:
+    """Extract CSV as readable row text, preserving delimiter-separated values."""
+    try:
+        text = _read_text_file(filepath, max_chars=0)
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+        parts: list[str] = []
+        total = 0
+        reader = csv.reader(text.splitlines(), dialect)
+        for row in reader:
+            row_text = " | ".join(str(cell).strip() for cell in row if str(cell).strip())
+            if not row_text:
+                continue
+            parts.append(row_text)
+            total += len(row_text)
+            if max_chars and total >= max_chars:
+                break
+        return "\n".join(parts)
+    except Exception as exc:
+        logger.warning("Ошибка чтения CSV %s: %s", filepath, exc)
+        return ""
 
 
 def extract_pdf(filepath: Path, *, skip_ocr: bool = False, ocr: Callable[[Path], str] | None = None) -> str:
