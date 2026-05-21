@@ -176,9 +176,12 @@ Cloud Drive — registry-backed файловый слой: папки, файл�
 - create folder, rename, move;
 - soft delete, trash, restore;
 - immutable storage keys and checksum dedup;
-- reindex and cleanup jobs;
+- reindex and cleanup jobs with durable leases and stale-job recovery;
+- registry-backed ACL/RBAC: user/role grants for path, folder, file, `viewer/editor/admin` access levels;
+- index coverage diagnostics: registry files vs current `index_state.db`;
 - sync clients, folder pairs, selective sync, conflicts;
-- Cloud Drive hints in search and registry-backed explorer.
+- Cloud Drive hints in search and registry-backed explorer;
+- Cloud Drive search results are filtered by Cloud Drive access before RAG use.
 
 ### S3 / MinIO Storage
 
@@ -228,8 +231,11 @@ GET  /api/cloud-drive/trash
 POST /api/cloud-drive/restore
 POST /api/cloud-drive/reindex
 GET  /api/cloud-drive/jobs
+POST /api/cloud-drive/jobs/recover-stale
 GET  /api/cloud-drive/changes
 GET  /api/cloud-drive/storage-health
+GET  /api/cloud-drive/index-coverage
+POST /api/cloud-drive/permissions
 /api/cloud-drive/sync/*
 ```
 

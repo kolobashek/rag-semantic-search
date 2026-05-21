@@ -103,6 +103,9 @@ Codex:
 - DONE 2026-05-14: S3/MinIO storage adapter проверен тестами: bucket init, healthcheck, presigned download, missing boto3 message, config validation. `boto3` добавлен в CI lock для воспроизводимого S3 smoke.
 - DONE 2026-05-14: проверено, что Cloud Drive local storage/data не tracked в Git; `.gitignore` дополнен явными правилами `data/cloud_storage/`, `cloud_storage/`, `cloud_drive.db*`.
 - DONE 2026-05-14: cleanup job удаляет Qdrant points по `cloud_file_id`/`cloud_path`; restore возвращает файл через reindex job. Остался release smoke на реальном Qdrant.
+- DONE 2026-05-21: registry-backed ACL/RBAC включён поверх существующей `cloud_permissions`: folder/file/path grants, viewer/editor/admin levels, наследование по folder/path, enforcement в Cloud Drive API и фильтрация Cloud Drive search results перед RAG.
+- DONE 2026-05-21: добавлена диагностика покрытия индекса `GET /api/cloud-drive/index-coverage`: registry files vs `index_state.db`, missing/stale/error examples, current-version coverage.
+- DONE 2026-05-21: Cloud Drive jobs переведены на durable leases: `lease_owner`, `lease_until`, claim pending jobs, recovery expired/stuck jobs, admin endpoint `POST /api/cloud-drive/jobs/recover-stale`.
 
 Claude:
 
@@ -114,6 +117,8 @@ Done criteria:
 - сценарий upload -> reindex -> search -> download работает;
 - move/rename не создают дубли в поиске;
 - delete убирает результат из поиска, restore возвращает.
+- search/RAG не показывает Cloud Drive документы без viewer-доступа;
+- admin API видит stale bootstrap/reindex jobs и индексное покрытие без ручного чтения SQLite.
 
 ## P1 Release Polish
 
@@ -176,6 +181,7 @@ Owner: Codex.
 - Folder/file ACL in Cloud Drive registry.
 - Qdrant payload filter by allowed groups/path scopes.
 - Audit report by user/action/document.
+- DONE 2026-05-21: базовый Cloud Drive RBAC включён в registry/API/search-filter. Следующий слой V2 — Qdrant-side payload filters для больших tenant/group ACL и отчёты доступа.
 
 ### 10. Structural Chunking V2
 
