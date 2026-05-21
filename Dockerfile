@@ -25,6 +25,7 @@ COPY assets ./assets
 COPY config.docker.example.json ./config.docker.example.json
 
 RUN pip install --upgrade pip \
+    && pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.5.1+cpu" \
     && pip install ".[ocr]"
 
 RUN cp config.docker.example.json config.json \

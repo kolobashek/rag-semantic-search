@@ -1,0 +1,18 @@
+services:
+  web:
+    volumes: !override
+      - app_state:/data/state
+      - app_logs:/data/logs
+      - model_cache:/data/cache
+
+  bot:
+    volumes: !override
+      - app_state:/data/state
+      - app_logs:/data/logs
+      - model_cache:/data/cache
+
+  indexer:
+    volumes: !override
+      - app_state:/data/state
+      - app_logs:/data/logs
+      - model_cache:/data/cache

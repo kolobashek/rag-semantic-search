@@ -1,6 +1,6 @@
 # ADR-001: Аудит архитектуры индексатора RAG
 
-**Статус:** В работе  
+**Статус:** Accepted
 **Дата:** 2026-05-21  
 **Область:** `src/rag_catalog/core/index_rag.py`, `indexing/stage_runner.py`, `index_state_db.py`, `chunking/text.py`, `extractors/files.py`
 
