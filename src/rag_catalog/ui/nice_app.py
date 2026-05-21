@@ -154,11 +154,18 @@ def _build_page(initial_screen: str = "search") -> None:
                 state.header_explorer_actions = header_actions
                 header_status_chip = ui.label("").classes("rag-chip rag-header-status")
                 header_status_chip.set_visibility(False)
+                settings_button = ui.button(
+                    icon="settings",
+                    on_click=lambda: set_screen("settings"),
+                    color=None,
+                ).props("flat round dense").classes("rag-header-button")
+                settings_button.tooltip("Настройки")
                 theme_button = ui.button(
                     icon="light_mode" if state.theme == "dark" else "dark_mode",
                     on_click=lambda: toggle_theme(),
                     color=None,
                 ).props("flat round dense").classes("rag-header-button")
+                theme_button.tooltip("Сменить тему")
                 header_title = ui.label("").classes("hidden")
                 header_user_label = ui.label("").classes("rag-avatar hidden lg:grid")
 
@@ -2078,6 +2085,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 theme_button.set_visibility(False)
             except Exception:
                 pass
+            try:
+                settings_button.set_visibility(False)
+            except Exception:
+                pass
             with content:
                 render_login_screen()
             return
@@ -2095,6 +2106,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 menu_button.set_visibility(False)
             except Exception:
                 pass
+            try:
+                settings_button.set_visibility(False)
+            except Exception:
+                pass
             with content:
                 render_force_change_password_screen()
             return
@@ -2109,6 +2124,10 @@ def _build_page(initial_screen: str = "search") -> None:
         try:
             theme_button.set_visibility(True)
             theme_button.set_icon("light_mode" if state.theme == "dark" else "dark_mode")
+        except Exception:
+            pass
+        try:
+            settings_button.set_visibility(True)
         except Exception:
             pass
         dark_mode.set_value(state.theme == "dark")
