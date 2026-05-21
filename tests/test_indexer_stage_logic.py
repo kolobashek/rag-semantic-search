@@ -310,6 +310,28 @@ def test_process_index_queue_once_deletes_missing_file(tmp_path: Path) -> None:
     assert idx.state_db.queue_stats() == {}
 
 
+def test_drain_index_queue_processes_bounded_batches(tmp_path: Path) -> None:
+    docs = []
+    for name in ("a.txt", "b.txt", "c.txt"):
+        doc = tmp_path / name
+        doc.write_text(name, encoding="utf-8")
+        docs.append(doc)
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.read_workers = 1
+    idx._is_excluded_path = lambda _p: False
+    seen: list[Path] = []
+    idx.process_file = lambda path: seen.append(path)
+    for doc in docs:
+        idx.state_db.enqueue_index_task(str(doc), stage="small", reason="watch")
+
+    stats = idx.drain_index_queue(limit=1, max_batches=2)
+
+    assert stats["leased"] == 2
+    assert len(seen) == 2
+    assert idx.state_db.queue_stats() == {"pending": 1}
+
+
 def test_exclude_patterns_skip_matching_files(tmp_path: Path) -> None:
     keep = tmp_path / "keep.txt"
     ignored_dir = tmp_path / "node_modules"

@@ -1161,6 +1161,24 @@ class RAGIndexer:
                 stats["failed"] += 1
         return stats
 
+    def drain_index_queue(
+        self,
+        *,
+        limit: Optional[int] = None,
+        max_batches: int = 10,
+        lease_seconds: int = 300,
+    ) -> Dict[str, int]:
+        """Drain bounded queue batches without letting watch loop spin forever."""
+        batch_limit = max(1, int(limit or getattr(self, "read_workers", 1) or 1))
+        totals = {"leased": 0, "completed": 0, "failed": 0, "missing": 0}
+        for _ in range(max(1, int(max_batches))):
+            stats = self.process_index_queue_once(limit=batch_limit, lease_seconds=lease_seconds)
+            for key in totals:
+                totals[key] += int(stats.get(key) or 0)
+            if int(stats.get("leased") or 0) < batch_limit:
+                break
+        return totals
+
     def watch(self, stage: str = "content") -> None:
         """Watch catalog changes and incrementally reindex changed files."""
         try:
@@ -1169,8 +1187,15 @@ class RAGIndexer:
         except ImportError as exc:
             raise RuntimeError("Для --watch установите зависимость watchdog") from exc
 
-        wake_queue: "queue.Queue[None]" = queue.Queue()
+        wake_queue: "queue.Queue[None]" = queue.Queue(maxsize=1)
         watch_stage = "small" if stage == "all" else stage
+        zip_debounce_seconds = 5.0
+
+        def _wake() -> None:
+            try:
+                wake_queue.put_nowait(None)
+            except queue.Full:
+                pass
 
         class _Handler(FileSystemEventHandler):
             def on_created(self, event):  # type: ignore[no-untyped-def]
@@ -1193,13 +1218,15 @@ class RAGIndexer:
                     return
                 path = Path(raw)
                 if path.suffix.lower() in SUPPORTED_EXTENSIONS and not path.name.startswith("~$"):
+                    available_at = time.time() + zip_debounce_seconds if path.suffix.lower() == ".zip" else None
                     self_indexer.state_db.enqueue_index_task(
                         str(path),
                         stage=watch_stage,
                         reason=f"watch:{reason}",
                         priority=20,
+                        available_at=available_at,
                     )
-                    wake_queue.put(None)
+                    _wake()
 
         self_indexer = self
         observer = Observer()
@@ -1213,7 +1240,7 @@ class RAGIndexer:
                 except queue.Empty:
                     pass
                 time.sleep(0.5)
-                stats = self.process_index_queue_once(limit=max(1, self.read_workers))
+                stats = self.drain_index_queue(limit=max(1, self.read_workers), max_batches=10)
                 if stats.get("leased"):
                     logger.info("Watch queue processed: %s", stats)
         finally:
