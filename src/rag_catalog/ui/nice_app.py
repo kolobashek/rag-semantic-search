@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time as _time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -19,8 +20,10 @@ from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
+from . import cloud_view as _cloud_view
 from . import explorer_view as _explorer_view
 from . import index_view as _index_view
+from . import jobs_view as _jobs_view
 from . import settings_view as _settings_view
 from . import stats_view as _stats_view
 from .auth_session import complete_login_session, logout_session, restore_session, touch_session
@@ -46,7 +49,9 @@ from .helpers import (
     _load_user_state,
     _merge_search_results,
     _my_recent_queries,
+    _apply_query_operators,
     _open_os_path,
+    _parse_search_query,
     _popular_queries,
     _preview_file,
     _preview_office_file,
@@ -234,10 +239,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 ("home", "Главная", "dashboard", lambda: set_screen("search"), False),
                 ("search", "Поиск", "search", lambda: set_screen("search"), state.screen == "search"),
                 ("explorer", "Файлы", "folder", lambda: set_screen("explorer"), state.screen == "explorer"),
-                ("cloud", "Cloud", "cloud", lambda: open_settings_section("cloud_drive"), state.screen == "settings" and state.settings_section == "cloud_drive"),
+                ("cloud", "Cloud", "cloud", lambda: set_screen("cloud"), state.screen == "cloud"),
             ]
             if is_admin:
                 header_items.append(("index", "Индекс", "filter_center_focus", lambda: set_screen("index"), state.screen == "index"))
+            header_items.append(("jobs", "Задачи", "queue", lambda: set_screen("jobs"), state.screen == "jobs"))
             with header_nav:
                 for _key, label, icon_name, action, is_active in header_items:
                     active_cls = "active" if is_active else ""
@@ -300,6 +306,9 @@ def _build_page(initial_screen: str = "search") -> None:
         if not query:
             ui.notify("Введите запрос.", type="warning")
             return
+        parsed_query = _parse_search_query(query)
+        semantic_q = parsed_query["semantic_query"] or query
+        effective_file_type = parsed_query.get("file_type_filter") or state.file_type
         request_id = state.search_request_id + 1
         state.search_request_id = request_id
         state.query = query
@@ -339,9 +348,9 @@ def _build_page(initial_screen: str = "search") -> None:
             quick_results = await run.io_bound(
                 _run_quick_name_search,
                 searcher,
-                query=query,
+                query=semantic_q,
                 limit=state.limit,
-                file_type=state.file_type,
+                file_type=effective_file_type,
             )
             if state.search_request_id != request_id:
                 return
@@ -385,16 +394,16 @@ def _build_page(initial_screen: str = "search") -> None:
             return
 
         # Ленивая догрузка: сначала, при необходимости, расширяем запрос через LLM.
-        search_query = query
+        search_query = semantic_q
         if llm_expand_enabled:
             try:
                 from rag_catalog.core.llm import expand_query  # noqa: PLC0415
                 expanded = await run.io_bound(
-                    expand_query, query, model=expand_model, ollama_url=ollama_url
+                    expand_query, semantic_q, model=expand_model, ollama_url=ollama_url
                 )
                 if state.search_request_id != request_id:
                     return
-                if expanded and expanded.lower() != query.lower():
+                if expanded and expanded.lower() != semantic_q.lower():
                     state.expanded_query = expanded
                     search_query = expanded
             except Exception:
@@ -405,7 +414,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 _run_catalog_search,
                 searcher,
                 limit=state.limit,
-                file_type=state.file_type,
+                file_type=effective_file_type,
                 content_only=state.content_only,
                 title_only=state.title_only,
                 username=_username(state),
@@ -415,12 +424,13 @@ def _build_page(initial_screen: str = "search") -> None:
             )
             if state.search_request_id != request_id:
                 return
-            state.results = _merge_search_results(state.results, full_results, limit=state.limit)
-            state.results = [
-                item for item in state.results
+            merged = _merge_search_results(state.results, full_results, limit=state.limit)
+            merged = [
+                item for item in merged
                 if not (item.get("cloud_file_id") or item.get("cloud_path"))
                 or _cd_acl_allows(state.cfg, state.current_user, str(item.get("cloud_path") or item.get("path") or ""))
             ]
+            state.results = _apply_query_operators(merged, parsed_query)
             cloud_semantic_count = sum(
                 1
                 for item in state.results
@@ -574,9 +584,67 @@ def _build_page(initial_screen: str = "search") -> None:
                                     ci = ui.icon("cloud", size="14px").classes("text-blue-400 shrink-0")
                                     ci.tooltip("Этот запрос ранее возвращал Cloud Drive документы")
 
+    _SEARCH_HELP_HTML = """
+<style>
+.rag-sh-t{width:100%;border-collapse:collapse;font-size:13px;line-height:1.5}
+.rag-sh-t th{text-align:left;padding:5px 10px;border-bottom:1px solid rgba(128,128,128,.25);font-size:11px;text-transform:uppercase;letter-spacing:.05em;opacity:.55;font-weight:600}
+.rag-sh-t td{padding:4px 10px;border-bottom:1px solid rgba(128,128,128,.1);vertical-align:top}
+.rag-sh-t tr:last-child td{border-bottom:none}
+.rag-sh-t td:first-child{font-family:ui-monospace,monospace;font-weight:600;white-space:nowrap;color:var(--rag-accent,#6366f1)}
+.rag-sh-t td:last-child{opacity:.65;font-family:ui-monospace,monospace;font-size:12px}
+.rag-sh-sec{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.45;padding:14px 10px 4px;display:block}
+</style>
+<span class="rag-sh-sec">Основные операторы</span>
+<table class="rag-sh-t">
+<tr><th>Синтаксис</th><th>Описание</th><th>Пример</th></tr>
+<tr><td>"фраза"</td><td>Точная фраза (в кавычках)</td><td>"договор подряда"</td></tr>
+<tr><td>-слово</td><td>Исключить слово из результатов</td><td>-акт</td></tr>
+<tr><td>слово*</td><td>Начинается на... (префикс)</td><td>дог*&nbsp;→&nbsp;договор, договоры</td></tr>
+<tr><td>A и B</td><td>Оба условия одновременно</td><td>договор и акт</td></tr>
+<tr><td>A или B</td><td>Любое из условий</td><td>счёт или акт</td></tr>
+</table>
+<span class="rag-sh-sec">Фильтры по файлу и дате</span>
+<table class="rag-sh-t">
+<tr><th>Синтаксис</th><th>Описание</th><th>Пример</th></tr>
+<tr><td>type:расш</td><td>Тип файла по расширению</td><td>type:pdf&nbsp;&nbsp;type:xlsx</td></tr>
+<tr><td>after:ГГГГ-ММ-ДД</td><td>Дата изменения — после</td><td>after:2024-01-01</td></tr>
+<tr><td>before:ГГГГ-ММ-ДД</td><td>Дата изменения — до</td><td>before:2024-12-31</td></tr>
+<tr><td>path:папка</td><td>Путь содержит текст (каталог)</td><td>path:Договоры</td></tr>
+</table>
+<span class="rag-sh-sec">Фильтры по авторам (из свойств документа)</span>
+<table class="rag-sh-t">
+<tr><th>Синтаксис</th><th>Описание</th><th>Пример</th></tr>
+<tr><td>creator:имя</td><td>Создатель документа (dc:creator / PDF Author)</td><td>creator:ivanov</td></tr>
+<tr><td>editor:имя</td><td>Последний или самый частый редактор</td><td>editor:petrov</td></tr>
+<tr><td>from:имя</td><td>Любой автор или путь содержит имя</td><td>from:sidorov</td></tr>
+</table>
+<span class="rag-sh-sec">Примеры комбинаций</span>
+<table class="rag-sh-t">
+<tr><th>Запрос</th><th>Смысл</th></tr>
+<tr><td>"договор подряда" type:pdf after:2024-01-01</td><td>PDF-договоры подряда с 2024 года</td></tr>
+<tr><td>счёт -НДС type:xlsx</td><td>Excel-счета без упоминания НДС</td></tr>
+<tr><td>дог* и акт path:Финансы</td><td>Начинается на «дог» и содержит «акт», в папке Финансы</td></tr>
+<tr><td>"акт сверки" или "акт выполненных"</td><td>Один из двух видов акта</td></tr>
+<tr><td>after:2025-01-01 before:2025-12-31 creator:ivanov</td><td>Документы Иванова (создатель) за 2025 год</td></tr>
+<tr><td>оплата editor:petrov type:pdf</td><td>PDF об оплате, где редактировал Петров</td></tr>
+<tr><td>from:ivanov -черновик path:Договоры</td><td>Файлы Иванова в папке Договоры, без слова «черновик»</td></tr>
+</table>
+<span class="rag-sh-sec">Поддерживаемые форматы для метаданных авторов</span>
+<table class="rag-sh-t">
+<tr><td>DOCX, XLSX, PPTX</td><td>Создатель, последний редактор, самый частый редактор (при включённых правках)</td></tr>
+<tr><td>PDF</td><td>Поле Author</td></tr>
+<tr><td>DOC, XLS, PPT, другие</td><td>Метаданные авторов не извлекаются</td></tr>
+</table>
+"""
+
     def render_search_box() -> None:
         with ui.column().classes("rag-search-shell w-full max-w-5xl"):
             suggest_area = ui.column().classes("w-full")
+            with ui.dialog() as help_dlg, ui.card().classes("w-[min(620px,96vw)] max-h-[90vh] overflow-auto p-0 gap-0"):
+                with ui.row().classes("items-center justify-between px-4 pt-4 pb-1"):
+                    ui.label("Операторы поиска").classes("text-base font-semibold")
+                    ui.button(icon="close", on_click=help_dlg.close, color=None).props("flat round dense")
+                ui.html(_SEARCH_HELP_HTML, sanitize=False).classes("px-2 pb-4")
             with ui.row().classes("rag-search-box w-full items-center gap-2 p-2"):
                 search_input = ui.input(
                     placeholder="Введите название, номер, контрагента или фразу из документа",
@@ -599,6 +667,8 @@ def _build_page(initial_screen: str = "search") -> None:
                     )
 
                 ai_expand_checkbox.on_value_change(update_ai_expand)
+
+                ui.button(icon="help_outline", on_click=help_dlg.open, color=None).props("flat round dense").tooltip("Синтаксис поиска")
 
                 async def submit_click() -> None:
                     await run_search(str(search_input.value or ""))
@@ -733,6 +803,47 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.button("Отменить", icon="close", on_click=reset_changes).props("flat dense")
                     ui.button("Применить", icon="done", on_click=apply_changes).props("unelevated dense")
 
+    def _render_preview_body(candidate: Path, viewer_url: str, ext: str) -> None:
+        if ext == ".pdf":
+            ui.html(
+                f'<iframe src="{html.escape(viewer_url, quote=True)}" '
+                'style="width:100%;height:calc(100vh - 240px);border:1px solid var(--rag-border);'
+                'border-radius:8px;"></iframe>',
+                sanitize=False,
+            )
+        elif ext in INLINE_IMAGE_EXTENSIONS:
+            ui.image(viewer_url).style("max-width:100%;height:auto;border-radius:8px")
+        elif ext in FILE_PREVIEW_EXTENSIONS:
+            ui.label(_preview_file(candidate, limit=32000)).classes("rag-code")
+        elif ext in OFFICE_PREVIEW_EXTENSIONS:
+            ui.label(_preview_office_file(candidate, limit=32000)).classes("rag-code")
+            ui.label("Текстовый извлечённый фрагмент.").classes("rag-meta")
+        else:
+            ui.label("Встроенный просмотр не поддерживается — используйте «Скачать».").classes("rag-meta")
+
+    def _render_meta_body(candidate: Path) -> None:
+        try:
+            stat = candidate.stat()
+            rows = [
+                ("Размер", f"{stat.st_size:,} байт".replace(",", " ")),
+                ("Изменён", datetime.fromtimestamp(stat.st_mtime).strftime("%d.%m.%Y %H:%M")),
+                ("Создан", datetime.fromtimestamp(stat.st_ctime).strftime("%d.%m.%Y %H:%M")),
+                ("Тип", candidate.suffix.lower()),
+                ("Путь", str(candidate.parent)),
+            ]
+        except Exception:
+            rows = [("Файл", str(candidate))]
+        for k, v in rows:
+            with ui.element("div").style(
+                "display:grid;grid-template-columns:140px 1fr;padding:10px 0;"
+                "border-bottom:1px solid var(--rag-border)"
+            ):
+                ui.label(k).style(
+                    "font-family:var(--rag-font-mono);font-size:10px;text-transform:uppercase;"
+                    "letter-spacing:0.1em;color:var(--rag-muted)"
+                )
+                ui.label(str(v)).style("font-family:var(--rag-font-mono);font-size:12px;word-break:break-all")
+
     def open_file_viewer(path_value: Path | str) -> None:
         candidate = _resolve_catalog_file(state.cfg, str(path_value or ""))
         if candidate is None:
@@ -741,31 +852,77 @@ def _build_page(initial_screen: str = "search") -> None:
         viewer_url = _viewer_file_url(str(candidate))
         ext = candidate.suffix.lower()
 
-        with ui.dialog() as dialog, ui.card().classes("w-[min(1100px,96vw)] max-h-[90vh] overflow-auto gap-3"):
-            with ui.row().classes("w-full items-center gap-2"):
-                with ui.column().classes("min-w-0 flex-1 gap-0"):
-                    ui.label(candidate.name).classes("text-lg font-semibold truncate")
-                    ui.label(str(candidate)).classes("rag-path")
-                ui.button("Скачать", icon="download", on_click=lambda p=candidate: ui.download(p, filename=p.name)).props("outline dense")
-                ui.button("Найти в ОС", icon="open_in_new", on_click=lambda p=candidate: _select_in_os_explorer(str(p))).props("outline dense").tooltip("Выделить файл в проводнике Windows")
-                ui.button(icon="close", on_click=dialog.close, color=None).props("flat round dense")
+        preview_drawer.clear()
+        active_tab: List[str] = ["preview"]
+        _tab_refs: Dict[str, Any] = {}
 
-            if ext == ".pdf":
-                ui.html(
-                    f'<iframe src="{html.escape(viewer_url, quote=True)}" '
-                    'style="width:100%; height:72vh; border:1px solid rgba(148,163,184,.45); border-radius:10px;"></iframe>',
-                    sanitize=False,
+        with preview_drawer:
+            # Header
+            with ui.element("div").classes("rag-preview-drawer-header"):
+                with ui.element("div").style("flex:1;min-width:0"):
+                    ui.label(candidate.name).style(
+                        "font-family:var(--rag-font-display);font-weight:600;font-size:14px;"
+                        "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block"
+                    )
+                    ui.label(str(candidate)).classes("rag-path").style("margin-top:2px;display:block")
+                ui.button(icon="close", on_click=close_preview_drawer, color=None).props("flat round dense")
+
+            # Tabs row
+            tabs_row = ui.element("div").classes("rag-preview-drawer-tabs")
+            body_el = ui.element("div").classes("rag-preview-drawer-body")
+
+            def _refresh_body() -> None:
+                body_el.clear()
+                with body_el:
+                    if active_tab[0] == "preview":
+                        _render_preview_body(candidate, viewer_url, ext)
+                    elif active_tab[0] == "meta":
+                        _render_meta_body(candidate)
+                    else:
+                        ui.label("Чанки документа в индексе (заглушка).").classes("rag-meta")
+
+            def _make_tab(key: str, label: str) -> None:
+                btn = ui.element("button").classes(
+                    f"rag-preview-drawer-tab {'active' if active_tab[0] == key else ''}"
                 )
-            elif ext in INLINE_IMAGE_EXTENSIONS:
-                ui.image(viewer_url).classes("max-w-full max-h-[72vh] object-contain mx-auto")
-            elif ext in FILE_PREVIEW_EXTENSIONS:
-                ui.label(_preview_file(candidate, limit=32000)).classes("rag-code")
-            elif ext in OFFICE_PREVIEW_EXTENSIONS:
-                ui.label(_preview_office_file(candidate, limit=32000)).classes("rag-code")
-                ui.label("Для офисных форматов показывается текстовый извлеченный фрагмент.").classes("rag-meta")
-            else:
-                ui.label("Встроенный просмотр для этого формата не поддерживается. Используйте скачивание или открытие в ОС.").classes("rag-meta")
-        dialog.open()
+                btn._text = label  # type: ignore[attr-defined]
+                ui.html(label, parent=btn)
+
+                def _click(k: str = key) -> None:
+                    active_tab[0] = k
+                    for tk, te in _tab_refs.items():
+                        te.classes(remove="active")
+                        if tk == k:
+                            te.classes(add="active")
+                    _refresh_body()
+
+                btn.on("click", _click)
+                _tab_refs[key] = btn
+
+            with tabs_row:
+                _make_tab("preview", "Превью")
+                _make_tab("meta", "Метаданные")
+                _make_tab("chunks", "Чанки")
+
+            _refresh_body()
+
+            # Footer actions
+            with ui.element("div").classes("rag-preview-drawer-actions"):
+                ui.button("Скачать", icon="download",
+                          on_click=lambda p=candidate: ui.download(p, filename=p.name))\
+                    .props("unelevated dense").classes("flex-1")
+                ui.button("В проводник", icon="folder_open",
+                          on_click=lambda p=candidate: (close_preview_drawer(),
+                                                        set_screen("explorer"),
+                                                        state.__setattr__("explorer_path", str(p.parent)),
+                                                        render()))\
+                    .props("outline dense")
+                ui.button("Открыть в ОС", icon="open_in_new",
+                          on_click=lambda p=candidate: _select_in_os_explorer(str(p)))\
+                    .props("outline dense")
+
+        preview_drawer.classes(remove="closed")
+        preview_drawer_scrim.classes(remove="closed")
 
     def _parse_rag_answer(text: str) -> tuple[str, List[str]]:
         """Split RAG answer into (body, list_of_source_filenames)."""
@@ -1234,40 +1391,50 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.spinner(size="sm")
                 ui.label("Ищу совпадения…").classes("rag-meta")
 
-        # RAG Q&A карточка (основной ответ по всем результатам)
-        if state.rag_answer_loading:
-            with ui.row().classes("rag-card w-full p-3 gap-2 items-center"):
-                ui.spinner(size="sm")
-                ui.label("Анализирую документы…").classes("rag-meta")
-        elif state.rag_answer_text:
-            with ui.column().classes("rag-card w-full p-3 gap-2"):
-                with ui.row().classes("items-center justify-between w-full"):
-                    with ui.row().classes("items-center gap-1"):
-                        ui.icon("smart_toy", size="18px").classes("text-indigo-500")
-                        ui.label("Ответ ИИ").classes("font-semibold text-sm text-indigo-700")
-                    if not state.rag_answer_ok:
-                        ui.label("⚠ ответ может быть неточным").classes("rag-chip text-xs text-amber-700 bg-amber-50")
-                ui.label(state.rag_answer_text).classes("text-sm whitespace-pre-wrap")
-                if state.rag_answer_sources:
-                    ui.separator()
-                    with ui.column().classes("gap-1"):
-                        ui.label("Источники:").classes("rag-meta text-xs font-medium")
-                        with ui.row().classes("items-start gap-2 flex-wrap"):
-                            for _src in state.rag_answer_sources:
-                                _fname = str(_src.get("filename") or "")
+        # RAG Q&A карточка (основной ответ по всем результатам) — glow-card
+        if state.rag_answer_loading or state.rag_answer_text:
+            with ui.element("div").classes("rag-glow-card w-full").style("margin-bottom:16px"):
+                # Header
+                with ui.row().classes("items-center gap-3 w-full"):
+                    with ui.element("div").classes("rag-ai-badge"):
+                        ui.icon("auto_awesome", size="14px")
+                    with ui.column().classes("gap-0 min-w-0 flex-1"):
+                        ui.label("AI ответ").classes("rag-ai-title")
+                        _rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
+                        _src_count = len(state.rag_answer_sources or [])
+                        if state.rag_answer_loading:
+                            _ai_meta = f"{_rag_model} · думает…"
+                        else:
+                            _ai_meta = f"{_rag_model} · {_src_count} источник{'ов' if _src_count != 1 else ''}"
+                        ui.label(_ai_meta).classes("rag-ai-meta")
+                    if not state.rag_answer_ok and not state.rag_answer_loading:
+                        ui.label("⚠ может быть неточным").classes("rag-chip").style("color:#b45309;background:rgba(251,191,36,.15)")
+                # Body
+                if state.rag_answer_loading:
+                    with ui.row().classes("items-center gap-2 mt-3"):
+                        ui.spinner(size="sm")
+                        ui.label("Анализирую найденные документы…").classes("rag-meta")
+                else:
+                    ui.html(
+                        f'<p style="font-size:14px;line-height:1.6;margin:12px 0 0;white-space:pre-wrap">'
+                        f'{html.escape(state.rag_answer_text)}</p>',
+                        sanitize=False,
+                    )
+                    if state.rag_answer_sources:
+                        with ui.row().classes("gap-2 mt-3 flex-wrap"):
+                            for _src in list(state.rag_answer_sources)[:6]:
+                                _fname = str(_src.get("filename") or _src.get("path") or "—")[:40]
                                 _fpath = Path(str(_src.get("full_path") or ""))
                                 _page = _src.get("page")
-                                _section = str(_src.get("section") or "")
-                                _prov_label = ""
-                                if _page is not None:
-                                    _prov_label = f" · стр.{_page}"
-                                elif _section:
-                                    _prov_label = f" · {_section[:20]}"
-                                _btn_label = _fname + _prov_label
+                                _prov = f" · стр.{_page}" if _page is not None else ""
+                                _chip = ui.label(_fname + _prov).classes("rag-chip rag-chip-active").style(
+                                    "max-width:240px;overflow:hidden;text-overflow:ellipsis;cursor:pointer"
+                                )
+                                _chip.tooltip(str(_src.get("full_path") or _fname))
                                 if _fpath.exists() and _fpath.is_file():
-                                    ui.button(_btn_label, icon="description", on_click=lambda p=_fpath: open_file_viewer(p)).props("outline dense no-caps").classes("text-xs")
-                                else:
-                                    ui.label(_btn_label).classes("rag-chip text-xs")
+                                    _chip.on("click", lambda p=_fpath: open_file_viewer(p))
+                            if len(state.rag_answer_sources) > 6:
+                                ui.label(f"+{len(state.rag_answer_sources) - 6} ещё").classes("rag-chip")
 
         # Сводка по выбранным
         if state.selection_summary_loading:
@@ -1805,6 +1972,12 @@ def _build_page(initial_screen: str = "search") -> None:
             query_handler=choose_query_handler,
         )
 
+    def render_jobs_screen() -> None:
+        _jobs_view.render_jobs_screen(state, render_fn=render)
+
+    def render_cloud_screen() -> None:
+        _cloud_view.render_cloud_drive_screen(state)
+
     def render() -> None:
         page_root.classes(remove="search")
         if state.screen == "search":
@@ -1815,6 +1988,8 @@ def _build_page(initial_screen: str = "search") -> None:
             "index": "Индекс",
             "settings": "Настройки",
             "stats": "Аналитика",
+            "jobs": "Задачи",
+            "cloud": "Cloud Drive",
         }.get(state.screen, "Поиск"))
         if state.header_breadcrumbs is not None:
             state.header_breadcrumbs.clear()
@@ -1825,6 +2000,12 @@ def _build_page(initial_screen: str = "search") -> None:
             state.index_progress_timer = None
             _stop_managed_timer(state.stage_status_timer)
             state.stage_status_timer = None
+        if state.screen != "jobs":
+            _stop_managed_timer(getattr(state, "jobs_refresh_timer", None))
+            try:
+                state.jobs_refresh_timer = None  # type: ignore[attr-defined]
+            except Exception:
+                pass
         if not (state.auth_token and state.current_user):
             _stop_managed_timer(state.activity_timer)
             state.activity_timer = None
@@ -1903,8 +2084,23 @@ def _build_page(initial_screen: str = "search") -> None:
                 render_settings_screen()
             elif state.screen == "stats":
                 render_stats_screen()
+            elif state.screen == "jobs":
+                render_jobs_screen()
+            elif state.screen == "cloud":
+                render_cloud_screen()
             else:
                 render_search_screen()
+
+    # ── Preview drawer (живёт вне content, не сбрасывается при render()) ──
+    preview_drawer = ui.element("div").classes("rag-preview-drawer closed")
+    preview_drawer_scrim = ui.element("div").classes("rag-preview-drawer-scrim closed")
+
+    def close_preview_drawer() -> None:
+        preview_drawer.classes(add="closed")
+        preview_drawer_scrim.classes(add="closed")
+        preview_drawer.clear()
+
+    preview_drawer_scrim.on("click", lambda: close_preview_drawer())
 
     render()
 

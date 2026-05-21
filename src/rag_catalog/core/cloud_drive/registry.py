@@ -1546,6 +1546,15 @@ class CloudDriveRegistryDB:
                     conn.executemany("DELETE FROM cloud_file_versions WHERE id=?", [(item_id,) for item_id in delete_ids])
                 return len(delete_ids)
 
+    def all_storage_keys(self) -> set[str]:
+        """Return the set of unique storage keys currently registered (non-deleted files)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT storage_key FROM cloud_files "
+                "WHERE deleted_at='' AND storage_key<>'' AND storage_key IS NOT NULL"
+            ).fetchall()
+        return {str(row["storage_key"]) for row in rows}
+
     def sample_storage_objects(self, *, limit: int = 25) -> list[Dict[str, str]]:
         """Return a small deterministic sample of registry objects for storage checks."""
         safe_limit = max(1, min(int(limit or 25), 500))

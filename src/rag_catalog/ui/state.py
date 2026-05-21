@@ -93,6 +93,7 @@ CONFIG_PATH_KEYS = {
     "log_file",
     "collection_name",
     "telemetry_db_path",
+    "embedding_model",
 }
 
 

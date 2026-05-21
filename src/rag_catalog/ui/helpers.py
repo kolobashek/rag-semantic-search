@@ -499,6 +499,223 @@ def _remember_query(state: PageState, query: str) -> None:
         state.history = _dedupe_queries([clean, *state.history], limit=24)
 
 
+# ─────────────────────────── query parser ────────────────────────────────────
+
+def _parse_search_query(raw: str) -> Dict[str, Any]:
+    """Parse search operators out of raw query string.
+
+    Order matters: phrases and filters are removed first so они don't pollute
+    boolean splitting; wildcards are extracted last so дог* или акт preserves OR.
+    """
+    # 1. Quoted phrases → must match exactly
+    must_phrases: List[str] = re.findall(r'"([^"]+)"', raw)
+    q = re.sub(r'"[^"]+"', ' ', raw)
+
+    # 2. Excluded words (-слово)
+    tokens = q.split()
+    excluded_words: List[str] = [t[1:].lower() for t in tokens if t.startswith('-') and len(t) > 1]
+    tokens = [t for t in tokens if not (t.startswith('-') and len(t) > 1)]
+    q = ' '.join(tokens)
+
+    # 3. Structured filters (consume them before boolean splitting)
+    file_type_filter: Optional[str] = None
+    m = re.search(r'\btype:(\.?\w+)', q, re.IGNORECASE)
+    if m:
+        ft = m.group(1).lower()
+        file_type_filter = ft if ft.startswith('.') else '.' + ft
+        q = (q[:m.start()] + q[m.end():]).strip()
+
+    date_from: Optional[str] = None
+    m = re.search(r'\bafter:(\d{4}-\d{2}-\d{2})', q, re.IGNORECASE)
+    if m:
+        date_from = m.group(1)
+        q = (q[:m.start()] + q[m.end():]).strip()
+
+    date_to: Optional[str] = None
+    m = re.search(r'\bbefore:(\d{4}-\d{2}-\d{2})', q, re.IGNORECASE)
+    if m:
+        date_to = m.group(1)
+        q = (q[:m.start()] + q[m.end():]).strip()
+
+    path_filter: Optional[str] = None
+    m = re.search(r'\bpath:(\S+)', q, re.IGNORECASE)
+    if m:
+        path_filter = m.group(1).lower()
+        q = (q[:m.start()] + q[m.end():]).strip()
+
+    from_filter: Optional[str] = None
+    m = re.search(r'\bfrom:(\S+)', q, re.IGNORECASE)
+    if m:
+        from_filter = m.group(1).lower()
+        q = (q[:m.start()] + q[m.end():]).strip()
+
+    creator_filter: Optional[str] = None
+    m = re.search(r'\bcreator:(\S+)', q, re.IGNORECASE)
+    if m:
+        creator_filter = m.group(1).lower()
+        q = (q[:m.start()] + q[m.end():]).strip()
+
+    editor_filter: Optional[str] = None
+    m = re.search(r'\beditor:(\S+)', q, re.IGNORECASE)
+    if m:
+        editor_filter = m.group(1).lower()
+        q = (q[:m.start()] + q[m.end():]).strip()
+
+    # 4. Boolean OR/AND splitting — wildcards intentionally kept so дог* или акт
+    #    produces two OR branches, not one prefix term and a broken OR.
+    or_branches = re.split(r'(?<!\w)или(?!\w)', q, flags=re.IGNORECASE)
+    raw_bool_groups: List[List[str]] = []
+    for branch in or_branches:
+        and_terms = re.split(r'(?<!\w)и(?!\w)', branch, flags=re.IGNORECASE)
+        group = [t.strip() for t in and_terms if t.strip()]
+        if group:
+            raw_bool_groups.append(group)
+
+    # 5. Extract wildcards from bool_group terms (keeps them in groups for matching)
+    prefix_terms: List[str] = []
+    bool_groups: List[List[str]] = []
+    for group in raw_bool_groups:
+        clean_group: List[str] = []
+        for term in group:
+            words = term.split()
+            for w in words:
+                if w.endswith('*') and len(w) > 1:
+                    prefix_terms.append(w[:-1].lower())
+            # Keep the original term (with *) in bool_groups so _apply can use wildcard matching
+            clean_group.append(term)
+        bool_groups.append(clean_group)
+
+    has_bool = len(bool_groups) > 1 or any(len(g) > 1 for g in bool_groups)
+
+    def _strip_star(t: str) -> str:
+        return ' '.join(w[:-1] if w.endswith('*') and len(w) > 1 else w for w in t.split())
+
+    clean_terms = [_strip_star(t) for group in bool_groups for t in group]
+    semantic_query = ' '.join(clean_terms).strip() or ' '.join(must_phrases)
+
+    has_operators = bool(
+        must_phrases or excluded_words or prefix_terms
+        or file_type_filter or date_from or date_to or path_filter
+        or from_filter or creator_filter or editor_filter
+        or has_bool
+    )
+    return {
+        "semantic_query": semantic_query,
+        "must_phrases": must_phrases,
+        "excluded_words": excluded_words,
+        "prefix_terms": prefix_terms,
+        "file_type_filter": file_type_filter,
+        "date_from": date_from,
+        "date_to": date_to,
+        "path_filter": path_filter,
+        "from_filter": from_filter,
+        "creator_filter": creator_filter,
+        "editor_filter": editor_filter,
+        "bool_groups": bool_groups,
+        "has_bool": has_bool,
+        "has_operators": has_operators,
+    }
+
+
+def _apply_query_operators(results: List[Dict[str, Any]], parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Post-filter search results based on parsed query operators."""
+    if not parsed.get("has_operators"):
+        return results
+
+    must_phrases = [p.lower() for p in parsed.get("must_phrases", [])]
+    excluded_words = [w.lower() for w in parsed.get("excluded_words", [])]
+    prefix_terms = [p.lower() for p in parsed.get("prefix_terms", [])]
+    file_type_filter: Optional[str] = parsed.get("file_type_filter")
+    date_from: Optional[str] = parsed.get("date_from")
+    date_to: Optional[str] = parsed.get("date_to")
+    path_filter: Optional[str] = parsed.get("path_filter")
+    from_filter: Optional[str] = parsed.get("from_filter")
+    creator_filter: Optional[str] = parsed.get("creator_filter")
+    editor_filter: Optional[str] = parsed.get("editor_filter")
+    bool_groups: List[List[str]] = parsed.get("bool_groups", [])
+    has_bool: bool = parsed.get("has_bool", False)
+
+    def _term_in(term: str, text: str, words: List[str]) -> bool:
+        """Match a single term against text; handles trailing * as prefix wildcard."""
+        if term.endswith('*'):
+            pfx = term[:-1].lower()
+            return bool(pfx) and any(w.startswith(pfx) for w in words)
+        return term.lower() in text
+
+    filtered = []
+    for item in results:
+        text = ' '.join([
+            str(item.get("text") or ""),
+            str(item.get("chunk_text") or ""),
+            str(item.get("filename") or ""),
+            str(item.get("path") or ""),
+        ]).lower()
+        words = text.split()
+        path = str(item.get("path") or item.get("full_path") or item.get("cloud_path") or "").lower()
+        fname = str(item.get("filename") or "").lower()
+        ext = str(item.get("extension") or "").lower()
+        if ext and not ext.startswith('.'):
+            ext = '.' + ext
+        doc_author = str(item.get("doc_author") or "").lower()
+        doc_last_editor = str(item.get("doc_last_editor") or "").lower()
+        doc_top_editor = str(item.get("doc_top_editor") or "").lower()
+
+        if file_type_filter:
+            if ext != file_type_filter and not fname.endswith(file_type_filter):
+                continue
+
+        d = str(item.get("modified") or "")[:10]
+        if date_from and d and d < date_from:
+            continue
+        if date_to and d and d > date_to:
+            continue
+
+        if path_filter and path_filter not in path:
+            continue
+
+        # from: searches path + all author fields
+        if from_filter and not (
+            from_filter in path
+            or from_filter in doc_author
+            or from_filter in doc_last_editor
+            or from_filter in doc_top_editor
+        ):
+            continue
+
+        # creator: matches only the original document author
+        if creator_filter and creator_filter not in doc_author:
+            continue
+
+        # editor: matches last editor or top tracked-change editor
+        if editor_filter and not (
+            editor_filter in doc_last_editor or editor_filter in doc_top_editor
+        ):
+            continue
+
+        if any(ew in text for ew in excluded_words):
+            continue
+
+        if must_phrases and not all(ph in text for ph in must_phrases):
+            continue
+
+        # Standalone prefix check only when no boolean groups control the logic
+        if not has_bool and prefix_terms:
+            if not all(any(w.startswith(pt) for w in words) for pt in prefix_terms):
+                continue
+
+        # Boolean OR-of-ANDs: pass if ANY OR-branch has ALL its AND-terms matching
+        if has_bool and bool_groups:
+            if not any(
+                all(_term_in(term, text, words) for term in grp)
+                for grp in bool_groups
+            ):
+                continue
+
+        filtered.append(item)
+
+    return filtered
+
+
 # ─────────────────────────── search runners ─────────────────────────────────
 
 def _normalize_search_results(results: Any) -> List[Dict[str, Any]]:

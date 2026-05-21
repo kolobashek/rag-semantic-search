@@ -11,6 +11,7 @@ from typing import Protocol
 class StorageAdapter(Protocol):
     def put_file(self, source_path: Path, storage_key: str) -> None: ...
     def exists(self, storage_key: str) -> bool: ...
+    def list_keys(self) -> set[str]: ...
     def move(self, old_storage_key: str, new_storage_key: str) -> None: ...
     def delete(self, storage_key: str) -> None: ...
     def resolve_path(self, storage_key: str) -> str: ...
@@ -43,6 +44,15 @@ class LocalStorageAdapter:
 
     def exists(self, storage_key: str) -> bool:
         return self._target(storage_key).exists()
+
+    def list_keys(self) -> set[str]:
+        result: set[str] = set()
+        if not self.root.exists():
+            return result
+        for p in self.root.rglob("*"):
+            if p.is_file() and not p.name.startswith("."):
+                result.add(str(p.relative_to(self.root)).replace("\\", "/"))
+        return result
 
     def move(self, old_storage_key: str, new_storage_key: str) -> None:
         source = self._target(old_storage_key)
@@ -112,6 +122,16 @@ class S3StorageAdapter:
             return True
         except Exception:
             return False
+
+    def list_keys(self) -> set[str]:
+        result: set[str] = set()
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket):
+            for obj in page.get("Contents", []):
+                key = str(obj.get("Key") or "")
+                if key and not key.startswith("."):
+                    result.add(key)
+        return result
 
     def move(self, old_storage_key: str, new_storage_key: str) -> None:
         self._client.copy_object(

@@ -530,6 +530,7 @@ def render_settings_screen(
                 "qdrant_url": str(state.cfg.get("qdrant_url") or "").strip(),
                 "qdrant_db_path": str(state.cfg.get("qdrant_db_path") or "").strip(),
                 "collection_name": str(state.cfg.get("collection_name") or "catalog").strip() or "catalog",
+                "embedding_model": str(state.cfg.get("embedding_model") or "sentence-transformers/all-MiniLM-L6-v2").strip(),
                 "telemetry_db_path": str(state.cfg.get("telemetry_db_path") or "").strip(),
                 "log_file": str(state.cfg.get("log_file") or "").strip(),
             }
@@ -539,6 +540,14 @@ def render_settings_screen(
             qdrant_url_input = ui.input("Qdrant URL", value=str(state.cfg.get("qdrant_url") or "")).props("dense outlined").classes("w-full")
             qdrant_db_input = _path_row("Локальный путь Qdrant", str(state.cfg.get("qdrant_db_path") or ""), folder=True)
             collection_input = ui.input("Коллекция", value=str(state.cfg.get("collection_name") or "catalog")).props("dense outlined").classes("w-full")
+            embedding_input = ui.input(
+                "Embedding-модель",
+                value=str(state.cfg.get("embedding_model") or "sentence-transformers/all-MiniLM-L6-v2"),
+            ).props("dense outlined").classes("w-full")
+            ui.label(
+                "⚠ Смена модели требует полной переиндексации (все файлы, stage=all). "
+                "Рекомендуется для русских документов: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+            ).classes("rag-meta text-amber-600 dark:text-amber-400 text-xs")
             telemetry_input = _path_row("БД телеметрии", str(state.cfg.get("telemetry_db_path") or ""), folder=False)
             log_input = _path_row("Лог автоматизации", str(state.cfg.get("log_file") or ""), folder=False)
 
@@ -554,6 +563,7 @@ def render_settings_screen(
                     "qdrant_url": str(qdrant_url_input.value or "").strip(),
                     "qdrant_db_path": str(qdrant_db_input.value or "").strip(),
                     "collection_name": str(collection_input.value or "catalog").strip() or "catalog",
+                    "embedding_model": str(embedding_input.value or "").strip(),
                     "telemetry_db_path": str(telemetry_input.value or "").strip(),
                     "log_file": str(log_input.value or "").strip(),
                 }
@@ -566,6 +576,7 @@ def render_settings_screen(
                 qdrant_url_input.set_value(initial_paths["qdrant_url"])
                 qdrant_db_input.set_value(initial_paths["qdrant_db_path"])
                 collection_input.set_value(initial_paths["collection_name"])
+                embedding_input.set_value(initial_paths["embedding_model"])
                 telemetry_input.set_value(initial_paths["telemetry_db_path"])
                 log_input.set_value(initial_paths["log_file"])
                 action_row.set_visibility(False)
@@ -598,6 +609,7 @@ def render_settings_screen(
             qdrant_url_input.on_value_change(lambda _: refresh_paths_dirty())
             qdrant_db_input.on_value_change(lambda _: refresh_paths_dirty())
             collection_input.on_value_change(lambda _: refresh_paths_dirty())
+            embedding_input.on_value_change(lambda _: refresh_paths_dirty())
             telemetry_input.on_value_change(lambda _: refresh_paths_dirty())
             log_input.on_value_change(lambda _: refresh_paths_dirty())
             with action_row:
@@ -635,7 +647,7 @@ def render_settings_screen(
                 "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
                 "cloud_drive_autosync_minutes": int(state.cfg.get("cloud_drive_autosync_minutes") or 0),
             }
-            stats_ref: Dict[str, Any] = {"value": None}
+            stats_ref: Dict[str, Any] = {"value": None, "storage_box": None}
             autosync_last_run: Dict[str, Any] = {"ts": None}
 
             ui.label("Cloud Drive").classes("text-xl font-semibold")
@@ -812,21 +824,10 @@ def render_settings_screen(
                             ui.label(_lbl).classes("rag-meta text-xs text-green-700")
                     except Exception:
                         pass
-                    try:
-                        _coverage = CloudDriveService.from_config(build_cloud_config()).get_storage_coverage(sample_limit=25)
-                        _checked = int(_coverage.get("checked") or 0)
-                        _missing = int(_coverage.get("missing") or 0)
-                        if _checked > 0 and _missing > 0:
-                            with ui.element("div").classes("cd-alert cd-alert-warning w-full"):
-                                ui.icon("warning", size="18px")
-                                ui.label(
-                                    f"Storage не содержит {_missing} из {_checked} проверенных объектов. "
-                                    "Если недавно сменили Local/S3/MinIO, запустите «Добавить новые файлы» для дозаливки."
-                                ).classes("text-xs")
-                        elif _checked > 0:
-                            ui.label(f"Storage проверен: {_checked} объектов доступны.").classes("rag-meta text-xs text-green-700")
-                    except Exception as exc:
-                        ui.label(f"Проверка storage недоступна: {exc}").classes("rag-meta text-xs text-orange-700")
+                    storage_box = ui.column().classes("w-full gap-1 mt-1")
+                    stats_ref["storage_box"] = storage_box
+                    with storage_box:
+                        ui.label("Проверка хранилища…").classes("rag-meta text-xs text-gray-400")
 
             _CD_STATUS_META = {
                 "pending":   ("schedule",     "cd-status-pending",   "Ожидание"),
@@ -850,8 +851,10 @@ def render_settings_screen(
                 "cleanup": "Очистка",
             }
 
-            def render_bootstrap_status() -> None:
-                bootstrap_state = _read_cloud_bootstrap_status(build_cloud_config())
+            def render_bootstrap_status(data: Optional[Dict[str, Any]] = None) -> None:
+                if data is None:
+                    data = _read_cloud_bootstrap_status(build_cloud_config())
+                bootstrap_state = data
                 bootstrap_box.clear()
                 with bootstrap_box:
                     ui.label("Статус импорта").classes("font-semibold text-sm")
@@ -887,25 +890,31 @@ def render_settings_screen(
                     if finished_at:
                         ui.label(f"Финиш: {finished_at[:19].replace(chr(84), chr(32))}").classes("rag-meta")
 
-            def render_bootstrap_jobs() -> None:
+            def render_bootstrap_jobs(
+                jobs: Optional[list] = None,
+                error: Optional[str] = None,
+            ) -> None:
                 jobs_box.clear()
                 cfg_now = build_cloud_config()
-                if not str(cfg_now.get("cloud_drive_db_path") or "").strip():
-                    with jobs_box:
-                        ui.label("Последние задачи").classes("font-semibold text-sm")
-                        with ui.element("div").classes("cd-empty-state w-full"):
-                            ui.icon("settings", size="24px").classes("opacity-30")
-                            ui.label("Сохраните настройки Cloud Drive, чтобы видеть историю задач.").classes("text-center")
-                    return
-                try:
-                    service = CloudDriveService.from_config(cfg_now)
-                    jobs = service.list_bootstrap_jobs(limit=8)
-                except Exception as exc:
+                if jobs is None and error is None:
+                    if not str(cfg_now.get("cloud_drive_db_path") or "").strip():
+                        with jobs_box:
+                            ui.label("Последние задачи").classes("font-semibold text-sm")
+                            with ui.element("div").classes("cd-empty-state w-full"):
+                                ui.icon("settings", size="24px").classes("opacity-30")
+                                ui.label("Сохраните настройки Cloud Drive, чтобы видеть историю задач.").classes("text-center")
+                        return
+                    try:
+                        service = CloudDriveService.from_config(cfg_now)
+                        jobs = service.list_bootstrap_jobs(limit=8)
+                    except Exception as exc:
+                        error = str(exc)
+                if error is not None:
                     with jobs_box:
                         ui.label("Последние задачи").classes("font-semibold text-sm")
                         with ui.element("div").classes("cd-empty-state w-full"):
                             ui.icon("error_outline", size="24px").classes("text-red-400 opacity-70")
-                            ui.label(f"Не удалось прочитать задачи: {exc}").classes("text-center text-red-600 text-xs")
+                            ui.label(f"Не удалось прочитать задачи: {error}").classes("text-center text-red-600 text-xs")
                     return
                 with jobs_box:
                     ui.label("Последние задачи").classes("font-semibold text-sm")
@@ -1034,6 +1043,42 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось подготовить bucket: {exc}", type="negative")
 
+            async def refresh_storage_coverage() -> None:
+                box = stats_ref.get("storage_box")
+                if box is None:
+                    return
+                try:
+                    cfg = build_cloud_config()
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    coverage = await run.io_bound(service.get_exact_storage_coverage)
+                    registry_keys = int(coverage.get("registry_keys") or 0)
+                    present = int(coverage.get("present") or 0)
+                    missing = int(coverage.get("missing") or 0)
+                    pct = present / registry_keys if registry_keys > 0 else 1.0
+                    color = "positive" if pct >= 0.99 else ("warning" if pct >= 0.5 else "negative")
+                    text_color = "green" if pct >= 0.99 else ("orange" if pct >= 0.5 else "red")
+                    box.clear()
+                    with box:
+                        with ui.row().classes("w-full items-center gap-2 mt-1"):
+                            ui.label("Хранилище").classes("font-semibold text-sm")
+                            ui.label(f"{present:,} / {registry_keys:,} уникальных ключей".replace(",", " ")).classes("rag-meta text-xs")
+                            ui.space()
+                            ui.label(f"{pct * 100:.1f}%").classes(f"font-semibold text-{text_color}-600")
+                        ui.linear_progress(value=pct, show_value=False).props(f"color={color}").classes("w-full")
+                        if missing > 0:
+                            with ui.element("div").classes("cd-alert cd-alert-warning w-full mt-1"):
+                                ui.icon("warning", size="16px")
+                                ui.label(
+                                    f"{missing:,} уникальных ключей отсутствуют в хранилище.".replace(",", " ") + " "
+                                    "Нажмите «Добавить новые файлы» для дозаливки."
+                                ).classes("text-xs")
+                        else:
+                            ui.label("Все файлы реестра присутствуют в хранилище.").classes("rag-meta text-xs text-green-600")
+                except Exception as exc:
+                    box.clear()
+                    with box:
+                        ui.label(f"Проверка хранилища недоступна: {exc}").classes("rag-meta text-xs text-orange-700")
+
             async def refresh_registry_stats() -> None:
                 try:
                     cfg = build_cloud_config()
@@ -1042,6 +1087,7 @@ def render_settings_screen(
                     render_cloud_stats(stats_obj, title="Статистика реестра")
                     render_bootstrap_status()
                     render_bootstrap_jobs()
+                    await refresh_storage_coverage()
                 except Exception:
                     render_cloud_stats(None, title="Статистика реестра")
 
@@ -1071,6 +1117,7 @@ def render_settings_screen(
                     render_cloud_stats(stats_obj, title="Реестр инициализирован")
                     _log_app_event(state, "cloud_drive", "init_registry", details=current_cloud_values())
                     ui.notify("Реестр Cloud Drive инициализирован.", type="positive")
+                    await refresh_storage_coverage()
                 except Exception as exc:
                     ui.notify(f"Не удалось инициализировать реестр: {exc}", type="negative")
 
@@ -1150,42 +1197,29 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось повторить импорт: {exc}", type="negative")
 
-            def _autosync_tick() -> None:
+            def _autosync_tick(bootstrap_state: Optional[Dict[str, Any]] = None) -> None:
                 interval_min = int(autosync_select.value or 0)
                 if interval_min <= 0:
                     autosync_status_label.set_text("")
                     return
-                last = autosync_last_run.get("ts")
                 now = datetime.datetime.now()
+                last = autosync_last_run.get("ts")
+                # update last_run from DB status if we haven't run yet in this session
+                if last is None and bootstrap_state is not None:
+                    started_at = str(bootstrap_state.get("started_at") or "").strip()
+                    if started_at:
+                        try:
+                            last = datetime.datetime.fromisoformat(started_at[:19])
+                            autosync_last_run["ts"] = last
+                        except ValueError:
+                            pass
                 if last is None:
-                    autosync_last_run["ts"] = now
-                    autosync_status_label.set_text(f"Автосинхронизация включена, первый запуск через {interval_min} мин")
+                    autosync_status_label.set_text(f"Автосинхронизация каждые {interval_min} мин (глобальный планировщик)")
                     return
                 elapsed = (now - last).total_seconds() / 60
-                remaining = interval_min - elapsed
-                if remaining <= 0:
-                    cfg_now = build_cloud_config()
-                    catalog = str(cfg_now.get("catalog_path") or "").strip()
-                    if catalog and Path(catalog).exists():
-                        current_state = _read_cloud_bootstrap_status(cfg_now)
-                        if str(current_state.get("job_status") or current_state.get("status") or "") not in {"running", "pending"}:
-                            try:
-                                service = CloudDriveService.from_config(cfg_now)
-                                job = service.create_bootstrap_job(catalog_root=catalog, import_files=True)
-                                threading.Thread(
-                                    target=_run_bootstrap_background,
-                                    kwargs={"cfg": cfg_now, "job_id": job.id},
-                                    name="cloud-drive-autosync",
-                                    daemon=True,
-                                ).start()
-                                autosync_last_run["ts"] = now
-                                autosync_status_label.set_text(f"Автосинхронизация: запущена в {now.strftime(chr(37) + chr(72) + chr(58) + chr(37) + chr(77) + chr(58) + chr(37) + chr(83))}")
-                                render_bootstrap_status()
-                                render_bootstrap_jobs()
-                                return
-                            except Exception:
-                                pass
-                    autosync_last_run["ts"] = now
+                remaining = max(0, interval_min - elapsed)
+                if remaining < 1:
+                    autosync_status_label.set_text(f"Автосинхронизация: выполняется или запускается")
                 else:
                     next_in = int(remaining) + 1
                     last_str = last.strftime(chr(37) + chr(72) + chr(58) + chr(37) + chr(77))
@@ -1221,8 +1255,26 @@ def render_settings_screen(
                 ensure_bucket_button = ui.button("Создать bucket", icon="create_new_folder", on_click=ensure_cloud_storage_container).props("outline")
                 ui.button("Добавить новые файлы", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
 
+            async def _cloud_drive_tick() -> None:
+                cfg_now = build_cloud_config()
+                # fetch all IO off the event loop to avoid blocking WebSocket heartbeats
+                bs_data = await run.io_bound(_read_cloud_bootstrap_status, cfg_now)
+                render_bootstrap_status(data=bs_data)
+
+                db_path = str(cfg_now.get("cloud_drive_db_path") or "").strip()
+                if db_path:
+                    try:
+                        def _get_jobs() -> list:
+                            return CloudDriveService.from_config(cfg_now).list_bootstrap_jobs(limit=8)
+                        jobs_list = await run.io_bound(_get_jobs)
+                        render_bootstrap_jobs(jobs=jobs_list)
+                    except Exception as exc:
+                        render_bootstrap_jobs(error=str(exc))
+
+                _autosync_tick(bootstrap_state=bs_data)
+
             _stop_managed_timer(state.cloud_drive_timer)
-            state.cloud_drive_timer = ui.timer(3.0, lambda: (render_bootstrap_status(), render_bootstrap_jobs(), _autosync_tick()))
+            state.cloud_drive_timer = ui.timer(3.0, _cloud_drive_tick)
 
             ensure_bucket_button.set_visibility(str(storage_kind.value or "local") == "s3")
             storage_kind.on_value_change(lambda _: ensure_bucket_button.set_visibility(str(storage_kind.value or "local") == "s3"))

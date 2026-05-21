@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 import mimetypes
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from ..embedding_collections import resolve_collection_name_from_config
 from .models import CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
@@ -81,6 +85,26 @@ class CloudDriveService:
         if callable(ensure):
             return dict(ensure())
         return dict(self.storage.healthcheck())
+
+    def get_exact_storage_coverage(self) -> dict:
+        """Exact coverage: compare all registry keys against all storage keys.
+
+        For S3/MinIO uses list_objects_v2 (one paginated call, much faster than
+        per-file HEAD requests). For local storage walks the directory once.
+        Returns exact counts — no sampling.
+        """
+        db_keys = self.registry.all_storage_keys()
+        storage_keys = self.storage.list_keys()
+        missing = db_keys - storage_keys
+        present = db_keys & storage_keys
+        return {
+            "registry_keys": len(db_keys),
+            "storage_keys": len(storage_keys),
+            "present": len(present),
+            "missing": len(missing),
+            "missing_examples": list(missing)[:5],
+            "ok": not missing,
+        }
 
     def get_storage_coverage(self, *, sample_limit: int = 25) -> dict:
         """Check whether registry objects are present in the configured storage backend.
@@ -835,7 +859,26 @@ class CloudDriveService:
                 return False
             return not bool(dict(current_job.progress or {}).get('cancel_requested'))
 
+        _CATALOG_WAIT_SEC = 60
         try:
+            while not Path(catalog_root).is_dir():
+                current_job = self.registry.get_job(job_id)
+                if current_job is None or dict(current_job.progress or {}).get('cancel_requested'):
+                    raise CloudDriveJobCancelled('cancelled_by_user')
+                logger.warning(
+                    "bootstrap: каталог недоступен %s — жду %ds...",
+                    catalog_root, _CATALOG_WAIT_SEC,
+                )
+                self.registry.update_job(
+                    job_id, status='running',
+                    payload={'progress': {
+                        'status': 'waiting_catalog',
+                        'catalog': catalog_root,
+                        'started_at': datetime.now(timezone.utc).isoformat(),
+                    }},
+                )
+                time.sleep(_CATALOG_WAIT_SEC)
+
             stats = self.bootstrap_from_catalog(
                 catalog_root,
                 max_files=max_files,
@@ -1013,27 +1056,32 @@ class CloudDriveService:
                         continue
 
                 # File is new or modified — compute checksum and upsert
-                checksum = compute_file_checksum(file_path)
-                storage_key = self._immutable_storage_key(checksum=checksum, filename=filename)
-                if import_files and not self.storage.exists(storage_key):
-                    self.storage.put_file(file_path, storage_key)
-                self.registry.upsert_file(
-                    folder_id=base_id,
-                    path=str(rel_file).replace('\\', '/'),
-                    name=filename,
-                    storage_key=storage_key,
-                    mime_type=guess_mime_type(file_path),
-                    size_bytes=file_size,
-                    checksum=checksum,
-                    source_path=str(file_path),
-                    source_mtime=file_mtime,
-                )
-                imported += 1
-                if imported == 1 or imported % 25 == 0:
-                    emit_progress('file', current_path=str(file_path))
-                if max_files is not None and imported >= max_files:
-                    emit_progress('done', current_path=str(file_path), done=True)
-                    return self.registry.stats()
+                try:
+                    checksum = compute_file_checksum(file_path)
+                    storage_key = self._immutable_storage_key(checksum=checksum, filename=filename)
+                    if import_files and not self.storage.exists(storage_key):
+                        self.storage.put_file(file_path, storage_key)
+                    self.registry.upsert_file(
+                        folder_id=base_id,
+                        path=str(rel_file).replace('\\', '/'),
+                        name=filename,
+                        storage_key=storage_key,
+                        mime_type=guess_mime_type(file_path),
+                        size_bytes=file_size,
+                        checksum=checksum,
+                        source_path=str(file_path),
+                        source_mtime=file_mtime,
+                    )
+                    imported += 1
+                    if imported == 1 or imported % 25 == 0:
+                        emit_progress('file', current_path=str(file_path))
+                    if max_files is not None and imported >= max_files:
+                        emit_progress('done', current_path=str(file_path), done=True)
+                        return self.registry.stats()
+                except CloudDriveJobCancelled:
+                    raise
+                except Exception as _file_exc:
+                    logger.warning("bootstrap: пропускаю %s — %s", file_path, _file_exc)
 
             # Update stored dir mtime so next scan can skip this directory if unchanged
             if base_id is not None:
