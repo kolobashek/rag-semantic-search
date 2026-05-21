@@ -70,6 +70,64 @@ class CloudDriveService:
     def list_jobs(self, *, job_type: str = '', limit: int = 20) -> list[CloudDriveJob]:
         return self.registry.list_jobs(job_type=(job_type or None), limit=limit)
 
+    def grant_permission(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        resource_type: str,
+        resource_id: str,
+        access_level: str = "viewer",
+    ) -> Dict[str, str]:
+        return self.registry.grant_permission(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            access_level=access_level,
+        )
+
+    def grant_path_permission(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        path: str,
+        access_level: str = "viewer",
+    ) -> Dict[str, str]:
+        clean_path = str(path or "").strip().replace("\\", "/").strip("/")
+        node = self.registry.get_node_by_path(clean_path)
+        if node is not None:
+            resource_type = "folder" if hasattr(node, "is_root") else "file"
+            resource_id = str(node.id)
+        else:
+            resource_type = "path"
+            resource_id = clean_path or "*"
+        return self.grant_permission(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            access_level=access_level,
+        )
+
+    def user_can_access(
+        self,
+        *,
+        username: str,
+        role: str = "",
+        path: str = "",
+        file_id: str = "",
+        required_level: str = "viewer",
+    ) -> bool:
+        return self.registry.user_can_access(
+            username=username,
+            role=role,
+            path=path,
+            file_id=file_id,
+            required_level=required_level,
+        )
+
     def get_storage_health(self) -> CloudDriveStorageHealth:
         result = dict(self.storage.healthcheck())
         return CloudDriveStorageHealth(

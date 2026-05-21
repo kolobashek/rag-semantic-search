@@ -34,6 +34,38 @@ def test_registry_root_folder_and_stats(tmp_path: Path) -> None:
     assert root.is_root is True
 
 
+def test_registry_permissions_inherit_from_folder_and_preserve_open_default(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')
+    folder = registry.upsert_folder(path='Projects/A', name='A', parent_id=root.id, depth=2)
+    file_row = registry.upsert_file(
+        folder_id=folder.id,
+        path='Projects/A/report.txt',
+        name='report.txt',
+        storage_key='objects/sha256/aa/bb/aabb.txt',
+        mime_type='text/plain',
+        size_bytes=12,
+        checksum='aabb',
+        source_path='O:/Обмен/Projects/A/report.txt',
+    )
+
+    assert registry.user_can_access(username='maria', role='viewer', path='Private/secret.txt')
+
+    registry.grant_permission(
+        subject_type='role',
+        subject_id='viewer',
+        resource_type='folder',
+        resource_id=folder.id,
+        access_level='viewer',
+    )
+
+    assert registry.user_can_access(username='maria', role='viewer', path='Projects/A/report.txt')
+    assert registry.user_can_access(username='maria', role='viewer', file_id=file_row.id)
+    assert not registry.user_can_access(username='maria', role='viewer', path='Private/secret.txt')
+    assert not registry.user_can_access(username='maria', role='viewer', path='Projects/A/report.txt', required_level='editor')
+    assert registry.user_can_access(username='root', role='admin', path='Private/secret.txt', required_level='admin')
+
+
 def test_registry_upsert_file_is_idempotent_for_same_content(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')

@@ -24,7 +24,7 @@ from rag_catalog.core.rag_core import load_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
-from .helpers import _cd_acl_allows, _resolve_catalog_file
+from .helpers import _cd_registry_acl_allows, _resolve_catalog_file
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _safe_int, _telemetry_db_path
 
@@ -90,8 +90,26 @@ def _audit_cloud_drive_api_event(
         pass
 
 
-def _require_cloud_drive_path_access(cfg: Dict[str, Any], user: Dict[str, Any], path: str) -> None:
-    if not _cd_acl_allows(cfg, user, path):
+def _cloud_drive_path_allowed(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any],
+    path: str,
+    *,
+    service: CloudDriveService | None = None,
+    required_level: str = "viewer",
+) -> bool:
+    return _cd_registry_acl_allows(cfg, user, path, service=service, required_level=required_level)
+
+
+def _require_cloud_drive_path_access(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any],
+    path: str,
+    *,
+    service: CloudDriveService | None = None,
+    required_level: str = "viewer",
+) -> None:
+    if not _cloud_drive_path_allowed(cfg, user, path, service=service, required_level=required_level):
         raise HTTPException(status_code=403, detail="Нет доступа к этому пути Cloud Drive.")
 
 
@@ -226,6 +244,42 @@ def api_cloud_drive_jobs(job_type: str = "", limit: int = 20, authorization: Aut
     return [_serialize_cloud_drive_job(job) for job in jobs]
 
 
+@app.post("/api/cloud-drive/permissions")
+def api_cloud_drive_permissions(
+    subject_type: str = "",
+    subject_id: str = "",
+    path: str = "",
+    resource_type: str = "",
+    resource_id: str = "",
+    access_level: str = "viewer",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    try:
+        if str(path or "").strip() or not str(resource_type or "").strip():
+            permission = service.grant_path_permission(
+                subject_type=subject_type,
+                subject_id=subject_id,
+                path=path,
+                access_level=access_level,
+            )
+        else:
+            permission = service.grant_permission(
+                subject_type=subject_type,
+                subject_id=subject_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                access_level=access_level,
+            )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "permissions_grant", ok=False, details={"subject_type": subject_type, "subject_id": subject_id, "path": path, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "permissions_grant", details=permission)
+    return permission
+
+
 @app.get("/api/cloud-drive/job")
 def api_cloud_drive_job(job_id: str, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
@@ -244,7 +298,7 @@ def api_cloud_drive_file_statuses(file_ids: str = "", paths: str = "", authoriza
     service = CloudDriveService.from_config(cfg)
     ids = [part.strip() for part in str(file_ids or "").split(",") if part.strip()]
     for path in [part.strip() for part in str(paths or "").split(",") if part.strip()]:
-        _require_cloud_drive_path_access(cfg, user, path)
+        _require_cloud_drive_path_access(cfg, user, path, service=service)
         file_row = service.registry.get_file_by_path(path)
         if file_row is not None:
             ids.append(file_row.id)
@@ -320,7 +374,7 @@ def api_cloud_drive_changes(since: str = "", limit: int = 500, authorization: Au
     result = service.list_changes(since=since, limit=max(1, min(int(limit or 500), 5000)))
     changes = [
         item for item in result.get("changes", [])
-        if _cd_acl_allows(cfg, user, str(item.get("path") or ""))
+        if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
     ]
     result["changes"] = changes
     result["count"] = len(changes)
@@ -463,7 +517,7 @@ def api_cloud_drive_sync_pair_upsert(
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
-    _require_cloud_drive_path_access(cfg, user, cloud_path)
+    _require_cloud_drive_path_access(cfg, user, cloud_path, service=service, required_level="editor")
     try:
         pair = service.upsert_sync_pair(
             client_id=client_id,
@@ -517,7 +571,7 @@ def api_cloud_drive_sync_selective_set(
     _require_sync_client_access(service, user, client_id)
     path_values = [part.strip() for part in str(paths or "").split(",") if part.strip()]
     for path in path_values:
-        _require_cloud_drive_path_access(cfg, user, path)
+        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
     try:
         result = service.set_selective_sync_paths(client_id=client_id, paths=path_values, mode=mode, replace=bool(replace))
     except RuntimeError as exc:
@@ -563,7 +617,7 @@ def api_cloud_drive_sync_conflict_record(
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     if cloud_path or path:
-        _require_cloud_drive_path_access(cfg, user, cloud_path or path)
+        _require_cloud_drive_path_access(cfg, user, cloud_path or path, service=service, required_level="editor")
     try:
         details = json.loads(str(details_json or "{}"))
     except json.JSONDecodeError:
@@ -620,8 +674,8 @@ def api_cloud_drive_sync_conflict_resolve(
 def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
-    _require_cloud_drive_path_access(cfg, user, parent_path)
     service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, parent_path, service=service, required_level="editor")
     try:
         result = service.create_folder(parent_path=parent_path, name=name)
         _audit_cloud_drive_api_event(cfg, user, "create_folder", details={"parent_path": parent_path, "name": name, "path": result.get("path")})
@@ -662,8 +716,8 @@ async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(
         raise HTTPException(status_code=400, detail="Не передан файл для загрузки.")
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
-    _require_cloud_drive_path_access(cfg, user, parent_path)
     service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, parent_path, service=service, required_level="editor")
     suffix = Path(str(file.filename or "")).suffix
     tmp_path = ""
     try:
@@ -708,9 +762,9 @@ def api_cloud_drive_versions(path: str, authorization: AuthHeader = "") -> Dict[
 def api_cloud_drive_move(source_path: str = "", dest_parent_path: str = "", new_name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
-    _require_cloud_drive_path_access(cfg, user, source_path)
-    _require_cloud_drive_path_access(cfg, user, dest_parent_path)
     service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, source_path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(cfg, user, dest_parent_path, service=service, required_level="editor")
     try:
         result = service.move_node(source_path=source_path, dest_parent_path=dest_parent_path, new_name=new_name)
         _audit_cloud_drive_api_event(cfg, user, "move", details={"source_path": source_path, "dest_parent_path": dest_parent_path, "new_name": new_name, "result": result})
@@ -724,8 +778,8 @@ def api_cloud_drive_move(source_path: str = "", dest_parent_path: str = "", new_
 def api_cloud_drive_rename(path: str = "", new_name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
-    _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
     node = service.registry.get_node_by_path(path)
     if node is None:
         _audit_cloud_drive_api_event(cfg, user, "rename", ok=False, details={"path": path, "new_name": new_name, "error": "not_found"})
@@ -744,8 +798,8 @@ def api_cloud_drive_rename(path: str = "", new_name: str = "", authorization: Au
 def api_cloud_drive_delete(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
-    _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
     try:
         result = service.delete_node(path)
         _audit_cloud_drive_api_event(cfg, user, "delete", details={"path": path, "result": result})
@@ -764,7 +818,7 @@ def api_cloud_drive_trash(limit: int = 200, authorization: AuthHeader = "") -> D
     items = [
         item
         for item in result.get("items", [])
-        if _cd_acl_allows(cfg, user, str(item.get("path") or ""))
+        if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
     ]
     payload = {"items": items, "count": len(items)}
     _audit_cloud_drive_api_event(cfg, user, "trash", details={"count": len(items)})
@@ -775,8 +829,8 @@ def api_cloud_drive_trash(limit: int = 200, authorization: AuthHeader = "") -> D
 def api_cloud_drive_restore(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
-    _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
     try:
         result = service.restore_node(path)
         _audit_cloud_drive_api_event(cfg, user, "restore", details={"path": path, "result": result})
@@ -790,8 +844,8 @@ def api_cloud_drive_restore(path: str = "", authorization: AuthHeader = "") -> D
 def api_cloud_drive_reindex(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
-    _require_cloud_drive_path_access(cfg, user, path)
     service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
     try:
         job = service.enqueue_reindex(path)
     except RuntimeError as exc:

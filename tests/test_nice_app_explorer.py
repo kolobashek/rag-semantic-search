@@ -30,6 +30,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_list,
     api_cloud_drive_move,
     api_cloud_drive_node,
+    api_cloud_drive_permissions,
     api_cloud_drive_reindex,
     api_cloud_drive_rename,
     api_cloud_drive_restore,
@@ -52,6 +53,7 @@ from rag_catalog.ui.helpers import (
     _apply_explorer_filter_input,
     _cd_acl_allows,
     _file_icon_svg,
+    _filter_cloud_drive_search_results,
     _file_rows,
     _is_system_file,
     _normalize_search_results,
@@ -1137,6 +1139,126 @@ def test_cloud_drive_api_acl_rejects_forbidden_path(monkeypatch, tmp_path) -> No
         api_cloud_drive_list("Blocked")
 
     assert exc.value.status_code == 403
+
+
+def test_cloud_drive_registry_acl_filters_api_and_write_level(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    service.registry.upsert_folder(path="Allowed", name="Allowed", parent_id=root.id, depth=1)
+    service.registry.upsert_folder(path="Blocked", name="Blocked", parent_id=root.id, depth=1)
+    service.grant_path_permission(
+        subject_type="user",
+        subject_id="user",
+        path="Allowed",
+        access_level="viewer",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
+
+    assert api_cloud_drive_list("Allowed")["folder"]["path"] == "Allowed"
+    with pytest.raises(HTTPException) as read_exc:
+        api_cloud_drive_list("Blocked")
+    assert read_exc.value.status_code == 403
+    with pytest.raises(HTTPException) as write_exc:
+        api_cloud_drive_create_folder(parent_path="Allowed", name="Draft")
+    assert write_exc.value.status_code == 403
+
+    service.grant_path_permission(
+        subject_type="user",
+        subject_id="user",
+        path="Allowed",
+        access_level="editor",
+    )
+
+    created = api_cloud_drive_create_folder(parent_path="Allowed", name="Draft")
+    assert created["path"] == "Allowed/Draft"
+
+
+def test_cloud_drive_permissions_endpoint_grants_path_acl(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    service.registry.upsert_folder(path="Team", name="Team", parent_id=root.id, depth=1)
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+
+    permission = api_cloud_drive_permissions(
+        subject_type="role",
+        subject_id="viewer",
+        path="Team",
+        access_level="viewer",
+    )
+
+    assert permission["subject_type"] == "role"
+    assert permission["access_level"] == "viewer"
+    assert service.user_can_access(username="maria", role="viewer", path="Team/readme.txt")
+
+
+def test_cloud_drive_search_filter_uses_registry_acl(tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    allowed = service.registry.upsert_folder(path="Allowed", name="Allowed", parent_id=root.id, depth=1)
+    blocked = service.registry.upsert_folder(path="Blocked", name="Blocked", parent_id=root.id, depth=1)
+    allowed_file = service.registry.upsert_file(
+        folder_id=allowed.id,
+        path="Allowed/report.txt",
+        name="report.txt",
+        storage_key="objects/sha256/aa/bb/aabb.txt",
+        mime_type="text/plain",
+        size_bytes=12,
+        checksum="aabb",
+        source_path="",
+    )
+    service.registry.upsert_file(
+        folder_id=blocked.id,
+        path="Blocked/secret.txt",
+        name="secret.txt",
+        storage_key="objects/sha256/cc/dd/ccdd.txt",
+        mime_type="text/plain",
+        size_bytes=12,
+        checksum="ccdd",
+        source_path="",
+    )
+    service.grant_path_permission(
+        subject_type="user",
+        subject_id="user",
+        path="Allowed",
+        access_level="viewer",
+    )
+
+    filtered = _filter_cloud_drive_search_results(
+        cfg,
+        {"username": "user", "role": "user"},
+        [
+            {"filename": "local.txt", "path": "Blocked/local.txt"},
+            {"filename": "report.txt", "cloud_file_id": allowed_file.id, "cloud_path": "Allowed/report.txt"},
+            {"filename": "secret.txt", "cloud_path": "Blocked/secret.txt"},
+        ],
+    )
+
+    assert [item["filename"] for item in filtered] == ["local.txt", "report.txt"]
 
 
 def test_cloud_drive_api_admin_guard_rejects_non_admin(tmp_path) -> None:

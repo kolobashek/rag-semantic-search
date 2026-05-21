@@ -32,7 +32,6 @@ from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
     OFFICE_PREVIEW_EXTENSIONS,
-    _cd_acl_allows,
     _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
@@ -44,6 +43,7 @@ from .helpers import (
     _directory_children,
     _ensure_searcher,
     _file_icon_svg,
+    _filter_cloud_drive_search_results,
     _highlight_query_terms,
     _is_admin,
     _load_user_state,
@@ -387,11 +387,7 @@ def _build_page(initial_screen: str = "search") -> None:
             )
             if state.search_request_id != request_id:
                 return
-            quick_results = [
-                item for item in quick_results
-                if not (item.get("cloud_file_id") or item.get("cloud_path"))
-                or _cd_acl_allows(state.cfg, state.current_user, str(item.get("cloud_path") or item.get("path") or ""))
-            ]
+            quick_results = _filter_cloud_drive_search_results(state.cfg, state.current_user, quick_results)
             state.results = quick_results
             exact_count = _count_exact_name_matches(query, quick_results)
             state.search_stats_hint = f"Быстро найдено: {len(quick_results)} · точных совпадений: {exact_count}"
@@ -458,11 +454,7 @@ def _build_page(initial_screen: str = "search") -> None:
             if state.search_request_id != request_id:
                 return
             merged = _merge_search_results(state.results, full_results, limit=state.limit)
-            merged = [
-                item for item in merged
-                if not (item.get("cloud_file_id") or item.get("cloud_path"))
-                or _cd_acl_allows(state.cfg, state.current_user, str(item.get("cloud_path") or item.get("path") or ""))
-            ]
+            merged = _filter_cloud_drive_search_results(state.cfg, state.current_user, merged)
             state.results = _apply_query_operators(merged, parsed_query)
             cloud_semantic_count = sum(
                 1

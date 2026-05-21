@@ -1144,6 +1144,69 @@ def _cd_acl_allows(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) 
     return False
 
 
+def _cd_registry_acl_allows(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    path: str,
+    *,
+    file_id: str = "",
+    required_level: str = "viewer",
+    service: CloudDriveService | None = None,
+) -> bool:
+    if not _cd_acl_allows(cfg, user, path):
+        return False
+    try:
+        svc = service or CloudDriveService.from_config(cfg)
+        return bool(
+            svc.user_can_access(
+                username=str((user or {}).get("username") or ""),
+                role=str((user or {}).get("role") or ""),
+                path=path,
+                file_id=file_id,
+                required_level=required_level,
+            )
+        )
+    except Exception:
+        return True
+
+
+def _filter_cloud_drive_search_results(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not results:
+        return results
+    service: CloudDriveService | None = None
+    decisions: Dict[tuple[str, str], bool] = {}
+    filtered: List[Dict[str, Any]] = []
+    for item in results:
+        cloud_file_id = str(item.get("cloud_file_id") or "").strip()
+        cloud_path = str(item.get("cloud_path") or item.get("path") or item.get("full_path") or "").strip()
+        if not (cloud_file_id or item.get("cloud_path")):
+            filtered.append(item)
+            continue
+        key = (cloud_file_id, cloud_path)
+        allowed = decisions.get(key)
+        if allowed is None:
+            if service is None:
+                try:
+                    service = CloudDriveService.from_config(cfg)
+                except Exception:
+                    service = None
+            allowed = _cd_registry_acl_allows(
+                cfg,
+                user,
+                cloud_path,
+                file_id=cloud_file_id,
+                service=service,
+            )
+            decisions[key] = allowed
+        if allowed:
+            filtered.append(item)
+    return filtered
+
+
 # ─────────────────────────── search helpers ─────────────────────────────────
 
 _STOP_WORDS = frozenset(["и", "в", "на", "с", "по", "для", "из", "к", "от", "за", "о", "а", "но", "не"])

@@ -196,6 +196,8 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_folder ON cloud_files(folder_id, name);
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_storage_key ON cloud_files(storage_key);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_permissions_resource ON cloud_permissions(resource_type, resource_id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_clients_username ON cloud_sync_clients(username, status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_pairs_client ON cloud_sync_pairs(client_id, enabled, cloud_path);
@@ -473,6 +475,184 @@ class CloudDriveRegistryDB:
                 (clean_path, like_value),
             ).fetchall()
             return [self._file_from_row(row) for row in rows]
+
+    def has_any_permissions(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM cloud_permissions LIMIT 1").fetchone()
+            return row is not None
+
+    @staticmethod
+    def _access_rank(access_level: str) -> int:
+        return {
+            "viewer": 1,
+            "read": 1,
+            "editor": 2,
+            "write": 2,
+            "admin": 3,
+            "owner": 3,
+        }.get(str(access_level or "").strip().lower(), 0)
+
+    def grant_permission(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        resource_type: str,
+        resource_id: str,
+        access_level: str = "viewer",
+    ) -> Dict[str, str]:
+        clean_subject_type = str(subject_type or "").strip().lower()
+        clean_resource_type = str(resource_type or "").strip().lower()
+        clean_access = str(access_level or "viewer").strip().lower()
+        if clean_subject_type not in {"user", "role", "*"}:
+            raise RuntimeError("Недопустимый subject_type для Cloud Drive permission.")
+        if clean_resource_type not in {"file", "folder", "path", "global"}:
+            raise RuntimeError("Недопустимый resource_type для Cloud Drive permission.")
+        if self._access_rank(clean_access) <= 0:
+            raise RuntimeError("Недопустимый access_level для Cloud Drive permission.")
+        clean_subject_id = str(subject_id or "*").strip().lower() or "*"
+        clean_resource_id = str(resource_id or "*").strip()
+        if clean_resource_type == "path":
+            clean_resource_id = self._normalize_path(clean_resource_id) or "*"
+        if clean_resource_type == "global":
+            clean_resource_id = "*"
+        permission_id = str(uuid.uuid4())
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO cloud_permissions (
+                        id, subject_type, subject_id, resource_type, resource_id, access_level, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        permission_id,
+                        clean_subject_type,
+                        clean_subject_id,
+                        clean_resource_type,
+                        clean_resource_id,
+                        clean_access,
+                        now,
+                    ),
+                )
+        return {
+            "id": permission_id,
+            "subject_type": clean_subject_type,
+            "subject_id": clean_subject_id,
+            "resource_type": clean_resource_type,
+            "resource_id": clean_resource_id,
+            "access_level": clean_access,
+            "created_at": now,
+        }
+
+    def _folder_ancestor_ids_for_path(self, conn: sqlite3.Connection, path: str, *, file_folder_id: str = "") -> set[str]:
+        clean_path = self._normalize_path(path)
+        candidate_paths = {""}
+        parts = [part for part in clean_path.split("/") if part]
+        for idx in range(1, len(parts) + 1):
+            candidate_paths.add("/".join(parts[:idx]))
+        ids: set[str] = set()
+        if file_folder_id:
+            ids.add(str(file_folder_id))
+        if candidate_paths:
+            placeholders = ",".join("?" for _ in candidate_paths)
+            rows = conn.execute(
+                f"SELECT id FROM cloud_folders WHERE path IN ({placeholders})",
+                tuple(candidate_paths),
+            ).fetchall()
+            ids.update(str(row["id"]) for row in rows)
+        return ids
+
+    def user_can_access(
+        self,
+        *,
+        username: str,
+        role: str = "",
+        path: str = "",
+        file_id: str = "",
+        required_level: str = "viewer",
+    ) -> bool:
+        clean_username = str(username or "").strip().lower()
+        clean_role = str(role or "").strip().lower()
+        clean_path = self._normalize_path(path)
+        clean_file_id = str(file_id or "").strip()
+        required_rank = self._access_rank(required_level)
+        if required_rank <= 0:
+            required_rank = self._access_rank("viewer")
+        if clean_role == "admin":
+            return True
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM cloud_permissions LIMIT 1").fetchone() is None:
+                return True
+            file_row = None
+            folder_row = None
+            if clean_file_id:
+                file_row = conn.execute("SELECT * FROM cloud_files WHERE id=?", (clean_file_id,)).fetchone()
+                if file_row is not None and not clean_path:
+                    clean_path = self._normalize_path(str(file_row["path"] or ""))
+            if clean_path:
+                folder_row = conn.execute(
+                    "SELECT * FROM cloud_folders WHERE path=?",
+                    (clean_path,),
+                ).fetchone()
+                if file_row is None:
+                    file_row = conn.execute(
+                        "SELECT * FROM cloud_files WHERE path=?",
+                        (clean_path,),
+                    ).fetchone()
+            folder_ids = self._folder_ancestor_ids_for_path(
+                conn,
+                clean_path,
+                file_folder_id=str(file_row["folder_id"] or "") if file_row is not None else "",
+            )
+            if folder_row is not None:
+                folder_ids.add(str(folder_row["id"]))
+            file_ids = {clean_file_id} if clean_file_id else set()
+            if file_row is not None:
+                file_ids.add(str(file_row["id"]))
+
+            rows = conn.execute(
+                """
+                SELECT subject_type, subject_id, resource_type, resource_id, access_level
+                FROM cloud_permissions
+                """
+            ).fetchall()
+
+        def subject_matches(row: sqlite3.Row) -> bool:
+            subject_type = str(row["subject_type"] or "").lower()
+            subject_id = str(row["subject_id"] or "").lower()
+            if subject_type == "*" and subject_id == "*":
+                return True
+            if subject_type == "user" and subject_id in {clean_username, "*"}:
+                return bool(clean_username or subject_id == "*")
+            if subject_type == "role" and subject_id in {clean_role, "*"}:
+                return bool(clean_role or subject_id == "*")
+            return False
+
+        def path_matches(resource_id: str) -> bool:
+            clean_resource = self._normalize_path(resource_id)
+            if clean_resource in {"", "*"}:
+                return True
+            return clean_path == clean_resource or clean_path.startswith(f"{clean_resource}/")
+
+        for row in rows:
+            if self._access_rank(str(row["access_level"] or "")) < required_rank:
+                continue
+            if not subject_matches(row):
+                continue
+            resource_type = str(row["resource_type"] or "").lower()
+            resource_id = str(row["resource_id"] or "").strip()
+            if resource_type == "global":
+                return True
+            if resource_type == "path" and path_matches(resource_id):
+                return True
+            if resource_type == "folder" and resource_id in folder_ids:
+                return True
+            if resource_type == "file" and resource_id in file_ids:
+                return True
+        return False
 
     def list_changes(self, *, since: str = '', limit: int = 500) -> List[Dict[str, Any]]:
         """Return changed file/folder registry rows ordered by update time."""
