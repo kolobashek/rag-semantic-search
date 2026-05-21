@@ -348,7 +348,10 @@ class CloudDriveService:
 
     @staticmethod
     def _is_indexable_registry_file(file_row: dict[str, Any]) -> bool:
-        ext = Path(str(file_row.get("path") or file_row.get("name") or "")).suffix.lower()
+        path = Path(str(file_row.get("path") or file_row.get("name") or ""))
+        if path.name.startswith("~$"):
+            return False
+        ext = path.suffix.lower()
         return ext in INDEXABLE_EXTENSIONS
 
     @staticmethod
