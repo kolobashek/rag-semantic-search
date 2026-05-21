@@ -10,6 +10,7 @@ from typing import Protocol
 
 class StorageAdapter(Protocol):
     def put_file(self, source_path: Path, storage_key: str) -> None: ...
+    def download_file(self, storage_key: str, target_path: Path) -> None: ...
     def exists(self, storage_key: str) -> bool: ...
     def list_keys(self) -> set[str]: ...
     def move(self, old_storage_key: str, new_storage_key: str) -> None: ...
@@ -41,6 +42,13 @@ class LocalStorageAdapter:
         target = self._target(storage_key)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, target)
+
+    def download_file(self, storage_key: str, target_path: Path) -> None:
+        source = self._target(storage_key)
+        if not source.exists():
+            raise RuntimeError(f'Storage object not found: {storage_key}')
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target_path)
 
     def exists(self, storage_key: str) -> bool:
         return self._target(storage_key).exists()
@@ -115,6 +123,10 @@ class S3StorageAdapter:
 
     def put_file(self, source_path: Path, storage_key: str) -> None:
         self._client.upload_file(str(source_path), self.bucket, storage_key)
+
+    def download_file(self, storage_key: str, target_path: Path) -> None:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        self._client.download_file(self.bucket, storage_key, str(target_path))
 
     def exists(self, storage_key: str) -> bool:
         try:

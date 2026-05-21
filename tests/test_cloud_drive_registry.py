@@ -642,6 +642,82 @@ def test_service_reindex_job_rejects_remote_storage_without_local_source(tmp_pat
     assert 'удалённом storage' in failed.last_error
 
 
+def test_service_reindex_job_downloads_remote_storage_for_indexing(tmp_path: Path, monkeypatch) -> None:
+    class _DownloadableRemoteStorage:
+        def __init__(self) -> None:
+            self.objects: dict[str, str] = {}
+
+        def put_file(self, source_path: Path, storage_key: str) -> None:
+            self.objects[storage_key] = source_path.read_text(encoding='utf-8')
+
+        def download_file(self, storage_key: str, target_path: Path) -> None:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(self.objects[storage_key], encoding='utf-8')
+
+        def exists(self, storage_key: str) -> bool:
+            return storage_key in self.objects
+
+        def list_keys(self) -> set[str]:
+            return set(self.objects)
+
+        def move(self, old_storage_key: str, new_storage_key: str) -> None:
+            self.objects[new_storage_key] = self.objects.pop(old_storage_key)
+
+        def delete(self, storage_key: str) -> None:
+            self.objects.pop(storage_key, None)
+
+        def resolve_path(self, storage_key: str) -> str:
+            return f'https://storage.example/bucket/{storage_key}'
+
+        def healthcheck(self) -> dict:
+            return {'ok': True}
+
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = _DownloadableRemoteStorage()
+    service = CloudDriveService(registry=registry, storage=storage)
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    source = tmp_path / 'remote.txt'
+    source.write_text('remote payload', encoding='utf-8')
+    uploaded = service.upload_file(parent_path='Folder A', filename='hello.txt', source_path=str(source), mime_type='text/plain')
+    job = registry.get_latest_job(job_type='reindex')
+    assert job is not None
+    calls: dict[str, object] = {}
+
+    class _FakeIndexer:
+        def __init__(self, **_kwargs):
+            self.point_count = 1
+
+        def _delete_file_vectors(self, filepath, *, payload_match=None):
+            calls['delete'] = {'filepath': filepath, 'payload_match': payload_match}
+
+        def process_file(self, filepath, **kwargs):
+            path = Path(filepath)
+            calls['process'] = {'filepath': path, 'text': path.read_text(encoding='utf-8'), 'kwargs': kwargs}
+
+        def _flush_buffer(self):
+            calls['flushed'] = True
+
+    import rag_catalog.core.index_rag as index_rag
+
+    monkeypatch.setattr(index_rag, 'RAGIndexer', _FakeIndexer)
+    completed = service.run_reindex_job(
+        job.id,
+        index_config={
+            'catalog_path': str(tmp_path / 'catalog'),
+            'qdrant_db_path': str(tmp_path / 'qdrant'),
+            'collection_name': 'catalog',
+        },
+    )
+
+    assert completed.status == 'completed'
+    assert completed.file_id == uploaded['id']
+    assert completed.progress['storage_origin'] == 'storage_download'
+    assert completed.progress['indexed'] is True
+    assert calls['process']['text'] == 'remote payload'  # type: ignore[index]
+    assert not Path(completed.progress['storage_path']).exists()
+
+
 def test_service_retry_job_requeues_reindex(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     storage = LocalStorageAdapter(str(tmp_path / 'storage'))

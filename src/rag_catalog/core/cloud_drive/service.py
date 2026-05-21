@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import shutil
 import sqlite3
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1107,16 +1109,20 @@ class CloudDriveService:
             file_row = self._resolve_job_file(job)
             if file_row.deleted_at:
                 raise RuntimeError(f'Файл удалён и не может быть переиндексирован: {file_row.path}')
-            target_path, source_path_text, storage_ref, storage_origin = self._resolve_reindex_target_path(file_row)
+            target_path, source_path_text, storage_ref, storage_origin, temp_dir = self._resolve_reindex_target_path(file_row)
 
             indexed = False
             points_added = 0
-            if index_config:
-                indexed, points_added = self._run_indexer_for_file(
-                    target_path=target_path,
-                    file_row=file_row,
-                    index_config=index_config,
-                )
+            try:
+                if index_config:
+                    indexed, points_added = self._run_indexer_for_file(
+                        target_path=target_path,
+                        file_row=file_row,
+                        index_config=index_config,
+                    )
+            finally:
+                if temp_dir is not None:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
 
             progress.update(
                 {
@@ -1146,7 +1152,7 @@ class CloudDriveService:
             self.registry.update_job(job.id, status='failed', payload={'progress': progress}, last_error=str(exc))
             raise
 
-    def _resolve_reindex_target_path(self, file_row: Any) -> tuple[Path, str, str, str]:
+    def _resolve_reindex_target_path(self, file_row: Any) -> tuple[Path, str, str, str, Optional[Path]]:
         source_path_text = str(getattr(file_row, 'source_path', '') or '').strip()
         storage_key = str(getattr(file_row, 'storage_key', '') or '')
         storage_ref = str(self.storage.resolve_path(storage_key) or '').strip() if storage_key else ''
@@ -1154,12 +1160,12 @@ class CloudDriveService:
         if source_path_text:
             source_path = Path(source_path_text)
             if source_path.exists() and source_path.is_file():
-                return source_path, source_path_text, storage_ref, 'source_path'
+                return source_path, source_path_text, storage_ref, 'source_path', None
 
         if storage_ref and not self._is_remote_storage_ref(storage_ref):
             storage_path = Path(storage_ref)
             if storage_path.exists() and storage_path.is_file():
-                return storage_path, source_path_text, storage_ref, 'storage_path'
+                return storage_path, source_path_text, storage_ref, 'storage_path', None
 
         storage_exists = False
         if storage_key:
@@ -1167,6 +1173,23 @@ class CloudDriveService:
                 storage_exists = bool(self.storage.exists(storage_key))
             except Exception:
                 storage_exists = False
+        if storage_exists:
+            downloader = getattr(self.storage, 'download_file', None)
+            if callable(downloader):
+                temp_dir = Path(tempfile.mkdtemp(prefix='cloud-reindex-'))
+                filename = Path(str(getattr(file_row, 'name', '') or Path(storage_key).name or 'object')).name
+                target_path = temp_dir / filename
+                try:
+                    downloader(storage_key, target_path)
+                except Exception:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    raise
+                if target_path.exists() and target_path.is_file():
+                    return target_path, source_path_text, storage_ref, 'storage_download', temp_dir
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise RuntimeError(
+                    f'Storage download не создал локальный файл для переиндексации: {getattr(file_row, "path", "")}'
+                )
         if storage_exists and self._is_remote_storage_ref(storage_ref):
             raise RuntimeError(
                 f'Файл доступен только в удалённом storage и не может быть переиндексирован локальным индексатором: '
