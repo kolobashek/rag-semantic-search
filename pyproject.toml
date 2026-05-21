@@ -79,7 +79,7 @@ where = ["src"]
 include = ["rag_catalog*"]
 
 [tool.setuptools.package-data]
-rag_catalog = ["py.typed"]
+rag_catalog = ["py.typed", "core/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

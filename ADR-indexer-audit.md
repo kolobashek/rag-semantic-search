@@ -370,6 +370,7 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 17. **[done 2026-05-21] [качество]** Добавить `content_hash` и маркировку дублей через `is_duplicate` / `duplicate_of` (п. 2.6)
 18. **[done 2026-05-21] [качество]** Добавить `RAGIndexer.quality_report()` и CLI `--quality-report` (п. 2.8)
 19. **[done 2026-05-21] [операции]** Добавить `--watch` режим на `watchdog` для инкрементальной индексации по событиям ФС (п. 2.4)
+20. **[done 2026-05-21] [техдолг]** Вынести базовую карту синонимов из `index_rag.py` в пакетный `default_synonyms.json` (п. 1.8)
 
 ### Реализация 2026-05-21
 
@@ -391,3 +392,4 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - В `state_entries` добавлен `content_hash`; payload metadata/content получает `is_duplicate` и `duplicate_of` для одинакового извлечённого текста.
 - `quality_report()` возвращает покрытие content-stage, распределение stage/ext, failed paths, duplicate groups/files и OCR summary из telemetry.
 - `--watch` выполняет первичный stage-прогон, затем через `watchdog` переиндексирует изменённые файлы; ZIP-событие запускает stage-проход, чтобы обновить entries архива.
+- `DEFAULT_SYNONYM_MAP` загружается из `src/rag_catalog/core/default_synonyms.json`, который включён в package data; Python-константа сохранена как совместимый facade.

@@ -787,6 +787,12 @@ class TestSkipOcrFlag:
                 for entry in entries:
                     self.entries[str(entry["full_path"])] = dict(entry)
 
+            def find_by_content_hash(self, content_hash, *, exclude_path=""):
+                for key, row in self.entries.items():
+                    if key != exclude_path and row.get("content_hash") == content_hash:
+                        return dict(row)
+                return None
+
         idx = object.__new__(RAGIndexer)
         idx.catalog_path = tmp_path
         idx.skip_ocr = skip_ocr
@@ -858,22 +864,22 @@ class TestSynonymMapIntegrity:
 
     def test_no_duplicate_keys(self):
         """В DEFAULT_SYNONYM_MAP нет дублирующихся ключей."""
-        # Python dict не хранит дубли, но мы проверяем через исходник
-        import ast
+        import json
         from pathlib import Path
-        src = Path(__file__).parent.parent / "src/rag_catalog/core/index_rag.py"
-        tree = ast.parse(src.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                for t in node.targets:
-                    if isinstance(t, ast.Name) and t.id == "DEFAULT_SYNONYM_MAP":
-                        if isinstance(node.value, ast.Dict):
-                            keys = [
-                                k.s if isinstance(k, ast.Constant) else None
-                                for k in node.value.keys
-                            ]
-                            assert len(keys) == len(set(k for k in keys if k)), \
-                                f"Дублирующиеся ключи: {[k for k in keys if keys.count(k) > 1]}"
+
+        src = Path(__file__).parent.parent / "src/rag_catalog/core/default_synonyms.json"
+        duplicates = []
+
+        def _pairs(pairs):
+            seen = set()
+            for key, _value in pairs:
+                if key in seen:
+                    duplicates.append(key)
+                seen.add(key)
+            return dict(pairs)
+
+        json.loads(src.read_text(encoding="utf-8"), object_pairs_hook=_pairs)
+        assert duplicates == []
 
     def test_liebherr_has_both_variants(self):
         """liebherr содержит оба варианта транслитерации."""
