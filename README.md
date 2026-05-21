@@ -123,6 +123,7 @@ python index_rag.py --stage small
 python index_rag.py --stage large
 python index_rag.py --stage all
 python index_rag.py --cleanup
+python index_rag.py --dry-run --stage all
 python index_rag.py --recreate --stage all
 ```
 

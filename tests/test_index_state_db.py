@@ -117,6 +117,23 @@ def test_state_db_validates_embedding_config(tmp_path: Path) -> None:
     assert cfg["collection_name"] == "catalog_v2"
 
 
+def test_state_db_tracks_failed_paths_with_retry_backoff(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+
+    first = db.record_failed_path("a.docx", fingerprint="fp1", error="locked", base_delay_seconds=10)
+    second = db.record_failed_path("a.docx", fingerprint="fp1", error="locked again", base_delay_seconds=10)
+
+    assert first["retry_count"] == 1
+    assert second["retry_count"] == 2
+    assert second["next_retry_at"] > first["next_retry_at"]
+    assert db.get_failed_path("a.docx")["last_error"] == "locked again"
+    assert not db.is_failed_retry_due("a.docx", now=second["next_retry_at"] - 1)
+    assert db.is_failed_retry_due("a.docx", now=second["next_retry_at"] + 1)
+    assert db.list_due_failed_paths(now=second["next_retry_at"] + 1)[0]["full_path"] == "a.docx"
+    assert db.clear_failed_path("a.docx") == 1
+    assert db.get_failed_path("a.docx") is None
+
+
 def test_bootstrap_from_json_imports_only_once(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     legacy = tmp_path / "index_state.json"

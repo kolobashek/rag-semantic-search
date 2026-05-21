@@ -40,6 +40,7 @@ class _FakeQdrant:
 class _FakeStateDB:
     def __init__(self) -> None:
         self.entries: dict[str, dict] = {}
+        self.failures: dict[str, dict] = {}
 
     def get_entry(self, full_path: str):
         row = self.entries.get(full_path)
@@ -50,6 +51,25 @@ class _FakeStateDB:
             key = str(entry.get("full_path") or "")
             if key:
                 self.entries[key] = dict(entry)
+
+    def record_failed_path(self, full_path: str, *, fingerprint: str = "", error: str = "", **_kwargs):
+        row = self.failures.get(full_path, {"retry_count": 0})
+        row = {
+            "full_path": full_path,
+            "fingerprint": fingerprint,
+            "last_error": error,
+            "retry_count": int(row.get("retry_count") or 0) + 1,
+            "next_retry_at": time.time() + 300,
+        }
+        self.failures[full_path] = row
+        return dict(row)
+
+    def clear_failed_path(self, full_path: str):
+        return 1 if self.failures.pop(full_path, None) else 0
+
+    def is_failed_retry_due(self, full_path: str):
+        row = self.failures.get(full_path)
+        return not row or float(row.get("next_retry_at") or 0) <= time.time()
 
 
 def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
@@ -93,6 +113,27 @@ def test_small_stage_file_without_content_is_marked_empty_for_retry(tmp_path: Pa
     key = str(p)
     assert idx.state_db.get_entry(key)["stage"] == "empty"
     assert stats["processed_files"] >= 1
+
+
+def test_read_error_is_marked_error_and_backed_off(tmp_path: Path) -> None:
+    p = tmp_path / "broken.docx"
+    p.write_text("dummy", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    def _raise(_path: Path) -> str:
+        raise OSError("locked")
+
+    idx._extract_docx = _raise
+
+    stats = idx.index_directory(stage="small")
+
+    key = str(p)
+    assert idx.state_db.get_entry(key)["stage"] == "error"
+    assert idx.state_db.failures[key]["last_error"] == "locked"
+    assert stats["error_files"] == 1
+
+    stats_retry_wait = idx.index_directory(stage="small")
+    assert stats_retry_wait["skipped_files"] == 1
 
 
 def test_small_stage_file_with_content_becomes_content(tmp_path: Path) -> None:
@@ -149,6 +190,20 @@ def test_zip_members_are_indexed_with_logical_archive_paths(tmp_path: Path) -> N
     payloads = [point.payload for point in idx.qdrant.points]
     assert any(payload.get("path") == "docs.zip/folder/readme.txt" for payload in payloads)
     assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
+
+
+def test_dry_run_reports_work_without_writing_points_or_state(tmp_path: Path) -> None:
+    doc = tmp_path / "new.txt"
+    doc.write_text("new content", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.dry_run = True
+
+    stats = idx.index_directory(stage="small")
+
+    assert stats["dry_run_files"] == 1
+    assert stats["processed_files"] == 1
+    assert idx.qdrant.points == []
+    assert idx.state_db.get_entry(str(doc)) is None
 
 
 def test_exclude_patterns_skip_matching_files(tmp_path: Path) -> None:

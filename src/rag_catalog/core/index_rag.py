@@ -389,6 +389,7 @@ class RAGIndexer:
         self.batch_size = batch_size
         self.recreate = recreate_collection
         self.skip_ocr = skip_ocr
+        self.dry_run = False
         self.max_chunks_per_file = max_chunks_per_file  # 0 = без ограничений
         self.read_workers = read_workers
         self.qdrant_timeout_sec = max(5, int(qdrant_timeout_sec or 60))
@@ -1094,6 +1095,11 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Показать файлы, которые будут обработаны, и причины без записи в Qdrant/state.",
+    )
+    parser.add_argument(
         "--mark-stage-metadata-for", default="", dest="mark_stage_metadata_for",
         help="Перед индексированием пометить уже имеющиеся в state записи указанных расширений "
              "как stage=metadata (чтобы они переиндексировались на этапах small/large). "
@@ -1179,13 +1185,16 @@ def main() -> None:
     # (это нужно, если раньше был прогон --metadata-only-for без поддержки stage,
     # и мы хотим, чтобы на этапах small/large эти файлы переиндексировались).
     if args.mark_stage_metadata_for:
-        exts = {
-            e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
-            for e in args.mark_stage_metadata_for.split(",") if e.strip()
-        }
-        changed = indexer.state_db.update_stage_for_extensions(exts, stage="metadata")
-        logger.info("Миграция state: %d записей с расширениями %s помечены stage=metadata",
-                    changed, sorted(exts))
+        if args.dry_run:
+            logger.info("--dry-run: миграция state --mark-stage-metadata-for не выполняется.")
+        else:
+            exts = {
+                e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
+                for e in args.mark_stage_metadata_for.split(",") if e.strip()
+            }
+            changed = indexer.state_db.update_stage_for_extensions(exts, stage="metadata")
+            logger.info("Миграция state: %d записей с расширениями %s помечены stage=metadata",
+                        changed, sorted(exts))
 
     try:
         if args.cleanup:
@@ -1200,15 +1209,36 @@ def main() -> None:
                 and not indexer._is_excluded_path(f)
             ]
             logger.info("Файлов на диске: %d", len(all_files))
-            deleted = indexer._cleanup_deleted_files(all_files)
+            if args.dry_run:
+                logger.info("--dry-run cleanup: удаление из индекса не выполняется.")
+                deleted = 0
+            else:
+                deleted = indexer._cleanup_deleted_files(all_files)
             indexer._run_deleted_files += deleted
             run_totals["total_files"] = len(all_files)
             logger.info("Очистка завершена. Удалено из индекса: %d", deleted)
         else:
+            if args.dry_run:
+                indexer.dry_run = True
             if stage == "all":
                 totals = indexer.index_all_stages()
             else:
                 totals = indexer.index_directory(stage=stage)
+            if args.dry_run:
+                logger.info("--dry-run завершён: %s", totals)
+                indexer.telemetry.finish_index_run(
+                    run_id=run_id,
+                    status="completed",
+                    total_files=int(totals.get("total_files", 0)),
+                    added_files=0,
+                    updated_files=0,
+                    skipped_files=int(totals.get("skipped_files", 0)),
+                    deleted_files=0,
+                    error_files=0,
+                    points_added=0,
+                    note="dry-run",
+                )
+                return
             run_totals["total_files"] = max(run_totals["total_files"], int(totals.get("total_files", 0)))
             for k in ("added_files", "updated_files", "skipped_files", "error_files", "points_added"):
                 run_totals[k] += int(totals.get(k, 0))

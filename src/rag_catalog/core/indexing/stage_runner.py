@@ -199,6 +199,48 @@ class IndexStageRunner:
             "error_files": 0,
             "points_added": 0,
         }
+        if bool(getattr(indexer, "dry_run", False)):
+            planned: List[Dict[str, str]] = []
+            skipped = 0
+            for item in scope_files:
+                file_key = str(item["state_key"])
+                fingerprint = str(item["fingerprint"])
+                existing = indexer._get_state_entry(file_key)
+                reason = ""
+                if not existing:
+                    reason = "new"
+                elif str(existing.get("fingerprint") or "") != fingerprint:
+                    reason = "changed"
+                else:
+                    existing_stage = str(existing.get("stage") or "content")
+                    if existing_stage == "error":
+                        if hasattr(indexer, "state_db") and not indexer.state_db.is_failed_retry_due(file_key):
+                            skipped += 1
+                            continue
+                        reason = "retry_error"
+                    elif stage == "metadata":
+                        skipped += 1
+                        continue
+                    elif existing_stage in ("content", stage):
+                        skipped += 1
+                        continue
+                    else:
+                        reason = f"stage_upgrade:{existing_stage}->{stage}"
+                planned.append({"path": Path(item["relative_path"]).as_posix(), "reason": reason})
+
+            stage_stats["processed_files"] = len(planned)
+            stage_stats["skipped_files"] = skipped
+            stage_stats["dry_run_files"] = len(planned)
+            self._logger.info(
+                "--dry-run stage=%s: к обработке %d, пропуск %d",
+                stage,
+                len(planned),
+                skipped,
+            )
+            for row in planned:
+                self._logger.info("--dry-run: %s | %s", row["reason"], row["path"])
+            return stage_stats
+
         last_telemetry_push = time.monotonic()
         telemetry_push_interval_sec = 1.0
         telemetry_push_every_n = 25
@@ -290,6 +332,15 @@ class IndexStageRunner:
             mtime = float(item["mtime"])
             size_bytes = int(item.get("size_bytes") or 0)
 
+            existing_entry = indexer._get_state_entry(file_key)
+            if (
+                existing_entry
+                and str(existing_entry.get("stage") or "") == "error"
+                and hasattr(indexer, "state_db")
+                and not indexer.state_db.is_failed_retry_due(file_key)
+            ):
+                return {"skipped": True}
+
             # Stage-aware skip:
             #  - на этапе metadata пропускаем любой уже проиндексированный файл;
             #  - на этапах small/large пропускаем только те, что уже дошли до "content".
@@ -306,6 +357,7 @@ class IndexStageRunner:
             t_start = time.monotonic()
             full_text = ""
             file_type = ""
+            failure_error = ""
 
             _buf: list = [None, None]  # [result_text, exception]
 
@@ -364,6 +416,7 @@ class IndexStageRunner:
                         indexer.read_workers * 2, relative_path.name,
                     )
                     full_text = ""
+                    failure_error = "reader_limit_exhausted"
                 else:
                     def _reader():
                         try:
@@ -393,11 +446,13 @@ class IndexStageRunner:
                             _sem.release()   # освобождаем слот
                         _th.Thread(target=_cleanup, daemon=True).start()
                         full_text = ""
+                        failure_error = f"timeout>{FILE_TIMEOUT}s"
                     else:
                         _reader_sem.release()   # поток завершился штатно
                         if _buf[1] is not None:
                             self._logger.warning("Ошибка чтения %s: %s", relative_path.name, _buf[1])
                             full_text = ""
+                            failure_error = str(_buf[1])
                         else:
                             full_text = _buf[0] or ""
 
@@ -496,6 +551,7 @@ class IndexStageRunner:
                 "chunks": chunks,
                 "content_payloads": content_payloads,
                 "has_content": bool(chunks),
+                "error": failure_error,
                 "skipped": False,
             }
 
@@ -551,14 +607,27 @@ class IndexStageRunner:
                 for chunk, cpayload in zip(result["chunks"], result["content_payloads"]):
                     pending_texts.append(chunk)
                     pending_payloads.append(cpayload)
-                file_stage = "metadata" if stage == "metadata" else (
-                    "content" if result.get("has_content") else "empty"
-                )
+                if result.get("error"):
+                    file_stage = "error"
+                    stage_stats["error_files"] += 1
+                    if hasattr(indexer, "state_db"):
+                        indexer.state_db.record_failed_path(
+                            str(result["file_key"]),
+                            fingerprint=str(result["fingerprint"]),
+                            error=str(result.get("error") or ""),
+                        )
+                else:
+                    if hasattr(indexer, "state_db"):
+                        indexer.state_db.clear_failed_path(str(result["file_key"]))
+                    file_stage = "metadata" if stage == "metadata" else (
+                        "content" if result.get("has_content") else "empty"
+                    )
                 if stage in ("small", "large") and not result.get("has_content"):
                     self._logger.warning(
-                        "Этап %s: файл %s без контента, сохраняю stage=empty (будет повторная попытка)",
+                        "Этап %s: файл %s без контента, сохраняю stage=%s (будет повторная попытка)",
                         stage,
                         Path(str(result["file_key"])).name,
+                        file_stage,
                     )
                 pending_states.append(
                     (

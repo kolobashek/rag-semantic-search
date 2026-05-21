@@ -365,6 +365,8 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 12. **[done 2026-05-21] [техдолг]** Добавить `chunk_group_size` вместо захардкоженного `chunk_index // 4` (п. 1.6)
 13. **[done 2026-05-21] [форматы]** Добавить поддержку `.rtf`, `.pptx`, `.doc` (п. 2.2)
 14. **[done 2026-05-21] [форматы]** Добавить индексирование поддерживаемых файлов внутри `.zip` с logical path `archive.zip/member` (п. 2.9)
+15. **[done 2026-05-21] [надёжность]** Добавить `failed_paths` с retry/backoff для ошибок чтения (п. 2.3)
+16. **[done 2026-05-21] [операции]** Добавить `--dry-run` для просмотра файлов к обработке без записи в индекс/state (п. 2.10)
 
 ### Реализация 2026-05-21
 
@@ -381,3 +383,5 @@ inotify / ReadDirectoryChangesW). Изменённый файл попадает
 - Размер provenance-группы чанков задаётся через `chunk_group_size` с дефолтом `4`.
 - Добавлены pure-Python extractor'ы для `.rtf` и `.pptx`, а `.doc` читается best-effort через `antiword` или LibreOffice.
 - `.zip` раскрывается в pipeline как набор отдельных entries; state key хранится как `archive.zip::member`, а payload path как `archive.zip/member`.
+- `IndexStateDB` получил таблицу `failed_paths`; ошибки чтения сохраняются со stage `error`, retry-счётчиком и `next_retry_at`.
+- `--dry-run` строит план `new` / `changed` / `stage_upgrade` / `retry_error` без batch-encode, Qdrant upsert и state mutations.

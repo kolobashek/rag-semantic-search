@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _utc_now() -> str:
@@ -77,6 +77,18 @@ class IndexStateDB:
                         value TEXT NOT NULL DEFAULT '',
                         updated_at TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS failed_paths (
+                        full_path TEXT PRIMARY KEY,
+                        fingerprint TEXT NOT NULL DEFAULT '',
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        next_retry_at REAL NOT NULL DEFAULT 0,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_failed_paths_retry
+                      ON failed_paths(next_retry_at);
                     """
                 )
                 existing_cols = {
@@ -121,6 +133,7 @@ class IndexStateDB:
         with self._lock:
             with self._connect() as conn:
                 conn.execute("DELETE FROM state_entries")
+                conn.execute("DELETE FROM failed_paths")
 
     def get_config(self) -> Dict[str, str]:
         with self._lock:
@@ -236,6 +249,90 @@ class IndexStateDB:
                     (key,),
                 ).fetchone()
                 return dict(row) if row else None
+
+    def get_failed_path(self, full_path: str) -> Optional[Dict[str, Any]]:
+        key = str(full_path or "").strip()
+        if not key:
+            return None
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute("SELECT * FROM failed_paths WHERE full_path=?", (key,)).fetchone()
+                return dict(row) if row else None
+
+    def record_failed_path(
+        self,
+        full_path: str,
+        *,
+        fingerprint: str = "",
+        error: str = "",
+        base_delay_seconds: int = 300,
+        max_delay_seconds: int = 86_400,
+    ) -> Dict[str, Any]:
+        key = str(full_path or "").strip()
+        if not key:
+            return {}
+        now_iso = _utc_now()
+        now_ts = time.time()
+        with self._lock:
+            with self._connect() as conn:
+                existing = conn.execute(
+                    "SELECT retry_count FROM failed_paths WHERE full_path=?",
+                    (key,),
+                ).fetchone()
+                retry_count = int(existing["retry_count"] if existing else 0) + 1
+                delay = min(max_delay_seconds, max(1, int(base_delay_seconds)) * (2 ** min(retry_count - 1, 8)))
+                next_retry_at = now_ts + delay
+                conn.execute(
+                    """
+                    INSERT INTO failed_paths (
+                        full_path, fingerprint, retry_count, next_retry_at, last_error, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(full_path) DO UPDATE SET
+                        fingerprint=excluded.fingerprint,
+                        retry_count=excluded.retry_count,
+                        next_retry_at=excluded.next_retry_at,
+                        last_error=excluded.last_error,
+                        updated_at=excluded.updated_at
+                    """,
+                    (key, str(fingerprint or ""), retry_count, next_retry_at, str(error or "")[:1000], now_iso),
+                )
+        return {
+            "full_path": key,
+            "fingerprint": str(fingerprint or ""),
+            "retry_count": retry_count,
+            "next_retry_at": next_retry_at,
+            "last_error": str(error or "")[:1000],
+            "updated_at": now_iso,
+        }
+
+    def clear_failed_path(self, full_path: str) -> int:
+        key = str(full_path or "").strip()
+        if not key:
+            return 0
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute("DELETE FROM failed_paths WHERE full_path=?", (key,))
+                return int(cur.rowcount or 0)
+
+    def is_failed_retry_due(self, full_path: str, *, now: Optional[float] = None) -> bool:
+        row = self.get_failed_path(full_path)
+        if not row:
+            return True
+        try:
+            next_retry_at = float(row.get("next_retry_at") or 0.0)
+        except (TypeError, ValueError):
+            next_retry_at = 0.0
+        return next_retry_at <= float(time.time() if now is None else now)
+
+    def list_due_failed_paths(self, *, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        ts = float(time.time() if now is None else now)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM failed_paths WHERE next_retry_at <= ? ORDER BY next_retry_at, updated_at",
+                    (ts,),
+                ).fetchall()
+                return [dict(row) for row in rows]
 
     def iter_entries(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -371,6 +468,7 @@ class IndexStateDB:
                 total_row = conn.execute(
                     "SELECT COUNT(*) AS total, COALESCE(SUM(size_bytes), 0) AS total_size FROM state_entries"
                 ).fetchone()
+                failed_row = conn.execute("SELECT COUNT(*) AS total FROM failed_paths").fetchone()
                 ext_rows = conn.execute(
                     """
                     SELECT
@@ -401,4 +499,5 @@ class IndexStateDB:
             "by_ext": by_ext,
             "by_ext_size": by_ext_size,
             "by_stage": by_stage,
+            "failed_paths": int(failed_row["total"] if failed_row else 0),
         }
