@@ -71,6 +71,19 @@ class CloudDriveService:
     def list_jobs(self, *, job_type: str = '', limit: int = 20) -> list[CloudDriveJob]:
         return self.registry.list_jobs(job_type=(job_type or None), limit=limit)
 
+    def recover_stale_jobs(
+        self,
+        *,
+        job_types: Optional[list[str]] = None,
+        lease_timeout_seconds: int = 3600,
+        limit: int = 100,
+    ) -> int:
+        return self.registry.recover_stale_jobs(
+            job_types=job_types,
+            lease_timeout_seconds=lease_timeout_seconds,
+            limit=limit,
+        )
+
     def grant_permission(
         self,
         *,
@@ -873,7 +886,8 @@ class CloudDriveService:
                 'started_at': datetime.now(timezone.utc).isoformat(),
             }
         )
-        self.registry.update_job(job.id, status='running', payload={'progress': progress}, attempts=int(job.attempts or 0) + 1)
+        next_attempts = int(job.attempts or 0) if job.status == 'running' else int(job.attempts or 0) + 1
+        self.registry.update_job(job.id, status='running', payload={'progress': progress}, attempts=next_attempts)
 
         try:
             if job.job_type == 'cleanup':
@@ -943,7 +957,14 @@ class CloudDriveService:
 
     def run_pending_reindex_jobs(self, *, index_config: Optional[Dict[str, object]] = None, limit: int = 5) -> list[CloudDriveJob]:
         completed: list[CloudDriveJob] = []
-        for job in self.registry.list_pending_jobs(job_types=['reindex', 'cleanup'], limit=max(1, int(limit or 1))):
+        for _ in range(max(1, int(limit or 1))):
+            job = self.registry.claim_pending_job(
+                job_types=['reindex', 'cleanup'],
+                worker_id='nicegui-cloud-worker',
+                lease_seconds=900,
+            )
+            if job is None:
+                break
             completed.append(self.run_reindex_job(job.id, index_config=index_config))
         return completed
 

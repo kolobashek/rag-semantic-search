@@ -143,6 +143,9 @@ def _serialize_cloud_drive_job(job: Any) -> Dict[str, Any]:
         "updated_at": str(getattr(job, "updated_at", "") or ""),
         "started_at": str(getattr(job, "started_at", "") or ""),
         "finished_at": str(getattr(job, "finished_at", "") or ""),
+        "lease_owner": str(getattr(job, "lease_owner", "") or ""),
+        "lease_until": str(getattr(job, "lease_until", "") or ""),
+        "next_run_at": str(getattr(job, "next_run_at", "") or ""),
     }
 
 
@@ -289,6 +292,25 @@ def api_cloud_drive_job(job_id: str, authorization: AuthHeader = "") -> Dict[str
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job не найден: {job_id}")
     return _serialize_cloud_drive_job(job)
+
+
+@app.post("/api/cloud-drive/jobs/recover-stale")
+def api_cloud_drive_jobs_recover_stale(
+    job_types: str = "reindex,cleanup",
+    lease_timeout_seconds: int = 3600,
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    types = [part.strip() for part in str(job_types or "").split(",") if part.strip()]
+    recovered = service.recover_stale_jobs(
+        job_types=types or None,
+        lease_timeout_seconds=max(1, int(lease_timeout_seconds or 3600)),
+        limit=500,
+    )
+    _audit_cloud_drive_api_event(cfg, user, "jobs_recover_stale", details={"job_types": types, "recovered": recovered})
+    return {"ok": True, "recovered": recovered, "job_types": types}
 
 
 @app.get("/api/cloud-drive/file-statuses")

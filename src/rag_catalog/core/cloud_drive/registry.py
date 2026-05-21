@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,7 +21,7 @@ from .models import (
     CloudDriveSyncPair,
 )
 
-CLOUD_DRIVE_SCHEMA_VERSION = 4
+CLOUD_DRIVE_SCHEMA_VERSION = 5
 
 
 def _utc_now() -> str:
@@ -116,6 +116,9 @@ class CloudDriveRegistryDB:
                         last_error TEXT NOT NULL DEFAULT '',
                         started_at TEXT NOT NULL DEFAULT '',
                         finished_at TEXT NOT NULL DEFAULT '',
+                        lease_owner TEXT NOT NULL DEFAULT '',
+                        lease_until TEXT NOT NULL DEFAULT '',
+                        next_run_at TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
@@ -199,6 +202,7 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_resource ON cloud_permissions(resource_type, resource_id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_jobs_lease ON cloud_jobs(status, lease_until, next_run_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_clients_username ON cloud_sync_clients(username, status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_pairs_client ON cloud_sync_pairs(client_id, enabled, cloud_path);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_selective_client ON cloud_sync_selective_paths(client_id, mode, cloud_path);
@@ -231,6 +235,12 @@ class CloudDriveRegistryDB:
             conn.execute("ALTER TABLE cloud_jobs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
         if current_version <= 1 and not self._has_column(conn, "cloud_jobs", "finished_at"):
             conn.execute("ALTER TABLE cloud_jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
+        if not self._has_column(conn, "cloud_jobs", "lease_owner"):
+            conn.execute("ALTER TABLE cloud_jobs ADD COLUMN lease_owner TEXT NOT NULL DEFAULT ''")
+        if not self._has_column(conn, "cloud_jobs", "lease_until"):
+            conn.execute("ALTER TABLE cloud_jobs ADD COLUMN lease_until TEXT NOT NULL DEFAULT ''")
+        if not self._has_column(conn, "cloud_jobs", "next_run_at"):
+            conn.execute("ALTER TABLE cloud_jobs ADD COLUMN next_run_at TEXT NOT NULL DEFAULT ''")
         if not self._has_column(conn, "cloud_folders", "deleted_at"):
             conn.execute("ALTER TABLE cloud_folders ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''")
         if not self._has_column(conn, "cloud_folders", "source_mtime"):
@@ -1081,6 +1091,127 @@ class CloudDriveRegistryDB:
                 ).fetchall()
             return [self._job_from_row(row) for row in rows]
 
+    def claim_pending_job(
+        self,
+        *,
+        job_types: Optional[List[str]] = None,
+        worker_id: str = "",
+        lease_seconds: int = 900,
+    ) -> Optional[CloudDriveJob]:
+        clean_types = [str(item or '').strip() for item in (job_types or []) if str(item or '').strip()]
+        owner = str(worker_id or "cloud-drive-worker").strip()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=max(1, int(lease_seconds or 900)))).isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                params: list[Any] = [now]
+                type_clause = ""
+                if clean_types:
+                    placeholders = ",".join("?" for _ in clean_types)
+                    type_clause = f"AND job_type IN ({placeholders})"
+                    params.extend(clean_types)
+                row = conn.execute(
+                    f"""
+                    SELECT * FROM cloud_jobs
+                    WHERE status='pending'
+                      AND (next_run_at='' OR next_run_at<=?)
+                      {type_clause}
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    params,
+                ).fetchone()
+                if row is None:
+                    return None
+                started_at = str(row["started_at"] or "") or now
+                conn.execute(
+                    """
+                    UPDATE cloud_jobs
+                    SET status='running',
+                        attempts=?,
+                        lease_owner=?,
+                        lease_until=?,
+                        started_at=?,
+                        updated_at=?
+                    WHERE id=? AND status='pending'
+                    """,
+                    (
+                        int(row["attempts"] or 0) + 1,
+                        owner,
+                        lease_until,
+                        started_at,
+                        now,
+                        str(row["id"]),
+                    ),
+                )
+                saved = conn.execute("SELECT * FROM cloud_jobs WHERE id=?", (str(row["id"]),)).fetchone()
+                assert saved is not None
+                return self._job_from_row(saved)
+
+    def recover_stale_jobs(
+        self,
+        *,
+        job_types: Optional[List[str]] = None,
+        lease_timeout_seconds: int = 3600,
+        limit: int = 100,
+    ) -> int:
+        clean_types = [str(item or '').strip() for item in (job_types or []) if str(item or '').strip()]
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        stale_before = (now_dt - timedelta(seconds=max(1, int(lease_timeout_seconds or 3600)))).isoformat()
+        recovered = 0
+        with self._lock:
+            with self._connect() as conn:
+                params: list[Any] = [now, stale_before]
+                type_clause = ""
+                if clean_types:
+                    placeholders = ",".join("?" for _ in clean_types)
+                    type_clause = f"AND job_type IN ({placeholders})"
+                    params.extend(clean_types)
+                params.append(max(1, min(int(limit or 100), 1000)))
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM cloud_jobs
+                    WHERE status='running'
+                      AND (
+                        (lease_until!='' AND lease_until<?)
+                        OR (lease_until='' AND started_at!='' AND started_at<?)
+                      )
+                      {type_clause}
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    payload = json.loads(str(row["payload_json"] or "{}"))
+                    progress = dict(payload.get("progress") or {})
+                    progress.update(
+                        {
+                            "status": "pending",
+                            "recovered_at": now,
+                            "recovered_reason": "lease_expired",
+                        }
+                    )
+                    payload["progress"] = progress
+                    conn.execute(
+                        """
+                        UPDATE cloud_jobs
+                        SET status='pending',
+                            payload_json=?,
+                            last_error='lease_expired',
+                            lease_owner='',
+                            lease_until='',
+                            next_run_at='',
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (json.dumps(payload, ensure_ascii=False), now, str(row["id"])),
+                    )
+                    recovered += 1
+        return recovered
+
     def list_latest_jobs_for_files(
         self,
         file_ids: List[str],
@@ -1134,8 +1265,17 @@ class CloudDriveRegistryDB:
                 finished_at = str(row['finished_at'] or '')
                 if next_status == 'running' and not started_at:
                     started_at = now
+                lease_owner = str(row["lease_owner"] or "")
+                lease_until = str(row["lease_until"] or "")
+                next_run_at = str(row["next_run_at"] or "")
                 if next_status in {'completed', 'failed', 'cancelled'}:
                     finished_at = now
+                    lease_owner = ''
+                    lease_until = ''
+                    next_run_at = ''
+                if next_status == 'pending':
+                    lease_owner = ''
+                    lease_until = ''
                 conn.execute(
                     '''
                     UPDATE cloud_jobs
@@ -1145,6 +1285,9 @@ class CloudDriveRegistryDB:
                         attempts=?,
                         started_at=?,
                         finished_at=?,
+                        lease_owner=?,
+                        lease_until=?,
+                        next_run_at=?,
                         updated_at=?
                     WHERE id=?
                     ''',
@@ -1155,6 +1298,9 @@ class CloudDriveRegistryDB:
                         int(attempts if attempts is not None else row['attempts'] or 0),
                         started_at,
                         finished_at,
+                        lease_owner,
+                        lease_until,
+                        next_run_at,
                         now,
                         str(job_id),
                     ),
@@ -1822,6 +1968,7 @@ class CloudDriveRegistryDB:
         )
 
     def _job_from_row(self, row: sqlite3.Row) -> CloudDriveJob:
+        keys = row.keys()
         payload = json.loads(str(row['payload_json'] or '{}'))
         return CloudDriveJob(
             id=str(row['id']),
@@ -1836,6 +1983,9 @@ class CloudDriveRegistryDB:
             updated_at=str(row['updated_at'] or ''),
             started_at=str(row['started_at'] or ''),
             finished_at=str(row['finished_at'] or ''),
+            lease_owner=str(row['lease_owner'] or '') if 'lease_owner' in keys else '',
+            lease_until=str(row['lease_until'] or '') if 'lease_until' in keys else '',
+            next_run_at=str(row['next_run_at'] or '') if 'next_run_at' in keys else '',
             progress=dict(payload.get('progress') or {}),
         )
 

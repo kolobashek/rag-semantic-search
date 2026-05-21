@@ -28,6 +28,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_job_retry,
     api_cloud_drive_job_run,
     api_cloud_drive_jobs,
+    api_cloud_drive_jobs_recover_stale,
     api_cloud_drive_list,
     api_cloud_drive_move,
     api_cloud_drive_node,
@@ -1257,6 +1258,36 @@ def test_cloud_drive_index_coverage_endpoint(monkeypatch, tmp_path) -> None:
     assert coverage["ok"] is True
     assert coverage["registry_files"] == 1
     assert coverage["indexed_current"] == 1
+
+
+def test_cloud_drive_recover_stale_jobs_endpoint(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    job = service.registry.queue_job(job_type="reindex", payload={"progress": {"status": "pending"}})
+    claimed = service.registry.claim_pending_job(job_types=["reindex"], worker_id="worker-a", lease_seconds=30)
+    assert claimed is not None
+    with service.registry._connect() as conn:
+        conn.execute(
+            "UPDATE cloud_jobs SET lease_until='2000-01-01T00:00:00+00:00' WHERE id=?",
+            (job.id,),
+        )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+
+    result = api_cloud_drive_jobs_recover_stale(job_types="reindex", lease_timeout_seconds=1)
+
+    assert result["recovered"] == 1
+    recovered = service.registry.get_job(job.id)
+    assert recovered is not None
+    assert recovered.status == "pending"
 
 
 def test_cloud_drive_search_filter_uses_registry_acl(tmp_path) -> None:

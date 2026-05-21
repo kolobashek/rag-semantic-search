@@ -51,6 +51,9 @@ class CloudDriveJob:
     updated_at: str = ""
     started_at: str = ""
     finished_at: str = ""
+    lease_owner: str = ""
+    lease_until: str = ""
+    next_run_at: str = ""
     progress: Dict[str, Any] = field(default_factory=dict)
 
 

@@ -606,6 +606,40 @@ def test_registry_job_lifecycle(tmp_path: Path) -> None:
     assert latest.id == job.id
 
 
+def test_registry_claims_and_recovers_stale_cloud_jobs(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    first = registry.queue_job(job_type='reindex', file_id='file-1', payload={'progress': {'status': 'pending'}})
+    registry.queue_job(job_type='cleanup', file_id='file-2', payload={'progress': {'status': 'pending'}})
+
+    claimed = registry.claim_pending_job(job_types=['reindex'], worker_id='worker-a', lease_seconds=30)
+
+    assert claimed is not None
+    assert claimed.id == first.id
+    assert claimed.status == 'running'
+    assert claimed.attempts == 1
+    assert claimed.lease_owner == 'worker-a'
+    assert claimed.lease_until
+    assert registry.claim_pending_job(job_types=['reindex'], worker_id='worker-b') is None
+
+    with registry._connect() as conn:
+        conn.execute(
+            """
+            UPDATE cloud_jobs
+            SET lease_until='2000-01-01T00:00:00+00:00'
+            WHERE id=?
+            """,
+            (first.id,),
+        )
+
+    assert registry.recover_stale_jobs(job_types=['reindex'], lease_timeout_seconds=1) == 1
+    recovered = registry.get_job(first.id)
+    assert recovered is not None
+    assert recovered.status == 'pending'
+    assert recovered.lease_owner == ''
+    assert recovered.last_error == 'lease_expired'
+    assert recovered.progress['recovered_reason'] == 'lease_expired'
+
+
 def test_service_bootstrap_job(tmp_path: Path) -> None:
     catalog = tmp_path / 'catalog'
     (catalog / 'Folder A').mkdir(parents=True)
@@ -791,12 +825,15 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
         version = conn.execute("SELECT schema_version FROM schema_meta WHERE db_kind='cloud_drive'").fetchone()[0]
     assert 'started_at' in columns
     assert 'finished_at' in columns
+    assert 'lease_owner' in columns
+    assert 'lease_until' in columns
+    assert 'next_run_at' in columns
     assert 'deleted_at' in folder_columns
     assert 'cloud_sync_clients' in tables
     assert 'cloud_sync_pairs' in tables
     assert 'cloud_sync_selective_paths' in tables
     assert 'cloud_sync_conflicts' in tables
-    assert int(version) == 4
+    assert int(version) == 5
 
 
 def test_registry_repairs_current_version_missing_source_mtime_columns(tmp_path: Path) -> None:

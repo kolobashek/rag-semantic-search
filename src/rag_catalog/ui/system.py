@@ -190,6 +190,7 @@ def _start_cloud_drive_job_worker(cfg: Dict[str, Any]) -> None:
                 cfg_now = load_config()
                 if bool(cfg_now.get("cloud_drive_enabled")):
                     service = CloudDriveService.from_config(cfg_now)
+                    service.recover_stale_jobs(job_types=["reindex", "cleanup"], lease_timeout_seconds=1800, limit=50)
                     service.run_pending_reindex_jobs(index_config=cfg_now, limit=3)
                     _cloud_autosync_tick(cfg_now, service)
             except Exception as exc:
