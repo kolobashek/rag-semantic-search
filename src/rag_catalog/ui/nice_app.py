@@ -198,6 +198,13 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def set_screen(screen: str, *, close_drawer: bool = False) -> None:
         touch_activity()
+        prev_screen = state.screen
+        ui.run_javascript(
+            "(() => {"
+            f"const key = 'rag-scroll-{prev_screen}';"
+            "try { sessionStorage.setItem(key, String(window.scrollY || document.documentElement.scrollTop || 0)); } catch(e) {}"
+            "})();"
+        )
         if close_drawer:
             try:
                 drawer.set_value(False)
@@ -1978,7 +1985,11 @@ def _build_page(initial_screen: str = "search") -> None:
         _jobs_view.render_jobs_screen(state, render_fn=render)
 
     def render_cloud_screen() -> None:
-        _cloud_view.render_cloud_drive_screen(state)
+        _cloud_view.render_cloud_drive_screen(
+            state,
+            render_fn=render,
+            settings_fn=go_settings_section,
+        )
 
     def render() -> None:
         page_root.classes(remove="search")
@@ -2023,6 +2034,7 @@ def _build_page(initial_screen: str = "search") -> None:
             _stop_managed_timer(state.tg_login_timer)
             state.tg_login_timer = None
         update_nav()
+        current_screen = state.screen
         content.clear()
         with content:
             if state.current_user is None:
@@ -2088,6 +2100,16 @@ def _build_page(initial_screen: str = "search") -> None:
                 render_cloud_screen()
             else:
                 render_search_screen()
+        ui.timer(
+            0.05,
+            lambda screen=current_screen: ui.run_javascript(
+                "(() => {"
+                f"const v = Number(sessionStorage.getItem('rag-scroll-{screen}') || 0);"
+                "if (Number.isFinite(v) && v > 0) window.scrollTo({top:v, behavior:'instant'});"
+                "})();"
+            ),
+            once=True,
+        )
 
     # ── Preview drawer (живёт вне content, не сбрасывается при render()) ──
     preview_drawer = ui.element("div").classes("rag-preview-drawer closed")

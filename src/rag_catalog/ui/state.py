@@ -63,6 +63,8 @@ class PageState:
     explorer_page: int = 0
     explorer_cd_path: str = ""
     explorer_tree_open: List[str] = field(default_factory=list)
+    cloud_tab: str = "files"
+    screen_scroll: Dict[str, int] = field(default_factory=dict)
     auth_db: Optional[UserAuthDB] = None
     current_user: Optional[Dict[str, Any]] = None
     auth_token: str = ""

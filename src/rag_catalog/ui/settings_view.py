@@ -1972,7 +1972,6 @@ def render_settings_screen(
     user_sections: List[tuple] = [
         ("profile",         "person",         "Профиль",                  ["имя", "аккаунт", "профиль"]),
         ("telegram_sync",   "sync",           "Telegram-синк",            ["telegram", "бот", "синхронизация", "файлы"]),
-        ("cloud_sync_user", "sync_alt",       "Cloud Sync",               ["sync", "синхронизация", "папка", "desktop"]),
         ("explorer",        "folder_open",    "Проводник",                ["файлы", "вид", "сортировка"]),
         ("favorites",       "star_border",    "Избранное",                ["закладки"]),
         ("saved_searches",  "bookmark",       "Сохранённые запросы",      ["запросы", "поиск", "сохранено"]),
@@ -1980,7 +1979,7 @@ def render_settings_screen(
     ]
     admin_sections: List[tuple] = [
         ("paths",         "storage",        "Пути и Qdrant",          ["каталог", "база", "url", "коллекция"]),
-        ("cloud_drive",   "cloud",          "Cloud Drive",            ["cloud", "registry", "bootstrap", "storage", "s3"]),
+        ("cloud_drive",   "cloud",          "Инфраструктура Cloud",   ["cloud", "registry", "bootstrap", "storage", "s3"]),
         ("cloud_sync",    "sync_alt",       "Sync клиент",            ["sync", "синхронизация", "клиент", "desktop", "папка"]),
         ("llm",           "smart_toy",      "Нейросеть",              ["ollama", "модель", "ai", "llm", "rag"]),
         ("aliases",       "travel_explore", "Синонимы поиска",        ["группы", "расширение", "запросы"]),
@@ -2245,8 +2244,12 @@ def render_settings_screen(
                 with ui.column().classes("rag-card w-full p-4 gap-3"):
                     ui.label("Проводник").classes("text-xl font-semibold")
                     ui.label(
-                        f"Вид: {state.explorer_view} · сортировка: {state.explorer_sort} · "
-                        f"{'убывание' if state.explorer_desc else 'возрастание'} · тип: {state.explorer_ext}"
+                        "Настройки вида, сортировки и фильтра теперь находятся в самом Проводнике: "
+                        "используйте шестерёнку в панели инструментов."
+                    ).classes("rag-meta")
+                    ui.label(
+                        f"Текущее состояние: {state.explorer_view} · {state.explorer_sort} · "
+                        f"{'убывание' if state.explorer_desc else 'возрастание'} · {state.explorer_ext}"
                     ).classes("rag-meta")
 
                     def reset_explorer() -> None:
@@ -2259,7 +2262,13 @@ def render_settings_screen(
                         ui.notify("Настройки проводника сброшены.", type="positive")
                         render_section()
 
-                    ui.button("Сбросить настройки проводника", icon="restart_alt", on_click=reset_explorer).props("outline")
+                    with ui.row().classes("gap-2 flex-wrap"):
+                        ui.button(
+                            "Открыть Проводник",
+                            icon="folder_open",
+                            on_click=lambda: go_explorer_fn(str(state.explorer_path or "")),
+                        ).props("unelevated")
+                        ui.button("Сбросить настройки проводника", icon="restart_alt", on_click=reset_explorer).props("outline")
 
             elif sec == "favorites":
                 with ui.column().classes("rag-card w-full p-4 gap-3"):

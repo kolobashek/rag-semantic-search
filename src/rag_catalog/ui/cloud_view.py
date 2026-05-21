@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from nicegui import ui
 
 from rag_catalog.core.cloud_drive.service import CloudDriveService
 
+from .helpers import _is_admin
 from .state import PageState
 
 
-def render_cloud_drive_screen(state: PageState) -> None:
+def render_cloud_drive_screen(
+    state: PageState,
+    *,
+    render_fn: Optional[Callable[[], None]] = None,
+    settings_fn: Optional[Callable[[str], None]] = None,
+) -> None:
     try:
         service = CloudDriveService.from_config(state.cfg)
         health: Dict[str, Any] = service.storage_health() if service else {}
@@ -19,9 +25,7 @@ def render_cloud_drive_screen(state: PageState) -> None:
         health = {}
         service = None
 
-    has_files = int(health.get("file_count") or 0) > 0
-
-    with ui.row().classes("w-full items-start justify-between"):
+    with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
         with ui.column().classes("gap-1"):
             ui.label("CLOUD STORAGE").style(
                 "font-family:var(--rag-font-mono);text-transform:uppercase;"
@@ -39,14 +43,125 @@ def render_cloud_drive_screen(state: PageState) -> None:
                     "color:#06b6d4;border:1px solid color-mix(in srgb,#22d3ee 30%,transparent);"
                     "text-transform:uppercase;letter-spacing:0.08em"
                 )
-        ui.button("Загрузить файлы", icon="upload",
-                  on_click=lambda: ui.notify("Загрузка через настройки Cloud Drive", type="info"))\
-            .props("unelevated")
+        with ui.row().classes("gap-2"):
+            ui.button(
+                "Загрузить",
+                icon="upload",
+                on_click=lambda: ui.navigate.to("/explorer"),
+            ).props("unelevated no-caps")
+            if _is_admin(state) and settings_fn is not None:
+                ui.button(
+                    icon="settings",
+                    on_click=lambda: settings_fn("cloud_drive"),
+                    color=None,
+                ).props("flat round dense").tooltip("Инфраструктура Cloud")
 
+    tab_options = {
+        "files": "Файлы",
+        "sync": "Синхронизация",
+        "settings": "Настройки",
+    }
+
+    def set_tab(value: str) -> None:
+        if value in tab_options:
+            state.cloud_tab = value
+        if render_fn is not None:
+            render_fn()
+
+    with ui.tabs(value=state.cloud_tab if state.cloud_tab in tab_options else "files").classes("rag-cloud-tabs"):
+        for key, label in tab_options.items():
+            ui.tab(key, label=label, icon={"files": "folder", "sync": "sync", "settings": "tune"}[key]).on(
+                "click", lambda _=None, k=key: set_tab(k)
+            )
+
+    active_tab = state.cloud_tab if state.cloud_tab in tab_options else "files"
+    if active_tab == "sync":
+        _render_sync_tab(state, service, settings_fn=settings_fn)
+    elif active_tab == "settings":
+        _render_settings_tab(state, service, render_fn=render_fn, settings_fn=settings_fn)
+    else:
+        _render_files_tab(service, health)
+
+
+def _render_files_tab(service: Any, health: Dict[str, Any]) -> None:
+    has_files = int(health.get("file_count") or 0) > 0
     if has_files and service is not None:
         _render_with_files(service, health)
-    else:
-        _render_empty_state()
+        return
+    _render_empty_state()
+
+
+def _render_sync_tab(
+    state: PageState,
+    service: Any,
+    *,
+    settings_fn: Optional[Callable[[str], None]] = None,
+) -> None:
+    with ui.column().classes("rag-card w-full p-4 gap-3"):
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.icon("sync", size="22px")
+            ui.label("Синхронизация Cloud").classes("text-xl font-semibold")
+            ui.space()
+            if settings_fn is not None:
+                ui.button(
+                    "Пары синхронизации",
+                    icon="tune",
+                    on_click=lambda: settings_fn("cloud_sync" if _is_admin(state) else "cloud_sync_user"),
+                ).props("outline dense no-caps")
+        ui.label("Подключённые клиенты, пары папок и конфликты ведутся в общей Cloud-зоне.").classes("rag-meta")
+        if service is None:
+            ui.label("Cloud Drive не настроен.").classes("rag-meta")
+            return
+        try:
+            clients = service.list_sync_clients(include_offline=True, limit=8)
+        except Exception:
+            clients = []
+        if not clients:
+            with ui.element("div").classes("cd-empty-state w-full"):
+                ui.icon("devices", size="28px").classes("opacity-30")
+                ui.label("Синхронизация пока не подключена.").classes("text-center")
+            return
+        with ui.column().classes("w-full gap-2"):
+            for client in clients:
+                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                    ui.icon("computer", size="18px")
+                    with ui.column().classes("flex-1 min-w-0 gap-0"):
+                        ui.label(str(client.get("device_name") or client.get("device_id") or "Устройство")).classes("font-medium truncate")
+                        ui.label(str(client.get("status") or "unknown")).classes("rag-meta text-xs")
+
+
+def _render_settings_tab(
+    state: PageState,
+    service: Any,
+    *,
+    render_fn: Optional[Callable[[], None]] = None,
+    settings_fn: Optional[Callable[[str], None]] = None,
+) -> None:
+    def open_cloud_tab(tab: str) -> None:
+        state.cloud_tab = tab
+        if render_fn is not None:
+            render_fn()
+
+    with ui.column().classes("rag-card w-full p-4 gap-3"):
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.icon("tune", size="22px")
+            ui.label("Настройки Cloud").classes("text-xl font-semibold")
+        ui.label("Пользовательские сценарии Cloud доступны здесь. Инфраструктура хранилища остаётся в настройках администратора.").classes("rag-meta")
+        with ui.row().classes("gap-2 flex-wrap"):
+            ui.button("Открыть файлы", icon="folder", on_click=lambda: open_cloud_tab("files")).props("outline dense no-caps")
+            ui.button("Синхронизация", icon="sync_alt", on_click=lambda: open_cloud_tab("sync")).props("outline dense no-caps")
+            if settings_fn is not None:
+                if _is_admin(state):
+                    ui.button("Инфраструктура Cloud", icon="storage", on_click=lambda: settings_fn("cloud_drive")).props("outline dense no-caps")
+        if service is not None:
+            try:
+                health = service.storage_health()
+            except Exception:
+                health = {}
+            if health:
+                with ui.row().classes("gap-2 flex-wrap"):
+                    ui.label(f"Файлов: {int(health.get('file_count') or 0):,}".replace(",", " ")).classes("rag-chip")
+                    ui.label(f"Очередь: {int(health.get('queue_size') or 0)}").classes("rag-chip")
 
 
 def _render_with_files(service: Any, health: Dict[str, Any]) -> None:
