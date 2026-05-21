@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_QDRANT_HTTP_OK_RE = re.compile(r'"HTTP/\d(?:\.\d)?\s+2\d\d\b')
 
 
 def _safe_name(value: str) -> str:
@@ -208,9 +209,26 @@ class SizeDateLogHandler(logging.Handler):
             super().close()
 
 
+def _is_successful_qdrant_http_request(record: logging.LogRecord) -> bool:
+    message = record.getMessage()
+    if not message.startswith("HTTP Request:"):
+        return False
+    if ":6333/" not in message and "localhost:6333" not in message and "127.0.0.1:6333" not in message:
+        return False
+    return bool(_QDRANT_HTTP_OK_RE.search(message))
+
+
+class QdrantHttpNoiseFilter(logging.Filter):
+    """Drop successful Qdrant client request noise from persisted app logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _is_successful_qdrant_http_request(record)
+
+
 def build_log_handler(path_or_name: str | Path, *, max_bytes: int = DEFAULT_MAX_BYTES, label: str = "") -> logging.Handler:
     handler = SizeDateLogHandler(path_or_name, max_bytes=max_bytes, label=label)
     handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    handler.addFilter(QdrantHttpNoiseFilter())
     setattr(handler, "_rag_log_history_name", logical_log_name(path_or_name))
     return handler
 

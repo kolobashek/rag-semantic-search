@@ -45,6 +45,29 @@ def test_size_handler_rotates_by_limit(monkeypatch, tmp_path: Path) -> None:
     assert "b" * 20 in log_history.read_history_tail("indexer.log", max_chars=2_000_000)
 
 
+def test_size_handler_filters_successful_qdrant_http_noise(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(log_history, "PROJECT_ROOT", tmp_path)
+    logger = logging.getLogger("test-log-history-qdrant-noise")
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handler = log_history.build_log_handler("web.log", max_bytes=1024 * 1024, label="WEB")
+    logger.addHandler(handler)
+    try:
+        logger.info('HTTP Request: POST http://localhost:6333/collections/catalog/points/scroll?timeout=300 "HTTP/1.1 200 OK"')
+        logger.info('HTTP Request: POST http://localhost:6333/collections/catalog/points/scroll?timeout=300 "HTTP/1.1 500 Internal Server Error"')
+        logger.info("useful app message")
+    finally:
+        handler.close()
+        logger.handlers.clear()
+
+    text = log_history.read_history_tail("web.log")
+
+    assert "200 OK" not in text
+    assert "500 Internal Server Error" in text
+    assert "useful app message" in text
+
+
 def test_history_includes_legacy_file(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(log_history, "PROJECT_ROOT", tmp_path)
     legacy = tmp_path / "logs" / "runtime" / "telegram_bot.log"
