@@ -1281,6 +1281,12 @@ def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _index_stage_from_note(note: str) -> str:
+    match = re.search(r"(?:^|\b)stage=([a-z_]+)", str(note or "").lower())
+    stage = match.group(1) if match else ""
+    return stage if stage in {"metadata", "small", "large", "content", "all"} else ""
+
+
 def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
     """Return stage-progress rows for a live headless indexer (PID alive but DB status='cancelled')."""
     import json as _json
@@ -1306,12 +1312,20 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
     if not live_pid:
         return []
 
-    rows = _db_query_dicts(
+    run_rows = _db_query_dicts(
         db_path,
-        "SELECT run_id FROM index_runs WHERE worker_pid=? ORDER BY ts_started DESC LIMIT 1",
+        """
+        SELECT run_id,
+               note,
+               CAST((julianday(CURRENT_TIMESTAMP) - julianday(ts_started)) * 86400 AS INTEGER) AS duration_sec
+        FROM index_runs
+        WHERE worker_pid=?
+        ORDER BY ts_started DESC
+        LIMIT 1
+        """,
         (live_pid,),
     )
-    if not rows:
+    if not run_rows:
         return [
             {
                 "run_id": "",
@@ -1327,11 +1341,13 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
                 "error_files": 0,
                 "points_added": 0,
                 "duration_sec": 0,
+                "_progress_unknown": True,
             }
         ]
-    run_id = str(rows[0].get("run_id") or "")
+    run_id = str(run_rows[0].get("run_id") or "")
     if not run_id:
         return []
+    run_note = str(run_rows[0].get("note") or "").strip()
 
     rows = _db_query_dicts(
         db_path,
@@ -1346,6 +1362,25 @@ def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:
         """,
         (run_id,),
     )
+    if not rows:
+        return [
+            {
+                "run_id": run_id,
+                "stage": marker_stage or _index_stage_from_note(run_note) or "all",
+                "status": "running",
+                "run_status": "running",
+                "run_note": run_note or "headless",
+                "processed_files": 0,
+                "total_files": 0,
+                "added_files": 0,
+                "updated_files": 0,
+                "skipped_files": 0,
+                "error_files": 0,
+                "points_added": 0,
+                "duration_sec": int(run_rows[0].get("duration_sec") or 0),
+                "_progress_unknown": True,
+            }
+        ]
     # PID is alive → watchdog-set 'cancelled' status is wrong; correct it to 'running'
     for r in rows:
         if r.get("status") == "cancelled":

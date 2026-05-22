@@ -314,6 +314,31 @@ def test_index_telemetry_uses_runtime_marker_before_run_row_exists(monkeypatch, 
     assert telemetry["active_stages"][0]["run_note"] == "runtime_marker"
 
 
+def test_index_telemetry_synthesizes_active_stage_before_stage_row(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    run_id = db.start_index_run(
+        catalog_path="O:\\Обмен",
+        collection_name="catalog",
+        recreate=False,
+        note="stage=small",
+        worker_pid=4321,
+    )
+
+    monkeypatch.setattr(
+        ui_helpers,
+        "_find_module_process_pids",
+        lambda module: [4321] if module == "rag_catalog.core.index_rag" else [],
+    )
+
+    telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
+
+    assert telemetry["active_stages"][0]["run_id"] == run_id
+    assert telemetry["active_stages"][0]["stage"] == "small"
+    assert telemetry["active_stages"][0]["status"] == "running"
+    assert telemetry["active_stages"][0]["_progress_unknown"] is True
+
+
 def test_index_telemetry_uses_process_scan_for_headless_ocr(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "telemetry.db"
     TelemetryDB(str(db_path))

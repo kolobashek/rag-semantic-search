@@ -357,7 +357,7 @@ def render_index_screen(
             processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
             total_f = int(row.get("total_files") or row.get("found_scanned") or 0)
             note_text = str(row.get("note") or row.get("run_note") or "").strip()
-            progress_unknown = bool(is_ocr and is_running and total_f <= 0 and (
+            progress_unknown = bool(is_running and total_f <= 0 and (
                 row.get("_progress_unknown")
                 or note_text.startswith("searching_scanned_pdfs")
                 or note_text in {"process_scan", "runtime_marker"}
@@ -370,6 +370,10 @@ def render_index_screen(
                 count_label = "поиск PDF"
                 pct_label = "—"
                 stats_text = "идёт поиск сканированных PDF"
+            elif progress_unknown:
+                count_label = "подготовка"
+                pct_label = "—"
+                stats_text = "идёт подготовка списка файлов"
             elif is_ocr:
                 count_label = f"{processed:,} / {total_f:,}".replace(",", " ")
                 pct_label = f"{pct * 100:.0f}%"
