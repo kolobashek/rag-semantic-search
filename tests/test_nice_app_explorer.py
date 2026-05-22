@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
@@ -388,6 +389,96 @@ def test_index_telemetry_stage_summary_keeps_failed_run_note(tmp_path) -> None:
 
     assert small["run_id"] == run_id
     assert small["run_note"] == "qdrant timeout on file.docx"
+
+
+def test_index_telemetry_stage_summary_ignores_recovery_cancelled_headline(tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    completed_run_id = db.start_index_run(catalog_path="O:\\Обмен", collection_name="catalog", recreate=False)
+    db.start_stage(run_id=completed_run_id, stage="small", total_files=10)
+    db.finish_stage(
+        run_id=completed_run_id,
+        stage="small",
+        status="completed",
+        processed_files=10,
+        added_files=1,
+        updated_files=0,
+        skipped_files=9,
+        error_files=0,
+        points_added=15,
+    )
+    db.finish_index_run(
+        run_id=completed_run_id,
+        status="completed",
+        total_files=10,
+        added_files=1,
+        updated_files=0,
+        skipped_files=9,
+        deleted_files=0,
+        error_files=0,
+        points_added=15,
+        note="ok",
+    )
+
+    recovery_run_id = db.start_index_run(
+        catalog_path="O:\\Обмен",
+        collection_name="catalog",
+        recreate=False,
+        note="stage=all | watchdog_recovery",
+    )
+    db.start_stage(run_id=recovery_run_id, stage="small", total_files=62036)
+    db.finish_stage(
+        run_id=recovery_run_id,
+        stage="small",
+        status="cancelled",
+        processed_files=825,
+        added_files=0,
+        updated_files=215,
+        skipped_files=610,
+        error_files=0,
+        points_added=0,
+    )
+    db.finish_index_run(
+        run_id=recovery_run_id,
+        status="cancelled",
+        total_files=0,
+        added_files=0,
+        updated_files=0,
+        skipped_files=0,
+        deleted_files=0,
+        error_files=0,
+        points_added=0,
+        note="stage=all | watchdog_recovery",
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE index_stage_progress SET ts_started='2026-05-21T13:00:00+00:00', "
+            "ts_finished='2026-05-21T13:10:00+00:00' WHERE run_id=?",
+            (completed_run_id,),
+        )
+        conn.execute(
+            "UPDATE index_runs SET ts_started='2026-05-21T13:00:00+00:00', "
+            "ts_finished='2026-05-21T13:10:00+00:00' WHERE run_id=?",
+            (completed_run_id,),
+        )
+        conn.execute(
+            "UPDATE index_stage_progress SET ts_started='2026-05-21T14:00:00+00:00', "
+            "ts_finished='2026-05-21T14:01:00+00:00' WHERE run_id=?",
+            (recovery_run_id,),
+        )
+        conn.execute(
+            "UPDATE index_runs SET ts_started='2026-05-21T14:00:00+00:00', "
+            "ts_finished='2026-05-21T14:01:00+00:00' WHERE run_id=?",
+            (recovery_run_id,),
+        )
+
+    telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
+    small = next(row for row in telemetry["stage_summary"] if row["stage"] == "small")
+
+    assert small["run_id"] == completed_run_id
+    assert small["status"] == "completed"
+    assert small["run_note"] == "ok"
 
 
 def test_resolve_index_recovery_stage_prefers_running_stage_over_note(tmp_path) -> None:

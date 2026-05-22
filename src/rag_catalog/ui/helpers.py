@@ -1463,30 +1463,44 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         db_path,
         """
         WITH finished AS (
-            SELECT run_id,
-                   stage,
-                   status,
-                   total_files,
-                   processed_files,
-                   added_files,
-                   updated_files,
-                   skipped_files,
-                   error_files,
-                   points_added,
-                   ts_started,
-                   ts_finished,
-                   CAST((julianday(ts_finished) - julianday(ts_started)) * 86400 AS INTEGER) AS duration_sec
-            FROM index_stage_progress
-            WHERE ts_finished IS NOT NULL
+            SELECT isp.run_id,
+                   isp.stage,
+                   isp.status,
+                   isp.total_files,
+                   isp.processed_files,
+                   isp.added_files,
+                   isp.updated_files,
+                   isp.skipped_files,
+                   isp.error_files,
+                   isp.points_added,
+                   isp.ts_started,
+                   isp.ts_finished,
+                   CASE
+                       WHEN isp.status='cancelled'
+                            AND (
+                                COALESCE(ir.note, '') LIKE '%recovery%'
+                                OR COALESCE(ir.note, '') LIKE '%switch_to_ocr%'
+                                OR COALESCE(ir.note, '') LIKE '%active_ocr_running%'
+                            )
+                       THEN 1
+                       ELSE 0
+                   END AS is_recovery_cancelled,
+                   CAST((julianday(isp.ts_finished) - julianday(isp.ts_started)) * 86400 AS INTEGER) AS duration_sec
+            FROM index_stage_progress AS isp
+            LEFT JOIN index_runs AS ir ON ir.run_id=isp.run_id
+            WHERE isp.ts_finished IS NOT NULL
         ),
         latest AS (
-            SELECT f.*
-            FROM finished f
-            JOIN (
-                SELECT stage, MAX(ts_started) AS ts_started
-                FROM finished
-                GROUP BY stage
-            ) m ON m.stage=f.stage AND m.ts_started=f.ts_started
+            SELECT *
+            FROM (
+                SELECT f.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY f.stage
+                           ORDER BY f.is_recovery_cancelled ASC, f.ts_started DESC
+                       ) AS rn
+                FROM finished f
+            )
+            WHERE rn=1
         ),
         avg_by_stage AS (
             SELECT stage,
