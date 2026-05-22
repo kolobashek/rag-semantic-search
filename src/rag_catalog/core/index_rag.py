@@ -1512,9 +1512,9 @@ def main() -> None:
     parser.add_argument(
         "--max-chunks",
         type=int,
-        default=int(cfg.get("index_max_chunks", 2000)),
+        default=int(cfg.get("index_max_chunks", 50)),
         dest="max_chunks",
-        help="Лимит чанков для --stage small (по умолчанию 2000; 0 = без ограничений). --stage large всегда без лимита.",
+        help="Лимит чанков для --stage small (по умолчанию 50; 0 = без ограничений). --stage large всегда без лимита.",
     )
     parser.add_argument(
         "--workers",

@@ -260,6 +260,8 @@ def _resolve_soffice() -> str:
 _DOC_TEXT_RUN_RE = re.compile(
     r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\s,.;:!?()\[\]{}№\"'«»%+\-_/\\]{5,}"
 )
+_DOC_SMALL_FALLBACK_MIN_READ_BYTES = 256 * 1024
+_DOC_SMALL_FALLBACK_MAX_READ_BYTES = 2 * 1024 * 1024
 
 
 def _clean_doc_text_run(text: str) -> str:
@@ -284,7 +286,15 @@ def _extract_doc_binary_fallback(filepath: Path, *, max_chars: int = 0) -> str:
     blind when bundled converters are absent.
     """
     try:
-        data = filepath.read_bytes()
+        if max_chars:
+            with filepath.open("rb") as fh:
+                read_limit = min(
+                    _DOC_SMALL_FALLBACK_MAX_READ_BYTES,
+                    max(_DOC_SMALL_FALLBACK_MIN_READ_BYTES, int(max_chars) * 16),
+                )
+                data = fh.read(read_limit)
+        else:
+            data = filepath.read_bytes()
     except Exception as exc:
         logger.warning("DOC fallback: ошибка чтения %s: %s", filepath, exc)
         return ""
@@ -314,7 +324,7 @@ def _extract_doc_binary_fallback(filepath: Path, *, max_chars: int = 0) -> str:
     if max_chars:
         text = text[:max_chars]
     if text:
-        logger.warning("DOC %s прочитан бинарным fallback без antiword/LibreOffice", filepath)
+        logger.info("DOC %s прочитан бинарным fallback без antiword/LibreOffice", filepath)
     return text
 
 

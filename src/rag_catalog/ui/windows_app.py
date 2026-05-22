@@ -487,7 +487,7 @@ class SettingsDialog(QDialog):
 
         self.index_max_chunks_spin = QSpinBox()
         self.index_max_chunks_spin.setRange(0, 20000)
-        self.index_max_chunks_spin.setValue(int(self.config.get("index_max_chunks", 2000)))
+        self.index_max_chunks_spin.setValue(int(self.config.get("index_max_chunks", 50)))
         self.index_max_chunks_spin.setToolTip(
             "Кратко: максимум чанков на файл.\n"
             "Подробно: 0 = без лимита; ограничение защищает от огромных файлов и взрывного роста индекса."

@@ -720,7 +720,7 @@ def render_index_screen(
             with ui.column().classes("gap-3 min-w-0"):
                 initial_index_settings = {
                     "workers": int(settings.get("workers") or state.cfg.get("index_read_workers") or 4),
-                    "max_chunks": int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 2000),
+                    "max_chunks": int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 50),
                     "recreate": bool(settings.get("recreate")),
                     "skip_inline_ocr": bool(settings.get("skip_inline_ocr")),
                     "ocr_enabled": bool(settings.get("ocr_enabled")),

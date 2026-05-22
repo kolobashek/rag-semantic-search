@@ -63,7 +63,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "chunk_group_size": 4,
     "batch_size": 1000,
     "index_read_workers": 4,
-    "index_max_chunks": 2000,
+    "index_max_chunks": 50,
     "index_skip_ocr": False,
     "index_default_stage": "all",
     "index_exclude_patterns": [],

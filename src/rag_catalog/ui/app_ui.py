@@ -1047,7 +1047,7 @@ def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
             "Макс. чанков/файл",
             min_value=0,
             max_value=20000,
-            value=int(cfg.get("index_max_chunks", 2000)),
+            value=int(cfg.get("index_max_chunks", 50)),
             step=100,
             help=(
                 "Кратко: ограничение чанков на один файл.\n\n"

@@ -856,7 +856,7 @@ class TelemetryDB:
             "stage": "all",
             "recreate": False,
             "workers": 4,
-            "max_chunks": 2000,
+            "max_chunks": 50,
             "skip_inline_ocr": False,
             "ocr_enabled": False,
             "ocr_min_text_len": 50,

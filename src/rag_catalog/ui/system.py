@@ -533,7 +533,7 @@ def _launch_indexer(
             )
         ),
         "--max-chunks",
-        str(0 if str(stage or "").strip().lower() == "large" else int(max_chunks or cfg.get("index_max_chunks") or 2000)),
+        str(0 if str(stage or "").strip().lower() == "large" else int(max_chunks or cfg.get("index_max_chunks") or 50)),
     ]
     qdrant_url = str(cfg.get("qdrant_url") or "")
     if qdrant_url:
@@ -768,7 +768,7 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
                     live_cfg,
                     stage=stage,
                     workers=workers,
-                    max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 2000),
+                    max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 50),
                     skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
                     ocr_engine=str(cfg_settings.get("ocr_engine") or "tesseract"),
                 )
@@ -910,7 +910,7 @@ def _recover_background_tasks(
     telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
     settings = telemetry.get_index_settings() if hasattr(telemetry, "get_index_settings") else {}
     workers = _safe_int(settings.get("workers") or cfg.get("index_read_workers") or 4, 4)
-    max_chunks = _safe_int(settings.get("max_chunks") or cfg.get("index_max_chunks") or 2000, 2000)
+    max_chunks = _safe_int(settings.get("max_chunks") or cfg.get("index_max_chunks") or 50, 50)
     skip_inline_ocr = bool(settings.get("skip_inline_ocr"))
     ocr_min_text_len = _safe_int(settings.get("ocr_min_text_len") or 50, 50)
     ocr_engine_setting = str(settings.get("ocr_engine") or "tesseract")
