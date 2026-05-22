@@ -30,6 +30,8 @@ from .contract import ExtractedDocument, TextBlock, document_from_legacy_text
 logger = logging.getLogger(__name__)
 
 _XLSX_MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+_TOOLS_ROOT = _PROJECT_ROOT / "tools"
 
 
 def _load_xlsx_workbook(filepath: Path, *, read_only: bool = True, data_only: bool = True) -> Any:
@@ -209,9 +211,116 @@ def extract_pptx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDoc
         return ExtractedDocument(blocks=())
 
 
+def _first_existing_tool(*paths: Path) -> str:
+    for path in paths:
+        if path.exists():
+            return str(path)
+    return ""
+
+
+def _resolve_env_tool(*env_names: str) -> str:
+    for name in env_names:
+        value = os.environ.get(name, "").strip()
+        if value and Path(value).exists():
+            return value
+    return ""
+
+
+def _resolve_antiword() -> str:
+    return (
+        _resolve_env_tool("RAG_ANTIWORD_CMD", "ANTIWORD")
+        or _first_existing_tool(
+            _TOOLS_ROOT / "antiword" / "antiword.exe",
+            _TOOLS_ROOT / "antiword" / "bin" / "antiword.exe",
+            _TOOLS_ROOT / "antiword" / "antiword",
+            _TOOLS_ROOT / "antiword" / "bin" / "antiword",
+        )
+        or shutil.which("antiword")
+        or ""
+    )
+
+
+def _resolve_soffice() -> str:
+    return (
+        _resolve_env_tool("RAG_SOFFICE_CMD", "RAG_LIBREOFFICE_CMD", "SOFFICE")
+        or _first_existing_tool(
+            _TOOLS_ROOT / "libreoffice" / "program" / "soffice.exe",
+            _TOOLS_ROOT / "LibreOffice" / "program" / "soffice.exe",
+            _TOOLS_ROOT / "LibreOfficePortable" / "App" / "libreoffice" / "program" / "soffice.exe",
+            _TOOLS_ROOT / "LibreOfficePortable" / "App" / "LibreOffice" / "program" / "soffice.exe",
+            _TOOLS_ROOT / "libreoffice" / "program" / "soffice",
+            _TOOLS_ROOT / "LibreOffice" / "program" / "soffice",
+        )
+        or shutil.which("soffice")
+        or shutil.which("libreoffice")
+        or ""
+    )
+
+
+_DOC_TEXT_RUN_RE = re.compile(
+    r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\s,.;:!?()\[\]{}№\"'«»%+\-_/\\]{5,}"
+)
+
+
+def _clean_doc_text_run(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text.replace("\x00", " ")).strip()
+    return cleaned.strip(" ,.;:-_")
+
+
+def _looks_like_doc_text(text: str) -> bool:
+    if len(text) < 8:
+        return False
+    letters = sum(1 for char in text if char.isalpha())
+    allowed = sum(1 for char in text if char.isalnum() or char.isspace() or char in ".,;:!?()[]{}№\"'«»%+-_/\\")
+    return letters >= 3 and allowed / max(1, len(text)) >= 0.85
+
+
+def _extract_doc_binary_fallback(filepath: Path, *, max_chars: int = 0) -> str:
+    """Last-resort DOC text extraction without external binaries.
+
+    Legacy .doc is an OLE binary container. A full parser is better, but many
+    files still keep human text as UTF-16LE or Windows-1251 runs. This fallback
+    extracts only conservative printable runs so indexing is not completely
+    blind when bundled converters are absent.
+    """
+    try:
+        data = filepath.read_bytes()
+    except Exception as exc:
+        logger.warning("DOC fallback: ошибка чтения %s: %s", filepath, exc)
+        return ""
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for encoding in ("utf-16le", "cp1251"):
+        try:
+            decoded = data.decode(encoding, errors="ignore")
+        except Exception:
+            continue
+        for match in _DOC_TEXT_RUN_RE.finditer(decoded):
+            run = _clean_doc_text_run(match.group(0))
+            if not _looks_like_doc_text(run):
+                continue
+            key = run.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(run)
+            if max_chars and sum(len(item) + 1 for item in candidates) >= max_chars:
+                break
+        if max_chars and sum(len(item) + 1 for item in candidates) >= max_chars:
+            break
+
+    text = "\n".join(candidates).strip()
+    if max_chars:
+        text = text[:max_chars]
+    if text:
+        logger.warning("DOC %s прочитан бинарным fallback без antiword/LibreOffice", filepath)
+    return text
+
+
 def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
-    """Best-effort extraction for legacy binary DOC via antiword or LibreOffice."""
-    antiword = shutil.which("antiword")
+    """Best-effort extraction for legacy binary DOC via bundled tools or fallback."""
+    antiword = _resolve_antiword()
     if antiword:
         try:
             proc = subprocess.run(
@@ -229,7 +338,7 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
         except Exception as exc:
             logger.warning("antiword: ошибка чтения DOC %s: %s", filepath, exc)
 
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    soffice = _resolve_soffice()
     if soffice:
         try:
             with tempfile.TemporaryDirectory(prefix="rag_doc_") as tmp:
@@ -259,7 +368,14 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
         except Exception as exc:
             logger.warning("LibreOffice: ошибка чтения DOC %s: %s", filepath, exc)
 
-    logger.warning("DOC %s не прочитан: установите antiword или LibreOffice", filepath)
+    fallback = _extract_doc_binary_fallback(filepath, max_chars=max_chars)
+    if fallback:
+        return fallback
+
+    logger.warning(
+        "DOC %s не прочитан: добавьте antiword или LibreOffice в tools/ либо задайте RAG_ANTIWORD_CMD/RAG_SOFFICE_CMD",
+        filepath,
+    )
     return ""
 
 

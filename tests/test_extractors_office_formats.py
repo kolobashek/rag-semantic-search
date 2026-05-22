@@ -66,3 +66,36 @@ def test_extract_doc_uses_antiword_when_available(tmp_path: Path, monkeypatch) -
     )
 
     assert extract_doc(path) == "legacy text"
+
+
+def test_extract_doc_uses_env_antiword_before_path(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "legacy.doc"
+    path.write_bytes(b"dummy")
+    antiword = tmp_path / "antiword.exe"
+    antiword.write_bytes(b"fake")
+
+    monkeypatch.setenv("RAG_ANTIWORD_CMD", str(antiword))
+    monkeypatch.setattr("rag_catalog.core.extractors.files.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "rag_catalog.core.extractors.files.subprocess.run",
+        lambda args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="bundled text" if str(args[0]) == str(antiword) else "",
+            stderr="",
+        ),
+    )
+
+    assert extract_doc(path) == "bundled text"
+
+
+def test_extract_doc_binary_fallback_reads_text_runs(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "legacy.doc"
+    path.write_bytes(b"\xd0\xcf\x11\xe0" + "Договор аренды спецтехники 8905".encode("utf-16le") + b"\x00" * 32)
+
+    monkeypatch.delenv("RAG_ANTIWORD_CMD", raising=False)
+    monkeypatch.delenv("RAG_SOFFICE_CMD", raising=False)
+    monkeypatch.setattr("rag_catalog.core.extractors.files.shutil.which", lambda _name: None)
+
+    text = extract_doc(path)
+
+    assert "Договор аренды спецтехники 8905" in text
