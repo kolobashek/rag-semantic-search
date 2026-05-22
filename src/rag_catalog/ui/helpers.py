@@ -1032,7 +1032,11 @@ def _cd_get_service(cfg: Dict[str, Any]) -> Optional["CloudDriveService"]:
 
 
 def _cd_list_children(
-    service: "CloudDriveService", cd_path: str
+    service: "CloudDriveService",
+    cd_path: str,
+    *,
+    cfg: Dict[str, Any] | None = None,
+    user: Dict[str, Any] | None = None,
 ) -> "tuple[list, list]":
     try:
         if cd_path:
@@ -1043,6 +1047,15 @@ def _cd_list_children(
             return [], []
         folders = service.registry.list_child_folders(folder.id)
         files = service.registry.list_files_in_folder(folder.id)
+        if cfg is not None and user is not None:
+            folders = [
+                item for item in folders
+                if _cd_registry_acl_allows(cfg, user, item.path, service=service)
+            ]
+            files = [
+                item for item in files
+                if _cd_registry_acl_allows(cfg, user, item.path, file_id=item.id, service=service)
+            ]
         return folders, files
     except Exception:
         return [], []

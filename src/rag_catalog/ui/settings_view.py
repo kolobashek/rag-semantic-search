@@ -120,6 +120,12 @@ def render_settings_screen(
                         status=str(new_status.value or "active"),
                         must_change_password=bool(new_must_change.value),
                     )
+                    if ok:
+                        try:
+                            if bool(state.cfg.get("cloud_drive_enabled")) and str(state.cfg.get("cloud_drive_db_path") or "").strip():
+                                CloudDriveService.from_config(state.cfg).ensure_user_home_folder(username=str(new_username.value or ""))
+                        except Exception:
+                            pass
                     ui.notify("Пользователь создан." if ok else "Не удалось создать пользователя.", type="positive" if ok else "negative")
                     render_fn()
 

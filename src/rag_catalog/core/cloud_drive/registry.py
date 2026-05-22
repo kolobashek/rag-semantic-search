@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
 import uuid
@@ -21,7 +22,7 @@ from .models import (
     CloudDriveSyncPair,
 )
 
-CLOUD_DRIVE_SCHEMA_VERSION = 5
+CLOUD_DRIVE_SCHEMA_VERSION = 6
 
 
 def _utc_now() -> str:
@@ -103,6 +104,27 @@ class CloudDriveRegistryDB:
                         resource_id TEXT NOT NULL,
                         access_level TEXT NOT NULL,
                         created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS cloud_user_folders (
+                        username TEXT PRIMARY KEY,
+                        folder_id TEXT NOT NULL,
+                        folder_path TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(folder_id) REFERENCES cloud_folders(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS cloud_share_links (
+                        token TEXT PRIMARY KEY,
+                        resource_type TEXT NOT NULL,
+                        resource_id TEXT NOT NULL,
+                        path TEXT NOT NULL DEFAULT '',
+                        access_level TEXT NOT NULL DEFAULT 'viewer',
+                        created_by TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL DEFAULT '',
+                        revoked_at TEXT NOT NULL DEFAULT ''
                     );
 
                     CREATE TABLE IF NOT EXISTS cloud_jobs (
@@ -201,6 +223,8 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_resource ON cloud_permissions(resource_type, resource_id);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_user_folders_folder ON cloud_user_folders(folder_id);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_share_links_resource ON cloud_share_links(resource_type, resource_id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_lease ON cloud_jobs(status, lease_until, next_run_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_clients_username ON cloud_sync_clients(username, status, updated_at);
@@ -247,6 +271,29 @@ class CloudDriveRegistryDB:
             conn.execute("ALTER TABLE cloud_folders ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
         if not self._has_column(conn, "cloud_files", "source_mtime"):
             conn.execute("ALTER TABLE cloud_files ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS cloud_user_folders (
+                username TEXT PRIMARY KEY,
+                folder_id TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(folder_id) REFERENCES cloud_folders(id)
+            );
+            CREATE TABLE IF NOT EXISTS cloud_share_links (
+                token TEXT PRIMARY KEY,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                path TEXT NOT NULL DEFAULT '',
+                access_level TEXT NOT NULL DEFAULT 'viewer',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL DEFAULT '',
+                revoked_at TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
 
     def ensure_root_folder(self, *, root_name: str, source_path: str = '', source_mtime: float = 0.0) -> CloudDriveFolder:
         clean_name = str(root_name or '').strip() or 'root'
@@ -297,6 +344,79 @@ class CloudDriveRegistryDB:
             source_path=source_path,
             is_root=False,
         )
+
+    @staticmethod
+    def _clean_username(value: str) -> str:
+        return str(value or '').strip().lower()
+
+    def ensure_user_home_folder(self, *, username: str) -> CloudDriveFolder:
+        clean_username = self._clean_username(username)
+        if not clean_username:
+            raise RuntimeError('Не задан username для личной папки Cloud Drive.')
+        folder_name = clean_username.replace('/', '_').replace('\\', '_').strip() or clean_username
+        expected_path = self._normalize_path(folder_name)
+        self.ensure_root_folder(root_name='Cloud Drive')
+
+        mapped_folder: Optional[CloudDriveFolder] = None
+        with self._lock:
+            with self._connect() as conn:
+                mapping = conn.execute(
+                    "SELECT folder_id FROM cloud_user_folders WHERE username=?",
+                    (clean_username,),
+                ).fetchone()
+                if mapping is not None:
+                    folder_row = conn.execute(
+                        "SELECT * FROM cloud_folders WHERE id=? AND deleted_at=''",
+                        (str(mapping["folder_id"]),),
+                    ).fetchone()
+                    if folder_row is not None:
+                        mapped_folder = self._folder_from_row(folder_row)
+
+        target = self.get_folder_by_path(expected_path)
+        if target is not None:
+            folder = target
+        elif mapped_folder is not None:
+            folder = self.rename_move_folder(
+                source_path=mapped_folder.path,
+                dest_parent_path='',
+                new_name=folder_name,
+            )
+        else:
+            folder = self.create_folder(parent_path='', name=folder_name)
+
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO cloud_user_folders (username, folder_id, folder_path, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(username) DO UPDATE SET
+                        folder_id=excluded.folder_id,
+                        folder_path=excluded.folder_path,
+                        updated_at=excluded.updated_at
+                    """,
+                    (clean_username, folder.id, folder.path, now, now),
+                )
+        self.grant_permission(
+            subject_type='user',
+            subject_id=clean_username,
+            resource_type='folder',
+            resource_id=folder.id,
+            access_level='owner',
+        )
+        return folder
+
+    def is_user_home_folder_path(self, path: str) -> bool:
+        clean_path = self._normalize_path(path)
+        if not clean_path or '/' in clean_path:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM cloud_user_folders WHERE folder_path=? LIMIT 1",
+                (clean_path,),
+            ).fetchone()
+            return row is not None
 
     def upsert_folder(self, *, path: str, name: str, parent_id: Optional[str], depth: int, source_path: str = '', is_root: bool = False, source_mtime: float = 0.0) -> CloudDriveFolder:
         clean_path = self._normalize_path(path)
@@ -598,10 +718,28 @@ class CloudDriveRegistryDB:
             clean_resource_id = self._normalize_path(clean_resource_id) or "*"
         if clean_resource_type == "global":
             clean_resource_id = "*"
-        permission_id = str(uuid.uuid4())
         now = _utc_now()
         with self._lock:
             with self._connect() as conn:
+                existing = conn.execute(
+                    """
+                    SELECT * FROM cloud_permissions
+                    WHERE subject_type=? AND subject_id=? AND resource_type=? AND resource_id=? AND access_level=?
+                    LIMIT 1
+                    """,
+                    (clean_subject_type, clean_subject_id, clean_resource_type, clean_resource_id, clean_access),
+                ).fetchone()
+                if existing is not None:
+                    return {
+                        "id": str(existing["id"]),
+                        "subject_type": clean_subject_type,
+                        "subject_id": clean_subject_id,
+                        "resource_type": clean_resource_type,
+                        "resource_id": clean_resource_id,
+                        "access_level": clean_access,
+                        "created_at": str(existing["created_at"] or ""),
+                    }
+                permission_id = str(uuid.uuid4())
                 conn.execute(
                     """
                     INSERT INTO cloud_permissions (
@@ -629,6 +767,44 @@ class CloudDriveRegistryDB:
             "created_at": now,
         }
 
+    def list_permissions(self, *, path: str = "") -> List[Dict[str, str]]:
+        clean_path = self._normalize_path(path)
+        with self._connect() as conn:
+            if not clean_path:
+                rows = conn.execute(
+                    """
+                    SELECT id, subject_type, subject_id, resource_type, resource_id, access_level, created_at
+                    FROM cloud_permissions
+                    ORDER BY created_at DESC
+                    """
+                ).fetchall()
+            else:
+                node = self.get_node_by_path(clean_path)
+                resource_ids = {clean_path}
+                if node is not None:
+                    resource_ids.add(str(node.id))
+                placeholders = ",".join("?" for _ in resource_ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT id, subject_type, subject_id, resource_type, resource_id, access_level, created_at
+                    FROM cloud_permissions
+                    WHERE resource_id IN ({placeholders})
+                       OR (resource_type='path' AND (?=resource_id OR ? LIKE resource_id || '/%'))
+                    ORDER BY created_at DESC
+                    """,
+                    (*resource_ids, clean_path, clean_path),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_permission(self, permission_id: str) -> bool:
+        clean_id = str(permission_id or "").strip()
+        if not clean_id:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute("DELETE FROM cloud_permissions WHERE id=?", (clean_id,))
+                return cur.rowcount > 0
+
     def _folder_ancestor_ids_for_path(self, conn: sqlite3.Connection, path: str, *, file_folder_id: str = "") -> set[str]:
         clean_path = self._normalize_path(path)
         candidate_paths = {""}
@@ -647,6 +823,112 @@ class CloudDriveRegistryDB:
             ids.update(str(row["id"]) for row in rows)
         return ids
 
+    def create_share_link(
+        self,
+        *,
+        path: str,
+        created_by: str = "",
+        expires_at: str = "",
+    ) -> Dict[str, str]:
+        clean_path = self._normalize_path(path)
+        node = self.get_node_by_path(clean_path)
+        if node is None:
+            raise RuntimeError(f'Узел не найден: {clean_path}')
+        resource_type = 'folder' if hasattr(node, 'is_root') else 'file'
+        token = secrets.token_urlsafe(32)
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO cloud_share_links (
+                        token, resource_type, resource_id, path, access_level,
+                        created_by, created_at, expires_at, revoked_at
+                    )
+                    VALUES (?, ?, ?, ?, 'viewer', ?, ?, ?, '')
+                    """,
+                    (
+                        token,
+                        resource_type,
+                        str(node.id),
+                        clean_path,
+                        self._clean_username(created_by),
+                        now,
+                        str(expires_at or '').strip(),
+                    ),
+                )
+        return {
+            'token': token,
+            'resource_type': resource_type,
+            'resource_id': str(node.id),
+            'path': clean_path,
+            'access_level': 'viewer',
+            'created_by': self._clean_username(created_by),
+            'created_at': now,
+            'expires_at': str(expires_at or '').strip(),
+            'url_path': f'/api/cloud-drive/public/download?token={token}',
+        }
+
+    def get_share_link(self, token: str) -> Optional[Dict[str, str]]:
+        clean_token = str(token or '').strip()
+        if not clean_token:
+            return None
+        now = _utc_now()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM cloud_share_links
+                WHERE token=? AND revoked_at=''
+                  AND (expires_at='' OR expires_at > ?)
+                LIMIT 1
+                """,
+                (clean_token, now),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def revoke_share_link(self, token: str) -> bool:
+        clean_token = str(token or '').strip()
+        if not clean_token:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE cloud_share_links SET revoked_at=? WHERE token=? AND revoked_at=''",
+                    (_utc_now(), clean_token),
+                )
+                return cur.rowcount > 0
+
+    def share_link_can_access(self, *, token: str, path: str, required_level: str = 'viewer') -> bool:
+        if self._access_rank(required_level) > self._access_rank('viewer'):
+            return False
+        link = self.get_share_link(token)
+        if link is None:
+            return False
+        clean_path = self._normalize_path(path) or self._normalize_path(str(link.get('path') or ''))
+        with self._connect() as conn:
+            file_row = conn.execute("SELECT * FROM cloud_files WHERE path=? AND deleted_at=''", (clean_path,)).fetchone()
+            folder_row = conn.execute("SELECT * FROM cloud_folders WHERE path=? AND deleted_at=''", (clean_path,)).fetchone()
+            folder_ids = self._folder_ancestor_ids_for_path(
+                conn,
+                clean_path,
+                file_folder_id=str(file_row["folder_id"] or "") if file_row is not None else "",
+            )
+            if folder_row is not None:
+                folder_ids.add(str(folder_row["id"]))
+            file_ids = {str(file_row["id"])} if file_row is not None else set()
+        resource_type = str(link.get('resource_type') or '').lower()
+        resource_id = str(link.get('resource_id') or '').strip()
+        if resource_type == 'folder':
+            return resource_id in folder_ids
+        if resource_type == 'file':
+            return resource_id in file_ids
+        if resource_type == 'path':
+            clean_resource = self._normalize_path(resource_id)
+            return clean_path == clean_resource or clean_path.startswith(f'{clean_resource}/')
+        if resource_type == 'global':
+            return True
+        return False
+
     def user_can_access(
         self,
         *,
@@ -664,6 +946,10 @@ class CloudDriveRegistryDB:
         if required_rank <= 0:
             required_rank = self._access_rank("viewer")
         if clean_role == "admin":
+            return True
+        if not clean_path and required_rank <= self._access_rank("viewer"):
+            return True
+        if required_rank <= self._access_rank("viewer") and self.is_user_home_folder_path(clean_path):
             return True
         with self._connect() as conn:
             if conn.execute("SELECT 1 FROM cloud_permissions LIMIT 1").fetchone() is None:

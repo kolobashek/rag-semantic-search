@@ -162,6 +162,73 @@ def test_registry_permissions_inherit_from_folder_and_preserve_open_default(tmp_
     assert registry.user_can_access(username='anyone', role='admin', path=file_row.path, required_level='admin')
 
 
+def test_registry_user_home_folder_is_visible_but_private(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    alice_home = registry.ensure_user_home_folder(username='Alice')
+    root = registry.get_root_folder()
+    assert root is not None
+    file_row = registry.upsert_file(
+        folder_id=alice_home.id,
+        path='alice/private.txt',
+        name='private.txt',
+        storage_key='objects/private',
+        mime_type='text/plain',
+        size_bytes=7,
+        checksum='abc',
+        source_path='',
+    )
+
+    assert alice_home.path == 'alice'
+    assert registry.user_can_access(username='bob', role='user', path='')
+    assert registry.user_can_access(username='bob', role='user', path='alice')
+    assert not registry.user_can_access(username='bob', role='user', path=file_row.path)
+    assert registry.user_can_access(username='alice', role='user', path=file_row.path, required_level='editor')
+    assert registry.user_can_access(username='alice', role='user', path=file_row.path, required_level='admin')
+
+
+def test_registry_user_home_folder_is_restored_after_rename(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    home = registry.ensure_user_home_folder(username='Alice')
+    registry.upsert_file(
+        folder_id=home.id,
+        path='alice/doc.txt',
+        name='doc.txt',
+        storage_key='objects/doc',
+        mime_type='text/plain',
+        size_bytes=3,
+        checksum='abc',
+        source_path='',
+    )
+
+    registry.rename_move_folder(source_path='alice', new_name='alice_old')
+    restored = registry.ensure_user_home_folder(username='Alice')
+
+    assert restored.path == 'alice'
+    assert registry.get_file_by_path('alice/doc.txt') is not None
+    assert registry.get_folder_by_path('alice_old') is None
+
+
+def test_registry_public_share_link_is_read_only(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    home = registry.ensure_user_home_folder(username='alice')
+    file_row = registry.upsert_file(
+        folder_id=home.id,
+        path='alice/public.txt',
+        name='public.txt',
+        storage_key='objects/public',
+        mime_type='text/plain',
+        size_bytes=6,
+        checksum='abc',
+        source_path='',
+    )
+
+    link = registry.create_share_link(path=file_row.path, created_by='alice')
+
+    assert registry.share_link_can_access(token=link['token'], path=file_row.path)
+    assert not registry.share_link_can_access(token=link['token'], path=file_row.path, required_level='editor')
+    assert not registry.share_link_can_access(token=link['token'], path='alice/other.txt')
+
+
 def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:
     catalog = tmp_path / 'catalog'
     (catalog / 'Folder A').mkdir(parents=True)
@@ -1054,7 +1121,9 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
     assert 'cloud_sync_pairs' in tables
     assert 'cloud_sync_selective_paths' in tables
     assert 'cloud_sync_conflicts' in tables
-    assert int(version) == 5
+    assert 'cloud_user_folders' in tables
+    assert 'cloud_share_links' in tables
+    assert int(version) == 6
 
 
 def test_registry_repairs_current_version_missing_source_mtime_columns(tmp_path: Path) -> None:

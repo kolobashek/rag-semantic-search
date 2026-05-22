@@ -37,10 +37,16 @@ from rag_catalog.ui.api import (
     api_cloud_drive_list,
     api_cloud_drive_move,
     api_cloud_drive_node,
+    api_cloud_drive_permission_revoke,
     api_cloud_drive_permissions,
+    api_cloud_drive_permissions_list,
+    api_cloud_drive_public_download,
+    api_cloud_drive_public_list,
+    api_cloud_drive_public_node,
     api_cloud_drive_reindex,
     api_cloud_drive_rename,
     api_cloud_drive_restore,
+    api_cloud_drive_share_link_create,
     api_cloud_drive_search,
     api_cloud_drive_storage_health,
     api_cloud_drive_sync_client_register,
@@ -1500,6 +1506,94 @@ def test_cloud_drive_permissions_endpoint_grants_path_acl(monkeypatch, tmp_path)
     assert permission["subject_type"] == "role"
     assert permission["access_level"] == "viewer"
     assert service.user_can_access(username="maria", role="viewer", path="Team/readme.txt")
+
+
+def test_cloud_drive_regular_user_can_grant_own_folder_and_listing_filters_children(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    alice_home = service.registry.ensure_user_home_folder(username="alice")
+    bob_home = service.registry.ensure_user_home_folder(username="bob")
+    service.registry.upsert_file(
+        folder_id=alice_home.id,
+        path="alice/secret.txt",
+        name="secret.txt",
+        storage_key="objects/secret",
+        mime_type="text/plain",
+        size_bytes=6,
+        checksum="secret",
+        source_path="",
+    )
+    service.registry.upsert_file(
+        folder_id=bob_home.id,
+        path="bob/own.txt",
+        name="own.txt",
+        storage_key="objects/own",
+        mime_type="text/plain",
+        size_bytes=3,
+        checksum="own",
+        source_path="",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "bob", "role": "user", "status": "active"},
+    )
+
+    root_listing = api_cloud_drive_list("")
+    assert {item["path"] for item in root_listing["folders"]} == {"alice", "bob"}
+    assert api_cloud_drive_list("alice")["files"] == []
+
+    with pytest.raises(HTTPException) as grant_exc:
+        api_cloud_drive_permissions(subject_type="user", subject_id="alice", path="bob", access_level="owner")
+    assert grant_exc.value.status_code == 403
+
+    permission = api_cloud_drive_permissions(subject_type="user", subject_id="alice", path="bob", access_level="viewer")
+    assert permission["subject_id"] == "alice"
+    assert service.user_can_access(username="alice", role="user", path="bob/own.txt")
+    assert api_cloud_drive_permissions_list(path="bob")[0]["id"] == permission["id"]
+
+    revoked = api_cloud_drive_permission_revoke(permission_id=permission["id"], path="bob")
+    assert revoked["ok"] is True
+    assert not service.user_can_access(username="alice", role="user", path="bob/own.txt")
+
+
+def test_cloud_drive_public_share_link_allows_read_without_auth(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    home = service.registry.ensure_user_home_folder(username="alice")
+    source = tmp_path / "public.txt"
+    source.write_text("public", encoding="utf-8")
+    service.upload_file(parent_path=home.path, filename="public.txt", source_path=str(source), mime_type="text/plain")
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "alice", "role": "user", "status": "active"},
+    )
+
+    class FakeRequest:
+        base_url = "http://testserver/"
+
+    link = api_cloud_drive_share_link_create(FakeRequest(), path="alice/public.txt")
+    token = link["token"]
+
+    assert link["url"].startswith("http://testserver/api/cloud-drive/public/download?token=")
+    assert api_cloud_drive_public_node(token=token)["path"] == "alice/public.txt"
+    response = api_cloud_drive_public_download(token=token)
+    assert Path(response.path).is_file()
+
+    with pytest.raises(HTTPException) as exc:
+        api_cloud_drive_public_list(token=token, path="alice")
+    assert exc.value.status_code == 403
 
 
 def test_cloud_drive_index_coverage_endpoint(monkeypatch, tmp_path) -> None:

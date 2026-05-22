@@ -63,6 +63,11 @@ def _require_cloud_drive_api_user(
         raise HTTPException(status_code=403, detail="Пользователь не активирован.")
     if admin_only and str(user.get("role") or "") != "admin":
         raise HTTPException(status_code=403, detail="Недостаточно прав.")
+    try:
+        if bool(cfg.get("cloud_drive_enabled")) and str(cfg.get("cloud_drive_db_path") or "").strip():
+            CloudDriveService.from_config(cfg).ensure_user_home_folder(username=str(user.get("username") or ""))
+    except Exception:
+        pass
     return user
 
 
@@ -277,8 +282,19 @@ def api_cloud_drive_permissions(
     authorization: AuthHeader = "",
 ) -> Dict[str, Any]:
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
+    is_admin = str(user.get("role") or "") == "admin"
+    if not is_admin:
+        if not str(path or "").strip():
+            raise HTTPException(status_code=400, detail="Для выдачи доступа пользователем нужен path.")
+        if str(resource_type or "").strip() or str(resource_id or "").strip():
+            raise HTTPException(status_code=403, detail="Только админ может выдавать доступ по resource_id.")
+        if str(access_level or "viewer").strip().lower() not in {"viewer", "read", "editor", "write"}:
+            raise HTTPException(status_code=403, detail="Пользователь может выдавать только чтение или редактирование.")
+        if str(subject_type or "").strip().lower() not in {"user", "*"}:
+            raise HTTPException(status_code=403, detail="Пользователь может открыть доступ всем или конкретному пользователю.")
+        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
     try:
         if str(path or "").strip() or not str(resource_type or "").strip():
             permission = service.grant_path_permission(
@@ -300,6 +316,129 @@ def api_cloud_drive_permissions(
         raise HTTPException(status_code=400, detail=str(exc))
     _audit_cloud_drive_api_event(cfg, user, "permissions_grant", details=permission)
     return permission
+
+
+@app.get("/api/cloud-drive/permissions")
+def api_cloud_drive_permissions_list(
+    path: str = "",
+    authorization: AuthHeader = "",
+) -> List[Dict[str, Any]]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    if str(user.get("role") or "") != "admin":
+        if not str(path or "").strip():
+            raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
+        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
+    return service.list_permissions(path=path)
+
+
+@app.delete("/api/cloud-drive/permissions")
+def api_cloud_drive_permission_revoke(
+    permission_id: str = "",
+    path: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    if str(user.get("role") or "") != "admin":
+        if not str(path or "").strip():
+            raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
+        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
+        allowed_ids = {str(item.get("id") or "") for item in service.list_permissions(path=path)}
+        if str(permission_id or "").strip() not in allowed_ids:
+            raise HTTPException(status_code=403, detail="Нет прав на отзыв этого доступа.")
+    ok = service.revoke_permission(permission_id)
+    _audit_cloud_drive_api_event(cfg, user, "permissions_revoke", ok=ok, details={"permission_id": permission_id, "path": path})
+    return {"ok": bool(ok), "permission_id": str(permission_id or "").strip()}
+
+
+@app.post("/api/cloud-drive/share-links")
+def api_cloud_drive_share_link_create(
+    request: Request,
+    path: str = "",
+    expires_at: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
+    try:
+        link = service.create_share_link(
+            path=path,
+            created_by=str(user.get("username") or ""),
+            expires_at=expires_at,
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "share_link_create", ok=False, details={"path": path, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    base = str(request.base_url).rstrip("/")
+    link["url"] = f"{base}{link.get('url_path')}"
+    _audit_cloud_drive_api_event(cfg, user, "share_link_create", details={"path": path, "token": link.get("token")})
+    return link
+
+
+def _require_public_share_access(service: CloudDriveService, token: str, path: str = "") -> str:
+    link = service.registry.get_share_link(token)
+    if link is None:
+        raise HTTPException(status_code=404, detail="Публичная ссылка не найдена или истекла.")
+    effective_path = str(path or link.get("path") or "").strip()
+    if not service.registry.share_link_can_access(token=token, path=effective_path, required_level="viewer"):
+        raise HTTPException(status_code=403, detail="Публичная ссылка не даёт доступ к этому пути.")
+    return effective_path
+
+
+@app.get("/api/cloud-drive/public/node")
+def api_cloud_drive_public_node(token: str = "", path: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    effective_path = _require_public_share_access(service, token, path)
+    try:
+        return service.get_node(effective_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/cloud-drive/public/list")
+def api_cloud_drive_public_list(token: str = "", path: str = "") -> Dict[str, Any]:
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    effective_path = _require_public_share_access(service, token, path)
+    try:
+        result = service.list_directory(effective_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    result["folders"] = [
+        item for item in result.get("folders", [])
+        if service.registry.share_link_can_access(token=token, path=str(item.get("path") or ""), required_level="viewer")
+    ]
+    result["files"] = [
+        item for item in result.get("files", [])
+        if service.registry.share_link_can_access(token=token, path=str(item.get("path") or ""), required_level="viewer")
+    ]
+    return result
+
+
+@app.get("/api/cloud-drive/public/download")
+def api_cloud_drive_public_download(token: str = "", path: str = ""):
+    cfg = load_config()
+    service = CloudDriveService.from_config(cfg)
+    effective_path = _require_public_share_access(service, token, path)
+    try:
+        descriptor = service.get_download_descriptor(effective_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if descriptor.get("mode") != "local_file":
+        if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
+            return RedirectResponse(str(descriptor["url"]))
+        raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает download.")
+    return FileResponse(
+        path=str(descriptor["file_path"]),
+        media_type=str(descriptor["mime_type"]),
+        filename=str(descriptor["filename"]),
+    )
 
 
 @app.get("/api/cloud-drive/job")
@@ -344,6 +483,13 @@ def api_cloud_drive_file_statuses(file_ids: str = "", paths: str = "", authoriza
         if file_row is not None:
             ids.append(file_row.id)
     ids = list(dict.fromkeys(ids))
+    if str(user.get("role") or "") != "admin":
+        allowed_ids: list[str] = []
+        for file_id in ids:
+            file_row = service.registry.get_file_by_id(file_id)
+            if file_row is not None and _cloud_drive_path_allowed(cfg, user, file_row.path, service=service):
+                allowed_ids.append(file_id)
+        ids = allowed_ids
     jobs = service.registry.list_latest_jobs_for_files(ids)
     return {file_id: _serialize_cloud_drive_job(job) for file_id, job in jobs.items()}
 
@@ -485,6 +631,14 @@ def api_cloud_drive_list(path: str = "", authorization: AuthHeader = "") -> Dict
     service = CloudDriveService.from_config(cfg)
     try:
         result = service.list_directory(path)
+        result["folders"] = [
+            item for item in result.get("folders", [])
+            if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
+        ]
+        result["files"] = [
+            item for item in result.get("files", [])
+            if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
+        ]
         _audit_cloud_drive_api_event(cfg, user, "list_directory", details={"path": path})
         return result
     except RuntimeError as exc:

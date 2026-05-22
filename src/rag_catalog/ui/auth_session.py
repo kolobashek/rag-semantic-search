@@ -6,7 +6,24 @@ from typing import Any, Callable, Dict
 
 from nicegui import app
 
+from rag_catalog.core.cloud_drive import CloudDriveService
+
 from .state import PageState, _get_auth_db, _username
+
+
+def ensure_cloud_drive_user_home(state: PageState, user: Dict[str, Any] | None = None) -> None:
+    """Best-effort personal Cloud Drive folder check for login/session restore."""
+    try:
+        cfg = dict(state.cfg or {})
+        if not bool(cfg.get("cloud_drive_enabled")) or not str(cfg.get("cloud_drive_db_path") or "").strip():
+            return
+        current = user or state.current_user or {}
+        username = str(current.get("username") or "").strip().lower()
+        if not username:
+            return
+        CloudDriveService.from_config(cfg).ensure_user_home_folder(username=username)
+    except Exception:
+        pass
 
 
 def restore_session(state: PageState, *, on_restored: Callable[[PageState], None] | None = None) -> None:
@@ -18,6 +35,7 @@ def restore_session(state: PageState, *, on_restored: Callable[[PageState], None
         state.auth_token = stored_token
         state.current_user = _get_auth_db(state).get_user_by_session(stored_token)
         if state.current_user:
+            ensure_cloud_drive_user_home(state)
             if on_restored is not None:
                 on_restored(state)
             _get_auth_db(state).log_auth_event(username=_username(state), event_type="session_restore", ok=True)
@@ -44,6 +62,7 @@ def complete_login_session(state: PageState, user: Dict[str, Any], *, event_type
     auth_db = _get_auth_db(state)
     state.current_user = user
     state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
+    ensure_cloud_drive_user_home(state, user)
     auth_db.log_auth_event(username=_username(state), event_type=event_type, ok=True)
     state.session_expired = False
     try:

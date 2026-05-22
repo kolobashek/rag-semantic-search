@@ -148,6 +148,29 @@ class CloudDriveService:
             access_level=access_level,
         )
 
+    def ensure_user_home_folder(self, *, username: str) -> dict:
+        folder = self.registry.ensure_user_home_folder(username=username)
+        return {
+            'node_type': 'folder',
+            'id': folder.id,
+            'name': folder.name,
+            'path': folder.path,
+            'source_path': folder.source_path,
+            'depth': folder.depth,
+            'is_root': folder.is_root,
+            'created_at': folder.created_at,
+            'updated_at': folder.updated_at,
+        }
+
+    def create_share_link(self, *, path: str, created_by: str = '', expires_at: str = '') -> Dict[str, str]:
+        return self.registry.create_share_link(path=path, created_by=created_by, expires_at=expires_at)
+
+    def list_permissions(self, *, path: str = '') -> list[dict]:
+        return self.registry.list_permissions(path=path)
+
+    def revoke_permission(self, permission_id: str) -> bool:
+        return self.registry.revoke_permission(permission_id)
+
     def user_can_access(
         self,
         *,

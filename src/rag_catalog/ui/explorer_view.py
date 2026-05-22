@@ -77,6 +77,14 @@ def render_explorer_screen(
         """Registry-backed Cloud Drive explorer screen."""
         from rag_catalog.core.cloud_drive.models import CloudDriveFile, CloudDriveFolder  # noqa: PLC0415
 
+        def _cd_can(path: str, level: str = "viewer") -> bool:
+            return svc.user_can_access(
+                username=_username(page_state),
+                role=str((page_state.current_user or {}).get("role") or ""),
+                path=path,
+                required_level=level,
+            )
+
         def _cd_open_folder(cd_path: str) -> None:
             page_state.explorer_cd_path = cd_path
             page_state.explorer_page = 0
@@ -92,6 +100,9 @@ def render_explorer_screen(
                 upload_results: list[dict] = []
 
                 async def _handle_upload(e: Any) -> None:
+                    if not _cd_can(page_state.explorer_cd_path or "", "editor"):
+                        ui.notify("Нет прав на загрузку в эту папку.", type="negative")
+                        return
                     filename = str(getattr(e, "name", "") or "").strip()
                     content = getattr(e, "content", None)
                     if not filename or content is None:
@@ -181,6 +192,9 @@ def render_explorer_screen(
                 ).props("dense outlined autofocus").classes("w-full")
 
                 async def _do_create() -> None:
+                    if not _cd_can(page_state.explorer_cd_path or "", "editor"):
+                        ui.notify("Нет прав на создание папки здесь.", type="negative")
+                        return
                     name = str(name_input.value or "").strip()
                     if not name:
                         ui.notify("Введите имя папки.", type="warning")
@@ -218,6 +232,9 @@ def render_explorer_screen(
                 ).props("dense outlined autofocus").classes("w-full")
 
                 async def _do_rename() -> None:
+                    if not _cd_can(node_path, "editor"):
+                        ui.notify("Нет прав на переименование.", type="negative")
+                        return
                     new_name = str(name_input.value or "").strip()
                     if not new_name:
                         ui.notify("Введите новое имя.", type="warning")
@@ -264,6 +281,9 @@ def render_explorer_screen(
                     ui.label("Файл и все его версии будут удалены безвозвратно.").classes("text-xs text-red-600 mt-1")
 
                 async def _do_delete() -> None:
+                    if not _cd_can(node_path, "editor"):
+                        ui.notify("Нет прав на удаление.", type="negative")
+                        return
                     try:
                         await run.io_bound(svc.delete_node, path=node_path)
                         dlg.close()
@@ -309,6 +329,7 @@ def render_explorer_screen(
                 ]
             else:
                 candidates = all_folders
+            candidates = [fo for fo in candidates if _cd_can(fo.path, "editor")]
 
             selected_path: list = [page_state.explorer_cd_path or ""]
 
@@ -332,7 +353,13 @@ def render_explorer_screen(
                     sel.on("update:model-value", lambda e: selected_path.__setitem__(0, e.args))
 
                 async def _do_move() -> None:
+                    if not _cd_can(node_path, "editor"):
+                        ui.notify("Нет прав на перемещение.", type="negative")
+                        return
                     dest = str(selected_path[0] or "").strip()
+                    if not _cd_can(dest, "editor"):
+                        ui.notify("Нет прав на целевую папку.", type="negative")
+                        return
                     if dest == (node_path.rsplit("/", 1)[0] if "/" in node_path else ""):
                         ui.notify("Файл уже находится в этой папке.", type="info")
                         dlg.close()
@@ -370,6 +397,9 @@ def render_explorer_screen(
             ui.notify("Исходный файл недоступен на диске.", type="warning")
 
         async def _cd_reindex_file(file_path: str) -> None:
+            if not _cd_can(file_path, "editor"):
+                ui.notify("Нет прав на переиндексацию этого файла.", type="negative")
+                return
             try:
                 job = await run.io_bound(svc.enqueue_reindex, file_path)
                 ui.notify(f"Переиндексация запущена (job {str(job.id or '')[:8]})", type="positive")
@@ -379,6 +409,9 @@ def render_explorer_screen(
             render_fn()
 
         async def _cd_restore_node(node_path: str) -> None:
+            if not _cd_can(node_path, "editor"):
+                ui.notify("Нет прав на восстановление.", type="negative")
+                return
             try:
                 await run.io_bound(svc.restore_node, path=node_path)
                 _log_app_event(page_state, "cd_explorer", "restore", details={"path": node_path})
@@ -391,7 +424,12 @@ def render_explorer_screen(
         _is_trash_view = cd_path == "__trash__"
         if _is_trash_view:
             cd_path = ""  # don't pass __trash__ to backend helpers
-        child_folders, child_files = _cd_list_children(svc, cd_path)
+        child_folders, child_files = _cd_list_children(
+            svc,
+            cd_path,
+            cfg=page_state.cfg,
+            user=page_state.current_user,
+        )
         breadcrumbs = _cd_breadcrumb_chain(svc, cd_path)
         root_folder = svc.registry.get_root_folder()
 
