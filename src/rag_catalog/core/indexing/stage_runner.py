@@ -66,8 +66,8 @@ class IndexStageRunner:
         Pipeline-индексирование на указанном этапе.
 
           stage="metadata" — только имя/путь/размер/mtime (не читает файлы);
-          stage="small"    — полное содержимое docx/xlsx/xls и мелких PDF;
-          stage="large"    — полное содержимое крупных и сканированных PDF;
+          stage="small"    — быстрый проход по всем файлам, ограниченный max_chunks;
+          stage="large"    — полный проход/догрузка оставшихся чанков;
           stage="content"  — legacy: полное содержимое для всех файлов за один проход.
 
         Pipeline:
@@ -203,27 +203,17 @@ class IndexStageRunner:
             all_tasks = [item for item in all_tasks if _task_matches_only_paths(item, only_paths)]
             self._logger.info("Ограничение списка файлов: %d → %d по --only-paths-file", before, len(all_tasks))
 
-        # Партиция по этапам: metadata берёт всё, small/large — свою категорию.
+        # metadata/small/large видят все файлы. Разница не в типе файла, а в глубине:
+        # small пишет первые N чанков, large догружает хвост и закрывает content.
         if stage == "small":
-            scope_files = [
-                item for item in all_tasks
-                if (
-                    item.get("archive_category")
-                    or self._file_category(item["filepath"], indexer.small_office_mb, indexer.small_pdf_mb)
-                ) == "small"
-            ]
-            self._logger.info("Отфильтровано для этапа 'small': %d файлов (docx/xlsx/xls + PDF < %g МБ)",
-                        len(scope_files), indexer.small_pdf_mb)
+            scope_files = all_tasks
+            self._logger.info(
+                "Этап 'small': быстрый проход по всем файлам, лимит %d чанков/файл",
+                int(getattr(indexer, "max_chunks_per_file", 0) or 0),
+            )
         elif stage == "large":
-            scope_files = [
-                item for item in all_tasks
-                if (
-                    item.get("archive_category")
-                    or self._file_category(item["filepath"], indexer.small_office_mb, indexer.small_pdf_mb)
-                ) == "large"
-            ]
-            self._logger.info("Отфильтровано для этапа 'large': %d файлов (крупные Office + большие/сканированные PDF)",
-                        len(scope_files))
+            scope_files = all_tasks
+            self._logger.info("Этап 'large': полный проход по всем файлам / догрузка оставшихся чанков")
         else:
             # metadata или legacy "content" — работаем со всем
             scope_files = all_tasks
@@ -265,6 +255,20 @@ class IndexStageRunner:
                     elif stage == "metadata":
                         skipped += 1
                         continue
+                    elif stage == "small" and existing_stage in ("content", "partial", "small"):
+                        skipped += 1
+                        continue
+                    elif stage == "large" and existing_stage == "content":
+                        indexed_stage = str(existing.get("indexed_stage") or "")
+                        try:
+                            indexed_chunks = int(existing.get("indexed_chunks") or 0)
+                            total_chunks = int(existing.get("total_chunks") or 0)
+                        except (TypeError, ValueError):
+                            indexed_chunks = 0
+                            total_chunks = 0
+                        if indexed_stage != "small" or (indexed_chunks > 0 and (total_chunks <= 0 or indexed_chunks >= total_chunks)):
+                            skipped += 1
+                            continue
                     elif existing_stage in ("content", stage):
                         skipped += 1
                         continue
@@ -301,6 +305,14 @@ class IndexStageRunner:
         pending_states: List[Dict[str, Any]] = []
         seen_content_hashes: Dict[str, str] = {}
 
+        def _point_id(payload: Dict[str, Any]) -> str:
+            doc_id = str(payload.get("doc_id") or payload.get("full_path") or "")
+            if str(payload.get("type") or "") == "file_metadata":
+                key = f"{doc_id}:metadata"
+            else:
+                key = f"{doc_id}:chunk:{int(payload.get('chunk_index') or 0)}"
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
         def flush() -> None:
             """
             Batch-encode накопленных текстов и запись в Qdrant.
@@ -308,6 +320,13 @@ class IndexStageRunner:
             чтобы один вызов encode() не блокировал главный поток надолго.
             """
             if not pending_texts:
+                if pending_states:
+                    if hasattr(indexer, "state_db"):
+                        indexer.state_db.upsert_many(pending_states)
+                    else:
+                        for row in pending_states:
+                            indexer._upsert_state_entry(row)
+                    pending_states.clear()
                 return
             # Нарезаем на мини-батчи — encode каждого занимает < ~1 сек
             for i in range(0, len(pending_texts), ENCODE_BATCH):
@@ -318,7 +337,7 @@ class IndexStageRunner:
                     batch_size=256, show_progress_bar=False,
                 )
                 points = [
-                    PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=p)
+                    PointStruct(id=_point_id(p), vector=v.tolist(), payload=p)
                     for v, p in zip(vectors, chunk_payloads)
                 ]
                 written = upsert_points(
@@ -422,7 +441,7 @@ class IndexStageRunner:
             elif ext in self._image_extensions:
                 if indexer.skip_ocr:
                     file_type = "image"
-                    _fn = None  # OCR отключён — только метаданные
+                    _fn = indexer._cached_ocr_text
                 else:
                     file_type = "image"
                     _fn = indexer._extract_image
@@ -499,18 +518,44 @@ class IndexStageRunner:
             chunk_source = extracted_doc if extracted_doc is not None else full_text
             chunk_items = indexer._chunk_text_with_provenance(chunk_source) if full_text.strip() else []
             chunks = [str(item.get("text") or "") for item in chunk_items]
+            total_chunks = len(chunks)
+            stage_chunk_limit = int(getattr(indexer, "max_chunks_per_file", 0) or 0) if stage == "small" else 0
+            append_from_chunk = 0
+            append_only = False
+            if (
+                stage == "large"
+                and existing_entry
+                and str(existing_entry.get("fingerprint") or "") == fingerprint
+                and str(existing_entry.get("stage") or "") in {"partial", "small"}
+            ):
+                try:
+                    append_from_chunk = max(0, int(existing_entry.get("indexed_chunks") or 0))
+                except (TypeError, ValueError):
+                    append_from_chunk = 0
+                if append_from_chunk > 0:
+                    append_only = True
             content_hash = indexer._content_hash(full_text)
             duplicate_of = ""
             if content_hash and hasattr(indexer, "state_db"):
                 duplicate = indexer.state_db.find_by_content_hash(content_hash, exclude_path=file_key)
                 duplicate_of = str((duplicate or {}).get("full_path") or "")
-            if indexer.max_chunks_per_file and len(chunks) > indexer.max_chunks_per_file:
+            if stage_chunk_limit and len(chunks) >= stage_chunk_limit:
                 self._logger.warning(
                     "Файл %s: %d чанков → обрезано до %d",
-                    relative_path.name, len(chunks), indexer.max_chunks_per_file,
+                    relative_path.name, len(chunks), stage_chunk_limit,
                 )
-                chunk_items = chunk_items[: indexer.max_chunks_per_file]
+                chunk_items = chunk_items[:stage_chunk_limit]
                 chunks = [str(item.get("text") or "") for item in chunk_items]
+                # При быстром проходе экстрактор мог остановиться по лимиту символов,
+                # поэтому точное число чанков может быть неизвестно. Важно отметить,
+                # что файл требует full-прохода.
+                total_chunks = max(total_chunks, len(chunks) + 1)
+            elif append_only and append_from_chunk < len(chunk_items):
+                chunk_items = chunk_items[append_from_chunk:]
+                chunks = [str(item.get("text") or "") for item in chunk_items]
+            elif append_only:
+                chunk_items = []
+                chunks = []
 
             # Генерируем теги для файла (по пути, содержимому, синонимам)
             tags = self._generate_tags(source_path, relative_path, full_text, getattr(indexer, "synonym_map", {}) or {})
@@ -570,7 +615,9 @@ class IndexStageRunner:
             meta_payload.update(base_provenance)
             doc_id = str(base_provenance["doc_id"])
             content_payloads = []
-            for idx, item in enumerate(chunk_items):
+            chunk_index_offset = append_from_chunk if append_only else 0
+            for offset, item in enumerate(chunk_items):
+                idx = chunk_index_offset + offset
                 chunk = str(item.get("text") or "")
                 clean_chunk = indexer._strip_provenance_markers(chunk) or chunk
                 chunk_payload = {
@@ -610,6 +657,9 @@ class IndexStageRunner:
                 "chunks": chunks,
                 "content_payloads": content_payloads,
                 "has_content": bool(chunks),
+                "append_only": append_only,
+                "indexed_chunks": (append_from_chunk + len(chunks)) if append_only else len(chunks),
+                "total_chunks": total_chunks,
                 "content_hash": content_hash,
                 "error": failure_error,
                 "skipped": False,
@@ -672,17 +722,20 @@ class IndexStageRunner:
                     else:
                         seen_content_hashes[content_hash] = str(result["file_key"])
 
-                # Если файл уже был в индексе — удалить старые векторы
-                # (нужно и при изменении файла, и при апгрейде metadata→content)
-                if result["was_indexed"]:
+                # При full-проходе после quick не трогаем уже записанные первые чанки,
+                # а добавляем только хвост. В остальных случаях старые векторы заменяются.
+                if result["was_indexed"] and not result.get("append_only"):
                     indexer._delete_file_vectors(Path(result["file_key"]))
+                    stage_stats["updated_files"] += 1
+                elif result["was_indexed"]:
                     stage_stats["updated_files"] += 1
                 else:
                     stage_stats["added_files"] += 1
 
                 # Добавить метаданные и контентные чанки в буфер
-                pending_texts.append(result["meta_text"])
-                pending_payloads.append(result["meta_payload"])
+                if not result.get("append_only"):
+                    pending_texts.append(result["meta_text"])
+                    pending_payloads.append(result["meta_payload"])
                 for cpayload in result["content_payloads"]:
                     pending_texts.append(str(cpayload.get("text") or ""))
                     pending_payloads.append(cpayload)
@@ -705,9 +758,18 @@ class IndexStageRunner:
                 else:
                     if hasattr(indexer, "state_db"):
                         indexer.state_db.clear_failed_path(str(result["file_key"]))
-                    file_stage = "metadata" if stage == "metadata" else (
-                        "content" if result.get("has_content") else "empty"
-                    )
+                    indexed_chunks = int(result.get("indexed_chunks") or 0)
+                    total_chunks = int(result.get("total_chunks") or 0)
+                    if stage == "metadata":
+                        file_stage = "metadata"
+                    elif result.get("has_content") or result.get("append_only"):
+                        file_stage = (
+                            "partial"
+                            if stage == "small" and total_chunks > 0 and indexed_chunks < total_chunks
+                            else "content"
+                        )
+                    else:
+                        file_stage = "empty"
                     status = "empty" if file_stage == "empty" else "ok"
                     last_error = ""
                     next_retry_at = 0.0
@@ -731,6 +793,8 @@ class IndexStageRunner:
                         "size_bytes": int(result.get("size_bytes") or 0),
                         "extension": str(result["meta_payload"].get("extension") or ""),
                         "content_hash": str(result.get("content_hash") or ""),
+                        "indexed_chunks": int(result.get("indexed_chunks") or 0),
+                        "total_chunks": int(result.get("total_chunks") or 0),
                     }
                 )
 

@@ -188,6 +188,34 @@ def test_small_stage_file_with_content_becomes_content(tmp_path: Path) -> None:
     assert row["status"] == "ok"
 
 
+def test_small_stage_truncates_all_files_and_large_appends_remainder(tmp_path: Path) -> None:
+    p = tmp_path / "long.docx"
+    p.write_text("dummy", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text=" ".join(["word"] * 500))
+    idx.max_chunks_per_file = 1
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda path: deleted.append(path)
+
+    idx.index_directory(stage="small")
+
+    key = str(p)
+    quick = idx.state_db.get_entry(key)
+    assert quick["stage"] == "partial"
+    assert quick["indexed_stage"] == "small"
+    assert quick["indexed_chunks"] == 1
+    assert quick["total_chunks"] > quick["indexed_chunks"]
+    quick_points = len(idx.qdrant.points)
+
+    idx.index_directory(stage="large")
+
+    full = idx.state_db.get_entry(key)
+    assert full["stage"] == "content"
+    assert full["indexed_stage"] == "large"
+    assert full["indexed_chunks"] == full["total_chunks"]
+    assert deleted == []
+    assert len(idx.qdrant.points) > quick_points
+
+
 def test_text_and_csv_files_are_indexed_as_content(tmp_path: Path) -> None:
     txt = tmp_path / "note.txt"
     csv = tmp_path / "table.csv"
@@ -214,9 +242,6 @@ def test_rtf_pptx_and_doc_files_are_supported(tmp_path: Path) -> None:
 
     assert idx.state_db.get_entry(str(rtf))["stage"] == "content"
     assert idx.state_db.get_entry(str(pptx))["stage"] == "content"
-    assert idx.state_db.get_entry(str(doc)) is None
-
-    idx.index_directory(stage="large")
     assert idx.state_db.get_entry(str(doc))["stage"] == "content"
 
 

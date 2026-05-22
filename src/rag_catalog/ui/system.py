@@ -22,9 +22,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _STAGE_LABELS: Dict[str, str] = {
     "all": "Все этапы",
+    "full": "full",
     "metadata": "metadata",
-    "small": "быстрые файлы",
-    "large": "тяжёлые файлы",
+    "small": "быстрый проход",
+    "large": "полный проход",
     "ocr": "OCR",
 }
 
@@ -484,7 +485,7 @@ def _effective_workers(configured: Any, *, stage: str = "all", mode: str = "inde
         return max(2, min(16, cpu))
     if stage_key == "small":
         return max(2, min(8, cpu))
-    if stage_key == "large":
+    if stage_key in {"large", "full"}:
         return max(1, min(6, max(2, cpu // 2)))
     return max(2, min(8, cpu))
 
@@ -531,7 +532,8 @@ def _launch_indexer(
                 mode="index",
             )
         ),
-        "--max-chunks", str(int(max_chunks or cfg.get("index_max_chunks") or 2000)),
+        "--max-chunks",
+        str(0 if str(stage or "").strip().lower() == "large" else int(max_chunks or cfg.get("index_max_chunks") or 2000)),
     ]
     qdrant_url = str(cfg.get("qdrant_url") or "")
     if qdrant_url:
@@ -540,7 +542,7 @@ def _launch_indexer(
         args += ["--db", str(cfg.get("qdrant_db_path") or "")]
     if recreate:
         args.append("--recreate")
-    if skip_inline_ocr:
+    if skip_inline_ocr or str(stage or "").strip().lower() in {"all", "full", "small", "large"}:
         args.append("--no-ocr")
     _ocr_eng = str(ocr_engine or "tesseract").strip().lower()
     if _ocr_eng in ("rapidocr",):
@@ -663,6 +665,7 @@ def _schedule_stage_priority(stage: str) -> int:
     """Lower priority value means this stage should claim a shared schedule slot first."""
     order = {
         "all": 0,
+        "full": 0,
         "large": 10,
         "small": 20,
         "content": 30,
@@ -679,7 +682,9 @@ def _schedule_stage_covers(launched_stage: str, candidate_stage: str) -> bool:
         return False
     if launched == candidate:
         return True
-    return launched == "all" and candidate != "ocr"
+    if launched in {"all", "full"} and candidate != "ocr":
+        return True
+    return launched == "large" and candidate == "small"
 
 
 def _log_scheduler_event(
@@ -822,10 +827,10 @@ def _stop_managed_timer(timer_obj: Any) -> None:
 
 def _resolve_index_recovery_stage(telemetry: TelemetryDB, active_run: Dict[str, Any]) -> str:
     note = str(active_run.get("note") or "")
-    note_match = re.search(r"stage=(all|metadata|small|large)", note.lower())
-    # If the original run was "all", preserve that intent — don't downgrade to a sub-stage.
-    if note_match and note_match.group(1) == "all":
-        return "all"
+    note_match = re.search(r"stage=(all|full|metadata|small|large)", note.lower())
+    # If the original run was full/all, preserve that intent — don't downgrade to a sub-stage.
+    if note_match and note_match.group(1) in {"all", "full"}:
+        return note_match.group(1)
 
     run_id = str(active_run.get("run_id") or "")
     if run_id:

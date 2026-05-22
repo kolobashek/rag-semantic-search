@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .db_contract import ensure_schema_version
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _utc_now() -> str:
@@ -125,6 +125,8 @@ class IndexStateDB:
                     "last_error": "TEXT NOT NULL DEFAULT ''",
                     "last_attempt_at": "TEXT NOT NULL DEFAULT ''",
                     "next_retry_at": "REAL NOT NULL DEFAULT 0",
+                    "indexed_chunks": "INTEGER NOT NULL DEFAULT 0",
+                    "total_chunks": "INTEGER NOT NULL DEFAULT 0",
                 }
                 for name, ddl in optional_columns.items():
                     if name not in existing_cols:
@@ -529,7 +531,8 @@ class IndexStateDB:
                     """
                     SELECT full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
                            cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash,
-                           indexed_stage, status, last_error, last_attempt_at, next_retry_at
+                           indexed_stage, status, last_error, last_attempt_at, next_retry_at,
+                           indexed_chunks, total_chunks
                     FROM state_entries
                     ORDER BY full_path
                     """
@@ -581,6 +584,14 @@ class IndexStateDB:
             except (TypeError, ValueError):
                 next_retry_at = 0.0
             try:
+                indexed_chunks = int(entry.get("indexed_chunks") or 0)
+            except (TypeError, ValueError):
+                indexed_chunks = 0
+            try:
+                total_chunks = int(entry.get("total_chunks") or 0)
+            except (TypeError, ValueError):
+                total_chunks = 0
+            try:
                 size_bytes = int(entry.get("size_bytes") or 0)
             except (TypeError, ValueError):
                 size_bytes = 0
@@ -609,6 +620,8 @@ class IndexStateDB:
                     last_error,
                     last_attempt_at,
                     next_retry_at,
+                    indexed_chunks,
+                    total_chunks,
                 )
             )
         if not rows:
@@ -620,8 +633,9 @@ class IndexStateDB:
                     INSERT INTO state_entries (
                         full_path, fingerprint, mtime, stage, size_bytes, extension, updated_at,
                         cloud_file_id, cloud_version_id, cloud_path, storage_key, content_hash,
-                        indexed_stage, status, last_error, last_attempt_at, next_retry_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        indexed_stage, status, last_error, last_attempt_at, next_retry_at,
+                        indexed_chunks, total_chunks
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(full_path) DO UPDATE SET
                         fingerprint=excluded.fingerprint,
                         mtime=excluded.mtime,
@@ -638,7 +652,9 @@ class IndexStateDB:
                         status=excluded.status,
                         last_error=excluded.last_error,
                         last_attempt_at=excluded.last_attempt_at,
-                        next_retry_at=excluded.next_retry_at
+                        next_retry_at=excluded.next_retry_at,
+                        indexed_chunks=excluded.indexed_chunks,
+                        total_chunks=excluded.total_chunks
                     """,
                     rows,
                 )
@@ -677,6 +693,8 @@ class IndexStateDB:
                     UPDATE state_entries
                     SET stage=?,
                         indexed_stage=?,
+                        indexed_chunks=0,
+                        total_chunks=0,
                         status='ok',
                         last_error='',
                         next_retry_at=0,
@@ -697,6 +715,8 @@ class IndexStateDB:
                     UPDATE state_entries
                     SET stage=?,
                         indexed_stage=?,
+                        indexed_chunks=0,
+                        total_chunks=0,
                         status='ok',
                         last_error='',
                         next_retry_at=0,

@@ -2021,7 +2021,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 ):
                     for dot_cls, lbl, sub in [
                         ("ok",   "индекс актуален",  "13.05.2026"),
-                        ("info", "индексация идёт",  "быстрые файлы"),
+                        ("info", "индексация идёт",  "быстрый проход"),
                     ]:
                         with ui.element("div").style(
                             "display:flex;align-items:center;gap:10px;padding:14px 0;"

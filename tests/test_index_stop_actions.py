@@ -111,6 +111,47 @@ def test_launch_indexer_is_blocked_while_ocr_is_running(monkeypatch) -> None:
         system._launch_indexer({"catalog_path": "O:\\Обмен", "collection_name": "catalog"})
 
 
+def test_launch_indexer_for_content_stages_disables_inline_ocr(monkeypatch, tmp_path) -> None:
+    captured: list[list[str]] = []
+
+    class FakeTelemetryDB:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    class FakeProc:
+        pid = 4321
+
+    class FakeLog:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(system, "TelemetryDB", FakeTelemetryDB)
+    monkeypatch.setattr(system, "_find_live_running_index_run", lambda telemetry: None)
+    monkeypatch.setattr(system, "_find_live_running_ocr_run", lambda telemetry: None)
+    monkeypatch.setattr(system, "_open_log", lambda *_args, **_kwargs: FakeLog())
+    monkeypatch.setattr(system, "_write_runtime_marker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(system, "_windows_detached_creationflags", lambda: 0)
+
+    def fake_popen(args, **_kwargs):
+        captured.append(list(args))
+        return FakeProc()
+
+    monkeypatch.setattr(system.subprocess, "Popen", fake_popen)
+
+    system._launch_indexer(
+        {
+            "telemetry_db_path": str(tmp_path / "telemetry.db"),
+            "catalog_path": "O:\\Обмен",
+            "collection_name": "catalog",
+            "qdrant_url": "http://localhost:6333",
+        },
+        stage="large",
+    )
+
+    assert "--no-ocr" in captured[0]
+    assert captured[0][captured[0].index("--max-chunks") + 1] == "0"
+
+
 def test_terminate_process_stops_children_before_parent(monkeypatch) -> None:
     calls: list[tuple[str, int]] = []
 

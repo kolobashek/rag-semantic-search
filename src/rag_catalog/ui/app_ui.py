@@ -1071,7 +1071,7 @@ def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
             help=(
                 "Кратко: этап индексирования по умолчанию.\n\n"
                 "Подробно: all — весь пайплайн; metadata — только имена/пути; "
-                "small — быстрые файлы; large — тяжелые и крупные файлы."
+                "small — быстрый проход по всем файлам; large — полный проход без inline OCR."
             ),
         )
         st.markdown("**Telegram бот**")

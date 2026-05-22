@@ -254,6 +254,7 @@ def test_ocr_main_passes_only_candidate_paths_to_indexer(monkeypatch, tmp_path: 
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(ocr_pdfs, "load_config", lambda: cfg)
+    monkeypatch.setattr(ocr_pdfs, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(ocr_pdfs.subprocess, "run", fake_run)
     monkeypatch.setattr(ocr_pdfs.sys, "argv", ["ocr_pdfs.py"])
 

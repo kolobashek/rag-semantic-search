@@ -1284,7 +1284,7 @@ def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
 def _index_stage_from_note(note: str) -> str:
     match = re.search(r"(?:^|\b)stage=([a-z_]+)", str(note or "").lower())
     stage = match.group(1) if match else ""
-    return stage if stage in {"metadata", "small", "large", "content", "all"} else ""
+    return stage if stage in {"metadata", "small", "large", "content", "all", "full"} else ""
 
 
 def _find_headless_active_stages(db_path: Path) -> List[Dict[str, Any]]:

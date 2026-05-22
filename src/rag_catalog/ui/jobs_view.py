@@ -26,9 +26,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _STAGE_LABELS: Dict[str, str] = {
     "all": "все этапы",
+    "full": "full",
     "metadata": "metadata",
-    "small": "быстрые файлы",
-    "large": "тяжёлые файлы",
+    "small": "быстрый проход",
+    "large": "полный проход",
     "ocr": "OCR",
 }
 
@@ -97,7 +98,7 @@ def _fetch_all_jobs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     for ir in index_runs:
         run_id = str(ir.get("run_id") or "")
         note = str(ir.get("note") or "")
-        stage_match = re.search(r"stage=(all|metadata|small|large)", note.lower())
+        stage_match = re.search(r"stage=(all|full|metadata|small|large)", note.lower())
         stage_key = stage_match.group(1) if stage_match else "all"
         run_status = str(ir.get("status") or "")
 

@@ -289,8 +289,8 @@ def render_index_screen(
             ui.space()
             ui.button(icon="refresh", on_click=lambda: _refresh_progress()).props("flat dense round").tooltip("Обновить")
         ui.label(
-            "Запускаемые фазы: metadata, быстрые файлы, тяжёлые файлы и OCR. "
-            "Быстрые и тяжёлые файлы — независимые корзины по типу и размеру, а не вложенные этапы. "
+            "Запускаемые фазы: metadata, быстрый проход, полный проход и OCR. "
+            "Быстрый проход берёт все файлы с лимитом чанков, полный проход догружает оставшиеся чанки. "
             "Покрытие содержимым показано отдельно, это агрегат state DB, а не отдельная команда запуска."
         ).classes("rag-meta")
 
@@ -302,10 +302,13 @@ def render_index_screen(
                 _coverage_refs["count"] = ui.label("").classes("rag-meta")
                 ui.space()
                 _coverage_refs["pct"] = ui.label("").classes("rag-meta")
+                ui.button("Full", icon="play_arrow", on_click=make_run_handler("full")).props("outline dense").tooltip(
+                    "Запустить полный пайплайн: metadata → быстрый проход → полный проход. OCR запускается отдельным этапом."
+                )
             _coverage_refs["bar"] = ui.linear_progress(value=0, show_value=False).props("color=indigo-5").classes("w-full mt-1")
             ui.label(
                 "Файлы со stage=content уже имеют проиндексированное содержимое. "
-                "Остальные пока представлены метаданными или ждут обработки в корзинах быстрых/тяжёлых файлов либо OCR."
+                "Остальные пока представлены метаданными, частичным quick-покрытием или ждут отдельного OCR."
             ).classes("rag-meta")
 
         progress_area = ui.column().classes("w-full gap-2")

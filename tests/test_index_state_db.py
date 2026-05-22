@@ -36,6 +36,8 @@ def test_state_db_upsert_get_delete_and_count(tmp_path: Path) -> None:
     assert row["fingerprint"] == "100_1"
     assert row["status"] == "ok"
     assert row["indexed_stage"] == "metadata"
+    assert row["indexed_chunks"] == 0
+    assert row["total_chunks"] == 0
     deleted = db.delete_entries([r"O:\docs\a.pdf"])
     assert deleted == 1
     assert db.count() == 1

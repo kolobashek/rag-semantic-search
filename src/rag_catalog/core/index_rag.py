@@ -36,6 +36,7 @@ from .extractors import (
     ExtractedDocument,
     TextBlock,
     blocks_from_legacy_text,
+    document_from_legacy_text,
     extract_csv,
     extract_doc,
     extract_doc_meta,
@@ -187,25 +188,24 @@ _TAG_STOPWORDS: Set[str] = {
 #
 #   1. metadata — индексируется ТОЛЬКО имя/путь/размер/mtime всех файлов.
 #      58 тыс. файлов за ~5 минут. Поиск по именам работает сразу.
-#   2. small    — полное содержимое быстрых файлов: docx/xlsx/xls любого
-#      размера + PDF < 2 МБ. Обычно 10-20 минут на 50k файлов.
-#   3. large    — содержимое тяжёлых файлов: крупные xlsx/docx + большие PDF
-#      + сканированные PDF (медленно, часы). Запускается отдельным проходом
-#      когда поиск по метаданным уже работает.
+#   2. small    — быстрый проход по всем файлам: первые N чанков на файл.
+#      Даёт ранний поиск по содержимому без ожидания полного корпуса.
+#   3. large    — полный проход по всем файлам: догружает чанки, оставшиеся
+#      после small, и закрывает файл как fully indexed.
 #
 # Порядок важен: чем меньше число, тем «старше» этап (больше информации).
 STAGES = ("metadata", "small", "large")
 STAGE_RANK = {name: i for i, name in enumerate(STAGES)}
 
-# Пороги для категоризации файлов между small/large (дефолты из config).
+# Пороги размера сохраняются для OCR-кандидатов и совместимости старых тестов.
 DEFAULT_SMALL_OFFICE_MB = 20.0
 DEFAULT_SMALL_PDF_MB = 2.0
 
 
 def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) -> str:
     """
-    Возвращает «small» или «large» для данного файла.
-    Используется для разделения файлов между этапами small и large.
+    Legacy-категория размера файла.
+    Этапы small/large больше не делят файлы по этой категории.
 
     Изображения всегда в категории «large» — OCR CPU-intensive.
     """
@@ -668,7 +668,23 @@ class RAGIndexer:
         # можем пропустить: мета-запись у файла уже есть.
         if self.current_stage == "metadata":
             return True
-        # Для small/large пропускаем если у файла уже есть "content" или тот же этап
+        if self.current_stage == "small":
+            return existing_stage in ("content", "partial", "small")
+        if self.current_stage == "large":
+            if existing_stage != "content":
+                return False
+            indexed_stage = str(existing.get("indexed_stage") or "")
+            try:
+                indexed_chunks = int(existing.get("indexed_chunks") or 0)
+                total_chunks = int(existing.get("total_chunks") or 0)
+            except (TypeError, ValueError):
+                indexed_chunks = 0
+                total_chunks = 0
+            # Старые quick/small записи могли быть ошибочно помечены как content
+            # без счетчиков покрытия. Full-проход должен перепроверить их.
+            if indexed_stage == "small" and (indexed_chunks <= 0 or (total_chunks > 0 and indexed_chunks < total_chunks)):
+                return False
+            return True
         return existing_stage in ("content", self.current_stage)
 
     def _get_state_entry(self, full_path: str) -> Optional[Dict[str, Any]]:
@@ -738,6 +754,8 @@ class RAGIndexer:
         return extract_csv(filepath, max_chars=self._extractor_max_chars())
 
     def _extractor_max_chars(self) -> int:
+        if self.current_stage != "small":
+            return 0
         return self.max_chunks_per_file * self.chunk_size if self.max_chunks_per_file else 0
 
     def _extract_pdf(self, filepath: Path) -> str:
@@ -747,10 +765,27 @@ class RAGIndexer:
         Fallback на pdfplumber если pymupdf не установлен.
         При пустом текстовом слое — OCR (если не --no-ocr).
         """
-        return extract_pdf(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
+        text = extract_pdf(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
+        if text or not self.skip_ocr:
+            return text
+        return self._cached_ocr_text(filepath)
 
     def _extract_pdf_document(self, filepath: Path) -> ExtractedDocument:
-        return extract_pdf_document(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
+        doc = extract_pdf_document(filepath, skip_ocr=self.skip_ocr, ocr=self._ocr_pdf)
+        if doc.blocks or not self.skip_ocr:
+            return doc
+        return document_from_legacy_text(self._cached_ocr_text(filepath))
+
+    def _cached_ocr_text(self, filepath: Path) -> str:
+        try:
+            mtime = float(filepath.stat().st_mtime)
+            cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
+            if cached is not None:
+                logger.info("OCR из кэша без запуска OCR: %s", filepath.name)
+                return str(cached.get("extracted_text") or "")
+        except Exception:
+            pass
+        return ""
 
     def _ocr_pdf(self, filepath: Path) -> str:
         """OCR сканированного PDF через pytesseract + pdf2image, с кэшем в telemetry DB."""
@@ -1023,7 +1058,9 @@ class RAGIndexer:
             full_text = extracted_doc.text
             file_type = "pdf"
         elif ext in IMAGE_EXTENSIONS:
-            if not self.skip_ocr:
+            if self.skip_ocr:
+                full_text = self._cached_ocr_text(filepath)
+            else:
                 full_text = self._extract_image(filepath)
             file_type = "image"
         else:
@@ -1032,20 +1069,23 @@ class RAGIndexer:
         chunk_source = extracted_doc if extracted_doc is not None else full_text
         chunk_items = self._chunk_text_with_provenance(chunk_source) if full_text.strip() else []
         chunks = [str(item.get("text") or "") for item in chunk_items]
+        total_chunks = len(chunks)
         content_hash = self._content_hash(full_text)
         duplicate_of = ""
         if content_hash and hasattr(self, "state_db"):
             duplicate = self.state_db.find_by_content_hash(content_hash, exclude_path=file_key)
             duplicate_of = str((duplicate or {}).get("full_path") or "")
-        if self.max_chunks_per_file and len(chunks) > self.max_chunks_per_file:
+        stage_chunk_limit = int(self.max_chunks_per_file or 0) if self.current_stage == "small" else 0
+        if stage_chunk_limit and len(chunks) >= stage_chunk_limit:
             logger.warning(
                 "Файл %s: %d чанков, обрезано до %d (--max-chunks-per-file)",
                 filepath.name,
                 len(chunks),
-                self.max_chunks_per_file,
+                stage_chunk_limit,
             )
-            chunk_items = chunk_items[: self.max_chunks_per_file]
+            chunk_items = chunk_items[:stage_chunk_limit]
             chunks = [str(item.get("text") or "") for item in chunk_items]
+            total_chunks = max(total_chunks, len(chunks) + 1)
         if not chunks:
             logger.warning("Файл %s: контент пуст, сохраняю только metadata stage", filepath.name)
 
@@ -1134,7 +1174,15 @@ class RAGIndexer:
             batch_size=max(1, min(256, int(self.batch_size or 64))),
             show_progress_bar=False,
         )
-        points = [PointStruct(id=str(uuid.uuid4()), vector=v.tolist(), payload=p) for v, p in zip(vectors, payloads)]
+        def _point_id(payload: Dict[str, Any]) -> str:
+            doc_id = str(payload.get("doc_id") or payload.get("full_path") or "")
+            if str(payload.get("type") or "") == "file_metadata":
+                key = f"{doc_id}:metadata"
+            else:
+                key = f"{doc_id}:chunk:{int(payload.get('chunk_index') or 0)}"
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+        points = [PointStruct(id=_point_id(p), vector=v.tolist(), payload=p) for v, p in zip(vectors, payloads)]
         written = upsert_points(
             self.qdrant,
             collection_name=self.collection_name,
@@ -1142,7 +1190,11 @@ class RAGIndexer:
             timeout_sec=self.qdrant_timeout_sec,
         )
         self.point_count += written
-        stage = "content" if chunks else "metadata"
+        stage = (
+            "partial"
+            if self.current_stage == "small" and chunks and total_chunks > len(chunks)
+            else "content" if chunks else "metadata"
+        )
         status = "ok" if chunks else "empty"
         self._upsert_state_entry(
             {
@@ -1157,6 +1209,8 @@ class RAGIndexer:
                 "size_bytes": size_bytes,
                 "extension": filepath.suffix.lower(),
                 "content_hash": content_hash,
+                "indexed_chunks": len(chunks),
+                "total_chunks": total_chunks,
                 **(payload_extra or {}),
             }
         )
@@ -1417,8 +1471,8 @@ def main() -> None:
             "Режимы работы:\n"
             "  (по умолчанию)        — многоэтапно: metadata → small → large\n"
             "  --stage metadata      — только имена/пути/размеры всех файлов (минуты)\n"
-            "  --stage small         — содержимое docx/xlsx/xls + мелких PDF (десятки минут)\n"
-            "  --stage large         — содержимое больших файлов + сканированные PDF (часы)\n"
+            "  --stage small         — быстрый проход: все файлы, первые --max-chunks чанков\n"
+            "  --stage large         — полный проход: догрузить оставшиеся чанки всех файлов\n"
             "  --stage all           — все этапы подряд (поведение по умолчанию)\n"
             "  --watch               — после первичного прохода следить за изменениями каталога\n"
             "  --recreate            — пересоздать коллекцию и очистить state\n"
@@ -1460,7 +1514,7 @@ def main() -> None:
         type=int,
         default=int(cfg.get("index_max_chunks", 2000)),
         dest="max_chunks",
-        help="Максимум чанков с одного файла (по умолчанию 2000; 0 = без ограничений)",
+        help="Лимит чанков для --stage small (по умолчанию 2000; 0 = без ограничений). --stage large всегда без лимита.",
     )
     parser.add_argument(
         "--workers",
@@ -1476,13 +1530,13 @@ def main() -> None:
         help="Использовать ONNX Runtime для encode (быстрее, но может не работать на Python 3.14)",
     )
     default_stage = str(cfg.get("index_default_stage", "all")).strip().lower()
-    if default_stage not in ("all", *STAGES):
+    if default_stage not in ("all", "full", *STAGES):
         default_stage = "all"
     parser.add_argument(
         "--stage",
         default=default_stage,
-        choices=("all", *STAGES),
-        help="Этап индексирования. По умолчанию 'all' — прогон всех этапов "
+        choices=("all", "full", *STAGES),
+        help="Этап индексирования. По умолчанию 'all'/'full' — прогон всех этапов "
         "(metadata → small → large). Можно запустить отдельный этап для "
         "дробного прогресса или для тонкой настройки фоновых задач.",
     )
@@ -1534,6 +1588,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.force_ocr:
         args.no_ocr = False
+    elif str(args.stage or "").lower() in {"all", "full", "small", "large"}:
+        args.no_ocr = True
     elif bool(cfg.get("index_skip_ocr", False)) and "--no-ocr" not in sys.argv:
         args.no_ocr = True
     args.collection = resolve_embedding_collection_name(
@@ -1667,7 +1723,7 @@ def main() -> None:
         else:
             if args.dry_run:
                 indexer.dry_run = True
-            if stage == "all":
+            if stage in {"all", "full"}:
                 totals = indexer.index_all_stages()
             else:
                 totals = indexer.index_directory(stage=stage)

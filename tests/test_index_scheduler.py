@@ -137,6 +137,8 @@ def test_scheduler_logs_blocked_launch(monkeypatch) -> None:
 def test_full_index_schedule_covers_partial_index_stages() -> None:
     assert system._schedule_stage_covers("all", "metadata")
     assert system._schedule_stage_covers("all", "small")
+    assert system._schedule_stage_covers("full", "small")
+    assert system._schedule_stage_covers("large", "small")
     assert system._schedule_stage_covers("metadata", "metadata")
     assert not system._schedule_stage_covers("metadata", "all")
     assert not system._schedule_stage_covers("all", "ocr")

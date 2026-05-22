@@ -510,7 +510,7 @@ class SettingsDialog(QDialog):
         self.index_stage_combo.setToolTip(
             "Кратко: этап индексации по умолчанию.\n"
             "Подробно: all=полный пайплайн; metadata=только имена/пути; "
-            "small=быстрый контент; large=крупные и тяжелые файлы."
+            "small=быстрый проход по всем файлам; large=полный проход без inline OCR."
         )
         form.addRow("Stage по умолчанию:", self.index_stage_combo)
 
