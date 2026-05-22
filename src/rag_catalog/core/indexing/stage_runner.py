@@ -142,8 +142,9 @@ class IndexStageRunner:
                     for info in zf.infolist():
                         if info.is_dir():
                             continue
-                        archive_member = info.filename.replace("\\", "/").lstrip("/")
-                        member = repair_zip_member_name(archive_member)
+                        archive_member_raw = info.filename
+                        archive_member_display = archive_member_raw.replace("\\", "/").lstrip("/")
+                        member = repair_zip_member_name(archive_member_display)
                         ext = Path(member).suffix.lower()
                         if ext not in self._supported_extensions or ext == ".zip":
                             continue
@@ -165,7 +166,7 @@ class IndexStageRunner:
                                 "size_bytes": int(info.file_size),
                                 "sort_mtime": float(archive_mtime),
                                 "archive_path": filepath,
-                                "archive_member": archive_member,
+                                "archive_member": archive_member_raw,
                                 "archive_member_display": member,
                                 "archive_category": _zip_member_category(ext, int(info.file_size)),
                             }
