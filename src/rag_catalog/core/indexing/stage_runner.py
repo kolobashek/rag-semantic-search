@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import tarfile
 import tempfile
 import threading
 import time
@@ -17,6 +18,25 @@ from tqdm import tqdm
 from ..extractors import ExtractedDocument, extract_doc_meta
 from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
 from .qdrant_writer import upsert_points
+
+
+_TAR_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz")
+_NESTED_ARCHIVE_SUFFIXES = (*_TAR_ARCHIVE_SUFFIXES, ".zip", ".7z")
+
+
+def _archive_type_for_path(path: Path | str) -> str:
+    name = str(path or "").lower()
+    if name.endswith(".zip"):
+        return "zip"
+    if name.endswith(".7z"):
+        return "7z"
+    if name.endswith(_TAR_ARCHIVE_SUFFIXES):
+        return "tar"
+    return ""
+
+
+def _is_nested_archive_member(name: str) -> bool:
+    return str(name or "").lower().endswith(_NESTED_ARCHIVE_SUFFIXES)
 
 
 def _normalize_only_path_key(value: Any) -> str:
@@ -122,7 +142,7 @@ class IndexStageRunner:
                 "archive_member": "",
             }
 
-        def _zip_member_category(ext: str, size_bytes: int) -> str:
+        def _archive_member_category(ext: str, size_bytes: int) -> str:
             if ext in (".txt", ".csv", ".rtf", ".pptx"):
                 return "small"
             if ext in (".docx", ".xlsx", ".xls") and size_bytes < indexer.small_office_mb * 1_048_576:
@@ -131,7 +151,43 @@ class IndexStageRunner:
                 return "small"
             return "large"
 
-        zip_member_keys: Dict[str, set[str]] = {}
+        archive_member_keys: Dict[str, set[str]] = {}
+
+        def _archive_member_task(
+            *,
+            filepath: Path,
+            archive_fingerprint: str,
+            archive_mtime: float,
+            archive_rel: str,
+            archive_type: str,
+            archive_member_raw: str,
+            archive_member_display: str,
+            size_bytes: int,
+            member_mtime: float,
+            fingerprint_extra: str,
+        ) -> Dict[str, Any] | None:
+            member = repair_zip_member_name(archive_member_display.replace("\\", "/").lstrip("/"))
+            ext = Path(member).suffix.lower()
+            if ext not in self._supported_extensions or _is_nested_archive_member(member):
+                return None
+            logical_path = Path(f"{archive_rel}/{member}")
+            if indexer._is_excluded_path(logical_path):
+                return None
+            return {
+                "filepath": filepath,
+                "source_path": filepath,
+                "relative_path": logical_path,
+                "state_key": f"{filepath}::{member}",
+                "fingerprint": f"{archive_fingerprint}:{archive_type}:{fingerprint_extra}",
+                "mtime": float(member_mtime),
+                "size_bytes": int(size_bytes),
+                "sort_mtime": float(archive_mtime),
+                "archive_path": filepath,
+                "archive_type": archive_type,
+                "archive_member": archive_member_raw,
+                "archive_member_display": member,
+                "archive_category": _archive_member_category(ext, int(size_bytes)),
+            }
 
         def _zip_tasks(filepath: Path) -> List[Dict[str, Any]]:
             tasks: List[Dict[str, Any]] = []
@@ -144,47 +200,116 @@ class IndexStageRunner:
                             continue
                         archive_member_raw = info.filename
                         archive_member_display = archive_member_raw.replace("\\", "/").lstrip("/")
-                        member = repair_zip_member_name(archive_member_display)
-                        ext = Path(member).suffix.lower()
-                        if ext not in self._supported_extensions or ext == ".zip":
-                            continue
-                        logical_path = Path(f"{archive_rel}/{member}")
-                        if indexer._is_excluded_path(logical_path):
-                            continue
                         try:
                             member_dt = datetime(*info.date_time).timestamp()
                         except Exception:
                             member_dt = archive_mtime
-                        tasks.append(
-                            {
-                                "filepath": filepath,
-                                "source_path": filepath,
-                                "relative_path": logical_path,
-                                "state_key": f"{filepath}::{member}",
-                                "fingerprint": f"{archive_fingerprint}:{info.CRC}:{info.file_size}:{info.date_time}",
-                                "mtime": float(member_dt),
-                                "size_bytes": int(info.file_size),
-                                "sort_mtime": float(archive_mtime),
-                                "archive_path": filepath,
-                                "archive_member": archive_member_raw,
-                                "archive_member_display": member,
-                                "archive_category": _zip_member_category(ext, int(info.file_size)),
-                            }
+                        task = _archive_member_task(
+                            filepath=filepath,
+                            archive_fingerprint=archive_fingerprint,
+                            archive_mtime=archive_mtime,
+                            archive_rel=archive_rel,
+                            archive_type="zip",
+                            archive_member_raw=archive_member_raw,
+                            archive_member_display=archive_member_display,
+                            size_bytes=int(info.file_size),
+                            member_mtime=float(member_dt),
+                            fingerprint_extra=f"{info.CRC}:{info.file_size}:{info.date_time}",
                         )
-                zip_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
+                        if task is not None:
+                            tasks.append(task)
+                archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
             except Exception as exc:
                 self._logger.warning("ZIP %s не прочитан: %s", filepath, exc)
             return tasks
 
+        def _tar_tasks(filepath: Path) -> List[Dict[str, Any]]:
+            tasks: List[Dict[str, Any]] = []
+            archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
+            archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
+            try:
+                with tarfile.open(filepath, "r:*") as tf:
+                    for info in tf.getmembers():
+                        if not info.isfile():
+                            continue
+                        raw_name = str(info.name or "")
+                        task = _archive_member_task(
+                            filepath=filepath,
+                            archive_fingerprint=archive_fingerprint,
+                            archive_mtime=archive_mtime,
+                            archive_rel=archive_rel,
+                            archive_type="tar",
+                            archive_member_raw=raw_name,
+                            archive_member_display=raw_name,
+                            size_bytes=int(info.size or 0),
+                            member_mtime=float(info.mtime or archive_mtime),
+                            fingerprint_extra=f"{raw_name}:{info.size}:{info.mtime}:{info.chksum}",
+                        )
+                        if task is not None:
+                            tasks.append(task)
+                archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
+            except Exception as exc:
+                self._logger.warning("TAR %s не прочитан: %s", filepath, exc)
+            return tasks
+
+        def _seven_zip_tasks(filepath: Path) -> List[Dict[str, Any]]:
+            tasks: List[Dict[str, Any]] = []
+            try:
+                import py7zr  # type: ignore[import-not-found]
+            except Exception as exc:
+                self._logger.warning("7Z %s не прочитан: py7zr недоступен (%s)", filepath, exc)
+                return tasks
+            archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
+            archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
+            try:
+                with py7zr.SevenZipFile(filepath, "r") as zf:
+                    if zf.needs_password():
+                        self._logger.warning("7Z %s пропущен: архив защищён паролем", filepath)
+                        return tasks
+                    for info in zf.list():
+                        if getattr(info, "is_directory", False) or not getattr(info, "is_file", True):
+                            continue
+                        raw_name = str(getattr(info, "filename", "") or "")
+                        created = getattr(info, "creationtime", None)
+                        try:
+                            member_dt = float(created.timestamp()) if created is not None else archive_mtime
+                        except Exception:
+                            member_dt = archive_mtime
+                        size_bytes = int(getattr(info, "uncompressed", 0) or 0)
+                        crc = str(getattr(info, "crc32", "") or "")
+                        task = _archive_member_task(
+                            filepath=filepath,
+                            archive_fingerprint=archive_fingerprint,
+                            archive_mtime=archive_mtime,
+                            archive_rel=archive_rel,
+                            archive_type="7z",
+                            archive_member_raw=raw_name,
+                            archive_member_display=raw_name,
+                            size_bytes=size_bytes,
+                            member_mtime=member_dt,
+                            fingerprint_extra=f"{raw_name}:{size_bytes}:{member_dt}:{crc}",
+                        )
+                        if task is not None:
+                            tasks.append(task)
+                archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
+            except Exception as exc:
+                self._logger.warning("7Z %s не прочитан: %s", filepath, exc)
+            return tasks
+
         all_tasks: List[Dict[str, Any]] = []
         for filepath in all_files:
-            if filepath.suffix.lower() == ".zip":
+            archive_type = _archive_type_for_path(filepath)
+            if archive_type == "zip":
                 all_tasks.extend(_zip_tasks(filepath))
+            elif archive_type == "tar":
+                all_tasks.extend(_tar_tasks(filepath))
+            elif archive_type == "7z":
+                all_tasks.extend(_seven_zip_tasks(filepath))
             else:
                 all_tasks.append(_normal_task(filepath))
 
         if hasattr(indexer, "state_db"):
-            for archive_path, current_keys in zip_member_keys.items():
+            for archive_path, current_keys in archive_member_keys.items():
                 prefix = f"{archive_path}::"
                 stale_keys = sorted(set(indexer.state_db.list_entries_by_prefix(prefix)) - set(current_keys))
                 if not stale_keys:
@@ -417,6 +542,32 @@ class IndexStageRunner:
             _buf: list = [None, None]  # [result_text, exception]
             _doc_fn = None
 
+            def _archive_member_bytes() -> bytes:
+                archive_path = Path(str(item["archive_path"]))
+                member_name = str(item["archive_member"])
+                archive_type = str(item.get("archive_type") or "zip")
+                if archive_type == "zip":
+                    with ZipFile(archive_path, "r") as zf:
+                        return zf.read(member_name)
+                if archive_type == "tar":
+                    with tarfile.open(archive_path, "r:*") as tf:
+                        member = tf.extractfile(member_name)
+                        if member is None:
+                            raise KeyError(f"There is no file member named {member_name!r} in the archive")
+                        return member.read()
+                if archive_type == "7z":
+                    import py7zr  # type: ignore[import-not-found]
+                    from py7zr.io import BytesIOFactory  # type: ignore[import-not-found]
+
+                    limit = max(1, int(item.get("size_bytes") or 0) + 1)
+                    factory = BytesIOFactory(limit)
+                    with py7zr.SevenZipFile(archive_path, "r") as zf:
+                        zf.extract(targets=[member_name], factory=factory)
+                    product = factory.get(member_name)
+                    product.seek(0)
+                    return product.read()
+                raise ValueError(f"Неподдерживаемый тип архива: {archive_type}")
+
             # Режим «только метадата»: либо текущий этап = metadata,
             # либо расширение явно в metadata_only_extensions (legacy флаг).
             # Содержимое не читается — файл попадает в индекс по имени/пути/размеру.
@@ -483,8 +634,7 @@ class IndexStageRunner:
                             if item.get("archive_path") and item.get("archive_member"):
                                 with tempfile.TemporaryDirectory(prefix="rag_zip_") as tmp:
                                     temp_path = Path(tmp) / Path(str(item.get("archive_member_display") or item["archive_member"])).name
-                                    with ZipFile(Path(item["archive_path"]), "r") as zf:
-                                        temp_path.write_bytes(zf.read(str(item["archive_member"])))
+                                    temp_path.write_bytes(_archive_member_bytes())
                                     _buf[0] = reader_fn(temp_path)
                             else:
                                 _buf[0] = reader_fn(source_path)
@@ -585,8 +735,7 @@ class IndexStageRunner:
             if item.get("archive_path") and item.get("archive_member"):
                 with tempfile.TemporaryDirectory(prefix="rag_zip_meta_") as tmp:
                     temp_path = Path(tmp) / Path(str(item.get("archive_member_display") or item["archive_member"])).name
-                    with ZipFile(Path(item["archive_path"]), "r") as zf:
-                        temp_path.write_bytes(zf.read(str(item["archive_member"])))
+                    temp_path.write_bytes(_archive_member_bytes())
                     doc_meta = extract_doc_meta(temp_path)
             else:
                 doc_meta = extract_doc_meta(source_path)

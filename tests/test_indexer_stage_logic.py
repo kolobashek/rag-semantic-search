@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tarfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -298,6 +299,47 @@ def test_zip_members_with_leading_slash_are_read_by_raw_archive_name(tmp_path: P
     assert any(payload.get("path") == "backup.zip/folder/readme.txt" for payload in payloads)
     assert any(payload.get("archive_member") == "/folder/readme.txt" for payload in payloads)
     assert any(payload.get("archive_member_display") == "folder/readme.txt" for payload in payloads)
+
+
+def test_tar_gz_members_are_indexed_with_logical_archive_paths(tmp_path: Path) -> None:
+    archive = tmp_path / "docs.tar.gz"
+    source = tmp_path / "source.txt"
+    source.write_text("tar text", encoding="utf-8")
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(source, arcname="folder/readme.txt")
+    source.unlink()
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    stats = idx.index_directory(stage="small")
+
+    state_key = f"{archive}::folder/readme.txt"
+    row = idx.state_db.get_entry(state_key)
+    assert row["stage"] == "content"
+    assert stats["error_files"] == 0
+    payloads = [point.payload for point in idx.qdrant.points]
+    assert any(payload.get("path") == "docs.tar.gz/folder/readme.txt" for payload in payloads)
+    assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
+
+
+def test_7z_members_are_indexed_with_logical_archive_paths(tmp_path: Path) -> None:
+    py7zr = pytest.importorskip("py7zr")
+    archive = tmp_path / "docs.7z"
+    source = tmp_path / "source.txt"
+    source.write_text("seven zip text", encoding="utf-8")
+    with py7zr.SevenZipFile(archive, "w") as zf:
+        zf.write(source, "folder/readme.txt")
+    source.unlink()
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    stats = idx.index_directory(stage="small")
+
+    state_key = f"{archive}::folder/readme.txt"
+    row = idx.state_db.get_entry(state_key)
+    assert row["stage"] == "content"
+    assert stats["error_files"] == 0
+    payloads = [point.payload for point in idx.qdrant.points]
+    assert any(payload.get("path") == "docs.7z/folder/readme.txt" for payload in payloads)
+    assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
 
 
 def test_zip_member_cleanup_removes_stale_archive_entries(tmp_path: Path) -> None:

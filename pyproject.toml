@@ -41,6 +41,7 @@ dependencies = [
     "psutil>=5.9.0",
     "boto3>=1.34.0",
     "watchdog>=4.0.0",
+    "py7zr>=1.0.0",
 ]
 
 [project.optional-dependencies]
