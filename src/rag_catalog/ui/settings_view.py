@@ -537,7 +537,8 @@ def render_settings_screen(
             }
             ui.label("Пути и подключение").classes("text-xl font-semibold")
             ui.label("Эти настройки видны только администратору. После сохранения поиск переподключается к Qdrant с новыми значениями.").classes("rag-meta")
-            catalog_input = _path_row("Каталог документов", str(state.cfg.get("catalog_path") or ""), folder=True)
+            catalog_input = _path_row("Рабочая директория файлов и Cloud Drive", str(state.cfg.get("catalog_path") or ""), folder=True)
+            catalog_input.tooltip("Единый корневой каталог: поиск, индексация, проводник и Cloud Drive используют один и тот же путь.")
             qdrant_url_input = ui.input("Qdrant URL", value=str(state.cfg.get("qdrant_url") or "")).props("dense outlined").classes("w-full")
             qdrant_db_input = _path_row("Локальный путь Qdrant", str(state.cfg.get("qdrant_db_path") or ""), folder=True)
             collection_input = ui.input("Коллекция", value=str(state.cfg.get("collection_name") or "catalog")).props("dense outlined").classes("w-full")
@@ -553,7 +554,7 @@ def render_settings_screen(
             log_input = _path_row("Лог автоматизации", str(state.cfg.get("log_file") or ""), folder=False)
 
             with ui.row().classes("w-full gap-2"):
-                ui.label(f"Текущий каталог: {state.cfg.get('catalog_path') or '-'}").classes("rag-path")
+                ui.label(f"Текущая рабочая директория: {state.cfg.get('catalog_path') or '-'}").classes("rag-path")
                 ui.label(f"Текущий Qdrant: {state.cfg.get('qdrant_url') or state.cfg.get('qdrant_db_path') or '-'}").classes("rag-path")
             action_row = ui.row().classes("rag-dirty-actions")
             action_row.set_visibility(False)
@@ -586,7 +587,7 @@ def render_settings_screen(
                 values = current_paths()
                 new_catalog = values["catalog_path"]
                 if new_catalog and not Path(new_catalog).exists():
-                    ui.notify("Каталог документов не найден. Проверьте путь.", type="negative")
+                    ui.notify("Рабочая директория не найдена. Проверьте путь.", type="negative")
                     return
                 new_qdrant_url = values["qdrant_url"]
                 new_qdrant_db = values["qdrant_db_path"]
@@ -601,7 +602,7 @@ def render_settings_screen(
                     state.searcher_error = ""
                     state.telemetry = None
                     _log_app_event(state, "settings", "save_paths", details={key: state.cfg.get(key) for key in CONFIG_PATH_KEYS})
-                    ui.notify("Пути сохранены.", type="positive")
+                    ui.notify("Пути сохранены. Cloud Drive будет использовать эту же рабочую директорию.", type="positive")
                     render_fn()
                 except Exception as exc:
                     ui.notify(f"Не удалось сохранить пути: {exc}", type="negative")
@@ -622,18 +623,6 @@ def render_settings_screen(
         default_db_path = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_drive.db").resolve())
         default_storage_root = str((Path(str(state.cfg.get("qdrant_db_path") or ".")) / "cloud_storage").resolve())
 
-        def _path_row_cd(label: str, value: str, *, folder: bool = True) -> ui.input:
-            with ui.row().classes("w-full items-center gap-1"):
-                inp = ui.input(label, value=value).props("dense outlined").classes("flex-1")
-                icon = "folder_open" if folder else "description"
-                btn = ui.button(icon=icon).props("flat dense round").classes("text-indigo-400 mt-1")
-                btn.tooltip("Выбрать папку" if folder else "Выбрать файл")
-                if folder:
-                    btn.on_click(lambda _inp=inp: _pick_folder_dialog(_inp))
-                else:
-                    btn.on_click(lambda _inp=inp: _pick_file_dialog(_inp))
-            return inp
-
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             initial_cloud = {
                 "cloud_drive_enabled": bool(state.cfg.get("cloud_drive_enabled")),
@@ -645,7 +634,6 @@ def render_settings_screen(
                 "cloud_drive_s3_region": str(state.cfg.get("cloud_drive_s3_region") or "").strip(),
                 "cloud_drive_s3_access_key": str(state.cfg.get("cloud_drive_s3_access_key") or "").strip(),
                 "cloud_drive_s3_secret_key": str(state.cfg.get("cloud_drive_s3_secret_key") or "").strip(),
-                "catalog_path": str(state.cfg.get("catalog_path") or "").strip(),
                 "cloud_drive_autosync_minutes": int(state.cfg.get("cloud_drive_autosync_minutes") or 0),
             }
             stats_ref: Dict[str, Any] = {"value": None, "storage_box": None}
@@ -654,7 +642,7 @@ def render_settings_screen(
             ui.label("Cloud Drive").classes("text-xl font-semibold")
             ui.label(
                 "Централизованный реестр файлов и папок: дерево каталогов, версии, фоновые задачи. "
-                "Поддерживается local storage; импорт — из указанного каталога источника."
+                "Поддерживается local storage; импорт выполняется из общей рабочей директории."
             ).classes("rag-meta")
 
             enabled_input = ui.checkbox("Включить Cloud Drive", value=initial_cloud["cloud_drive_enabled"])
@@ -711,8 +699,18 @@ def render_settings_screen(
             with s3_summary_row:
                 btn_s3_configure = ui.button("Настроить S3 / MinIO...", icon="settings", on_click=s3_dialog.open).props("outline dense size=sm")  # noqa: F841
 
-            catalog_input = _path_row_cd("Источник импорта", initial_cloud["catalog_path"], folder=True)
-            catalog_input.tooltip("Каталог источника для импорта. Обычно совпадает с основным каталогом документов.")
+            with ui.element("div").classes("w-full p-3 rounded border border-indigo-900/20 bg-indigo-950/10"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.icon("folder", size="18px").classes("text-indigo-400")
+                    ui.label("Рабочая директория").classes("font-semibold text-sm")
+                    ui.space()
+                    ui.button(
+                        "Изменить в путях",
+                        icon="settings",
+                        on_click=lambda: (setattr(state, "settings_section", "paths"), render_fn()),
+                    ).props("outline dense size=sm")
+                ui.label(str(state.cfg.get("catalog_path") or "-")).classes("rag-path text-xs mt-1")
+                ui.label("Cloud Drive, поиск, проводник и индексация используют этот же путь. Отдельного источника импорта здесь нет.").classes("rag-meta text-xs")
 
             bootstrap_limit = ui.number("Лимит импорта файлов (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full")
             bootstrap_limit.tooltip("Ограничивает количество файлов при пробном запуске. 0 — без ограничения.")
@@ -753,7 +751,6 @@ def render_settings_screen(
                     "cloud_drive_s3_region": str(s3_region_input.value or "").strip(),
                     "cloud_drive_s3_access_key": normalize_s3_credential(str(s3_access_input.value or "")),
                     "cloud_drive_s3_secret_key": normalize_s3_credential(str(s3_secret_input.value or "")),
-                    "catalog_path": str(catalog_input.value or "").strip(),
                     "cloud_drive_autosync_minutes": int(autosync_select.value or 0),
                 }
 
@@ -780,7 +777,6 @@ def render_settings_screen(
                 s3_region_input.set_value(initial_cloud["cloud_drive_s3_region"])
                 s3_access_input.set_value(initial_cloud["cloud_drive_s3_access_key"])
                 s3_secret_input.set_value(initial_cloud["cloud_drive_s3_secret_key"])
-                catalog_input.set_value(initial_cloud["catalog_path"])
                 autosync_select.set_value(initial_cloud["cloud_drive_autosync_minutes"])
                 refresh_cloud_visibility()
                 action_row.set_visibility(False)
@@ -1159,16 +1155,16 @@ def render_settings_screen(
                     pass
 
             async def bootstrap_registry(*, import_files: bool = True) -> None:
-                catalog = str(catalog_input.value or "").strip()
-                if not catalog:
-                    ui.notify("Укажите источник импорта.", type="warning")
-                    return
-                if not Path(catalog).exists():
-                    ui.notify("Источник импорта не найден.", type="negative")
-                    return
                 limit_value = int(bootstrap_limit.value or 0)
                 try:
                     cfg = persist_cloud_values(current_cloud_values())
+                    catalog = str(cfg.get("catalog_path") or "").strip()
+                    if not catalog:
+                        ui.notify("Укажите рабочую директорию в разделе «Пути».", type="warning")
+                        return
+                    if not Path(catalog).exists():
+                        ui.notify("Рабочая директория не найдена. Проверьте путь в разделе «Пути».", type="negative")
+                        return
                     current_state = _read_cloud_bootstrap_status(cfg)
                     if str(current_state.get("job_status") or current_state.get("status") or "") in {"running", "pending"}:
                         ui.notify("Импорт уже выполняется.", type="warning")
@@ -1270,7 +1266,6 @@ def render_settings_screen(
             s3_region_input.on_value_change(lambda _: refresh_cloud_dirty())
             s3_access_input.on_value_change(lambda _: refresh_cloud_dirty())
             s3_secret_input.on_value_change(lambda _: refresh_cloud_dirty())
-            catalog_input.on_value_change(lambda _: refresh_cloud_dirty())
             autosync_select.on_value_change(lambda _: refresh_cloud_dirty())
 
             with action_row:
