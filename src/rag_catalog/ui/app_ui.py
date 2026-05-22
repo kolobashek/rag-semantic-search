@@ -1034,21 +1034,21 @@ def render_sidebar(cfg: Dict[str, Any], user: Dict[str, Any]):
         )
         idx_workers = st.number_input(
             "Индекс. потоки",
-            min_value=1,
+            min_value=0,
             max_value=32,
-            value=int(cfg.get("index_read_workers", 4)),
+            value=int(cfg.get("index_read_workers", 0)),
             step=1,
             help=(
                 "Кратко: число потоков чтения документов.\n\n"
-                "Подробно: ускоряет I/O, но при слишком большом значении может перегружать сеть/диск."
+                "Подробно: 0 = авто; ускоряет I/O, но при слишком большом значении может перегружать сеть/диск."
             ),
         )
         idx_max_chunks = st.number_input(
             "Макс. чанков/файл",
             min_value=0,
             max_value=20000,
-            value=int(cfg.get("index_max_chunks", 50)),
-            step=100,
+            value=int(cfg.get("index_max_chunks", 5)),
+            step=1,
             help=(
                 "Кратко: ограничение чанков на один файл.\n\n"
                 "Подробно: 0 = без лимита; полезно для защиты от очень больших файлов."

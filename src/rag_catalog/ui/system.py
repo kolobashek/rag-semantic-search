@@ -519,6 +519,7 @@ def _launch_indexer(
     env["PYTHONIOENCODING"] = "utf-8"
     env["RAG_LOG_HISTORY_NAME"] = "indexer.log"
     env["RAG_LOG_LABEL"] = f"INDEXER stage={stage}"
+    max_chunks_value = cfg.get("index_max_chunks", 5) if max_chunks is None else max_chunks
     args = [
         sys.executable, "-m", "rag_catalog.core.index_rag",
         "--catalog", str(cfg.get("catalog_path") or ""),
@@ -533,7 +534,7 @@ def _launch_indexer(
             )
         ),
         "--max-chunks",
-        str(0 if str(stage or "").strip().lower() == "large" else int(max_chunks or cfg.get("index_max_chunks") or 50)),
+        str(0 if str(stage or "").strip().lower() == "large" else int(max_chunks_value if max_chunks_value is not None else 5)),
     ]
     qdrant_url = str(cfg.get("qdrant_url") or "")
     if qdrant_url:
@@ -739,7 +740,8 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
         ),
     )
     cfg_settings = tdb.get_index_settings() if hasattr(tdb, "get_index_settings") else {}
-    workers = int(cfg_settings.get("workers") or live_cfg.get("index_read_workers") or 4)
+    workers_value = cfg_settings.get("workers") if cfg_settings.get("workers") is not None else live_cfg.get("index_read_workers")
+    workers = _safe_int(workers_value, 0)
     launched_index_stage = ""
     for sched in due:
         stage = str(sched.get("stage") or "all")
@@ -768,7 +770,7 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
                     live_cfg,
                     stage=stage,
                     workers=workers,
-                    max_chunks=int(cfg_settings.get("max_chunks") or live_cfg.get("index_max_chunks") or 50),
+                    max_chunks=int(cfg_settings.get("max_chunks") if cfg_settings.get("max_chunks") is not None else live_cfg.get("index_max_chunks", 5)),
                     skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
                     ocr_engine=str(cfg_settings.get("ocr_engine") or "tesseract"),
                 )
@@ -909,8 +911,10 @@ def _recover_background_tasks(
     now_ts = time.time()
     telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
     settings = telemetry.get_index_settings() if hasattr(telemetry, "get_index_settings") else {}
-    workers = _safe_int(settings.get("workers") or cfg.get("index_read_workers") or 4, 4)
-    max_chunks = _safe_int(settings.get("max_chunks") or cfg.get("index_max_chunks") or 50, 50)
+    workers_value = settings.get("workers") if settings.get("workers") is not None else cfg.get("index_read_workers")
+    workers = _safe_int(workers_value, 0)
+    max_chunks_value = settings.get("max_chunks") if settings.get("max_chunks") is not None else cfg.get("index_max_chunks")
+    max_chunks = _safe_int(max_chunks_value, 5)
     skip_inline_ocr = bool(settings.get("skip_inline_ocr"))
     ocr_min_text_len = _safe_int(settings.get("ocr_min_text_len") or 50, 50)
     ocr_engine_setting = str(settings.get("ocr_engine") or "tesseract")

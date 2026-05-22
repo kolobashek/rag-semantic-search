@@ -477,17 +477,17 @@ class SettingsDialog(QDialog):
         form.addRow("Batch size:", self.batch_size_spin)
 
         self.index_workers_spin = QSpinBox()
-        self.index_workers_spin.setRange(1, 32)
-        self.index_workers_spin.setValue(int(self.config.get("index_read_workers", 4)))
+        self.index_workers_spin.setRange(0, 32)
+        self.index_workers_spin.setValue(int(self.config.get("index_read_workers", 0)))
         self.index_workers_spin.setToolTip(
             "Кратко: число потоков чтения файлов.\n"
-            "Подробно: повышает скорость I/O; слишком много потоков может перегрузить сеть/диск."
+            "Подробно: 0 = авто; повышает скорость I/O, но слишком много потоков может перегрузить сеть/диск."
         )
         form.addRow("Индекс. потоки:", self.index_workers_spin)
 
         self.index_max_chunks_spin = QSpinBox()
         self.index_max_chunks_spin.setRange(0, 20000)
-        self.index_max_chunks_spin.setValue(int(self.config.get("index_max_chunks", 50)))
+        self.index_max_chunks_spin.setValue(int(self.config.get("index_max_chunks", 5)))
         self.index_max_chunks_spin.setToolTip(
             "Кратко: максимум чанков на файл.\n"
             "Подробно: 0 = без лимита; ограничение защищает от огромных файлов и взрывного роста индекса."

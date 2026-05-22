@@ -247,11 +247,22 @@ class IndexStageRunner:
                 else:
                     existing_stage = str(existing.get("stage") or "content")
                     existing_status = str(existing.get("status") or ("error" if existing_stage == "error" else "ok"))
+                    existing_ext = str(existing.get("extension") or Path(file_key).suffix or "").lower()
                     if existing_status == "error":
                         if hasattr(indexer, "state_db") and not indexer.state_db.is_failed_retry_due(file_key):
                             skipped += 1
                             continue
                         reason = "retry_error"
+                    elif (
+                        stage in ("small", "large")
+                        and bool(getattr(indexer, "skip_ocr", False))
+                        and existing_ext in {".pdf", *self._image_extensions}
+                        and existing_status in {"deferred_ocr", "empty"}
+                        and existing_stage in {"metadata", "empty"}
+                        and str(existing.get("indexed_stage") or "") in {"small", "large"}
+                    ):
+                        skipped += 1
+                        continue
                     elif stage == "metadata":
                         skipped += 1
                         continue
@@ -515,6 +526,14 @@ class IndexStageRunner:
                     elapsed, size_mb, relative_path.name,
                 )
 
+            deferred_ocr = (
+                stage in ("small", "large")
+                and bool(getattr(indexer, "skip_ocr", False))
+                and (ext == ".pdf" or ext in self._image_extensions)
+                and not failure_error
+                and not full_text.strip()
+            )
+
             chunk_source = extracted_doc if extracted_doc is not None else full_text
             chunk_items = indexer._chunk_text_with_provenance(chunk_source) if full_text.strip() else []
             chunks = [str(item.get("text") or "") for item in chunk_items]
@@ -540,7 +559,7 @@ class IndexStageRunner:
                 duplicate = indexer.state_db.find_by_content_hash(content_hash, exclude_path=file_key)
                 duplicate_of = str((duplicate or {}).get("full_path") or "")
             if stage_chunk_limit and len(chunks) >= stage_chunk_limit:
-                self._logger.warning(
+                self._logger.debug(
                     "Файл %s: %d чанков → обрезано до %d",
                     relative_path.name, len(chunks), stage_chunk_limit,
                 )
@@ -662,6 +681,7 @@ class IndexStageRunner:
                 "total_chunks": total_chunks,
                 "content_hash": content_hash,
                 "error": failure_error,
+                "deferred_ocr": deferred_ocr,
                 "skipped": False,
             }
 
@@ -762,6 +782,8 @@ class IndexStageRunner:
                     total_chunks = int(result.get("total_chunks") or 0)
                     if stage == "metadata":
                         file_stage = "metadata"
+                    elif result.get("deferred_ocr"):
+                        file_stage = "metadata"
                     elif result.get("has_content") or result.get("append_only"):
                         file_stage = (
                             "partial"
@@ -770,10 +792,14 @@ class IndexStageRunner:
                         )
                     else:
                         file_stage = "empty"
-                    status = "empty" if file_stage == "empty" else "ok"
-                    last_error = ""
+                    status = (
+                        "deferred_ocr"
+                        if result.get("deferred_ocr")
+                        else "empty" if file_stage == "empty" else "ok"
+                    )
+                    last_error = "deferred_ocr" if result.get("deferred_ocr") else ""
                     next_retry_at = 0.0
-                if stage in ("small", "large") and not result.get("has_content"):
+                if stage in ("small", "large") and not result.get("has_content") and not result.get("deferred_ocr"):
                     self._logger.warning(
                         "Этап %s: файл %s без контента, сохраняю stage=%s (будет повторная попытка)",
                         stage,

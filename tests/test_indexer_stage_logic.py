@@ -150,6 +150,28 @@ def test_small_stage_file_without_content_is_marked_empty_for_retry(tmp_path: Pa
     assert stats["processed_files"] >= 1
 
 
+def test_no_ocr_pdf_without_cached_text_is_deferred_and_not_retried_by_quick_pass(tmp_path: Path) -> None:
+    p = tmp_path / "scan.pdf"
+    p.write_bytes(b"%PDF-1.4\n")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.skip_ocr = True
+
+    first = idx.index_directory(stage="small")
+    key = str(p)
+    row = idx.state_db.get_entry(key)
+    assert row["stage"] == "metadata"
+    assert row["indexed_stage"] == "small"
+    assert row["status"] == "deferred_ocr"
+    assert row["last_error"] == "deferred_ocr"
+    assert first["processed_files"] == 1
+    assert first["error_files"] == 0
+
+    second = idx.index_directory(stage="small")
+    assert second["processed_files"] == 1
+    assert second["skipped_files"] == 1
+    assert second["error_files"] == 0
+
+
 def test_read_error_is_marked_error_and_backed_off(tmp_path: Path) -> None:
     p = tmp_path / "broken.docx"
     p.write_text("dummy", encoding="utf-8")

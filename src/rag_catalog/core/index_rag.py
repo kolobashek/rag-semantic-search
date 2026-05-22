@@ -434,7 +434,7 @@ class RAGIndexer:
         self.skip_ocr = skip_ocr
         self.dry_run = False
         self.max_chunks_per_file = max_chunks_per_file  # 0 = без ограничений
-        self.read_workers = read_workers
+        self.read_workers = max(1, int(read_workers or 4))
         self.qdrant_timeout_sec = max(5, int(qdrant_timeout_sec or 60))
         self.exclude_patterns = self._normalize_exclude_patterns(exclude_patterns or [])
         self.only_paths = {str(path).strip() for path in (only_paths or set()) if str(path).strip()}
@@ -664,6 +664,17 @@ class RAGIndexer:
             return False  # файл изменился — обязательно переиндексируем
 
         existing_stage = str(existing.get("stage") or "content")  # backward compat
+        existing_status = str(existing.get("status") or ("error" if existing_stage == "error" else "ok"))
+        extension = str(existing.get("extension") or Path(file_key).suffix or "").lower()
+        if (
+            self.current_stage in {"small", "large"}
+            and bool(getattr(self, "skip_ocr", False))
+            and extension in {".pdf", *IMAGE_EXTENSIONS}
+            and existing_status in {"deferred_ocr", "empty"}
+            and existing_stage in {"metadata", "empty"}
+            and str(existing.get("indexed_stage") or "") in {"small", "large"}
+        ):
+            return True
         # Если текущий этап = metadata, а файл уже проиндексирован (любым этапом) —
         # можем пропустить: мета-запись у файла уже есть.
         if self.current_stage == "metadata":
@@ -1077,7 +1088,7 @@ class RAGIndexer:
             duplicate_of = str((duplicate or {}).get("full_path") or "")
         stage_chunk_limit = int(self.max_chunks_per_file or 0) if self.current_stage == "small" else 0
         if stage_chunk_limit and len(chunks) >= stage_chunk_limit:
-            logger.warning(
+            logger.debug(
                 "Файл %s: %d чанков, обрезано до %d (--max-chunks-per-file)",
                 filepath.name,
                 len(chunks),
@@ -1512,9 +1523,9 @@ def main() -> None:
     parser.add_argument(
         "--max-chunks",
         type=int,
-        default=int(cfg.get("index_max_chunks", 50)),
+        default=int(cfg.get("index_max_chunks", 5)),
         dest="max_chunks",
-        help="Лимит чанков для --stage small (по умолчанию 50; 0 = без ограничений). --stage large всегда без лимита.",
+        help="Лимит чанков для --stage small (по умолчанию 5; 0 = без ограничений). --stage large всегда без лимита.",
     )
     parser.add_argument(
         "--workers",

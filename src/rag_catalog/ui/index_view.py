@@ -719,8 +719,8 @@ def render_index_screen(
 
             with ui.column().classes("gap-3 min-w-0"):
                 initial_index_settings = {
-                    "workers": int(settings.get("workers") or state.cfg.get("index_read_workers") or 4),
-                    "max_chunks": int(settings.get("max_chunks") or state.cfg.get("index_max_chunks") or 50),
+                    "workers": int(settings.get("workers") if settings.get("workers") is not None else state.cfg.get("index_read_workers", 0)),
+                    "max_chunks": int(settings.get("max_chunks") if settings.get("max_chunks") is not None else state.cfg.get("index_max_chunks", 5)),
                     "recreate": bool(settings.get("recreate")),
                     "skip_inline_ocr": bool(settings.get("skip_inline_ocr")),
                     "ocr_enabled": bool(settings.get("ocr_enabled")),
@@ -732,7 +732,7 @@ def render_index_screen(
                     ui.label("Параметры").classes("font-semibold")
                 with ui.row().classes("w-full gap-3 flex-wrap"):
                     workers_input = ui.number("Потоки чтения (0 = авто)", value=initial_index_settings["workers"], min=0, max=32, step=1).props("dense outlined").classes("w-40")
-                    max_chunks_input = ui.number("Макс. чанков на файл", value=initial_index_settings["max_chunks"], min=0, max=100000, step=100).props("dense outlined").classes("w-52")
+                    max_chunks_input = ui.number("Макс. чанков на файл", value=initial_index_settings["max_chunks"], min=0, max=100000, step=1).props("dense outlined").classes("w-52")
                     recreate_input = ui.checkbox("Пересоздавать коллекцию", value=initial_index_settings["recreate"])
                     skip_inline_ocr_input = ui.checkbox("Пропускать OCR внутри индекса", value=initial_index_settings["skip_inline_ocr"])
 
