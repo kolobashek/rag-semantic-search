@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 # ──────────────────────────── константы ─────────────────────────────────────
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
 # PDF с текстом короче этого порога считается сканом (нет полезного текста)
 DEFAULT_MIN_TEXT_LEN = 50
 
@@ -122,6 +124,50 @@ def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) 
         if path and path not in seen:
             seen.add(path)
             paths.append(path)
+    return paths
+
+
+def _state_entry_still_needs_ocr(conn: sqlite3.Connection, path: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT stage, indexed_stage, status
+        FROM state_entries
+        WHERE full_path=?
+        """,
+        (path,),
+    ).fetchone()
+    if row is None:
+        return True
+    stage = str(row["stage"] or "")
+    indexed_stage = str(row["indexed_stage"] or "")
+    status = str(row["status"] or "")
+    return stage != "content" or status in {"empty", "error"} or indexed_stage in {"", "metadata", "small"}
+
+
+def find_pending_ocr_candidates_from_runtime(state_dir: Path, runtime_dir: Path) -> List[str]:
+    """Recover unfinished OCR candidates that were removed from state DB by a cancelled run."""
+    db_path = Path(state_dir) / "index_state.db"
+    if not db_path.exists() or not Path(runtime_dir).exists():
+        return []
+    candidate_files = sorted(Path(runtime_dir).glob("ocr_candidates_*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidate_files:
+        return []
+    paths: List[str] = []
+    seen: set[str] = set()
+    try:
+        with sqlite3.connect(str(db_path), timeout=30.0) as conn:
+            conn.row_factory = sqlite3.Row
+            for candidate_file in candidate_files:
+                for line in candidate_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                    path = line.strip()
+                    if not path or path in seen:
+                        continue
+                    if _state_entry_still_needs_ocr(conn, path):
+                        seen.add(path)
+                        paths.append(path)
+    except (OSError, sqlite3.Error) as exc:
+        logger.warning("Не удалось восстановить OCR-кандидатов из runtime: %s", exc)
+        return []
     return paths
 
 
@@ -461,6 +507,16 @@ def main() -> int:
         Path(args.state_dir),
         small_pdf_mb=float(cfg.get("small_pdf_mb") or 2.0),
     )
+    recovered = find_pending_ocr_candidates_from_runtime(Path(args.state_dir), PROJECT_ROOT / "runtime")
+    if recovered:
+        merged: List[str] = []
+        seen_paths: set[str] = set()
+        for path in [*scanned, *recovered]:
+            if path not in seen_paths:
+                seen_paths.add(path)
+                merged.append(path)
+        scanned = merged
+        logger.info("Восстановлено OCR-кандидатов из runtime: %d", len(recovered))
     if scanned:
         logger.info(
             "Быстрый список OCR-кандидатов из state DB (PDF >= %g МБ, без content): %d",
@@ -527,6 +583,9 @@ def main() -> int:
         ocr_run_id=ocr_run_id,
         note=f"state_entries_removed={removed}",
     )
+    candidates_file = PROJECT_ROOT / "runtime" / f"ocr_candidates_{ocr_run_id}.txt"
+    candidates_file.parent.mkdir(parents=True, exist_ok=True)
+    candidates_file.write_text("\n".join(scanned) + "\n", encoding="utf-8", errors="replace")
 
     # ── 3. Запустить index_rag как модуль (устойчиво к относительным импортам) ──
     cmd = [sys.executable, "-u", "-m", "rag_catalog.core.index_rag"]
@@ -542,6 +601,7 @@ def main() -> int:
         "--workers",    str(workers_effective),
         "--stage",      "large",  # сканированные PDF — этап large
         "--force-ocr",
+        "--only-paths-file", str(candidates_file),
         # НЕТ --no-ocr: OCR включён
     ]
     if str(args.ocr_engine or "tesseract").strip().lower() == "rapidocr":

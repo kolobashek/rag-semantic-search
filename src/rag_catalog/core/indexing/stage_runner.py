@@ -19,6 +19,22 @@ from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
 from .qdrant_writer import upsert_points
 
 
+def _normalize_only_path_key(value: Any) -> str:
+    return str(value or "").strip().replace("/", "\\").lower()
+
+
+def _task_matches_only_paths(item: Dict[str, Any], allowed: set[str]) -> bool:
+    if not allowed:
+        return True
+    keys = {
+        item.get("state_key"),
+        item.get("filepath"),
+        item.get("source_path"),
+        item.get("relative_path"),
+    }
+    return any(_normalize_only_path_key(key) in allowed for key in keys if key)
+
+
 class IndexStageRunner:
     """Runs one index stage while delegating indexer-specific operations to RAGIndexer.
 
@@ -176,6 +192,16 @@ class IndexStageRunner:
                 for key in stale_keys:
                     indexer._delete_file_vectors(Path(key))
                 indexer.state_db.delete_entries(stale_keys)
+
+        only_paths = {
+            _normalize_only_path_key(path)
+            for path in (getattr(indexer, "only_paths", None) or set())
+            if str(path or "").strip()
+        }
+        if only_paths:
+            before = len(all_tasks)
+            all_tasks = [item for item in all_tasks if _task_matches_only_paths(item, only_paths)]
+            self._logger.info("Ограничение списка файлов: %d → %d по --only-paths-file", before, len(all_tasks))
 
         # Партиция по этапам: metadata берёт всё, small/large — свою категорию.
         if stage == "small":

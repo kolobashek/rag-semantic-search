@@ -11,6 +11,7 @@ import pytest
 from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
 from rag_catalog.core.extractors import document_from_legacy_text
 from rag_catalog.core.index_state_db import IndexStateDB
+from rag_catalog.core.indexing.stage_runner import _normalize_only_path_key, _task_matches_only_paths
 from rag_catalog.core.telemetry_db import TelemetryDB
 
 
@@ -25,6 +26,12 @@ class _FakeVec:
 class _FakeEmbedder:
     def encode(self, chunks, normalize_embeddings=True, batch_size=256, show_progress_bar=False):
         return [_FakeVec([0.1, 0.2, 0.3]) for _ in chunks]
+
+
+def test_only_path_filter_matches_windows_and_posix_forms() -> None:
+    allowed = {_normalize_only_path_key(r"O:\Обмен\docs\a.pdf")}
+    assert _task_matches_only_paths({"state_key": "O:/Обмен/docs/a.pdf"}, allowed)
+    assert not _task_matches_only_paths({"state_key": r"O:\Обмен\docs\b.pdf"}, allowed)
 
 
 class _FakeQdrant:

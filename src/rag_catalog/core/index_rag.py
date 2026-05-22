@@ -394,6 +394,7 @@ class RAGIndexer:
         ocr_engine: str = "tesseract",
         qdrant_timeout_sec: int = 60,
         exclude_patterns: Optional[List[str]] = None,
+        only_paths: Optional[set[str]] = None,
         ocr_max_image_pages: int = MAX_IMAGE_PAGES,
         catalog_wait_attempts: int = 10,
         catalog_wait_seconds: int = 60,
@@ -436,6 +437,7 @@ class RAGIndexer:
         self.read_workers = read_workers
         self.qdrant_timeout_sec = max(5, int(qdrant_timeout_sec or 60))
         self.exclude_patterns = self._normalize_exclude_patterns(exclude_patterns or [])
+        self.only_paths = {str(path).strip() for path in (only_paths or set()) if str(path).strip()}
         self.ocr_max_image_pages = max(1, int(ocr_max_image_pages or MAX_IMAGE_PAGES))
         self.small_office_mb = float(DEFAULT_SMALL_OFFICE_MB if small_office_mb is None else small_office_mb)
         self.small_pdf_mb = float(DEFAULT_SMALL_PDF_MB if small_pdf_mb is None else small_pdf_mb)
@@ -1523,6 +1525,12 @@ def main() -> None:
         "как stage=metadata (чтобы они переиндексировались на этапах small/large). "
         "Пример: --mark-stage-metadata-for .pdf. Пригодится после legacy-прохода --metadata-only-for.",
     )
+    parser.add_argument(
+        "--only-paths-file",
+        default="",
+        dest="only_paths_file",
+        help="Обработать только пути из UTF-8 файла (по одному full_path/state_key на строку).",
+    )
     args = parser.parse_args()
     if args.force_ocr:
         args.no_ocr = False
@@ -1557,6 +1565,15 @@ def main() -> None:
     telemetry_path = (cfg.get("telemetry_db_path") or "").strip()
     if not telemetry_path:
         telemetry_path = str(Path(args.db) / "rag_telemetry.db")
+    only_paths: set[str] = set()
+    if args.only_paths_file:
+        only_paths_path = Path(str(args.only_paths_file))
+        only_paths = {
+            line.strip()
+            for line in only_paths_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        logger.info("Ограничение индексации по файлу %s: %d путей", only_paths_path, len(only_paths))
 
     indexer = RAGIndexer(
         catalog_path=args.catalog,
@@ -1585,6 +1602,7 @@ def main() -> None:
         ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
         exclude_patterns=list(cfg.get("index_exclude_patterns") or []),
+        only_paths=only_paths,
         ocr_max_image_pages=int(cfg.get("ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
         catalog_wait_attempts=int(cfg.get("catalog_wait_attempts", 10) or 10),
         catalog_wait_seconds=int(cfg.get("catalog_wait_seconds", 60) or 60),
