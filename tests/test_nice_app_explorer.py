@@ -1799,7 +1799,63 @@ def test_cloud_drive_search_filter_uses_registry_acl(tmp_path) -> None:
         ],
     )
 
-    assert [item["filename"] for item in filtered] == ["local.txt", "report.txt"]
+    assert [item["filename"] for item in filtered] == ["report.txt"]
+
+
+def test_cloud_drive_search_filter_maps_filesystem_paths_to_registry_acl(tmp_path) -> None:
+    catalog = tmp_path / "catalog"
+    allowed_dir = catalog / "Allowed"
+    blocked_dir = catalog / "Blocked"
+    allowed_dir.mkdir(parents=True)
+    blocked_dir.mkdir()
+    allowed_path = allowed_dir / "report.txt"
+    blocked_path = blocked_dir / "secret.txt"
+    allowed_path.write_text("ok", encoding="utf-8")
+    blocked_path.write_text("secret", encoding="utf-8")
+    cfg = {
+        "catalog_path": str(catalog),
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path=str(catalog))
+    allowed = service.registry.upsert_folder(path="Allowed", name="Allowed", parent_id=root.id, depth=1, source_path=str(allowed_dir))
+    blocked = service.registry.upsert_folder(path="Blocked", name="Blocked", parent_id=root.id, depth=1, source_path=str(blocked_dir))
+    service.registry.upsert_file(
+        folder_id=allowed.id,
+        path="Allowed/report.txt",
+        name="report.txt",
+        storage_key="objects/allowed",
+        mime_type="text/plain",
+        size_bytes=2,
+        checksum="ok",
+        source_path=str(allowed_path),
+    )
+    service.registry.upsert_file(
+        folder_id=blocked.id,
+        path="Blocked/secret.txt",
+        name="secret.txt",
+        storage_key="objects/blocked",
+        mime_type="text/plain",
+        size_bytes=6,
+        checksum="secret",
+        source_path=str(blocked_path),
+    )
+    service.grant_path_permission(subject_type="user", subject_id="user", path="Allowed", access_level="viewer")
+
+    filtered = _filter_cloud_drive_search_results(
+        cfg,
+        {"username": "user", "role": "user"},
+        [
+            {"filename": "report.txt", "full_path": str(allowed_path)},
+            {"filename": "secret.txt", "full_path": str(blocked_path)},
+            {"filename": "orphan.txt", "full_path": str(catalog / "orphan.txt")},
+        ],
+    )
+
+    assert [item["filename"] for item in filtered] == ["report.txt"]
+    assert filtered[0]["cloud_path"] == "Allowed/report.txt"
 
 
 def test_cloud_drive_api_admin_guard_rejects_non_admin(tmp_path) -> None:

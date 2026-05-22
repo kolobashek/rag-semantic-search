@@ -1202,6 +1202,48 @@ def _cd_registry_acl_allows(
         return True
 
 
+def _cd_registry_node_for_search_item(
+    cfg: Dict[str, Any],
+    service: CloudDriveService,
+    item: Dict[str, Any],
+) -> Any:
+    cloud_path = str(item.get("cloud_path") or "").strip()
+    if cloud_path:
+        node = service.registry.get_node_by_path(cloud_path)
+        if node is not None:
+            return node
+    cloud_file_id = str(item.get("cloud_file_id") or "").strip()
+    if cloud_file_id:
+        node = service.registry.get_file_by_id(cloud_file_id)
+        if node is not None:
+            return node
+
+    raw_path = str(
+        item.get("source_path")
+        or item.get("full_path")
+        or item.get("filepath")
+        or item.get("path")
+        or ""
+    ).strip()
+    if not raw_path:
+        return None
+
+    node = service.registry.get_node_by_source_path(raw_path)
+    if node is not None:
+        return node
+
+    catalog = str(cfg.get("catalog_path") or "").strip()
+    if catalog:
+        try:
+            rel = Path(raw_path).resolve().relative_to(Path(catalog).resolve())
+            node = service.registry.get_node_by_path(str(rel).replace("\\", "/"))
+            if node is not None:
+                return node
+        except Exception:
+            pass
+    return None
+
+
 def _filter_cloud_drive_search_results(
     cfg: Dict[str, Any],
     user: Dict[str, Any] | None,
@@ -1212,29 +1254,34 @@ def _filter_cloud_drive_search_results(
     service: CloudDriveService | None = None
     decisions: Dict[tuple[str, str], bool] = {}
     filtered: List[Dict[str, Any]] = []
+    is_admin = str((user or {}).get("role") or "").strip().lower() == "admin"
     for item in results:
-        cloud_file_id = str(item.get("cloud_file_id") or "").strip()
-        cloud_path = str(item.get("cloud_path") or item.get("path") or item.get("full_path") or "").strip()
-        if not (cloud_file_id or item.get("cloud_path")):
+        if service is None:
+            try:
+                service = CloudDriveService.from_config(cfg)
+            except Exception:
+                service = None
+        if service is None:
             filtered.append(item)
             continue
-        key = (cloud_file_id, cloud_path)
+
+        node = _cd_registry_node_for_search_item(cfg, service, item)
+        if node is None:
+            if is_admin:
+                filtered.append(item)
+            continue
+
+        node_path = str(getattr(node, "path", "") or "")
+        cloud_file_id = str(getattr(node, "id", "") or "") if hasattr(node, "folder_id") else ""
+        key = (cloud_file_id, node_path)
         allowed = decisions.get(key)
         if allowed is None:
-            if service is None:
-                try:
-                    service = CloudDriveService.from_config(cfg)
-                except Exception:
-                    service = None
-            allowed = _cd_registry_acl_allows(
-                cfg,
-                user,
-                cloud_path,
-                file_id=cloud_file_id,
-                service=service,
-            )
+            allowed = _cd_registry_acl_allows(cfg, user, node_path, file_id=cloud_file_id, service=service)
             decisions[key] = allowed
         if allowed:
+            item.setdefault("cloud_path", node_path)
+            if cloud_file_id:
+                item.setdefault("cloud_file_id", cloud_file_id)
             filtered.append(item)
     return filtered
 

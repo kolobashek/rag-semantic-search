@@ -553,6 +553,31 @@ class CloudDriveRegistryDB:
             return folder
         return self.get_file_by_path(clean_path)
 
+    def get_node_by_source_path(self, source_path: str) -> CloudDriveFolder | CloudDriveFile | None:
+        raw = str(source_path or '').strip()
+        if not raw:
+            return None
+        variants = {
+            raw,
+            raw.replace('\\', '/'),
+            raw.replace('/', '\\'),
+        }
+        with self._connect() as conn:
+            for value in variants:
+                folder = conn.execute(
+                    "SELECT * FROM cloud_folders WHERE source_path=? AND deleted_at='' LIMIT 1",
+                    (value,),
+                ).fetchone()
+                if folder is not None:
+                    return self._folder_from_row(folder)
+                file_row = conn.execute(
+                    "SELECT * FROM cloud_files WHERE source_path=? AND deleted_at='' LIMIT 1",
+                    (value,),
+                ).fetchone()
+                if file_row is not None:
+                    return self._file_from_row(file_row)
+        return None
+
     def list_files_in_folder(self, folder_id: str) -> List[CloudDriveFile]:
         with self._connect() as conn:
             rows = conn.execute(
