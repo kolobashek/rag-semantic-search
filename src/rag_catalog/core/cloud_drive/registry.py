@@ -600,50 +600,116 @@ class CloudDriveRegistryDB:
         escaped = cls._escape_like(value)
         return f'%{escaped}%'
 
-    def search_nodes(self, *, query: str, path: str = '', limit: int = 50) -> List[Dict[str, Any]]:
+    def search_nodes_page(
+        self,
+        *,
+        query: str,
+        path: str = '',
+        limit: int = 50,
+        offset: int = 0,
+        node_type: str = '',
+        extension: str = '',
+        mime_type: str = '',
+    ) -> Dict[str, Any]:
         needle = str(query or '').strip()
         if not needle:
-            return []
+            clean_path = self._normalize_path(path)
+            clean_limit = max(1, min(int(limit or 50), 500))
+            clean_offset = max(0, int(offset or 0))
+            return {
+                'query': '',
+                'path': clean_path,
+                'items': [],
+                'count': 0,
+                'total': 0,
+                'limit': clean_limit,
+                'offset': clean_offset,
+                'next_offset': None,
+            }
         clean_path = self._normalize_path(path)
         clean_limit = max(1, min(int(limit or 50), 500))
+        clean_offset = max(0, int(offset or 0))
+        clean_type = str(node_type or '').strip().lower()
+        if clean_type not in {'', 'file', 'folder'}:
+            clean_type = ''
+        clean_ext = str(extension or '').strip().lower().lstrip('.')
+        clean_mime = str(mime_type or '').strip().lower()
         pattern = self._like_contains(needle)
-        params: list[Any] = [pattern, pattern]
         folder_where = ["deleted_at=''", "(name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')"]
         file_where = ["deleted_at=''", "(name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')"]
+        folder_params: list[Any] = [pattern, pattern]
+        file_params: list[Any] = [pattern, pattern]
         if clean_path:
-            folder_where.append("path LIKE ? ESCAPE '\\'")
-            file_where.append("path LIKE ? ESCAPE '\\'")
-            params.append(f"{self._escape_like(clean_path)}/%")
-        with self._connect() as conn:
-            folder_rows = conn.execute(
+            folder_where.append("(path=? OR path LIKE ? ESCAPE '\\')")
+            file_where.append("(path=? OR path LIKE ? ESCAPE '\\')")
+            path_like = f"{self._escape_like(clean_path)}/%"
+            folder_params.extend([clean_path, path_like])
+            file_params.extend([clean_path, path_like])
+        if clean_ext:
+            file_where.append("lower(name) LIKE ? ESCAPE '\\'")
+            file_params.append(f"%.{self._escape_like(clean_ext)}")
+        if clean_mime:
+            file_where.append("lower(mime_type) LIKE ? ESCAPE '\\'")
+            file_params.append(self._like_contains(clean_mime))
+
+        selects: list[str] = []
+        params: list[Any] = []
+        count_selects: list[str] = []
+        count_params: list[Any] = []
+        if clean_type in {'', 'folder'} and not clean_ext and not clean_mime:
+            folder_filter = ' AND '.join(folder_where)
+            selects.append(
                 f"""
                 SELECT 'folder' AS node_type, id, name, path, source_path, 0 AS size_bytes,
                        '' AS mime_type, created_at, updated_at
                 FROM cloud_folders
-                WHERE {' AND '.join(folder_where)}
+                WHERE {folder_filter}
+                """
+            )
+            params.extend(folder_params)
+            count_selects.append(f"SELECT id FROM cloud_folders WHERE {folder_filter}")
+            count_params.extend(folder_params)
+        if clean_type in {'', 'file'}:
+            file_filter = ' AND '.join(file_where)
+            selects.append(
+                f"""
+                SELECT 'file' AS node_type, id, name, path, source_path, size_bytes,
+                       mime_type, created_at, updated_at
+                FROM cloud_files
+                WHERE {file_filter}
+                """
+            )
+            params.extend(file_params)
+            count_selects.append(f"SELECT id FROM cloud_files WHERE {file_filter}")
+            count_params.extend(file_params)
+        if not selects:
+            return {
+                'query': needle,
+                'path': clean_path,
+                'items': [],
+                'count': 0,
+                'total': 0,
+                'limit': clean_limit,
+                'offset': clean_offset,
+                'next_offset': None,
+            }
+
+        union_sql = "\nUNION ALL\n".join(selects)
+        count_sql = "\nUNION ALL\n".join(count_selects)
+        with self._connect() as conn:
+            total_row = conn.execute(f"SELECT COUNT(*) AS total FROM ({count_sql})", tuple(count_params)).fetchone()
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM ({union_sql})
                 ORDER BY updated_at DESC, name
                 LIMIT ?
+                OFFSET ?
                 """,
-                (*params, clean_limit),
+                (*params, clean_limit, clean_offset),
             ).fetchall()
-            remaining = clean_limit - len(folder_rows)
-            file_rows: list[sqlite3.Row] = []
-            if remaining > 0:
-                file_params: list[Any] = [pattern, pattern]
-                if clean_path:
-                    file_params.append(f"{self._escape_like(clean_path)}/%")
-                file_rows = conn.execute(
-                    f"""
-                    SELECT 'file' AS node_type, id, name, path, source_path, size_bytes,
-                           mime_type, created_at, updated_at
-                    FROM cloud_files
-                    WHERE {' AND '.join(file_where)}
-                    ORDER BY updated_at DESC, name
-                    LIMIT ?
-                    """,
-                    (*file_params, remaining),
-                ).fetchall()
-        return [
+        total = int(total_row['total'] if total_row else 0)
+        items = [
             {
                 'node_type': str(row['node_type']),
                 'id': str(row['id']),
@@ -655,8 +721,22 @@ class CloudDriveRegistryDB:
                 'created_at': str(row['created_at'] or ''),
                 'updated_at': str(row['updated_at'] or ''),
             }
-            for row in [*folder_rows, *file_rows]
+            for row in rows
         ]
+        next_offset = clean_offset + len(items) if clean_offset + len(items) < total else None
+        return {
+            'query': needle,
+            'path': clean_path,
+            'items': items,
+            'count': len(items),
+            'total': total,
+            'limit': clean_limit,
+            'offset': clean_offset,
+            'next_offset': next_offset,
+        }
+
+    def search_nodes(self, *, query: str, path: str = '', limit: int = 50) -> List[Dict[str, Any]]:
+        return list(self.search_nodes_page(query=query, path=path, limit=limit).get('items') or [])
 
     def list_file_versions(self, *, path: str) -> List[Dict[str, Any]]:
         file_row = self.get_file_by_path(path)

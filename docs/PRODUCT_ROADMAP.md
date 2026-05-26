@@ -339,6 +339,10 @@ Done criteria:
 
 Цель: первая версия для знакомых и пилотных клиентов.
 
+Статус:
+
+- DONE 2026-05-27: backend contract для registry search расширен до pagination/filter slice: `limit`, `offset`, `next_offset`, `total`, `node_type`, `extension`, `mime_type`; API добирает страницу после ACL-фильтрации, чтобы запрещенные документы не создавали пустую страницу при наличии разрешенных результатов дальше.
+
 Состав:
 
 - Cloud Drive как основной источник истины;

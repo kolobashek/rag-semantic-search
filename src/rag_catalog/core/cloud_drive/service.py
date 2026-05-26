@@ -687,20 +687,41 @@ class CloudDriveService:
             ],
         }
 
-    def search_nodes(self, *, query: str, path: str = '', limit: int = 50) -> dict:
+    def search_nodes(
+        self,
+        *,
+        query: str,
+        path: str = '',
+        limit: int = 50,
+        offset: int = 0,
+        node_type: str = '',
+        extension: str = '',
+        mime_type: str = '',
+    ) -> dict:
         clean_query = str(query or '').strip()
         if not clean_query:
-            return {'query': '', 'path': str(path or ''), 'items': [], 'count': 0}
+            return {
+                'query': '',
+                'path': str(path or ''),
+                'items': [],
+                'count': 0,
+                'total': 0,
+                'limit': max(1, min(int(limit or 50), 500)),
+                'offset': max(0, int(offset or 0)),
+                'next_offset': None,
+            }
         clean_path = str(path or '').strip().replace('\\', '/').strip('/')
         if clean_path and self.registry.get_folder_by_path(clean_path) is None:
             raise RuntimeError(f'Каталог не найден: {path}')
-        items = self.registry.search_nodes(query=clean_query, path=clean_path, limit=limit)
-        return {
-            'query': clean_query,
-            'path': clean_path,
-            'items': items,
-            'count': len(items),
-        }
+        return self.registry.search_nodes_page(
+            query=clean_query,
+            path=clean_path,
+            limit=limit,
+            offset=offset,
+            node_type=node_type,
+            extension=extension,
+            mime_type=mime_type,
+        )
 
     def list_changes(self, *, since: str = '', limit: int = 500) -> dict:
         changes = self.registry.list_changes(since=since, limit=limit)

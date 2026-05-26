@@ -36,6 +36,41 @@ def test_registry_root_folder_and_stats(tmp_path: Path) -> None:
     assert root.is_root is True
 
 
+def test_registry_search_nodes_page_filters_and_paginates(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')
+    docs = registry.upsert_folder(path='Docs', name='Docs', parent_id=root.id, depth=1)
+    registry.upsert_file(
+        folder_id=docs.id,
+        path='Docs/Alpha Contract.pdf',
+        name='Alpha Contract.pdf',
+        storage_key='objects/a',
+        mime_type='application/pdf',
+        size_bytes=12,
+        checksum='a',
+    )
+    registry.upsert_file(
+        folder_id=docs.id,
+        path='Docs/Alpha Budget.xlsx',
+        name='Alpha Budget.xlsx',
+        storage_key='objects/b',
+        mime_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        size_bytes=8,
+        checksum='b',
+    )
+
+    page = registry.search_nodes_page(query='Alpha', path='Docs', limit=1, node_type='file')
+
+    assert page['total'] == 2
+    assert page['count'] == 1
+    assert page['next_offset'] == 1
+
+    pdf_page = registry.search_nodes_page(query='Alpha', path='Docs', extension='pdf')
+
+    assert pdf_page['total'] == 1
+    assert pdf_page['items'][0]['path'] == 'Docs/Alpha Contract.pdf'
+
+
 def test_registry_user_permissions_close_open_default_for_regular_users(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')

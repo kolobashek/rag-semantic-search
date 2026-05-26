@@ -647,7 +647,16 @@ def api_cloud_drive_list(path: str = "", authorization: AuthHeader = "") -> Dict
 
 
 @app.get("/api/cloud-drive/search")
-def api_cloud_drive_search(query: str = "", path: str = "", limit: int = 50, authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_search(
+    query: str = "",
+    path: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    node_type: str = "",
+    extension: str = "",
+    mime_type: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     _require_cloud_drive_path_access(cfg, user, path)
@@ -655,17 +664,62 @@ def api_cloud_drive_search(query: str = "", path: str = "", limit: int = 50, aut
     if not clean_query:
         raise HTTPException(status_code=400, detail="Не задан query.")
     service = CloudDriveService.from_config(cfg)
+    clean_limit = max(1, min(int(limit or 50), 500))
+    clean_offset = max(0, int(offset or 0))
     try:
-        result = service.search_nodes(query=clean_query, path=path, limit=max(1, min(int(limit or 50), 500)))
+        result = service.search_nodes(
+            query=clean_query,
+            path=path,
+            limit=clean_limit,
+            offset=clean_offset,
+            node_type=node_type,
+            extension=extension,
+            mime_type=mime_type,
+        )
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "search_nodes", ok=False, details={"path": path, "query": clean_query, "error": str(exc)})
         raise HTTPException(status_code=404, detail=str(exc))
-    result["items"] = [
-        item for item in result.get("items", [])
+    items = [
+        item
+        for item in result.get("items", [])
         if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
     ]
+    next_offset = result.get("next_offset")
+    while len(items) < clean_limit and next_offset is not None:
+        extra_offset = int(next_offset)
+        try:
+            extra = service.search_nodes(
+                query=clean_query,
+                path=path,
+                limit=clean_limit,
+                offset=extra_offset,
+                node_type=node_type,
+                extension=extension,
+                mime_type=mime_type,
+            )
+        except RuntimeError:
+            break
+        consumed = 0
+        for item in extra.get("items", []):
+            consumed += 1
+            if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service):
+                items.append(item)
+                if len(items) >= clean_limit:
+                    break
+        if len(items) >= clean_limit:
+            candidate_offset = extra_offset + consumed
+            next_offset = candidate_offset if candidate_offset < int(extra.get("total") or 0) else None
+        else:
+            next_offset = extra.get("next_offset")
+    result["items"] = items[:clean_limit]
     result["count"] = len(result["items"])
-    _audit_cloud_drive_api_event(cfg, user, "search_nodes", details={"path": path, "query": clean_query, "count": result["count"]})
+    result["next_offset"] = next_offset
+    result["filters"] = {
+        "node_type": str(node_type or "").strip().lower(),
+        "extension": str(extension or "").strip().lower().lstrip("."),
+        "mime_type": str(mime_type or "").strip().lower(),
+    }
+    _audit_cloud_drive_api_event(cfg, user, "search_nodes", details={"path": path, "query": clean_query, "count": result["count"], "offset": clean_offset})
     return result
 
 

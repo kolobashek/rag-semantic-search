@@ -869,6 +869,52 @@ def test_cloud_drive_search_api_finds_files_by_name(monkeypatch, tmp_path) -> No
     assert result["items"][0]["path"] == "Docs/Contract Alpha.pdf"
 
 
+def test_cloud_drive_search_api_paginates_after_acl_filter(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
+    folder = service.registry.upsert_folder(path="Docs", name="Docs", parent_id=root.id, depth=1, source_path="")
+    service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Docs/Alpha Hidden.pdf",
+        name="Alpha Hidden.pdf",
+        storage_key="objects/hidden",
+        mime_type="application/pdf",
+        size_bytes=12,
+        checksum="hidden",
+        source_path="",
+    )
+    service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Docs/Alpha Visible.pdf",
+        name="Alpha Visible.pdf",
+        storage_key="objects/visible",
+        mime_type="application/pdf",
+        size_bytes=12,
+        checksum="visible",
+        source_path="",
+    )
+    service.registry.grant_permission(
+        subject_type="user",
+        subject_id="alice",
+        resource_type="path",
+        resource_id="Docs/Alpha Visible.pdf",
+        access_level="viewer",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "alice", "role": "user", "status": "active"})
+
+    result = api_cloud_drive_search(query="Alpha", limit=1, node_type="file", extension="pdf")
+
+    assert result["count"] == 1
+    assert result["items"][0]["path"] == "Docs/Alpha Visible.pdf"
+    assert result["filters"]["extension"] == "pdf"
+
+
 def test_cloud_drive_sync_api_contracts(monkeypatch, tmp_path) -> None:
     cfg = {
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
