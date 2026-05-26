@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
+import platform
 import signal
 import socket
 import subprocess
 import sys
 import time
+import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 import psutil
 
-from rag_catalog.core.log_history import last_error_from_history, open_run_log
+from rag_catalog.core.log_history import last_error_from_history, open_run_log, read_history_tail
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "logs" / "runtime"
@@ -487,6 +492,64 @@ def _restart(args: argparse.Namespace) -> int:
     return _start(args)
 
 
+def _redact_config(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(marker in lowered for marker in ("token", "password", "secret", "access_key", "api_key")):
+                redacted[str(key)] = "<redacted>" if str(item or "").strip() else ""
+            else:
+                redacted[str(key)] = _redact_config(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_config(item) for item in value]
+    return value
+
+
+def _platform_summary() -> str:
+    try:
+        return platform.platform()
+    except Exception:
+        return f"{platform.system()} {platform.release()}".strip()
+
+
+def _support_bundle(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    output_arg = str(args.output or "").strip()
+    output = Path(output_arg).expanduser() if output_arg else PROJECT_ROOT / "runtime" / "support" / f"rag-support-{timestamp}.zip"
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    status_buffer = io.StringIO()
+    with contextlib.redirect_stdout(status_buffer):
+        _status(str(args.host), int(args.port))
+
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "kind": "rag-catalog-support-bundle",
+        "version": 1,
+        "python": sys.version,
+        "platform": _platform_summary(),
+    }
+    runtime_dir = _shared_runtime_dir(cfg)
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        zf.writestr("config.redacted.json", json.dumps(_redact_config(cfg), ensure_ascii=False, indent=2))
+        zf.writestr("launcher_status.txt", status_buffer.getvalue())
+        for name in ("nice_app.log", "telegram_bot.log", "index_rag.log", "ocr_pdfs.log", "qdrant.log"):
+            tail = read_history_tail(name, max_chars=int(args.log_chars or 20000))
+            if tail:
+                zf.writestr(f"logs/{Path(name).stem}.tail.log", tail)
+        if runtime_dir.exists():
+            for path in runtime_dir.glob("*"):
+                if path.is_file():
+                    zf.write(path, f"runtime/{path.name}")
+    print(json.dumps({"support_bundle": str(output)}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Unified launcher for RAG web, Qdrant and Telegram bot.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -511,6 +574,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_restart.add_argument("--bot", choices=["auto", "on", "off"], default="auto")
     p_restart.add_argument("--with-qdrant", action="store_true", help="Stop managed qdrant before restart")
 
+    p_support = sub.add_parser("support-bundle", help="Write a redacted support diagnostic zip")
+    p_support.add_argument("--output", default="", help="Output zip path")
+    p_support.add_argument("--host", default="127.0.0.1")
+    p_support.add_argument("--port", type=int, default=8080)
+    p_support.add_argument("--log-chars", type=int, default=20000, help="Tail characters per logical log")
+
     args = parser.parse_args(argv)
     if args.cmd == "start":
         return _start(args)
@@ -520,6 +589,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _status(args.host, int(args.port))
     if args.cmd == "restart":
         return _restart(args)
+    if args.cmd == "support-bundle":
+        return _support_bundle(args)
     return 1
 
 

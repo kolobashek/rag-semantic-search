@@ -343,6 +343,7 @@ Done criteria:
 
 - DONE 2026-05-27: backend contract для registry search расширен до pagination/filter slice: `limit`, `offset`, `next_offset`, `total`, `node_type`, `extension`, `mime_type`; API добирает страницу после ACL-фильтрации, чтобы запрещенные документы не создавали пустую страницу при наличии разрешенных результатов дальше.
 - DONE 2026-05-27: backup/restore basics добавлены в Cloud Drive CLI: zip snapshot config + локальные SQLite state файлы с WAL checkpoint перед упаковкой; restore умеет безопасно разворачивать backup в отдельную директорию или по configured paths с `--force`.
+- DONE 2026-05-27: support bundle export добавлен в launcher: redacted config, launcher status, runtime pid markers и tails сегментированных логов в одном zip.
 
 Состав:
 

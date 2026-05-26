@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import zipfile
 from pathlib import Path
 
 from rag_catalog.cli import launcher
@@ -103,3 +105,30 @@ def test_restart_waits_for_web_port_to_close_before_start(monkeypatch) -> None:
 
     assert result == 0
     assert events == ["stop", "wait:127.0.0.1:8080", "start"]
+
+
+def test_support_bundle_redacts_config_and_includes_status(monkeypatch, tmp_path: Path) -> None:
+    cfg = {
+        "telegram_bot_token": "123456:secret",
+        "cloud_drive_s3_secret_key": "secret",
+        "qdrant_db_path": str(tmp_path / "state"),
+    }
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "web.pid").write_text('{"pid": 123}', encoding="utf-8")
+    output = tmp_path / "support.zip"
+    monkeypatch.setattr(launcher, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(launcher, "_shared_runtime_dir", lambda _cfg: runtime_dir)
+    monkeypatch.setattr(launcher, "_status", lambda host, port: print(f"status {host}:{port}"))
+    monkeypatch.setattr(launcher, "read_history_tail", lambda name, max_chars=20000: "ERROR line" if name == "nice_app.log" else "")
+
+    result = launcher.main(["support-bundle", "--output", str(output), "--host", "127.0.0.1", "--port", "8080"])
+
+    assert result == 0
+    with zipfile.ZipFile(output) as zf:
+        names = set(zf.namelist())
+        assert {"manifest.json", "config.redacted.json", "launcher_status.txt", "runtime/web.pid", "logs/nice_app.tail.log"} <= names
+        redacted = json.loads(zf.read("config.redacted.json").decode("utf-8"))
+        assert redacted["telegram_bot_token"] == "<redacted>"
+        assert redacted["cloud_drive_s3_secret_key"] == "<redacted>"
+        assert b"status 127.0.0.1:8080" in zf.read("launcher_status.txt")
