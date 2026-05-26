@@ -307,6 +307,17 @@ flowchart LR
 
 Цель: довести существующий RAG Catalog до состояния, которое можно уверенно показывать знакомым как ранний продукт.
 
+Статус 2026-05-27: baseline подтвержден на `main`.
+
+- `main` синхронизирован с `origin/main`, рабочее дерево чистое.
+- Full tests: `python -m pytest -q` -> 513 passed, 4 warnings.
+- Static checks: `python -m ruff check src tests scripts` -> green.
+- Cloud Drive focused tests: 101 passed.
+- Launcher status: web и Qdrant running; Telegram bot down из-за timeout к `api.telegram.org`, token в диагностике редактируется.
+- Search eval: Recall@10 0.875, MRR 0.953125, zero-result 0.0, p50 983 ms, p95 2369 ms.
+- Docker smoke: web и Qdrant поднялись на изолированных портах `18080`/`16333`, оба health probes вернули HTTP 200; smoke stack остановлен.
+- Следующий search-quality риск: категории `exact_number_or_vehicle` и `document_type` дают меньший recall, чем folder/name и OCR сценарии.
+
 Задачи:
 
 - зафиксировать текущий release tag после чистого CI;
