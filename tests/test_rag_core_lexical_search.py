@@ -134,6 +134,24 @@ def test_lexical_search_uses_search_aliases_for_company_card(tmp_path: Path) -> 
     assert out[0]["filename"] == "Карточка предприятия Спецмаш Альфа-Банк 2026.docx"
 
 
+def test_lexical_search_uses_service_context_for_requisites_query(tmp_path: Path) -> None:
+    service_folder = tmp_path / "Услуги" / "ООО СРК"
+    service_folder.mkdir(parents=True)
+    (service_folder / "Карточка_предприятия_СРК.docx").write_bytes(b"docx")
+    (tmp_path / "Реквизиты ООО ТСК.docx").write_bytes(b"docx")
+
+    s = _searcher_with_catalog(tmp_path)
+    out = s._lexical_catalog_search(
+        query="реквизиты обслуживания технических услуг",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+
+    files = [item["filename"] for item in out if item["type"] == "file_metadata"]
+    assert files.index("Карточка_предприятия_СРК.docx") < files.index("Реквизиты ООО ТСК.docx")
+
+
 def test_clear_filesystem_cache_forces_rescan(tmp_path: Path) -> None:
     (tmp_path / "old.pdf").write_bytes(b"%PDF")
     s = _searcher_with_catalog(tmp_path)

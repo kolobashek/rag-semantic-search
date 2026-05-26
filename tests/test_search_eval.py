@@ -33,6 +33,10 @@ def test_relevance_metrics_use_morphology_and_domain_aliases() -> None:
             "filename": "Шильдик Foton Lovol FL966H.jpg",
             "path": r"Документы на Технику\фото техники\Шильдик Foton Lovol FL966H.jpg",
         },
+        {
+            "filename": "Карточка_предприятия_СРК.docx",
+            "path": r"Катя\ООО ТСК\Услуги\ООО СРК\Карточка_предприятия_СРК.docx",
+        },
     ]
 
     assert recall_at_k(results[:1], ["счет", "оплата"], k=1) == 1
@@ -40,6 +44,7 @@ def test_relevance_metrics_use_morphology_and_domain_aliases() -> None:
     assert recall_at_k(results[2:3], ["touareg"], k=1) == 1
     assert recall_at_k(results[2:3], ["vin"], k=1) == 1
     assert recall_at_k(results[3:4], ["lovol", "vin"], k=1) == 1
+    assert recall_at_k(results[4:5], ["реквизит", "технических"], k=1) == 1
 
 
 def test_ndcg_is_bounded_when_many_results_match_same_expected_token() -> None:
