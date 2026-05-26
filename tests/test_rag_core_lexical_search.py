@@ -81,6 +81,43 @@ def test_lexical_search_keeps_numbered_scans_below_vehicle_docs(tmp_path: Path) 
     assert filenames.index("ПТС 050.pdf") < filenames.index("Осаго 050 туарег.pdf")
 
 
+def test_lexical_search_treats_vehicle_plate_as_vin_candidate(tmp_path: Path) -> None:
+    (tmp_path / "Погрузчик Lovol FL966H.jpg").write_bytes(b"jpg")
+    (tmp_path / "Шильдик Foton Lovol FL966H.jpg").write_bytes(b"jpg")
+    (tmp_path / "VIN Liugong 862H.jpg").write_bytes(b"jpg")
+
+    s = _searcher_with_catalog(tmp_path)
+    out = s._lexical_catalog_search(
+        query="vin lovol",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert out[0]["filename"] == "Шильдик Foton Lovol FL966H.jpg"
+
+
+def test_lexical_search_treats_vehicle_registration_docs_as_vin_candidate(tmp_path: Path) -> None:
+    folder = tmp_path / "Фольксваген Y 050 BY"
+    folder.mkdir()
+    (folder / "свидетельство о регистрации.jpg").write_bytes(b"jpg")
+    (folder / "паспорт транспортного средства.jpg").write_bytes(b"jpg")
+    (tmp_path / "VIN Liugong 862H.jpg").write_bytes(b"jpg")
+
+    s = _searcher_with_catalog(tmp_path)
+    out = s._lexical_catalog_search(
+        query="touareg O50 vin",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert out[0]["filename"] in {
+        "паспорт транспортного средства.jpg",
+        "свидетельство о регистрации.jpg",
+    }
+
+
 def test_lexical_search_uses_search_aliases_for_company_card(tmp_path: Path) -> None:
     (tmp_path / "Карточка предприятия Спецмаш Альфа-Банк 2026.docx").write_bytes(b"docx")
     (tmp_path / "Договор ООО Спецмаш.docx").write_bytes(b"docx")

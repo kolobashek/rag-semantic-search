@@ -163,7 +163,9 @@ def test_default_search_aliases_expand_query(tmp_path) -> None:
 
     vehicle = db.expand_search_query("touareg O50 vin")
     assert "фольксваген" in vehicle["expanded_query"].lower()
+    assert "шильдик" in vehicle["expanded_query"].lower()
     assert any(group["key"] == "vehicle_volkswagen_touareg" for group in vehicle["groups"])
+    assert any(group["key"] == "vehicle_vin_plate" for group in vehicle["groups"])
 
 
 def test_search_alias_group_can_be_saved_and_deleted(tmp_path) -> None:

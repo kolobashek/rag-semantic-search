@@ -1256,6 +1256,9 @@ class RAGSearcher:
             term in {"паспорт", "паспорта", "паспорты", "псм", "птс", "стс", "техпаспорт"}
             for term in raw_terms
         ) or any("паспорт техники" in label for label in alias_groups)
+        wants_vin_plate = "vin" in raw_terms
+        vin_context_terms = [term for term in raw_terms if term != "vin"]
+        vin_vehicle_doc_context_terms = [term for term in raw_terms if term not in {"vin", "птс", "стс"}]
         entity_terms = _extract_entities(query)
         query_norm = " ".join(terms)
         out: List[Dict[str, Any]] = []
@@ -1307,6 +1310,23 @@ class RAGSearcher:
                         break
             if (not raw_terms or raw_matched > 0) and alias_phrases and any(phrase and phrase in hay for phrase in alias_phrases):
                 score = max(score, 0.965)
+            if wants_vin_plate and not is_folder and (
+                "шильдик" in hay
+                or "табличка" in hay
+            ):
+                if vin_context_terms and all(self._term_matches(hay, term) for term in vin_context_terms):
+                    score = max(score, 0.985)
+                elif not vin_context_terms:
+                    score = max(score, 0.965)
+            if wants_vin_plate and not is_folder and (
+                "паспорт транспортного средства" in hay
+                or "свидетельство о регистрации" in hay
+                or "птс" in hay
+                or "стс" in hay
+            ) and vin_vehicle_doc_context_terms and all(
+                self._term_matches(hay, term) for term in vin_vehicle_doc_context_terms
+            ):
+                score = max(score, 0.985)
             if wants_machine_passport and not is_folder and (
                 "выписка из электронного паспорта" in hay
                 or "электронного паспорта" in hay

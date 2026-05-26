@@ -346,6 +346,7 @@ Done criteria:
 - DONE 2026-05-27: support bundle export добавлен в launcher: redacted config, launcher status, runtime pid markers и tails сегментированных логов в одном zip.
 - DONE 2026-05-27: первый search-quality sprint закрыл часть weak spots: eval учитывает морфологию, content snippets и доменные aliases, `nDCG` снова bounded 0..1; добавлены алиасы `touareg`/`туарег`/`фольксваген`; `паспорт PC300` больше не перехватывается spreadsheet numeric scan и ранжирует model PDF выше шильдиков/калькуляций. Search eval gate после правок: Recall@10 0.921875, p50 1131 ms, p95 2930 ms.
 - DONE 2026-05-27: model PDF boost для паспортных запросов сужен до точного entity-token в имени файла и исключает страховые документы, чтобы `touareg O50 vin птс стс` не поднимал ОСАГО или случайные `doc050...pdf` выше ПТС/СТС-like результатов. Search eval gate после правки: Recall@10 0.921875, p50 1414 ms, p95 3195 ms.
+- DONE 2026-05-27: VIN-доменный слой добавлен в lexical/BM25/eval/default aliases: `vin lovol` поднимает `Шильдик Foton Lovol FL966H.jpg` первым, а ПТС/СТС считаются релевантными носителями VIN при совпадении контекста машины. Search eval gate после правки: Recall@10 0.953125, MRR 0.984375, p50 1643 ms, p95 3817 ms.
 
 Состав:
 

@@ -69,6 +69,12 @@ DEFAULT_SEARCH_ALIAS_GROUPS: List[Dict[str, Any]] = [
         "negative_aliases": ["паспорт гражданина", "личный паспорт"],
     },
     {
+        "key": "vehicle_vin_plate",
+        "label": "VIN/шильдик техники",
+        "aliases": ["vin", "шильдик", "табличка", "заводская табличка", "номер рамы"],
+        "negative_aliases": [],
+    },
+    {
         "key": "contract",
         "label": "Договор",
         "aliases": ["договор", "договора", "контракт", "соглашение", "доп соглашение", "дс"],

@@ -29,11 +29,17 @@ def test_relevance_metrics_use_morphology_and_domain_aliases() -> None:
             "filename": "свидетельство о регистрации.jpg",
             "path": r"Док-ты техника\Старые\Фольксваген Y 050 BY\свидетельство о регистрации.jpg",
         },
+        {
+            "filename": "Шильдик Foton Lovol FL966H.jpg",
+            "path": r"Документы на Технику\фото техники\Шильдик Foton Lovol FL966H.jpg",
+        },
     ]
 
     assert recall_at_k(results[:1], ["счет", "оплата"], k=1) == 1
     assert recall_at_k(results[1:2], ["6357", "псм"], k=1) == 1
     assert recall_at_k(results[2:3], ["touareg"], k=1) == 1
+    assert recall_at_k(results[2:3], ["vin"], k=1) == 1
+    assert recall_at_k(results[3:4], ["lovol", "vin"], k=1) == 1
 
 
 def test_ndcg_is_bounded_when_many_results_match_same_expected_token() -> None:

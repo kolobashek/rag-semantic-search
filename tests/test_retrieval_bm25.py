@@ -60,3 +60,26 @@ def test_bm25_matches_touareg_against_russian_vehicle_folder() -> None:
     out = bm25_rank_items(items, ["touareg", "o50", "стс"], limit=2)
 
     assert out[0]["filename"] == "свидетельство о регистрации.jpg"
+
+
+def test_bm25_matches_vin_against_vehicle_plate_photo() -> None:
+    items = [
+        {
+            "kind": "file",
+            "filename": "Шильдик Foton Lovol FL966H.jpg",
+            "path": r"Документы на Технику\фото техники\Шильдик Foton Lovol FL966H.jpg",
+            "full_path": r"O:\Документы на Технику\фото техники\Шильдик Foton Lovol FL966H.jpg",
+            "extension": ".jpg",
+        },
+        {
+            "kind": "file",
+            "filename": "VIN Liugong 862H.jpg",
+            "path": r"Магазин\Нужное\Картинки\VIN Liugong 862H.jpg",
+            "full_path": r"O:\Магазин\Нужное\Картинки\VIN Liugong 862H.jpg",
+            "extension": ".jpg",
+        },
+    ]
+
+    out = bm25_rank_items(items, ["vin", "lovol"], limit=2)
+
+    assert out[0]["filename"] == "Шильдик Foton Lovol FL966H.jpg"
