@@ -550,15 +550,14 @@ Done criteria:
 
 ## 7. Ближайший порядок работ
 
-Рекомендуемый порядок после текущих незакоммиченных правок:
+Рекомендуемый порядок после текущего search-quality baseline:
 
-1. Закрыть текущий технический stage: форматы файлов, архивы, логи, тесты.
-2. Снять release baseline: качество поиска, latency, Docker, launcher, Cloud Drive smoke.
-3. Спроектировать Commercial MVP backlog: Cloud Drive product UX, groups/ACL UI, registry search, import folders.
-4. Продолжить search quality sprint: VIN-запросы, реквизиты с техническими услугами, eval semantics для model-only PDF паспортов.
-5. Сделать product UX sprint: explorer, preview, sharing, admin center.
-6. Сделать deployment sprint: installer, backup/restore, support bundle, license basics.
-7. Отдать первым знакомым на пилот.
+1. Снять повторяемый release smoke: Docker, launcher, Cloud Drive registry/storage/CLI, backup/restore, support bundle.
+2. Спроектировать Commercial MVP backlog: Cloud Drive product UX, groups/ACL UI, registry search, import folders.
+3. Сделать backend MVP sprint: import/watched folders, ACL edge cases, registry search filters, audit trail.
+4. Сделать product UX sprint: explorer, preview, sharing, admin center.
+5. Сделать deployment sprint: installer, backup/restore policy, support bundle, license basics.
+6. Подготовить pilot checklist и отдать первым знакомым на пилот.
 
 ## 8. Открытые вопросы
 
