@@ -61,6 +61,26 @@ def test_lexical_search_boosts_model_pdf_for_machine_passport_query(tmp_path: Pa
     assert out[0]["score"] >= 0.9996
 
 
+def test_lexical_search_keeps_numbered_scans_below_vehicle_docs(tmp_path: Path) -> None:
+    folder = tmp_path / "VOLKSWAGEN TOUAREG 050"
+    folder.mkdir()
+    (folder / "doc050225.pdf").write_bytes(b"%PDF")
+    (folder / "Осаго 050 туарег.pdf").write_bytes(b"%PDF")
+    (folder / "ПТС 050.pdf").write_bytes(b"%PDF")
+
+    s = _searcher_with_catalog(tmp_path)
+    out = s._lexical_catalog_search(
+        query="touareg O50 vin птс стс",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+
+    filenames = [x["filename"] for x in out]
+    assert filenames.index("ПТС 050.pdf") < filenames.index("doc050225.pdf")
+    assert filenames.index("ПТС 050.pdf") < filenames.index("Осаго 050 туарег.pdf")
+
+
 def test_lexical_search_uses_search_aliases_for_company_card(tmp_path: Path) -> None:
     (tmp_path / "Карточка предприятия Спецмаш Альфа-Банк 2026.docx").write_bytes(b"docx")
     (tmp_path / "Договор ООО Спецмаш.docx").write_bytes(b"docx")

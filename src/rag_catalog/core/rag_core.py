@@ -1269,6 +1269,7 @@ class RAGSearcher:
             hay = f"{name} {path}"
             path_parts = [p for p in re.split(r"[\\/]+", path) if p]
             parent_name = path_parts[-2] if len(path_parts) >= 2 else ""
+            name_terms = set(self._terms_from_text(name))
             if entity_terms and not any(self._term_matches(hay, e) for e in entity_terms):
                 continue
             matched = sum(1 for t in terms if self._term_matches(hay, t))
@@ -1317,8 +1318,13 @@ class RAGSearcher:
                 score = max(score, 0.992)
             elif wants_machine_passport and not is_folder and ("псм" in hay or "птс" in hay):
                 score = max(score, 0.996)
-            elif wants_machine_passport and not is_folder and str(item.get("extension") or "").lower() == ".pdf" and entity_terms and any(
-                self._term_matches(name, e) for e in entity_terms
+            elif (
+                wants_machine_passport
+                and not is_folder
+                and str(item.get("extension") or "").lower() == ".pdf"
+                and not any(noisy in hay for noisy in ("осаго", "страхов", "полис"))
+                and entity_terms
+                and any(any(variant in name_terms for variant in self._term_variants(e)) for e in entity_terms)
             ):
                 score = max(score, 0.9996)
             elif not is_folder and ("документы на технику" in hay or "док-ты техника" in hay):
