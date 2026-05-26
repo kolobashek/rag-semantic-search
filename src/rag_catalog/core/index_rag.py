@@ -32,6 +32,7 @@ from sentence_transformers import SentenceTransformer
 
 from .chunking import chunk_text, semantic_chunk_end
 from .embedding_collections import resolve_embedding_collection_name
+from .exact_tokens import add_numeric_tokens
 from .extractors import (
     ExtractedDocument,
     TextBlock,
@@ -41,6 +42,7 @@ from .extractors import (
     extract_doc,
     extract_doc_meta,
     extract_docx,
+    extract_html,
     extract_image,
     extract_pdf,
     extract_pdf_document,
@@ -52,7 +54,6 @@ from .extractors import (
     extract_text,
     ocr_pdf,
 )
-from .exact_tokens import add_numeric_tokens
 from .index_state_db import IndexStateDB
 from .indexer_control import read_indexer_control
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
@@ -84,14 +85,18 @@ SUPPORTED_EXTENSIONS = {
     ".doc",
     ".docx",
     ".xlsx",
+    ".xlsm",
     ".xls",
     ".pdf",
     ".pptx",
     ".rtf",
     ".txt",
     ".csv",
+    ".html",
+    ".htm",
     ".zip",
     ".7z",
+    ".rar",
     ".tar",
     ".tgz",
     ".tbz",
@@ -773,6 +778,9 @@ class RAGIndexer:
     def _extract_csv(self, filepath: Path) -> str:
         return extract_csv(filepath, max_chars=self._extractor_max_chars())
 
+    def _extract_html(self, filepath: Path) -> str:
+        return extract_html(filepath, max_chars=self._extractor_max_chars())
+
     def _extractor_max_chars(self) -> int:
         if self.current_stage != "small":
             return 0
@@ -800,7 +808,7 @@ class RAGIndexer:
         try:
             mtime = float(filepath.stat().st_mtime)
             cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
-            if cached is not None:
+            if isinstance(cached, dict):
                 logger.info("OCR из кэша без запуска OCR: %s", filepath.name)
                 return str(cached.get("extracted_text") or "")
         except Exception:
@@ -812,7 +820,7 @@ class RAGIndexer:
         try:
             mtime = float(filepath.stat().st_mtime)
             cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
-            if cached is not None:
+            if isinstance(cached, dict):
                 logger.info("OCR из кэша: %s", filepath.name)
                 return str(cached.get("extracted_text") or "")
         except Exception:
@@ -1056,7 +1064,7 @@ class RAGIndexer:
         elif ext == ".doc":
             full_text = self._extract_doc(filepath)
             file_type = "doc"
-        elif ext in (".xlsx", ".xls"):
+        elif ext in (".xlsx", ".xlsm", ".xls"):
             extracted_doc = self._extract_spreadsheet_document(filepath)
             full_text = extracted_doc.text
             file_type = "xlsx"
@@ -1073,6 +1081,9 @@ class RAGIndexer:
         elif ext == ".csv":
             full_text = self._extract_csv(filepath)
             file_type = "csv"
+        elif ext in (".html", ".htm"):
+            full_text = self._extract_html(filepath)
+            file_type = "html"
         elif ext == ".pdf":
             extracted_doc = self._extract_pdf_document(filepath)
             full_text = extracted_doc.text
@@ -1095,7 +1106,8 @@ class RAGIndexer:
         if content_hash and hasattr(self, "state_db"):
             duplicate = self.state_db.find_by_content_hash(content_hash, exclude_path=file_key)
             duplicate_of = str((duplicate or {}).get("full_path") or "")
-        stage_chunk_limit = int(self.max_chunks_per_file or 0) if self.current_stage == "small" else 0
+        current_stage = str(getattr(self, "current_stage", "") or "content")
+        stage_chunk_limit = int(self.max_chunks_per_file or 0) if current_stage == "small" else 0
         if stage_chunk_limit and len(chunks) >= stage_chunk_limit:
             logger.debug(
                 "Файл %s: %d чанков, обрезано до %d (--max-chunks-per-file)",
@@ -1212,7 +1224,7 @@ class RAGIndexer:
         self.point_count += written
         stage = (
             "partial"
-            if self.current_stage == "small" and chunks and total_chunks > len(chunks)
+            if current_stage == "small" and chunks and total_chunks > len(chunks)
             else "content" if chunks else "metadata"
         )
         status = "ok" if chunks else "empty"

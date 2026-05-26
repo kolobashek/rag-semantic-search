@@ -8,6 +8,7 @@ and log the concrete failure.
 from __future__ import annotations
 
 import csv
+import html as html_lib
 import logging
 import os
 import re
@@ -546,8 +547,8 @@ def extract_spreadsheet(filepath: Path, *, max_chars: int = 0) -> str:
     if ext == ".xls":
         logger.debug("Формат XLS — использую xlrd: %s", filepath.name)
         return extract_xls(filepath, max_chars=max_chars)
-    if ext == ".xlsx":
-        logger.debug("Формат XLSX — использую openpyxl: %s", filepath.name)
+    if ext in {".xlsx", ".xlsm"}:
+        logger.debug("Формат XLSX/XLSM — использую openpyxl: %s", filepath.name)
         return extract_xlsx(filepath, max_chars=max_chars)
     logger.warning("Неизвестное табличное расширение: %s", ext)
     return ""
@@ -559,8 +560,8 @@ def extract_spreadsheet_document(filepath: Path, *, max_chars: int = 0) -> Extra
     if ext == ".xls":
         logger.debug("Формат XLS — использую xlrd: %s", filepath.name)
         return extract_xls_document(filepath, max_chars=max_chars)
-    if ext == ".xlsx":
-        logger.debug("Формат XLSX — использую openpyxl: %s", filepath.name)
+    if ext in {".xlsx", ".xlsm"}:
+        logger.debug("Формат XLSX/XLSM — использую openpyxl: %s", filepath.name)
         return extract_xlsx_document(filepath, max_chars=max_chars)
     logger.warning("Неизвестное табличное расширение: %s", ext)
     return ExtractedDocument(blocks=())
@@ -585,6 +586,23 @@ def extract_text(filepath: Path, *, max_chars: int = 0) -> str:
         return _read_text_file(filepath, max_chars=max_chars)
     except Exception as exc:
         logger.warning("Ошибка чтения TXT %s: %s", filepath, exc)
+        return ""
+
+
+def extract_html(filepath: Path, *, max_chars: int = 0) -> str:
+    """Extract visible text from saved HTML/HTM files."""
+    try:
+        text = _read_text_file(filepath, max_chars=0)
+        text = re.sub(r"(?is)<(script|style|noscript)\b.*?</\1>", " ", text)
+        text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+        text = re.sub(r"(?i)</\s*(p|div|li|tr|td|th|h[1-6]|section|article|table)\s*>", "\n", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = html_lib.unescape(text)
+        lines = [re.sub(r"[^\S\r\n]+", " ", line).strip() for line in text.splitlines()]
+        cleaned = "\n".join(line for line in lines if line)
+        return cleaned[:max_chars] if max_chars else cleaned
+    except Exception as exc:
+        logger.warning("Ошибка чтения HTML %s: %s", filepath, exc)
         return ""
 
 

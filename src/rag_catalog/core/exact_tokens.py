@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from typing import Iterable, List
 
-
 _MOJIBAKE_MARKERS = set("αΓπΣσΩδ∞φτ≈√ⁿ²■ «»")
 
 

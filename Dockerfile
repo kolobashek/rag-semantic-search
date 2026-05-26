@@ -11,12 +11,21 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
+        antiword \
+        catdoc \
         libglib2.0-0 \
         libgl1 \
+        libarchive-tools \
+        libreoffice-calc \
+        libreoffice-impress \
+        libreoffice-writer \
+        p7zip-full \
         poppler-utils \
         tesseract-ocr \
         tesseract-ocr-eng \
+        tesseract-ocr-osd \
         tesseract-ocr-rus \
+        unar \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./

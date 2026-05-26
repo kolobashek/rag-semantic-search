@@ -1731,7 +1731,10 @@ class CloudDriveService:
         return True, max(0, int(indexer.point_count) - before)
 
     def _build_shared_reindex_indexer(self, index_config: Dict[str, object]):
-        catalog_root = Path(str(index_config.get('catalog_path') or ''))
+        catalog_root_value = str(index_config.get('catalog_path') or '').strip()
+        if not catalog_root_value:
+            return None
+        catalog_root = Path(catalog_root_value)
         if not catalog_root.exists():
             return None
         if not str(index_config.get('qdrant_db_path') or '').strip() and not str(index_config.get('qdrant_url') or '').strip():

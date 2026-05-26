@@ -138,7 +138,7 @@ python index_rag.py --recreate --stage all
 
 Индексное состояние хранится в SQLite `index_state.db`, а не в JSON. Это снижает риск file-lock ошибок на Windows и позволяет безопаснее продолжать долгие прогоны.
 
-Поддерживаемые форматы: `.doc`, `.docx`, `.xls`, `.xlsx`, `.pdf`, `.pptx`, `.rtf`, `.txt`, `.csv`, изображения с OCR и `.zip`-архивы с такими файлами внутри.
+Поддерживаемые форматы: `.doc`, `.docx`, `.xls`, `.xlsx`, `.xlsm`, `.pdf`, `.pptx`, `.rtf`, `.txt`, `.csv`, `.html`, `.htm`, изображения с OCR и архивы `.zip`, `.7z`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz`, `.tbz2`, `.tar.xz`, `.txz`, `.rar` с такими файлами внутри.
 
 ## OCR
 
@@ -296,6 +296,12 @@ Copy-Item config.docker.example.json config.docker.json
 ```powershell
 docker compose up -d --build qdrant web
 ```
+
+Docker image ставит runtime-зависимости, чтобы индексатор меньше зависел от host-ПК:
+
+- OCR: `tesseract-ocr`, `tesseract-ocr-rus`, `poppler-utils`;
+- архивы: `libarchive-tools`/`bsdtar`, `p7zip-full`, `unar` (`.rar` читается через `bsdtar` или `7z`/`7zz`/`7za`);
+- legacy Office: `antiword`, `catdoc`, headless LibreOffice components.
 
 Если локальные порты заняты, переопредели их через env vars:
 

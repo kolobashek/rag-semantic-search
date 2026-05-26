@@ -125,3 +125,17 @@ def test_last_error_can_ignore_info_fallback(monkeypatch, tmp_path: Path) -> Non
 
     assert log_history.last_error_from_history("telegram_bot.log", include_fallback=False) == ""
     assert "Telegram bot started" in log_history.last_error_from_history("telegram_bot.log")
+
+
+def test_last_error_redacts_telegram_bot_token(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(log_history, "PROJECT_ROOT", tmp_path)
+    with log_history.open_run_log("telegram_bot.log", "BOT") as fh:
+        fh.write(
+            "2026-05-14 10:00:00 - ERROR - failed url: "
+            "https://api.telegram.org/bot123456789:ABC_secret/getUpdates\n"
+        )
+
+    error = log_history.last_error_from_history("telegram_bot.log")
+
+    assert "123456789:ABC_secret" not in error
+    assert "/bot<redacted>/" in error

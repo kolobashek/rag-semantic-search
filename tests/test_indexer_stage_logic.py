@@ -12,6 +12,7 @@ import pytest
 from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
 from rag_catalog.core.extractors import document_from_legacy_text
 from rag_catalog.core.index_state_db import IndexStateDB
+from rag_catalog.core.indexing import stage_runner
 from rag_catalog.core.indexing.stage_runner import _normalize_only_path_key, _task_matches_only_paths
 from rag_catalog.core.telemetry_db import TelemetryDB
 
@@ -135,6 +136,7 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx._extract_pdf_document = lambda _p: document_from_legacy_text(extracted_text)
     idx._extract_text = lambda p: p.read_text(encoding="utf-8")
     idx._extract_csv = lambda p: p.read_text(encoding="utf-8")
+    idx._extract_html = lambda p: p.read_text(encoding="utf-8")
     return idx
 
 
@@ -339,6 +341,46 @@ def test_7z_members_are_indexed_with_logical_archive_paths(tmp_path: Path) -> No
     assert stats["error_files"] == 0
     payloads = [point.payload for point in idx.qdrant.points]
     assert any(payload.get("path") == "docs.7z/folder/readme.txt" for payload in payloads)
+    assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
+
+
+def test_rar_members_are_indexed_through_7z_fallback(monkeypatch, tmp_path: Path) -> None:
+    archive = tmp_path / "docs.rar"
+    archive.write_bytes(b"fake rar payload")
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    def fake_which(name: str) -> str | None:
+        return "C:/Tools/7z.exe" if name == "7z" else None
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001
+        if cmd[1:3] == ["l", "-slt"]:
+            stdout = "\n".join(
+                [
+                    "Listing archive: docs.rar",
+                    "----------",
+                    "Path = folder/readme.txt",
+                    "Size = 8",
+                    "Attributes = A",
+                    "CRC = 1234ABCD",
+                    "",
+                ]
+            )
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        if cmd[1:4] == ["x", "-so", "-y"]:
+            return SimpleNamespace(returncode=0, stdout=b"rar text", stderr=b"")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(stage_runner.shutil, "which", fake_which)
+    monkeypatch.setattr(stage_runner.subprocess, "run", fake_run)
+
+    stats = idx.index_directory(stage="small")
+
+    state_key = f"{archive}::folder/readme.txt"
+    row = idx.state_db.get_entry(state_key)
+    assert row["stage"] == "content"
+    assert stats["error_files"] == 0
+    payloads = [point.payload for point in idx.qdrant.points]
+    assert any(payload.get("path") == "docs.rar/folder/readme.txt" for payload in payloads)
     assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
 
 

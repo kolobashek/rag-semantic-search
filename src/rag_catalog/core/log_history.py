@@ -250,6 +250,12 @@ def install_env_log_handler(*, logger: logging.Logger | None = None) -> bool:
 
 def last_error_from_history(path_or_name: str | Path, *, max_lines: int = 120, include_fallback: bool = True) -> str:
     patterns: Sequence[str] = ("Traceback", "ERROR", "Error", "Exception", "OperationalError", "ProxyError")
+
+    def _safe_line(value: str) -> str:
+        text = re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", value)
+        text = re.sub(r"bot\d{6,}:[A-Za-z0-9_-]+", "bot<redacted>", text)
+        return re.sub(r"\s+", " ", text).strip()[:220]
+
     fallback = ""
     for path in reversed(list_log_segments(path_or_name)):
         text = read_file_tail(path, max_chars=300_000)
@@ -258,12 +264,12 @@ def last_error_from_history(path_or_name: str | Path, *, max_lines: int = 120, i
         tail = text.splitlines()[-max(1, int(max_lines)) :]
         for line in reversed(tail):
             if any(pattern in line for pattern in patterns):
-                return re.sub(r"\s+", " ", line).strip()[:220]
+                return _safe_line(line)
         if not fallback:
             for line in reversed(tail):
                 value = line.strip()
                 if value:
-                    fallback = re.sub(r"\s+", " ", value).strip()[:220]
+                    fallback = _safe_line(value)
                     break
         if fallback and include_fallback:
             return fallback

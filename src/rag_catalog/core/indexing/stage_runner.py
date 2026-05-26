@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -15,13 +18,30 @@ from zipfile import ZipFile
 from qdrant_client.models import PointStruct
 from tqdm import tqdm
 
-from ..extractors import ExtractedDocument, extract_doc_meta
 from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
+from ..extractors import ExtractedDocument, extract_doc_meta
 from .qdrant_writer import upsert_points
 
-
 _TAR_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz")
-_NESTED_ARCHIVE_SUFFIXES = (*_TAR_ARCHIVE_SUFFIXES, ".zip", ".7z")
+_COMMAND_ARCHIVE_SUFFIXES = (".rar",)
+_NESTED_ARCHIVE_SUFFIXES = (*_TAR_ARCHIVE_SUFFIXES, ".zip", ".7z", *_COMMAND_ARCHIVE_SUFFIXES)
+_COMMAND_ARCHIVE_TOOLS = ("bsdtar", "7z", "7zz", "7za")
+_WINDOWS_7Z_PATHS = (
+    Path("C:/Program Files/7-Zip/7z.exe"),
+    Path("C:/Program Files (x86)/7-Zip/7z.exe"),
+)
+
+
+def _hidden_subprocess_kwargs() -> Dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0),
+        "startupinfo": startupinfo,
+    }
 
 
 def _archive_type_for_path(path: Path | str) -> str:
@@ -30,6 +50,8 @@ def _archive_type_for_path(path: Path | str) -> str:
         return "zip"
     if name.endswith(".7z"):
         return "7z"
+    if name.endswith(_COMMAND_ARCHIVE_SUFFIXES):
+        return "command"
     if name.endswith(_TAR_ARCHIVE_SUFFIXES):
         return "tar"
     return ""
@@ -37,6 +59,142 @@ def _archive_type_for_path(path: Path | str) -> str:
 
 def _is_nested_archive_member(name: str) -> bool:
     return str(name or "").lower().endswith(_NESTED_ARCHIVE_SUFFIXES)
+
+
+def _command_archive_tool() -> Tuple[str, str] | None:
+    for name in _COMMAND_ARCHIVE_TOOLS:
+        path = shutil.which(name)
+        if path:
+            return name, path
+    if os.name == "nt":
+        for path in _WINDOWS_7Z_PATHS:
+            if path.exists():
+                return "7z", str(path)
+    return None
+
+
+def _parse_7z_list_output(stdout: str) -> List[Dict[str, Any]]:
+    members: List[Dict[str, Any]] = []
+    in_entries = False
+    current: Dict[str, Any] = {}
+
+    def _flush() -> None:
+        nonlocal current
+        name = str(current.get("name") or "").strip()
+        attrs = str(current.get("attributes") or "")
+        is_folder = str(current.get("folder") or "").strip() == "+"
+        if name and not name.endswith("/") and "D" not in attrs and not is_folder:
+            members.append(dict(current))
+        current = {}
+
+    for line in str(stdout or "").splitlines():
+        raw = line.strip()
+        if raw.startswith("----------"):
+            in_entries = True
+            current = {}
+            continue
+        if not in_entries:
+            continue
+        if not raw:
+            if current:
+                _flush()
+            continue
+        key, sep, value = raw.partition(" = ")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "path":
+            if current:
+                _flush()
+            current["name"] = value
+        elif key == "size":
+            try:
+                current["size_bytes"] = int(value or 0)
+            except ValueError:
+                current["size_bytes"] = 0
+        elif key == "modified":
+            current["mtime_text"] = value
+        elif key == "crc":
+            current["crc"] = value
+        elif key == "attributes":
+            current["attributes"] = value
+        elif key == "folder":
+            current["folder"] = value
+    if current:
+        _flush()
+    return members
+
+
+def _list_command_archive_members(filepath: Path, *, timeout: int = 120) -> Tuple[str, List[Dict[str, Any]]]:
+    tool = _command_archive_tool()
+    if not tool:
+        raise RuntimeError("недоступны bsdtar/7z/7zz/7za")
+    tool_name, tool_path = tool
+    if tool_name == "bsdtar":
+        proc = subprocess.run(
+            [tool_path, "-tf", str(filepath)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            **_hidden_subprocess_kwargs(),
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "").strip() or f"{tool_name} exit code {proc.returncode}")
+        members = [
+            {"name": raw_name.strip(), "size_bytes": 0}
+            for raw_name in proc.stdout.splitlines()
+            if raw_name.strip() and not raw_name.strip().endswith("/")
+        ]
+        return tool_name, members
+
+    proc = subprocess.run(
+        [tool_path, "l", "-slt", "-sccUTF-8", str(filepath)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+        **_hidden_subprocess_kwargs(),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "").strip() or f"{tool_name} exit code {proc.returncode}")
+    return tool_name, _parse_7z_list_output(proc.stdout)
+
+
+def _extract_command_archive_member(archive_path: Path, member_name: str, *, timeout: int = 300) -> bytes:
+    tool = _command_archive_tool()
+    if not tool:
+        raise RuntimeError("недоступны bsdtar/7z/7zz/7za")
+    tool_name, tool_path = tool
+    if tool_name == "bsdtar":
+        proc = subprocess.run(
+            [tool_path, "-xOf", str(archive_path), member_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+            **_hidden_subprocess_kwargs(),
+        )
+    else:
+        proc = subprocess.run(
+            [tool_path, "x", "-so", "-y", "-sccUTF-8", str(archive_path), member_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+            **_hidden_subprocess_kwargs(),
+        )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(err or f"{tool_name} exit code {proc.returncode}")
+    return bytes(proc.stdout)
 
 
 def _normalize_only_path_key(value: Any) -> str:
@@ -296,6 +454,37 @@ class IndexStageRunner:
                 self._logger.warning("7Z %s не прочитан: %s", filepath, exc)
             return tasks
 
+        def _command_archive_tasks(filepath: Path) -> List[Dict[str, Any]]:
+            tasks: List[Dict[str, Any]] = []
+            archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
+            archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
+            try:
+                tool_name, members = _list_command_archive_members(filepath)
+                for member_info in members:
+                    raw_name = str(member_info.get("name") or "").strip()
+                    if not raw_name or raw_name.endswith("/"):
+                        continue
+                    size_bytes = int(member_info.get("size_bytes") or 0)
+                    member_mtime = archive_mtime
+                    task = _archive_member_task(
+                        filepath=filepath,
+                        archive_fingerprint=archive_fingerprint,
+                        archive_mtime=archive_mtime,
+                        archive_rel=archive_rel,
+                        archive_type="command",
+                        archive_member_raw=raw_name,
+                        archive_member_display=raw_name,
+                        size_bytes=size_bytes,
+                        member_mtime=member_mtime,
+                        fingerprint_extra=f"{tool_name}:{raw_name}:{size_bytes}:{member_info.get('crc') or ''}:{archive_fingerprint}",
+                    )
+                    if task is not None:
+                        tasks.append(task)
+                archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
+            except Exception as exc:
+                self._logger.warning("Архив %s не прочитан: %s", filepath, exc)
+            return tasks
+
         all_tasks: List[Dict[str, Any]] = []
         for filepath in all_files:
             archive_type = _archive_type_for_path(filepath)
@@ -305,6 +494,8 @@ class IndexStageRunner:
                 all_tasks.extend(_tar_tasks(filepath))
             elif archive_type == "7z":
                 all_tasks.extend(_seven_zip_tasks(filepath))
+            elif archive_type == "command":
+                all_tasks.extend(_command_archive_tasks(filepath))
             else:
                 all_tasks.append(_normal_task(filepath))
 
@@ -566,6 +757,8 @@ class IndexStageRunner:
                     product = factory.get(member_name)
                     product.seek(0)
                     return product.read()
+                if archive_type == "command":
+                    return _extract_command_archive_member(archive_path, member_name)
                 raise ValueError(f"Неподдерживаемый тип архива: {archive_type}")
 
             # Режим «только метадата»: либо текущий этап = metadata,
@@ -580,7 +773,7 @@ class IndexStageRunner:
             elif ext == ".doc":
                 file_type = "doc"
                 _fn = indexer._extract_doc
-            elif ext in (".xlsx", ".xls"):
+            elif ext in (".xlsx", ".xlsm", ".xls"):
                 file_type = "xlsx"
                 _fn = None
                 _doc_fn = indexer._extract_spreadsheet_document
@@ -597,6 +790,9 @@ class IndexStageRunner:
             elif ext == ".csv":
                 file_type = "csv"
                 _fn = indexer._extract_csv
+            elif ext in (".html", ".htm"):
+                file_type = "html"
+                _fn = indexer._extract_html
             elif ext == ".pdf":
                 file_type = "pdf"
                 _fn = None

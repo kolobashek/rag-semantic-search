@@ -8,6 +8,7 @@ Imported by: api.py, nice_app.py.
 from __future__ import annotations
 
 import html
+import json
 import re
 import sqlite3
 import subprocess
@@ -20,6 +21,7 @@ from urllib.parse import quote
 from nicegui import ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.exact_tokens import query_numeric_tokens
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.log_history import (
     iter_history_texts,
@@ -27,7 +29,6 @@ from rag_catalog.core.log_history import (
     read_history_tail,
     read_history_tail_lines,
 )
-from rag_catalog.core.exact_tokens import query_numeric_tokens
 from rag_catalog.core.rag_core import RAGSearcher
 
 from .state import (
