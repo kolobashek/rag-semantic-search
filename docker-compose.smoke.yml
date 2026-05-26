@@ -1,5 +1,11 @@
 services:
+  qdrant:
+    ports: !override
+      - "${QDRANT_PORT:-16333}:6333"
+
   web:
+    ports: !override
+      - "${RAG_WEB_PORT:-18080}:8080"
     volumes: !override
       - app_state:/data/state
       - app_logs:/data/logs

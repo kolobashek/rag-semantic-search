@@ -323,8 +323,6 @@ $env:RAG_CONFIG_PATH = "C:\path\to\config.docker.json"
 Для release smoke без host bind mounts, которые иногда ломаются в Docker Desktop на Windows-дисках:
 
 ```powershell
-$env:QDRANT_PORT = "16333"
-$env:RAG_WEB_PORT = "18080"
 docker compose -p semanticsearch_smoke -f docker-compose.yml -f docker-compose.smoke.yml up -d qdrant web
 docker compose -p semanticsearch_smoke -f docker-compose.yml -f docker-compose.smoke.yml down --remove-orphans
 ```

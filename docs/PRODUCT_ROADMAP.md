@@ -349,6 +349,7 @@ Done criteria:
 - DONE 2026-05-27: VIN-доменный слой добавлен в lexical/BM25/eval/default aliases: `vin lovol` поднимает `Шильдик Foton Lovol FL966H.jpg` первым, а ПТС/СТС считаются релевантными носителями VIN при совпадении контекста машины. Search eval gate после правки: Recall@10 0.953125, MRR 0.984375, p50 1643 ms, p95 3817 ms.
 - DONE 2026-05-27: service/requisites-доменный слой добавлен для `реквизиты обслуживания технических услуг`: `реквизит` связывается с карточкой предприятия, а `обслуживание`/`технические услуги` с `Услуги`/`ремонт`/`сервис`. Search eval gate после правки: Recall@10 0.96875, MRR 1.0, p50 1453 ms, p95 3316 ms.
 - DONE 2026-05-27: eval semantics для model-only PDF паспортов уточнена: если запрос ожидает `паспорт`/`ПСМ`, PDF с совпавшей entity (`PC300`, `6357`) засчитывается как релевантный паспорт, а фото без PDF - нет. Search eval gate после правки: Recall@10 1.0, MRR 1.0, zero-result 0.0, p50 1440 ms, p95 3283 ms.
+- DONE 2026-05-27: release smoke повторен после baseline: launcher status показывает web/Qdrant up, Cloud Drive CLI stats green (`76205` files, `109836` versions, pending jobs `0`), support bundle/backup/restore green; Docker smoke исправлен на default isolated ports `18080`/`16333` и health probes вернули HTTP 200. Runtime warning: Telegram bot down из-за timeout к `api.telegram.org` при включенном токене.
 
 Состав:
 
