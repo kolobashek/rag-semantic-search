@@ -215,6 +215,8 @@ python cloud_drive.py init --enable
 python cloud_drive.py stats
 python cloud_drive.py bootstrap --max-files 1000
 python cloud_drive.py compact-versions
+python cloud_drive.py backup --output runtime/backups/cloud-drive.zip
+python cloud_drive.py restore runtime/backups/cloud-drive.zip --target-dir runtime/restore-check
 ```
 
 Admin UI:

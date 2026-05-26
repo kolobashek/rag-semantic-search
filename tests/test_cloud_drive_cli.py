@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 from rag_catalog.cli import cloud_drive
@@ -81,3 +82,45 @@ def test_cloud_drive_cli_compact_versions(tmp_path: Path, monkeypatch) -> None:
 
     assert rc == 0
     assert len(registry.list_file_versions(path='hello.txt')) == 1
+
+
+def test_cloud_drive_cli_backup_and_restore_to_target_dir(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / 'state'
+    state_dir.mkdir()
+    db_path = state_dir / 'cloud_drive.db'
+    registry = CloudDriveRegistryDB(str(db_path))
+    root = registry.ensure_root_folder(root_name='root')
+    registry.upsert_file(
+        folder_id=root.id,
+        path='hello.txt',
+        name='hello.txt',
+        storage_key='objects/sha256/aa/bb/aabb.txt',
+        mime_type='text/plain',
+        size_bytes=5,
+        checksum='aabb',
+    )
+    config = {
+        'qdrant_db_path': str(state_dir),
+        'cloud_drive_db_path': str(db_path),
+        'cloud_drive_storage': 'local',
+        'cloud_drive_storage_root': str(state_dir / 'storage'),
+    }
+    monkeypatch.setattr(cloud_drive, 'load_config', lambda: dict(config))
+    monkeypatch.setattr(cloud_drive, 'save_config', lambda cfg: None)
+    backup_path = tmp_path / 'backup.zip'
+
+    rc = cloud_drive.main(['backup', '--output', str(backup_path)])
+
+    assert rc == 0
+    with zipfile.ZipFile(backup_path) as zf:
+        names = set(zf.namelist())
+        assert 'manifest.json' in names
+        assert 'config.snapshot.json' in names
+        assert 'files/cloud_drive_db.db' in names
+
+    restore_dir = tmp_path / 'restore'
+    rc = cloud_drive.main(['restore', str(backup_path), '--target-dir', str(restore_dir)])
+
+    assert rc == 0
+    restored = CloudDriveRegistryDB(str(restore_dir / 'cloud_drive.db'))
+    assert restored.get_file_by_path('hello.txt') is not None
