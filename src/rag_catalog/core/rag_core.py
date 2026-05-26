@@ -364,11 +364,15 @@ class RAGSearcher:
             early_numeric_tokens = [
                 token for token in query_numeric_tokens(lexical_query) if len(token) >= 5
             ]
-            early_numeric_results = self._spreadsheet_numeric_exact_scan(
-                query=lexical_query,
-                tokens=early_numeric_tokens,
-                limit=limit,
-                file_type=file_type,
+            early_numeric_results = (
+                self._spreadsheet_numeric_exact_scan(
+                    query=lexical_query,
+                    tokens=early_numeric_tokens,
+                    limit=limit,
+                    file_type=file_type,
+                )
+                if early_numeric_tokens
+                else []
             )
             if early_numeric_results:
                 results = self._merge_ranked_results(
@@ -1307,8 +1311,16 @@ class RAGSearcher:
                 or "электронного паспорта" in hay
             ):
                 score = max(score, 0.998)
+            elif wants_machine_passport and not is_folder and "паспорт" in name and (
+                not entity_terms or any(self._term_matches(hay, e) for e in entity_terms)
+            ):
+                score = max(score, 0.992)
             elif wants_machine_passport and not is_folder and ("псм" in hay or "птс" in hay):
                 score = max(score, 0.996)
+            elif wants_machine_passport and not is_folder and str(item.get("extension") or "").lower() == ".pdf" and entity_terms and any(
+                self._term_matches(name, e) for e in entity_terms
+            ):
+                score = max(score, 0.9996)
             elif not is_folder and ("документы на технику" in hay or "док-ты техника" in hay):
                 score = min(0.94, score + 0.04)
             if query_norm and query_norm in name:

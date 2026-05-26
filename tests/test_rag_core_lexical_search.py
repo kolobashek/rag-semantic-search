@@ -44,6 +44,23 @@ def test_lexical_search_requires_entity_match_when_query_has_entity(tmp_path: Pa
     assert [x["filename"] for x in out] == ["PC300.pdf"]
 
 
+def test_lexical_search_boosts_model_pdf_for_machine_passport_query(tmp_path: Path) -> None:
+    (tmp_path / "Шильдик ДВС Komatsu PC300.jpg").write_bytes(b"jpg")
+    (tmp_path / "Экскаватор KOMATSU PC300-8 калькуляция 2024.xlsx").write_bytes(b"xlsx")
+    (tmp_path / "PC300.pdf").write_bytes(b"%PDF")
+
+    s = _searcher_with_catalog(tmp_path)
+    out = s._lexical_catalog_search(
+        query="паспорт PC300",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert out[0]["filename"] == "PC300.pdf"
+    assert out[0]["score"] >= 0.9996
+
+
 def test_lexical_search_uses_search_aliases_for_company_card(tmp_path: Path) -> None:
     (tmp_path / "Карточка предприятия Спецмаш Альфа-Банк 2026.docx").write_bytes(b"docx")
     (tmp_path / "Договор ООО Спецмаш.docx").write_bytes(b"docx")

@@ -125,6 +125,22 @@ def test_search_no_results_is_valid_empty_list_and_truncates_query() -> None:
     assert "truncated_from=" in call["error"]
 
 
+def test_search_does_not_run_spreadsheet_numeric_scan_for_alphanumeric_model(monkeypatch) -> None:
+    s = _make_searcher(connected=True)
+    called = False
+
+    def fake_scan(**_kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(s, "_spreadsheet_numeric_exact_scan", fake_scan)
+
+    s.search("паспорт PC300", source="test")
+
+    assert called is False
+
+
 def test_search_sets_content_only_must_not_filter() -> None:
     s = _make_searcher(connected=True)
     s.search("abc", content_only=True, source="test")

@@ -344,7 +344,7 @@ Done criteria:
 - DONE 2026-05-27: backend contract для registry search расширен до pagination/filter slice: `limit`, `offset`, `next_offset`, `total`, `node_type`, `extension`, `mime_type`; API добирает страницу после ACL-фильтрации, чтобы запрещенные документы не создавали пустую страницу при наличии разрешенных результатов дальше.
 - DONE 2026-05-27: backup/restore basics добавлены в Cloud Drive CLI: zip snapshot config + локальные SQLite state файлы с WAL checkpoint перед упаковкой; restore умеет безопасно разворачивать backup в отдельную директорию или по configured paths с `--force`.
 - DONE 2026-05-27: support bundle export добавлен в launcher: redacted config, launcher status, runtime pid markers и tails сегментированных логов в одном zip.
-- DONE 2026-05-27: первый search-quality sprint закрыл часть weak spots: eval учитывает морфологию, content snippets и доменные aliases, `nDCG` снова bounded 0..1; добавлены алиасы `touareg`/`туарег`/`фольксваген`; Search eval поднялся с Recall@10 0.875 до 0.9375, p50 1175 ms, p95 2903 ms.
+- DONE 2026-05-27: первый search-quality sprint закрыл часть weak spots: eval учитывает морфологию, content snippets и доменные aliases, `nDCG` снова bounded 0..1; добавлены алиасы `touareg`/`туарег`/`фольксваген`; `паспорт PC300` больше не перехватывается spreadsheet numeric scan и ранжирует model PDF выше шильдиков/калькуляций. Search eval gate после правок: Recall@10 0.921875, p50 1131 ms, p95 2930 ms.
 
 Состав:
 
@@ -551,7 +551,7 @@ Done criteria:
 1. Закрыть текущий технический stage: форматы файлов, архивы, логи, тесты.
 2. Снять release baseline: качество поиска, latency, Docker, launcher, Cloud Drive smoke.
 3. Спроектировать Commercial MVP backlog: Cloud Drive product UX, groups/ACL UI, registry search, import folders.
-4. Продолжить search quality sprint: точный поиск паспортов техники по модели (`паспорт PC300`), VIN-запросы, реквизиты с техническими услугами.
+4. Продолжить search quality sprint: VIN-запросы, реквизиты с техническими услугами, eval semantics для model-only PDF паспортов.
 5. Сделать product UX sprint: explorer, preview, sharing, admin center.
 6. Сделать deployment sprint: installer, backup/restore, support bundle, license basics.
 7. Отдать первым знакомым на пилот.
