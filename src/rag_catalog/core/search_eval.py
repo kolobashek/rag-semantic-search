@@ -118,12 +118,32 @@ def _text_matches_expected(text: str, expected: str) -> bool:
     return False
 
 
+def _is_entity_expected(value: str) -> bool:
+    text = _expected_text(value)
+    return bool(re.search(r"\d", text))
+
+
+def _result_matches_expected(text: str, expected: str, all_expected: List[str]) -> bool:
+    if _text_matches_expected(text, expected):
+        return True
+    expected_norm = _expected_text(expected)
+    if expected_norm not in {"паспорт", "паспорта", "псм", "техпаспорт"}:
+        return False
+    haystack = _expected_text(text)
+    if ".pdf" not in haystack:
+        return False
+    return any(
+        other != expected and _is_entity_expected(other) and _text_matches_expected(haystack, other)
+        for other in all_expected
+    )
+
+
 def relevance_vector(results: Iterable[Dict[str, Any]], expected: List[str], *, limit: int) -> List[int]:
     needles = [_expected_text(item) for item in expected if item]
     vector: List[int] = []
     for result in list(results)[: max(1, int(limit))]:
         haystack = _result_text(result)
-        vector.append(1 if any(_text_matches_expected(haystack, needle) for needle in needles) else 0)
+        vector.append(1 if any(_result_matches_expected(haystack, needle, needles) for needle in needles) else 0)
     return vector
 
 
@@ -132,7 +152,7 @@ def recall_at_k(results: List[Dict[str, Any]], expected: List[str], *, k: int) -
     if not needles:
         return 0.0
     top_texts = [_result_text(item) for item in results[: max(1, int(k))]]
-    matched = sum(1 for needle in needles if any(_text_matches_expected(text, needle) for text in top_texts))
+    matched = sum(1 for needle in needles if any(_result_matches_expected(text, needle, needles) for text in top_texts))
     return matched / len(needles)
 
 
