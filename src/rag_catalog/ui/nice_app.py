@@ -269,6 +269,18 @@ def _build_page(initial_screen: str = "search") -> None:
             mark_screen_dirty("explorer")
         set_screen("explorer")
 
+    def go_cloud_explorer_path(cloud_item_path: str, *, is_folder: bool = False) -> None:
+        item_path = str(cloud_item_path or "").strip().strip("/")
+        if not item_path:
+            state.explorer_cd_path = ""
+        elif is_folder:
+            state.explorer_cd_path = item_path
+        else:
+            state.explorer_cd_path = item_path.rsplit("/", 1)[0] if "/" in item_path else ""
+        state.explorer_page = 0
+        mark_screen_dirty("explorer")
+        set_screen("explorer")
+
     def update_nav() -> None:
         is_admin = str((state.current_user or {}).get("role") or "") == "admin"
         nav_items = [
@@ -928,6 +940,49 @@ def _build_page(initial_screen: str = "search") -> None:
                 )
                 ui.label(str(v)).style("font-family:var(--rag-font-mono);font-size:12px;word-break:break-all")
 
+    def _render_cloud_preview_body(cloud_path: str, name: str, mime_type: str) -> None:
+        preview_url = f"/api/cloud-drive/preview?path={quote(cloud_path, safe='')}"
+        ext = Path(name or cloud_path).suffix.lower()
+        mime = str(mime_type or "").lower()
+        if ext == ".pdf" or mime == "application/pdf":
+            ui.html(
+                f'<iframe src="{html.escape(preview_url, quote=True)}" '
+                'style="width:100%;height:calc(100vh - 240px);border:1px solid var(--rag-border);'
+                'border-radius:8px;"></iframe>',
+                sanitize=False,
+            )
+        elif ext in INLINE_IMAGE_EXTENSIONS or mime.startswith("image/"):
+            ui.image(preview_url).style("max-width:100%;height:auto;border-radius:8px")
+        elif ext in FILE_PREVIEW_EXTENSIONS or mime.startswith("text/"):
+            ui.html(
+                f'<iframe src="{html.escape(preview_url, quote=True)}" '
+                'style="width:100%;height:calc(100vh - 240px);border:1px solid var(--rag-border);'
+                'border-radius:8px;background:white;"></iframe>',
+                sanitize=False,
+            )
+        elif ext in OFFICE_PREVIEW_EXTENSIONS:
+            ui.label("Для Office-файлов пока доступно скачивание. Текстовый preview будет добавлен отдельным extractor-backed этапом.").classes("rag-meta")
+        else:
+            ui.label("Встроенный просмотр для этого типа файла недоступен — используйте «Скачать».").classes("rag-meta")
+
+    def _render_cloud_meta_body(file_info: Dict[str, Any]) -> None:
+        rows = [
+            ("Размер", _cd_file_size(int(file_info.get("size_bytes") or 0)) if file_info.get("size_bytes") else "—"),
+            ("Тип", str(file_info.get("mime_type") or Path(str(file_info.get("name") or "")).suffix.lower() or "—")),
+            ("Cloud path", str(file_info.get("path") or "")),
+            ("Storage key", str(file_info.get("storage_key") or "")),
+        ]
+        for k, v in rows:
+            with ui.element("div").style(
+                "display:grid;grid-template-columns:140px 1fr;padding:10px 0;"
+                "border-bottom:1px solid var(--rag-border)"
+            ):
+                ui.label(k).style(
+                    "font-family:var(--rag-font-mono);font-size:10px;text-transform:uppercase;"
+                    "letter-spacing:0.1em;color:var(--rag-muted)"
+                )
+                ui.label(str(v)).style("font-family:var(--rag-font-mono);font-size:12px;word-break:break-all")
+
     def open_file_viewer(path_value: Path | str) -> None:
         candidate = _resolve_catalog_file(state.cfg, str(path_value or ""))
         if candidate is None:
@@ -970,7 +1025,6 @@ def _build_page(initial_screen: str = "search") -> None:
                     f"rag-preview-drawer-tab {'active' if active_tab[0] == key else ''}"
                 )
                 btn._text = label  # type: ignore[attr-defined]
-                ui.html(label, parent=btn)
 
                 def _click(k: str = key) -> None:
                     active_tab[0] = k
@@ -1003,6 +1057,113 @@ def _build_page(initial_screen: str = "search") -> None:
                     .props("outline dense")
                 ui.button("Открыть в ОС", icon="open_in_new",
                           on_click=lambda p=candidate: _select_in_os_explorer(str(p)))\
+                    .props("outline dense")
+
+        preview_drawer.classes(remove="closed")
+        preview_drawer_scrim.classes(remove="closed")
+
+    def open_cloud_file_viewer(file_value: Any) -> None:
+        file_info: Dict[str, Any] = {}
+        if isinstance(file_value, str):
+            cloud_path = str(file_value or "").strip()
+            svc = _cd_get_service(state.cfg)
+            row = None
+            if svc is not None and cloud_path:
+                try:
+                    row = svc.registry.get_file_by_path(cloud_path)
+                except Exception:
+                    row = None
+            if row is not None:
+                file_info = {
+                    "path": row.path,
+                    "name": row.name,
+                    "mime_type": row.mime_type,
+                    "size_bytes": row.size_bytes,
+                    "storage_key": row.storage_key,
+                }
+            else:
+                file_info = {"path": cloud_path, "name": cloud_path.rsplit("/", 1)[-1]}
+        else:
+            file_info = {
+                "path": str(getattr(file_value, "path", "") or ""),
+                "name": str(getattr(file_value, "name", "") or ""),
+                "mime_type": str(getattr(file_value, "mime_type", "") or ""),
+                "size_bytes": getattr(file_value, "size_bytes", None),
+                "storage_key": str(getattr(file_value, "storage_key", "") or ""),
+            }
+        cloud_path = str(file_info.get("path") or "").strip()
+        name = str(file_info.get("name") or cloud_path.rsplit("/", 1)[-1] or "Файл")
+        if not cloud_path:
+            ui.notify("Файл Cloud Drive недоступен для просмотра.", type="warning")
+            return
+        preview_url = f"/api/cloud-drive/preview?path={quote(cloud_path, safe='')}"
+        download_url = f"/api/cloud-drive/download?path={quote(cloud_path, safe='')}"
+
+        preview_drawer.clear()
+        active_tab: List[str] = ["preview"]
+        tab_refs: Dict[str, Any] = {}
+
+        with preview_drawer:
+            with ui.element("div").classes("rag-preview-drawer-header"):
+                with ui.element("div").style("flex:1;min-width:0"):
+                    ui.label(name).style(
+                        "font-family:var(--rag-font-display);font-weight:600;font-size:14px;"
+                        "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block"
+                    )
+                    ui.label(f"Cloud Drive: {cloud_path}").classes("rag-path").style("margin-top:2px;display:block")
+                ui.button(icon="close", on_click=close_preview_drawer, color=None).props("flat round dense")
+
+            tabs_row = ui.element("div").classes("rag-preview-drawer-tabs")
+            body_el = ui.element("div").classes("rag-preview-drawer-body")
+
+            def _refresh_body() -> None:
+                body_el.clear()
+                with body_el:
+                    try:
+                        if active_tab[0] == "preview":
+                            _render_cloud_preview_body(cloud_path, name, str(file_info.get("mime_type") or ""))
+                        elif active_tab[0] == "meta":
+                            _render_cloud_meta_body(file_info)
+                        else:
+                            ui.label(
+                                "Чанки Cloud Drive документа в индексе будут доступны в следующем этапе preview."
+                            ).classes("rag-meta")
+                    except Exception as exc:
+                        ui.label(f"Не удалось построить preview: {exc}").classes("text-negative text-sm")
+
+            def _make_tab(key: str, label: str) -> None:
+                btn = ui.element("button").classes(
+                    f"rag-preview-drawer-tab {'active' if active_tab[0] == key else ''}"
+                )
+                btn._text = label  # type: ignore[attr-defined]
+
+                def _click(k: str = key) -> None:
+                    active_tab[0] = k
+                    for tk, te in tab_refs.items():
+                        te.classes(remove="active")
+                        if tk == k:
+                            te.classes(add="active")
+                    _refresh_body()
+
+                btn.on("click", _click)
+                tab_refs[key] = btn
+
+            with tabs_row:
+                _make_tab("preview", "Превью")
+                _make_tab("meta", "Метаданные")
+                _make_tab("chunks", "Чанки")
+
+            _refresh_body()
+
+            with ui.element("div").classes("rag-preview-drawer-actions"):
+                ui.button("Скачать", icon="download",
+                          on_click=lambda url=download_url: ui.navigate.to(url, new_tab=True))\
+                    .props("unelevated dense").classes("flex-1")
+                ui.button("Открыть", icon="open_in_new",
+                          on_click=lambda url=preview_url: ui.navigate.to(url, new_tab=True))\
+                    .props("outline dense")
+                ui.button("В Cloud Drive", icon="cloud",
+                          on_click=lambda p=cloud_path: (close_preview_drawer(), go_cloud_explorer_path(p)))\
                     .props("outline dense")
 
         preview_drawer.classes(remove="closed")
@@ -1209,8 +1370,8 @@ def _build_page(initial_screen: str = "search") -> None:
                 track_result_use("open_viewer")
                 open_file_viewer(p)
             elif is_cloud_result and cloud_path:
-                track_result_use("open_cloud_drive")
-                go_cloud_explorer(cloud_path)
+                track_result_use("open_cloud_preview")
+                open_cloud_file_viewer(cloud_path)
 
         result_key = full_path or path or name
         llm_on = bool(state.cfg.get("llm_enabled"))
@@ -1261,6 +1422,15 @@ def _build_page(initial_screen: str = "search") -> None:
                             on_click=lambda pth=cloud_path: go_cloud_explorer(pth),
                         ).props("outline dense no-caps")
                         if kind != "Каталог":
+                            def _cd_preview(pth: str = cloud_path) -> None:
+                                track_result_use("cloud_preview")
+                                open_cloud_file_viewer(pth)
+
+                            ui.button(
+                                "Просмотр",
+                                icon="visibility",
+                                on_click=_cd_preview,
+                            ).props("outline dense no-caps")
                             _dl_url = f"/api/cloud-drive/download?path={quote(cloud_path, safe='')}"
                             def _cd_download(url: str = _dl_url, pth: str = cloud_path) -> None:
                                 track_result_use("cloud_download")
@@ -1394,12 +1564,16 @@ def _build_page(initial_screen: str = "search") -> None:
                 if matched_files:
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         for f in matched_files:
-                            def _go_file(fpath: str = str(f.source_path or f.path or ""), fname: str = f.name) -> None:
+                            def _go_file(file_row: Any = f) -> None:
+                                if getattr(file_row, "storage_key", ""):
+                                    open_cloud_file_viewer(file_row)
+                                    return
+                                fpath = str(getattr(file_row, "source_path", "") or getattr(file_row, "path", "") or "")
                                 p = Path(fpath) if fpath else None
                                 if p and p.exists() and p.is_file():
                                     open_file_viewer(p)
-                                else:
-                                    ui.notify(f"Файл «{fname}» недоступен на диске.", type="warning")
+                                    return
+                                ui.notify(f"Файл «{getattr(file_row, 'name', 'Файл')}» недоступен на диске.", type="warning")
                             def _show_in_explorer(fp: str = f.path) -> None:
                                 parent = fp.rsplit("/", 1)[0] if "/" in fp else ""
                                 state.explorer_cd_path = parent
@@ -1419,6 +1593,12 @@ def _build_page(initial_screen: str = "search") -> None:
                                     on_click=_show_in_explorer,
                                     color=None,
                                 ).props("flat round dense").tooltip("Показать в Cloud Drive")
+                                if f.storage_key:
+                                    ui.button(
+                                        icon="visibility",
+                                        on_click=lambda file_row=f: open_cloud_file_viewer(file_row),
+                                        color=None,
+                                    ).props("flat round dense").tooltip("Просмотреть файл")
         except Exception:
             pass  # don't break search if registry lookup fails
 
@@ -1702,6 +1882,7 @@ def _build_page(initial_screen: str = "search") -> None:
             render_fn=render,
             go_explorer_fn=go_explorer,
             open_file_viewer_fn=open_file_viewer,
+            open_cloud_file_viewer_fn=open_cloud_file_viewer,
             choose_query_fn=choose_query,
             query_handler=choose_query_handler,
         )

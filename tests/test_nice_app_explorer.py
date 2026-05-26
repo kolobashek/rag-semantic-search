@@ -40,6 +40,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_permission_revoke,
     api_cloud_drive_permissions,
     api_cloud_drive_permissions_list,
+    api_cloud_drive_preview,
     api_cloud_drive_public_download,
     api_cloud_drive_public_list,
     api_cloud_drive_public_node,
@@ -1137,6 +1138,47 @@ def test_cloud_drive_download_api(monkeypatch, tmp_path) -> None:
     assert response.filename == "hello.txt"
 
 
+def test_cloud_drive_preview_api_serves_inline_file(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    folder = service.registry.upsert_folder(
+        path="Folder A",
+        name="Folder A",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/Folder A",
+    )
+    source_file = tmp_path / "hello.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    service.storage.put_file(source_file, "Folder A/hello.txt")
+    service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Folder A/hello.txt",
+        name="hello.txt",
+        storage_key="Folder A/hello.txt",
+        mime_type="text/plain",
+        size_bytes=5,
+        checksum="abc",
+        source_path="",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
+
+    response = api_cloud_drive_preview("Folder A/hello.txt")
+
+    assert response.path.endswith("hello.txt")
+    assert response.filename == "hello.txt"
+    assert "inline" in response.headers["content-disposition"]
+
 
 def test_cloud_drive_download_requires_session(monkeypatch, tmp_path) -> None:
     cfg = {
@@ -1176,9 +1218,14 @@ def test_cloud_drive_download_requires_session(monkeypatch, tmp_path) -> None:
     with pytest.raises(HTTPException) as exc:
         api_cloud_drive_download("Folder A/hello.txt")
     assert exc.value.status_code == 401
+    with pytest.raises(HTTPException) as exc:
+        api_cloud_drive_preview("Folder A/hello.txt")
+    assert exc.value.status_code == 401
 
     response = api_cloud_drive_download("Folder A/hello.txt", authorization=f"Bearer {token}")
     assert response.filename == "hello.txt"
+    preview = api_cloud_drive_preview("Folder A/hello.txt", authorization=f"Bearer {token}")
+    assert preview.filename == "hello.txt"
 
 
 def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:

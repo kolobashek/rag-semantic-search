@@ -233,6 +233,7 @@ GET  /api/cloud-drive/list
 POST /api/cloud-drive/folders
 POST /api/cloud-drive/upload
 GET  /api/cloud-drive/download
+GET  /api/cloud-drive/preview
 GET  /api/cloud-drive/versions
 POST /api/cloud-drive/move
 POST /api/cloud-drive/rename

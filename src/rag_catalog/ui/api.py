@@ -1067,6 +1067,32 @@ def api_cloud_drive_download(path: str, authorization: AuthHeader = ""):
     )
 
 
+@app.get("/api/cloud-drive/preview")
+def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    _require_cloud_drive_path_access(cfg, user, path, service=service)
+    try:
+        descriptor = service.get_download_descriptor(path)
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "preview", ok=False, details={"path": path, "error": str(exc)})
+        raise HTTPException(status_code=404, detail=str(exc))
+    if descriptor.get("mode") != "local_file":
+        if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
+            _audit_cloud_drive_api_event(cfg, user, "preview", details={"path": path, "filename": descriptor.get("filename"), "mode": "redirect_url"})
+            return RedirectResponse(str(descriptor["url"]))
+        _audit_cloud_drive_api_event(cfg, user, "preview", ok=False, details={"path": path, "mode": descriptor.get("mode")})
+        raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает preview.")
+    _audit_cloud_drive_api_event(cfg, user, "preview", details={"path": path, "filename": descriptor.get("filename")})
+    return FileResponse(
+        path=str(descriptor["file_path"]),
+        media_type=str(descriptor["mime_type"]),
+        filename=str(descriptor["filename"]),
+        content_disposition_type="inline",
+    )
+
+
 @app.post("/api/cloud-drive/upload")
 async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(...), authorization: AuthHeader = "") -> Dict[str, Any]:
     if file is None or not str(file.filename or "").strip():

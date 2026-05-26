@@ -55,6 +55,7 @@ def render_explorer_screen(
     render_fn: Callable,
     go_explorer_fn: Callable,
     open_file_viewer_fn: Callable,
+    open_cloud_file_viewer_fn: Callable | None = None,
     choose_query_fn: Callable,
     query_handler: Callable,
 ) -> None:
@@ -387,6 +388,10 @@ def render_explorer_screen(
             dlg.open()
 
         def _cd_open_file(file: CloudDriveFile) -> None:
+            if file.storage_key and open_cloud_file_viewer_fn is not None:
+                _log_app_event(page_state, "cd_explorer", "open_cloud_preview", details={"path": file.path})
+                open_cloud_file_viewer_fn(file)
+                return
             src = str(file.source_path or file.path or "")
             if src:
                 p = Path(src)
@@ -803,6 +808,11 @@ def render_explorer_screen(
                                     ).props("flat round dense").tooltip("История версий")
                                     if f.storage_key:
                                         ui.button(
+                                            icon="visibility",
+                                            on_click=lambda fi=f: _cd_open_file(fi),
+                                            color=None,
+                                        ).props("flat round dense").tooltip("Просмотреть файл")
+                                        ui.button(
                                             icon="download",
                                             on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
                                             color=None,
@@ -911,6 +921,11 @@ def render_explorer_screen(
                                         color=None,
                                     ).props("flat round dense").tooltip("История версий")
                                     if f.storage_key:
+                                        ui.button(
+                                            icon="visibility",
+                                            on_click=lambda fi=f: _cd_open_file(fi),
+                                            color=None,
+                                        ).props("flat round dense").tooltip("Просмотреть файл")
                                         ui.button(
                                             icon="download",
                                             on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
