@@ -370,6 +370,8 @@ def test_term_matches_latin_o_and_zero_vehicle_codes() -> None:
 
     assert s._term_matches("volkswagen touareg 050", "o50")
     assert s._term_matches("volkswagen touareg o50", "050")
+    assert s._term_matches("фольксваген y 050 by", "touareg")
+    assert s._term_matches("volkswagen y 050 by", "туарег")
 
 
 def test_verify_rag_answer_rejects_unsupported_numbers() -> None:

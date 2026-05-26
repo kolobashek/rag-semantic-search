@@ -126,6 +126,12 @@ FS_CACHE_TTL_SEC = 300
 FS_CACHE_MAX_ITEMS = 250_000
 
 _ENTITY_RE = re.compile(r"\b[a-zа-я]*\d+[a-zа-я0-9\-]*\b", re.IGNORECASE)
+_TERM_ALIASES = {
+    "touareg": ["туарег", "volkswagen", "фольксваген", "vw"],
+    "туарег": ["touareg", "volkswagen", "фольксваген", "vw"],
+    "volkswagen": ["фольксваген", "vw"],
+    "фольксваген": ["volkswagen", "vw"],
+}
 _WEIGHT_LINE_RE = re.compile(
     r"(масса|вес|снаряженн\w*\s+масса|разрешенн\w*\s+максимальн\w*\s+масса)[^\n\r]{0,80}",
     re.IGNORECASE,
@@ -630,6 +636,10 @@ class RAGSearcher:
     def _term_variants(self, term: str) -> List[str]:
         clean = str(term or "").lower().replace("ё", "е")
         variants = [clean]
+        for alias in _TERM_ALIASES.get(clean, []):
+            alias_norm = alias.lower().replace("ё", "е")
+            if alias_norm and alias_norm not in variants:
+                variants.append(alias_norm)
         if "0" in clean or re.search(r"[oо].*\d|\d.*[oо]", clean, flags=re.IGNORECASE):
             for src, dst in (("o", "0"), ("о", "0"), ("0", "o"), ("0", "о")):
                 alt = clean.replace(src, dst)

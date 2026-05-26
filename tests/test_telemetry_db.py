@@ -161,6 +161,10 @@ def test_default_search_aliases_expand_query(tmp_path) -> None:
     assert "карточка предприятия" in expanded["expanded_query"].lower()
     assert any(group["key"] == "company_card" for group in expanded["groups"])
 
+    vehicle = db.expand_search_query("touareg O50 vin")
+    assert "фольксваген" in vehicle["expanded_query"].lower()
+    assert any(group["key"] == "vehicle_volkswagen_touareg" for group in vehicle["groups"])
+
 
 def test_search_alias_group_can_be_saved_and_deleted(tmp_path) -> None:
     db = TelemetryDB(str(tmp_path / "telemetry.db"))

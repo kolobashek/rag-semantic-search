@@ -9,6 +9,12 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 _TOKEN_RE = re.compile(r"[a-zа-яё0-9\-]{2,}", flags=re.IGNORECASE)
 _STOPWORDS = {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
+_TERM_ALIASES = {
+    "touareg": ["туарег", "volkswagen", "фольксваген", "vw"],
+    "туарег": ["touareg", "volkswagen", "фольксваген", "vw"],
+    "volkswagen": ["фольксваген", "vw"],
+    "фольксваген": ["volkswagen", "vw"],
+}
 
 
 def tokenize(text: str) -> List[str]:
@@ -39,6 +45,10 @@ def _matches(token: str, query_term: str) -> bool:
 def _term_variants(term: str) -> List[str]:
     clean = str(term or "").lower().replace("ё", "е")
     variants = [clean]
+    for alias in _TERM_ALIASES.get(clean, []):
+        alias_norm = alias.lower().replace("ё", "е")
+        if alias_norm and alias_norm not in variants:
+            variants.append(alias_norm)
     if "0" in clean or re.search(r"[oо].*\d|\d.*[oо]", clean, flags=re.IGNORECASE):
         for src, dst in (("o", "0"), ("о", "0"), ("0", "o"), ("0", "о")):
             alt = clean.replace(src, dst)

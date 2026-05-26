@@ -116,6 +116,12 @@ DEFAULT_SEARCH_ALIAS_GROUPS: List[Dict[str, Any]] = [
         "aliases": ["требование", "фнс", "налоговая", "выездная проверка", "впн", "представление документов"],
         "negative_aliases": [],
     },
+    {
+        "key": "vehicle_volkswagen_touareg",
+        "label": "Volkswagen Touareg",
+        "aliases": ["touareg", "туарег", "volkswagen touareg", "фольксваген туарег", "фольксваген", "volkswagen", "vw"],
+        "negative_aliases": [],
+    },
 ]
 
 

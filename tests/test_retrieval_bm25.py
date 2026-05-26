@@ -37,3 +37,26 @@ def test_bm25_rank_items_prefers_filename_match_over_parent_path_noise() -> None
     assert out[0]["filename"] == "Карточка предприятия ООО ТСК.docx"
     assert out[0]["rank_reason"] == "BM25 совпадение в имени/пути"
     assert float(out[0]["score"]) > float(out[1]["score"])
+
+
+def test_bm25_matches_touareg_against_russian_vehicle_folder() -> None:
+    items = [
+        {
+            "kind": "file",
+            "filename": "свидетельство о регистрации.jpg",
+            "path": r"Док-ты техника\Старые\Фольксваген Y 050 BY\свидетельство о регистрации.jpg",
+            "full_path": r"O:\Док-ты техника\Старые\Фольксваген Y 050 BY\свидетельство о регистрации.jpg",
+            "extension": ".jpg",
+        },
+        {
+            "kind": "file",
+            "filename": "СТС 1234.pdf",
+            "path": r"Док-ты техника\СТС 1234.pdf",
+            "full_path": r"O:\Док-ты техника\СТС 1234.pdf",
+            "extension": ".pdf",
+        },
+    ]
+
+    out = bm25_rank_items(items, ["touareg", "o50", "стс"], limit=2)
+
+    assert out[0]["filename"] == "свидетельство о регистрации.jpg"
