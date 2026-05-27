@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Optional
 logger = logging.getLogger(__name__)
 
 from ..embedding_collections import resolve_collection_name_from_config
-from .models import CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
+from .models import CloudDriveImportSource, CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
 from .registry import CloudDriveRegistryDB
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
 
@@ -164,6 +164,177 @@ class CloudDriveService:
 
     def create_share_link(self, *, path: str, created_by: str = '', expires_at: str = '') -> Dict[str, str]:
         return self.registry.create_share_link(path=path, created_by=created_by, expires_at=expires_at)
+
+    @staticmethod
+    def _import_source_to_dict(source: CloudDriveImportSource) -> dict:
+        return {
+            'id': source.id,
+            'name': source.name,
+            'source_path': source.source_path,
+            'target_path': source.target_path,
+            'import_files': source.import_files,
+            'enabled': source.enabled,
+            'created_by': source.created_by,
+            'last_job_id': source.last_job_id,
+            'last_status': source.last_status,
+            'last_error': source.last_error,
+            'last_scan_at': source.last_scan_at,
+            'stats': dict(source.stats or {}),
+            'created_at': source.created_at,
+            'updated_at': source.updated_at,
+        }
+
+    def upsert_import_source(
+        self,
+        *,
+        name: str,
+        source_path: str,
+        target_path: str = '',
+        import_files: bool = True,
+        enabled: bool = True,
+        created_by: str = '',
+    ) -> dict:
+        source = self.registry.upsert_import_source(
+            name=name,
+            source_path=source_path,
+            target_path=target_path,
+            import_files=import_files,
+            enabled=enabled,
+            created_by=created_by,
+        )
+        return self._import_source_to_dict(source)
+
+    def list_import_sources(self, *, enabled_only: bool = False, limit: int = 200) -> list[dict]:
+        return [
+            self._import_source_to_dict(source)
+            for source in self.registry.list_import_sources(enabled_only=enabled_only, limit=limit)
+        ]
+
+    def set_import_source_enabled(self, source_id: str, enabled: bool) -> dict:
+        return self._import_source_to_dict(self.registry.set_import_source_enabled(source_id, enabled))
+
+    def create_import_job(self, *, source_id: str, max_files: Optional[int] = None) -> CloudDriveJob:
+        source = self.registry.get_import_source(source_id)
+        if source is None:
+            raise RuntimeError(f'Import source не найден: {source_id}')
+        if not source.enabled:
+            raise RuntimeError(f'Import source отключён: {source.name}')
+        job = self.registry.queue_job(
+            job_type='import',
+            status='pending',
+            payload={
+                'source_id': source.id,
+                'source_path': source.source_path,
+                'target_path': source.target_path,
+                'import_files': source.import_files,
+                'max_files': max_files,
+                'progress': {
+                    'status': 'pending',
+                    'source_id': source.id,
+                    'source_name': source.name,
+                    'source_path': source.source_path,
+                    'target_path': source.target_path,
+                    'import_files': source.import_files,
+                    'limit_value': int(max_files or 0),
+                    'imported_files': 0,
+                    'imported_folders': 0,
+                    'skipped_files': 0,
+                    'current_path': '',
+                },
+            },
+        )
+        self.registry.update_import_source_run(source.id, job_id=job.id, status='pending', error='')
+        return job
+
+    def run_import_job(self, job_id: str) -> dict:
+        job = self.registry.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f'Job не найден: {job_id}')
+        if job.job_type != 'import':
+            raise RuntimeError(f'run_import_job поддерживает только import jobs: {job.job_type}')
+        payload = dict(job.payload or {})
+        source_id = str(payload.get('source_id') or '').strip()
+        source = self.registry.get_import_source(source_id)
+        if source is None:
+            raise RuntimeError(f'Import source не найден: {source_id}')
+        if not source.enabled:
+            raise RuntimeError(f'Import source отключён: {source.name}')
+        max_files_raw = payload.get('max_files')
+        max_files = int(max_files_raw) if max_files_raw not in (None, '') else None
+        progress = dict(job.progress or {})
+        progress.update(
+            {
+                'status': 'running',
+                'started_at': datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self.registry.update_job(job.id, status='running', payload={'progress': progress})
+        self.registry.update_import_source_run(source.id, job_id=job.id, status='running', error='')
+
+        def on_progress(progress_payload: Dict[str, object]) -> None:
+            current_job = self.registry.get_job(job.id)
+            current_progress = dict(current_job.progress if current_job else {})
+            current_progress.update(progress_payload)
+            current_progress['status'] = 'running'
+            self.registry.update_job(job.id, status='running', payload={'progress': current_progress})
+
+        try:
+            result = self.import_from_folder(
+                source_path=source.source_path,
+                target_path=source.target_path,
+                import_files=source.import_files,
+                max_files=max_files,
+                progress_callback=on_progress,
+            )
+            completed_progress = dict(self.registry.get_job(job.id).progress if self.registry.get_job(job.id) else {})
+            completed_progress.update(
+                {
+                    'status': 'done',
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                    **result,
+                }
+            )
+            self.registry.update_job(job.id, status='completed', payload={'progress': completed_progress})
+            self.registry.update_import_source_run(
+                source.id,
+                job_id=job.id,
+                status='completed',
+                error='',
+                stats=result,
+                scanned=True,
+            )
+            return result
+        except Exception as exc:
+            failed_progress = dict(self.registry.get_job(job.id).progress if self.registry.get_job(job.id) else {})
+            failed_progress.update(
+                {
+                    'status': 'failed',
+                    'error': str(exc),
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self.registry.update_job(job.id, status='failed', payload={'progress': failed_progress}, last_error=str(exc))
+            self.registry.update_import_source_run(source.id, job_id=job.id, status='failed', error=str(exc))
+            raise
+
+    def run_pending_import_jobs(self, *, limit: int = 5) -> list[CloudDriveJob]:
+        completed: list[CloudDriveJob] = []
+        for _ in range(max(1, int(limit or 1))):
+            job = self.registry.claim_pending_job(
+                job_types=['import'],
+                worker_id='cloud-import-worker',
+                lease_seconds=900,
+            )
+            if job is None:
+                break
+            try:
+                self.run_import_job(job.id)
+            except Exception as exc:
+                logger.warning("Cloud Drive import job %s failed: %s", job.id, exc)
+            latest = self.registry.get_job(job.id)
+            if latest is not None:
+                completed.append(latest)
+        return completed
 
     def list_permissions(self, *, path: str = '') -> list[dict]:
         return self.registry.list_permissions(path=path)
@@ -1487,6 +1658,204 @@ class CloudDriveService:
             if limit_value > 0 and total >= limit_value:
                 return limit_value
         return total
+
+    def _ensure_folder_path(self, target_path: str, *, source_path: str = '') -> Any:
+        self.registry.ensure_root_folder(root_name='Cloud Drive')
+        clean_target = str(target_path or '').strip().replace('\\', '/').strip('/')
+        root = self.registry.get_root_folder()
+        if root is None:
+            raise RuntimeError('Cloud Drive root не создан.')
+        if not clean_target:
+            return root
+        current = root
+        parts = [part for part in clean_target.split('/') if part]
+        for idx, part in enumerate(parts, 1):
+            folder_path = '/'.join(parts[:idx])
+            existing = self.registry.get_folder_by_path(folder_path)
+            if existing is not None:
+                current = existing
+                continue
+            folder_source = str(Path(source_path) / Path(*parts[:idx])) if source_path else ''
+            current = self.registry.upsert_folder(
+                path=folder_path,
+                name=part,
+                parent_id=current.id,
+                depth=idx,
+                source_path=folder_source,
+            )
+        return current
+
+    def import_from_folder(
+        self,
+        *,
+        source_path: str,
+        target_path: str = '',
+        import_files: bool = True,
+        max_files: Optional[int] = None,
+        progress_callback: Optional[Callable[[Dict[str, object]], None]] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
+    ) -> dict:
+        source_root = Path(str(source_path or '').strip()).expanduser()
+        if not source_root.exists() or not source_root.is_dir():
+            raise RuntimeError(f'Import source каталог не найден: {source_root}')
+        clean_target = str(target_path or '').strip().replace('\\', '/').strip('/')
+        target_root = self._ensure_folder_path(clean_target)
+        imported_files = 0
+        imported_folders = 0
+        skipped_files = 0
+        failed_files = 0
+        queued_reindex = 0
+        progress_seq = 0
+        folder_cache: dict[Path, str] = {source_root: target_root.id}
+
+        def emit_progress(kind: str, *, current_path: str = '', done: bool = False) -> None:
+            nonlocal progress_seq
+            if progress_callback is None:
+                return
+            progress_seq += 1
+            progress_callback(
+                {
+                    'kind': kind,
+                    'done': done,
+                    'source_path': str(source_root),
+                    'target_path': clean_target,
+                    'import_files': import_files,
+                    'imported_files': imported_files,
+                    'imported_folders': imported_folders,
+                    'skipped_files': skipped_files,
+                    'failed_files': failed_files,
+                    'queued_reindex': queued_reindex,
+                    'current_path': current_path,
+                    'sequence': progress_seq,
+                }
+            )
+
+        def target_for(rel: Path) -> str:
+            rel_text = str(rel).replace('\\', '/').strip('/')
+            if not clean_target:
+                return rel_text
+            return f'{clean_target}/{rel_text}' if rel_text else clean_target
+
+        emit_progress('start', current_path=str(source_root))
+        import os as _os  # noqa: PLC0415
+
+        for dirpath, dirnames, filenames in _os.walk(source_root):
+            if should_continue is not None and not should_continue():
+                raise CloudDriveJobCancelled('cancelled_by_user')
+            base = Path(dirpath)
+            rel_base = base.relative_to(source_root)
+            base_id = folder_cache.get(base)
+            if base_id is None:
+                parent = base.parent if base.parent in folder_cache else source_root
+                parent_id = folder_cache[parent]
+                folder_path = target_for(rel_base)
+                folder = self.registry.upsert_folder(
+                    path=folder_path,
+                    name=base.name,
+                    parent_id=parent_id,
+                    depth=len([part for part in folder_path.split('/') if part]),
+                    source_path=str(base),
+                )
+                base_id = folder.id
+                folder_cache[base] = base_id
+                imported_folders += 1
+
+            for dirname in sorted(dirnames):
+                child = base / dirname
+                rel_child = child.relative_to(source_root)
+                child_path = target_for(rel_child)
+                folder = self.registry.upsert_folder(
+                    path=child_path,
+                    name=dirname,
+                    parent_id=base_id,
+                    depth=len([part for part in child_path.split('/') if part]),
+                    source_path=str(child),
+                )
+                folder_cache[child] = folder.id
+                imported_folders += 1
+                if imported_folders == 1 or imported_folders % 25 == 0:
+                    emit_progress('folder', current_path=str(child))
+
+            known_mtimes = self.registry.get_file_mtimes_in_folder(base_id)
+            for filename in sorted(filenames):
+                if should_continue is not None and not should_continue():
+                    raise CloudDriveJobCancelled('cancelled_by_user')
+                file_path = base / filename
+                rel_file = file_path.relative_to(source_root)
+                target_file_path = target_for(rel_file)
+                try:
+                    st = file_path.stat()
+                    file_mtime = st.st_mtime
+                    file_size = st.st_size
+                except OSError as exc:
+                    failed_files += 1
+                    logger.warning("import source: не могу прочитать stat %s — %s", file_path, exc)
+                    continue
+
+                known = known_mtimes.get(filename)
+                if known is not None:
+                    stored_mtime, stored_size = known
+                    if stored_mtime != 0.0 and abs(file_mtime - stored_mtime) < 1e-3 and file_size == stored_size:
+                        skipped_files += 1
+                        continue
+
+                try:
+                    checksum = compute_file_checksum(file_path)
+                    storage_key = self._immutable_storage_key(checksum=checksum, filename=filename)
+                    if import_files and not self.storage.exists(storage_key):
+                        self.storage.put_file(file_path, storage_key)
+                    existing = self.registry.get_file_by_path(target_file_path)
+                    file_row = self.registry.upsert_file(
+                        folder_id=base_id,
+                        path=target_file_path,
+                        name=filename,
+                        storage_key=storage_key,
+                        mime_type=guess_mime_type(file_path),
+                        size_bytes=file_size,
+                        checksum=checksum,
+                        source_path=str(file_path),
+                        source_mtime=file_mtime,
+                    )
+                    imported_files += 1
+                    changed = (
+                        existing is None
+                        or existing.current_version_id != file_row.current_version_id
+                        or existing.deleted_at != ''
+                    )
+                    if changed:
+                        self._queue_reindex_file(file_row, reason='import')
+                        queued_reindex += 1
+                    if imported_files == 1 or imported_files % 25 == 0:
+                        emit_progress('file', current_path=str(file_path))
+                    if max_files is not None and imported_files >= max_files:
+                        emit_progress('done', current_path=str(file_path), done=True)
+                        return {
+                            'source_path': str(source_root),
+                            'target_path': clean_target,
+                            'import_files': bool(import_files),
+                            'imported_files': imported_files,
+                            'imported_folders': imported_folders,
+                            'skipped_files': skipped_files,
+                            'failed_files': failed_files,
+                            'queued_reindex': queued_reindex,
+                            'limited': True,
+                        }
+                except Exception as exc:
+                    failed_files += 1
+                    logger.warning("import source: пропускаю %s — %s", file_path, exc)
+
+        emit_progress('done', current_path=str(source_root), done=True)
+        return {
+            'source_path': str(source_root),
+            'target_path': clean_target,
+            'import_files': bool(import_files),
+            'imported_files': imported_files,
+            'imported_folders': imported_folders,
+            'skipped_files': skipped_files,
+            'failed_files': failed_files,
+            'queued_reindex': queued_reindex,
+            'limited': False,
+        }
 
     def bootstrap_from_catalog(
         self,

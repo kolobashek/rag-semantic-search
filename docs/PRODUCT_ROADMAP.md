@@ -351,6 +351,7 @@ Done criteria:
 - DONE 2026-05-27: eval semantics для model-only PDF паспортов уточнена: если запрос ожидает `паспорт`/`ПСМ`, PDF с совпавшей entity (`PC300`, `6357`) засчитывается как релевантный паспорт, а фото без PDF - нет. Search eval gate после правки: Recall@10 1.0, MRR 1.0, zero-result 0.0, p50 1440 ms, p95 3283 ms.
 - DONE 2026-05-27: release smoke повторен после baseline: launcher status показывает web/Qdrant up, Cloud Drive CLI stats green (`76205` files, `109836` versions, pending jobs `0`), support bundle/backup/restore green; Docker smoke исправлен на default isolated ports `18080`/`16333` и health probes вернули HTTP 200. Runtime warning: Telegram bot down из-за timeout к `api.telegram.org` при включенном токене.
 - DONE 2026-05-27: Cloud Drive preview включен для storage-backed файлов: API `GET /api/cloud-drive/preview` отдает local storage inline, explorer/search открывают drawer просмотра без зависимости от исходного `source_path`, ACL/session проверяются тем же контуром, что download.
+- DONE 2026-05-27: backend scanner/import ingestion добавлен: `cloud_import_sources`, durable `import` jobs, CLI `import-source-add/list/run`, admin API для import sources, копирование новых/изменённых файлов в storage и постановка `reindex` только для изменившихся версий.
 
 Состав:
 
@@ -369,7 +370,7 @@ Done criteria:
 
 - registry search с ACL и pagination;
 - UI sharing для внутренних пользователей;
-- import folders and scanner ingestion;
+- import folders and scanner ingestion backend done; следующий слой - UI управления источниками и расписание;
 - search quality v2: eval cases под реальные документы;
 - latency profiling and cache tuning;
 - ACL management UI;

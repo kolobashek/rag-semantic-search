@@ -3,6 +3,7 @@ from __future__ import annotations
 from .models import (
     CloudDriveFile,
     CloudDriveFolder,
+    CloudDriveImportSource,
     CloudDriveJob,
     CloudDriveStats,
     CloudDriveStorageHealth,
@@ -18,6 +19,7 @@ __all__ = [
     'CLOUD_DRIVE_SCHEMA_VERSION',
     'CloudDriveFile',
     'CloudDriveFolder',
+    'CloudDriveImportSource',
     'CloudDriveJob',
     'CloudDriveRegistryDB',
     'CloudDriveService',

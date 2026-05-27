@@ -15,6 +15,7 @@ from rag_catalog.core.sqlite_runtime import prepare_sqlite_connection
 from .models import (
     CloudDriveFile,
     CloudDriveFolder,
+    CloudDriveImportSource,
     CloudDriveJob,
     CloudDriveStats,
     CloudDriveSyncClient,
@@ -22,7 +23,7 @@ from .models import (
     CloudDriveSyncPair,
 )
 
-CLOUD_DRIVE_SCHEMA_VERSION = 6
+CLOUD_DRIVE_SCHEMA_VERSION = 7
 
 
 def _utc_now() -> str:
@@ -127,6 +128,24 @@ class CloudDriveRegistryDB:
                         revoked_at TEXT NOT NULL DEFAULT ''
                     );
 
+                    CREATE TABLE IF NOT EXISTS cloud_import_sources (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        source_path TEXT NOT NULL,
+                        target_path TEXT NOT NULL DEFAULT '',
+                        import_files INTEGER NOT NULL DEFAULT 1,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        created_by TEXT NOT NULL DEFAULT '',
+                        last_job_id TEXT NOT NULL DEFAULT '',
+                        last_status TEXT NOT NULL DEFAULT '',
+                        last_error TEXT NOT NULL DEFAULT '',
+                        last_scan_at TEXT NOT NULL DEFAULT '',
+                        stats_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(source_path, target_path)
+                    );
+
                     CREATE TABLE IF NOT EXISTS cloud_jobs (
                         id TEXT PRIMARY KEY,
                         job_type TEXT NOT NULL,
@@ -225,6 +244,7 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_resource ON cloud_permissions(resource_type, resource_id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_user_folders_folder ON cloud_user_folders(folder_id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_share_links_resource ON cloud_share_links(resource_type, resource_id);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_import_sources_enabled ON cloud_import_sources(enabled, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_lease ON cloud_jobs(status, lease_until, next_run_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_clients_username ON cloud_sync_clients(username, status, updated_at);
@@ -291,6 +311,23 @@ class CloudDriveRegistryDB:
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL DEFAULT '',
                 revoked_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS cloud_import_sources (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                target_path TEXT NOT NULL DEFAULT '',
+                import_files INTEGER NOT NULL DEFAULT 1,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT NOT NULL DEFAULT '',
+                last_job_id TEXT NOT NULL DEFAULT '',
+                last_status TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                last_scan_at TEXT NOT NULL DEFAULT '',
+                stats_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(source_path, target_path)
             );
             """
         )
@@ -1033,6 +1070,151 @@ class CloudDriveRegistryDB:
         if resource_type == 'global':
             return True
         return False
+
+    def upsert_import_source(
+        self,
+        *,
+        name: str,
+        source_path: str,
+        target_path: str = "",
+        import_files: bool = True,
+        enabled: bool = True,
+        created_by: str = "",
+    ) -> CloudDriveImportSource:
+        raw_source = str(source_path or "").strip()
+        if not raw_source:
+            raise RuntimeError("Не задан source_path import source.")
+        clean_source = str(Path(raw_source).expanduser())
+        clean_target = self._normalize_path(target_path)
+        clean_name = str(name or "").strip() or Path(clean_source).name or clean_source
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT id, created_at FROM cloud_import_sources WHERE source_path=? AND target_path=?",
+                    (clean_source, clean_target),
+                ).fetchone()
+                source_id = str(row["id"]) if row else str(uuid.uuid4())
+                created_at = str(row["created_at"]) if row else now
+                conn.execute(
+                    """
+                    INSERT INTO cloud_import_sources (
+                        id, name, source_path, target_path, import_files, enabled,
+                        created_by, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_path, target_path) DO UPDATE SET
+                        name=excluded.name,
+                        import_files=excluded.import_files,
+                        enabled=excluded.enabled,
+                        created_by=CASE
+                            WHEN cloud_import_sources.created_by='' THEN excluded.created_by
+                            ELSE cloud_import_sources.created_by
+                        END,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        source_id,
+                        clean_name,
+                        clean_source,
+                        clean_target,
+                        1 if import_files else 0,
+                        1 if enabled else 0,
+                        self._clean_username(created_by),
+                        created_at,
+                        now,
+                    ),
+                )
+                saved = conn.execute("SELECT * FROM cloud_import_sources WHERE id=?", (source_id,)).fetchone()
+        assert saved is not None
+        return self._import_source_from_row(saved)
+
+    def get_import_source(self, source_id: str) -> Optional[CloudDriveImportSource]:
+        clean_id = str(source_id or "").strip()
+        if not clean_id:
+            return None
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM cloud_import_sources WHERE id=?", (clean_id,)).fetchone()
+            return self._import_source_from_row(row) if row else None
+
+    def list_import_sources(self, *, enabled_only: bool = False, limit: int = 200) -> List[CloudDriveImportSource]:
+        clean_limit = max(1, min(int(limit or 200), 1000))
+        with self._connect() as conn:
+            if enabled_only:
+                rows = conn.execute(
+                    "SELECT * FROM cloud_import_sources WHERE enabled=1 ORDER BY updated_at DESC LIMIT ?",
+                    (clean_limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM cloud_import_sources ORDER BY updated_at DESC LIMIT ?",
+                    (clean_limit,),
+                ).fetchall()
+        return [self._import_source_from_row(row) for row in rows]
+
+    def set_import_source_enabled(self, source_id: str, enabled: bool) -> CloudDriveImportSource:
+        clean_id = str(source_id or "").strip()
+        if not clean_id:
+            raise RuntimeError("Не задан import source id.")
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE cloud_import_sources SET enabled=?, updated_at=? WHERE id=?",
+                    (1 if enabled else 0, now, clean_id),
+                )
+                saved = conn.execute("SELECT * FROM cloud_import_sources WHERE id=?", (clean_id,)).fetchone()
+        if saved is None:
+            raise RuntimeError(f"Import source не найден: {clean_id}")
+        return self._import_source_from_row(saved)
+
+    def update_import_source_run(
+        self,
+        source_id: str,
+        *,
+        job_id: str = "",
+        status: str = "",
+        error: str = "",
+        stats: Optional[Dict[str, Any]] = None,
+        scanned: bool = False,
+    ) -> Optional[CloudDriveImportSource]:
+        clean_id = str(source_id or "").strip()
+        if not clean_id:
+            return None
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute("SELECT * FROM cloud_import_sources WHERE id=?", (clean_id,)).fetchone()
+                if row is None:
+                    return None
+                next_job_id = str(job_id or row["last_job_id"] or "")
+                next_status = str(status or row["last_status"] or "")
+                next_error = str(error if error is not None else row["last_error"] or "")
+                next_stats = stats if stats is not None else json.loads(str(row["stats_json"] or "{}"))
+                next_scan = now if scanned else str(row["last_scan_at"] or "")
+                conn.execute(
+                    """
+                    UPDATE cloud_import_sources
+                    SET last_job_id=?,
+                        last_status=?,
+                        last_error=?,
+                        last_scan_at=?,
+                        stats_json=?,
+                        updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        next_job_id,
+                        next_status,
+                        next_error,
+                        next_scan,
+                        json.dumps(next_stats or {}, ensure_ascii=False),
+                        now,
+                        clean_id,
+                    ),
+                )
+                saved = conn.execute("SELECT * FROM cloud_import_sources WHERE id=?", (clean_id,)).fetchone()
+        return self._import_source_from_row(saved) if saved else None
 
     def user_can_access(
         self,
@@ -2451,6 +2633,28 @@ class CloudDriveRegistryDB:
             lease_until=str(row['lease_until'] or '') if 'lease_until' in keys else '',
             next_run_at=str(row['next_run_at'] or '') if 'next_run_at' in keys else '',
             progress=dict(payload.get('progress') or {}),
+        )
+
+    def _import_source_from_row(self, row: sqlite3.Row) -> CloudDriveImportSource:
+        try:
+            stats = json.loads(str(row["stats_json"] or "{}"))
+        except json.JSONDecodeError:
+            stats = {}
+        return CloudDriveImportSource(
+            id=str(row["id"]),
+            name=str(row["name"] or ""),
+            source_path=str(row["source_path"] or ""),
+            target_path=str(row["target_path"] or ""),
+            import_files=bool(int(row["import_files"] or 0)),
+            enabled=bool(int(row["enabled"] or 0)),
+            created_by=str(row["created_by"] or ""),
+            last_job_id=str(row["last_job_id"] or ""),
+            last_status=str(row["last_status"] or ""),
+            last_error=str(row["last_error"] or ""),
+            last_scan_at=str(row["last_scan_at"] or ""),
+            stats=dict(stats or {}),
+            created_at=str(row["created_at"] or ""),
+            updated_at=str(row["updated_at"] or ""),
         )
 
     def _sync_client_from_row(self, row: sqlite3.Row) -> CloudDriveSyncClient:

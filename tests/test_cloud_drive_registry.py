@@ -588,6 +588,66 @@ def test_cloud_drive_sync_clients_pairs_selective_and_conflicts(tmp_path: Path) 
     assert service.list_sync_pairs(username='user') == []
 
 
+def test_cloud_drive_import_source_job_imports_files_and_queues_reindex(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    source_root = tmp_path / 'scanner'
+    nested = source_root / 'Inbox'
+    nested.mkdir(parents=True)
+    (nested / 'scan.txt').write_text('scan payload', encoding='utf-8')
+
+    source = service.upsert_import_source(
+        name='Scanner inbox',
+        source_path=str(source_root),
+        target_path='Imports/Scanner',
+        import_files=True,
+        created_by='admin',
+    )
+    job = service.create_import_job(source_id=source['id'])
+    stats = service.run_import_job(job.id)
+
+    file_row = registry.get_file_by_path('Imports/Scanner/Inbox/scan.txt')
+    assert file_row is not None
+    assert file_row.source_path.endswith('scanner\\Inbox\\scan.txt') or file_row.source_path.endswith('scanner/Inbox/scan.txt')
+    assert storage.exists(file_row.storage_key)
+    assert stats['imported_files'] == 1
+    assert stats['queued_reindex'] == 1
+
+    reindex_jobs = [item for item in registry.list_jobs(limit=20) if item.job_type == 'reindex']
+    assert any(item.progress.get('reason') == 'import' and item.progress.get('path') == 'Imports/Scanner/Inbox/scan.txt' for item in reindex_jobs)
+    saved_source = registry.get_import_source(source['id'])
+    assert saved_source is not None
+    assert saved_source.last_status == 'completed'
+    assert saved_source.stats['imported_files'] == 1
+
+
+def test_cloud_drive_import_source_skips_unchanged_files(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    source_root = tmp_path / 'scanner'
+    source_root.mkdir()
+    source_file = source_root / 'scan.txt'
+    source_file.write_text('same payload', encoding='utf-8')
+
+    source = service.upsert_import_source(
+        name='Scanner',
+        source_path=str(source_root),
+        target_path='Inbox',
+        import_files=True,
+    )
+    service.run_import_job(service.create_import_job(source_id=source['id']).id)
+    first_reindex_count = len([item for item in registry.list_jobs(limit=20) if item.job_type == 'reindex'])
+
+    second = service.run_import_job(service.create_import_job(source_id=source['id']).id)
+
+    assert second['imported_files'] == 0
+    assert second['skipped_files'] == 1
+    assert second['queued_reindex'] == 0
+    assert len([item for item in registry.list_jobs(limit=20) if item.job_type == 'reindex']) == first_reindex_count
+
+
 def test_service_reindex_job_passes_cloud_identity_to_indexer(tmp_path: Path, monkeypatch) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
     storage = LocalStorageAdapter(str(tmp_path / 'storage'))
@@ -1158,7 +1218,8 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
     assert 'cloud_sync_conflicts' in tables
     assert 'cloud_user_folders' in tables
     assert 'cloud_share_links' in tables
-    assert int(version) == 6
+    assert 'cloud_import_sources' in tables
+    assert int(version) == 7
 
 
 def test_registry_repairs_current_version_missing_source_mtime_columns(tmp_path: Path) -> None:

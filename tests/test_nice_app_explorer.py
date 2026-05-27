@@ -25,6 +25,9 @@ from rag_catalog.ui.api import (
     api_cloud_drive_delete,
     api_cloud_drive_download,
     api_cloud_drive_file_statuses,
+    api_cloud_drive_import_source_run,
+    api_cloud_drive_import_source_upsert,
+    api_cloud_drive_import_sources,
     api_cloud_drive_index_coverage,
     api_cloud_drive_index_coverage_quarantine_unavailable,
     api_cloud_drive_index_coverage_repair,
@@ -1004,6 +1007,34 @@ def test_cloud_drive_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> 
     assert latest["started_at"] != ""
     assert fetched["id"] == reindex.id
     assert fetched["job_type"] == "reindex"
+
+
+def test_cloud_drive_import_source_api_queues_and_runs_job(monkeypatch, tmp_path) -> None:
+    source_root = tmp_path / "scanner"
+    source_root.mkdir()
+    (source_root / "scan.txt").write_text("scan", encoding="utf-8")
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "telemetry_db_path": str(tmp_path / "telemetry.db"),
+    }
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+
+    source = api_cloud_drive_import_source_upsert(
+        name="Scanner",
+        source_path=str(source_root),
+        target_path="Imports",
+    )
+    listed = api_cloud_drive_import_sources()
+    result = api_cloud_drive_import_source_run(source_id=source["id"], run_now=True)
+
+    assert listed[0]["id"] == source["id"]
+    assert result["job"]["status"] == "completed"
+    assert result["stats"]["imported_files"] == 1
+    service = CloudDriveService.from_config(cfg)
+    assert service.registry.get_file_by_path("Imports/scan.txt") is not None
 
 
 def test_cloud_drive_file_statuses_api_returns_latest_job_by_file(monkeypatch, tmp_path) -> None:

@@ -271,6 +271,91 @@ def api_cloud_drive_jobs(job_type: str = "", limit: int = 20, authorization: Aut
     return [_serialize_cloud_drive_job(job) for job in jobs]
 
 
+@app.get("/api/cloud-drive/import-sources")
+def api_cloud_drive_import_sources(
+    enabled_only: bool = False,
+    limit: int = 200,
+    authorization: AuthHeader = "",
+) -> List[Dict[str, Any]]:
+    cfg = load_config()
+    _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    return service.list_import_sources(enabled_only=bool(enabled_only), limit=max(1, min(int(limit or 200), 1000)))
+
+
+@app.post("/api/cloud-drive/import-sources")
+def api_cloud_drive_import_source_upsert(
+    name: str = "",
+    source_path: str = "",
+    target_path: str = "",
+    import_files: bool = True,
+    enabled: bool = True,
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    try:
+        source = service.upsert_import_source(
+            name=name,
+            source_path=source_path,
+            target_path=target_path,
+            import_files=bool(import_files),
+            enabled=bool(enabled),
+            created_by=str(user.get("username") or ""),
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "import_source_upsert", ok=False, details={"source_path": source_path, "target_path": target_path, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "import_source_upsert", details={"source_id": source.get("id"), "source_path": source.get("source_path"), "target_path": source.get("target_path")})
+    return source
+
+
+@app.post("/api/cloud-drive/import-sources/enable")
+def api_cloud_drive_import_source_enable(
+    source_id: str = "",
+    enabled: bool = True,
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    try:
+        source = service.set_import_source_enabled(source_id, bool(enabled))
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "import_source_enable", ok=False, details={"source_id": source_id, "enabled": enabled, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "import_source_enable", details={"source_id": source.get("id"), "enabled": source.get("enabled")})
+    return source
+
+
+@app.post("/api/cloud-drive/import-sources/run")
+def api_cloud_drive_import_source_run(
+    source_id: str = "",
+    max_files: int = 0,
+    run_now: bool = False,
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    service = CloudDriveService.from_config(cfg)
+    try:
+        job = service.create_import_job(source_id=source_id, max_files=(int(max_files or 0) or None))
+        result: Dict[str, Any] = {"job": _serialize_cloud_drive_job(job)}
+        if run_now:
+            stats = service.run_import_job(job.id)
+            latest = service.get_job(job.id)
+            result = {
+                "job": _serialize_cloud_drive_job(latest or job),
+                "stats": stats,
+            }
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "import_source_run", ok=False, details={"source_id": source_id, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "import_source_run", details={"source_id": source_id, "job_id": result["job"].get("id"), "run_now": run_now})
+    return result
+
+
 @app.post("/api/cloud-drive/permissions")
 def api_cloud_drive_permissions(
     subject_type: str = "",

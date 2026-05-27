@@ -215,6 +215,8 @@ CLI:
 python cloud_drive.py init --enable
 python cloud_drive.py stats
 python cloud_drive.py bootstrap --max-files 1000
+python cloud_drive.py import-source-add --name "Сканер" --source-path "\\server\scanner" --target-path "Входящие/Сканер"
+python cloud_drive.py import-source-run <source_id> --run-now
 python cloud_drive.py compact-versions
 python cloud_drive.py backup --output runtime/backups/cloud-drive.zip
 python cloud_drive.py restore runtime/backups/cloud-drive.zip --target-dir runtime/restore-check
@@ -244,6 +246,9 @@ POST /api/cloud-drive/reindex
 POST /api/cloud-drive/permissions
 GET  /api/cloud-drive/jobs
 POST /api/cloud-drive/jobs/recover-stale
+GET  /api/cloud-drive/import-sources
+POST /api/cloud-drive/import-sources
+POST /api/cloud-drive/import-sources/run
 GET  /api/cloud-drive/changes
 GET  /api/cloud-drive/storage-health
 GET  /api/cloud-drive/index-coverage

@@ -58,6 +58,24 @@ class CloudDriveJob:
 
 
 @dataclass(slots=True)
+class CloudDriveImportSource:
+    id: str
+    name: str
+    source_path: str
+    target_path: str = ""
+    import_files: bool = True
+    enabled: bool = True
+    created_by: str = ""
+    last_job_id: str = ""
+    last_status: str = ""
+    last_error: str = ""
+    last_scan_at: str = ""
+    stats: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(slots=True)
 class CloudDriveStats:
     folders: int
     files: int

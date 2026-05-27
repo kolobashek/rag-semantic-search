@@ -36,6 +36,21 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap_cmd.add_argument('--max-files', type=int, default=0, help='Import only first N files')
     bootstrap_cmd.add_argument('--import-files', action='store_true', help='Copy files into storage backend')
 
+    import_add_cmd = sub.add_parser('import-source-add', help='Register a scanner/import folder')
+    import_add_cmd.add_argument('--name', default='', help='Human-readable import source name')
+    import_add_cmd.add_argument('--source-path', required=True, help='Local/network folder to import from')
+    import_add_cmd.add_argument('--target-path', default='', help='Cloud Drive folder to import into')
+    import_add_cmd.add_argument('--reference-only', action='store_true', help='Keep files by source_path instead of copying into storage')
+    import_add_cmd.add_argument('--disabled', action='store_true', help='Register the source but keep it disabled')
+
+    import_list_cmd = sub.add_parser('import-source-list', help='List registered scanner/import folders')
+    import_list_cmd.add_argument('--enabled-only', action='store_true', help='Show only enabled sources')
+
+    import_run_cmd = sub.add_parser('import-source-run', help='Queue or run a scanner/import folder')
+    import_run_cmd.add_argument('source_id', help='Import source id')
+    import_run_cmd.add_argument('--max-files', type=int, default=0, help='Import only first N changed/new files')
+    import_run_cmd.add_argument('--run-now', action='store_true', help='Run synchronously instead of only queuing a job')
+
     sub.add_parser('stats', help='Show current cloud drive registry stats')
     sub.add_parser('compact-versions', help='Remove duplicate unchanged Cloud Drive version rows')
     backup_cmd = sub.add_parser('backup', help='Create a zip backup of config and local SQLite state')
@@ -119,6 +134,51 @@ def _compact_versions(cfg: Dict[str, Any]) -> int:
         'before': asdict(before),
         'after': asdict(after),
     }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cloud_service_from_cfg(cfg: Dict[str, Any]) -> CloudDriveService:
+    db_path, storage_root = _default_cloud_paths(cfg)
+    cfg['cloud_drive_db_path'] = str(cfg.get('cloud_drive_db_path') or db_path)
+    cfg.setdefault('cloud_drive_storage', 'local')
+    if str(cfg.get('cloud_drive_storage') or 'local') == 'local':
+        cfg['cloud_drive_storage_root'] = str(cfg.get('cloud_drive_storage_root') or storage_root)
+    return CloudDriveService.from_config(cfg)
+
+
+def _import_source_add(cfg: Dict[str, Any], args: argparse.Namespace) -> int:
+    service = _cloud_service_from_cfg(cfg)
+    source = service.upsert_import_source(
+        name=str(args.name or ''),
+        source_path=str(args.source_path or ''),
+        target_path=str(args.target_path or ''),
+        import_files=not bool(args.reference_only),
+        enabled=not bool(args.disabled),
+        created_by='cli',
+    )
+    print(json.dumps(source, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _import_source_list(cfg: Dict[str, Any], args: argparse.Namespace) -> int:
+    service = _cloud_service_from_cfg(cfg)
+    print(json.dumps(service.list_import_sources(enabled_only=bool(args.enabled_only)), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _import_source_run(cfg: Dict[str, Any], args: argparse.Namespace) -> int:
+    service = _cloud_service_from_cfg(cfg)
+    job = service.create_import_job(
+        source_id=str(args.source_id or ''),
+        max_files=(int(args.max_files or 0) or None),
+    )
+    result: Dict[str, Any] = {'job': asdict(job)}
+    if args.run_now:
+        result['stats'] = service.run_import_job(job.id)
+        latest = service.get_job(job.id)
+        if latest is not None:
+            result['job'] = asdict(latest)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -219,6 +279,12 @@ def main(argv: list[str] | None = None) -> int:
         return _stats_cloud(cfg)
     if args.command == 'compact-versions':
         return _compact_versions(cfg)
+    if args.command == 'import-source-add':
+        return _import_source_add(cfg, args)
+    if args.command == 'import-source-list':
+        return _import_source_list(cfg, args)
+    if args.command == 'import-source-run':
+        return _import_source_run(cfg, args)
     if args.command == 'backup':
         return _backup_cloud(cfg, args)
     if args.command == 'restore':
