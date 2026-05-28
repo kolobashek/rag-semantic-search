@@ -344,45 +344,106 @@ def render_explorer_screen(
                     ui.button("Закрыть", on_click=dlg.close).props("flat dense")
             dlg.open()
 
-        async def _cd_new_folder_dialog() -> None:
-            """Show an inline dialog to create a new folder in the current directory."""
+        async def _cd_create_dialog(item_type: str) -> None:
+            """Show an inline dialog to create a folder or blank Cloud Drive file."""
+            type_meta = {
+                "folder": {
+                    "title": "Новая папка",
+                    "input": "Имя папки",
+                    "placeholder": "Новая папка",
+                    "default": "",
+                    "icon": "create_new_folder",
+                    "event": "create_folder",
+                },
+                "word": {
+                    "title": "Новый документ Word",
+                    "input": "Имя документа",
+                    "placeholder": "Новый документ.docx",
+                    "default": "Новый документ.docx",
+                    "icon": "description",
+                    "event": "create_word",
+                },
+                "excel": {
+                    "title": "Новая таблица Excel",
+                    "input": "Имя таблицы",
+                    "placeholder": "Новая таблица.xlsx",
+                    "default": "Новая таблица.xlsx",
+                    "icon": "table_chart",
+                    "event": "create_excel",
+                },
+                "text": {
+                    "title": "Новый текстовый файл",
+                    "input": "Имя файла",
+                    "placeholder": "Новый файл.txt",
+                    "default": "Новый файл.txt",
+                    "icon": "article",
+                    "event": "create_text",
+                },
+            }
+            meta = type_meta.get(item_type, type_meta["folder"])
             with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-80"):
-                ui.label("Новая папка").classes("text-lg font-semibold")
+                ui.label(str(meta["title"])).classes("text-lg font-semibold")
                 parent_label = page_state.explorer_cd_path or "/"
                 ui.label(f"В: {parent_label}").classes("rag-path text-xs")
                 name_input = ui.input(
-                    "Имя папки",
-                    placeholder="Введите имя",
+                    str(meta["input"]),
+                    value=str(meta["default"]),
+                    placeholder=str(meta["placeholder"]),
                 ).props("dense outlined autofocus").classes("w-full")
 
                 async def _do_create() -> None:
                     if not _cd_can(page_state.explorer_cd_path or "", "editor"):
-                        ui.notify("Нет прав на создание папки здесь.", type="negative")
+                        ui.notify("Нет прав на создание здесь.", type="negative")
                         return
                     name = str(name_input.value or "").strip()
                     if not name:
-                        ui.notify("Введите имя папки.", type="warning")
+                        ui.notify("Введите имя.", type="warning")
                         return
                     try:
-                        await run.io_bound(
-                            svc.create_folder,
-                            parent_path=page_state.explorer_cd_path or "",
-                            name=name,
-                        )
+                        if item_type == "folder":
+                            await run.io_bound(
+                                svc.create_folder,
+                                parent_path=page_state.explorer_cd_path or "",
+                                name=name,
+                            )
+                        else:
+                            await run.io_bound(
+                                svc.create_blank_file,
+                                parent_path=page_state.explorer_cd_path or "",
+                                filename=name,
+                                file_type=item_type,
+                            )
                         dlg.close()
                         _log_app_event(
-                            page_state, "cd_explorer", "create_folder",
+                            page_state, "cd_explorer", str(meta["event"]),
                             details={"parent": page_state.explorer_cd_path, "name": name},
                         )
-                        ui.notify(f"Папка «{name}» создана.", type="positive")
+                        ui.notify(f"Создано: «{name}».", type="positive")
                         render_fn()
                     except Exception as exc:
-                        ui.notify(f"Не удалось создать папку: {exc}", type="negative")
+                        ui.notify(f"Не удалось создать: {exc}", type="negative")
 
                 name_input.on("keydown.enter", lambda _: _do_create())
                 with ui.row().classes("w-full justify-end gap-2 mt-1"):
                     ui.button("Отмена", on_click=dlg.close).props("flat dense")
-                    ui.button("Создать", icon="create_new_folder", on_click=_do_create).props("unelevated dense")
+                    ui.button("Создать", icon=str(meta["icon"]), on_click=_do_create).props("unelevated dense")
+            dlg.open()
+
+        async def _cd_create_picker_dialog() -> None:
+            with ui.dialog() as dlg, ui.card().classes("p-2 gap-1 w-64"):
+                ui.label("Создать").classes("font-semibold px-2 py-1")
+
+                def _pick_handler(item_type: str) -> Callable[[], Any]:
+                    async def _handler() -> None:
+                        dlg.close()
+                        await _cd_create_dialog(item_type)
+
+                    return _handler
+
+                ui.button("Папку", icon="create_new_folder", on_click=_pick_handler("folder"), color=None).props("flat dense no-caps align=left").classes("w-full")
+                ui.button("Документ Word", icon="description", on_click=_pick_handler("word"), color=None).props("flat dense no-caps align=left").classes("w-full")
+                ui.button("Таблицу Excel", icon="table_chart", on_click=_pick_handler("excel"), color=None).props("flat dense no-caps align=left").classes("w-full")
+                ui.button("Текстовый файл", icon="article", on_click=_pick_handler("text"), color=None).props("flat dense no-caps align=left").classes("w-full")
             dlg.open()
 
         async def _cd_rename_dialog(node_path: str, node_name: str) -> None:
@@ -734,7 +795,7 @@ def render_explorer_screen(
                 ui.button("Дерево", icon="account_tree", on_click=_cd_open_tree_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
                 ui.button("Фильтры", icon="filter_alt", on_click=_cd_open_filters_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
                 ui.button("Загрузить", icon="upload", on_click=_cd_upload_dialog, color=None).props("outline dense no-caps")
-                ui.button("Папка", icon="add", on_click=_cd_new_folder_dialog, color=None).props("flat dense no-caps")
+                ui.button("Создать", icon="add", on_click=_cd_create_picker_dialog, color=None).props("flat dense no-caps")
                 ui.separator().props("vertical")
                 ui.button(f"тип: {page_state.explorer_ext.lower()}", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
                 ui.button("изменён: любой", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
@@ -849,10 +910,7 @@ def render_explorer_screen(
                 ui.label(f"Размер: {_cd_file_size(total_size)}").classes("rag-meta text-xs")
             ui.separator()
             ui.label("Действия").classes("font-semibold text-sm")
-            ui.button(
-                "Новая папка", icon="create_new_folder",
-                on_click=_cd_new_folder_dialog, color=None,
-            ).props("flat dense no-caps align=left").classes("w-full")
+            ui.button("Создать", icon="add", on_click=_cd_create_picker_dialog, color=None).props("flat dense no-caps align=left").classes("w-full")
             ui.button(
                 "Загрузить файлы", icon="upload_file",
                 on_click=_cd_upload_dialog, color=None,

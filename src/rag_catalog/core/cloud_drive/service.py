@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -1053,6 +1054,127 @@ class CloudDriveService:
             'created_at': folder.created_at,
             'updated_at': folder.updated_at,
         }
+
+    @staticmethod
+    def _blank_docx_bytes() -> bytes:
+        import io
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>""",
+            )
+            archive.writestr(
+                "_rels/.rels",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>""",
+            )
+            archive.writestr(
+                "word/document.xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p/><w:sectPr/></w:body>
+</w:document>""",
+            )
+        return buffer.getvalue()
+
+    @staticmethod
+    def _blank_xlsx_bytes() -> bytes:
+        import io
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>""",
+            )
+            archive.writestr(
+                "_rels/.rels",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>""",
+            )
+            archive.writestr(
+                "xl/_rels/workbook.xml.rels",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>""",
+            )
+            archive.writestr(
+                "xl/workbook.xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Лист1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>""",
+            )
+            archive.writestr(
+                "xl/worksheets/sheet1.xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData/>
+</worksheet>""",
+            )
+        return buffer.getvalue()
+
+    def create_blank_file(self, *, parent_path: str = '', filename: str, file_type: str) -> dict:
+        templates: dict[str, tuple[str, str, bytes]] = {
+            "word": (
+                ".docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                self._blank_docx_bytes(),
+            ),
+            "excel": (
+                ".xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                self._blank_xlsx_bytes(),
+            ),
+            "text": (".txt", "text/plain", b""),
+        }
+        clean_type = str(file_type or "").strip().lower()
+        if clean_type not in templates:
+            raise RuntimeError(f"Неизвестный тип файла: {file_type}")
+        suffix, mime_type, content = templates[clean_type]
+        clean_name = str(filename or "").strip().strip("/\\")
+        if not clean_name:
+            raise RuntimeError("Не задано имя файла.")
+        if not clean_name.lower().endswith(suffix):
+            clean_name = f"{clean_name}{suffix}"
+        clean_parent = str(parent_path or "").strip().replace("\\", "/").strip("/")
+        target_path = f"{clean_parent}/{clean_name}" if clean_parent else clean_name
+        if self.registry.get_node_by_path(target_path) is not None:
+            raise RuntimeError(f"Файл или папка уже существует: {target_path}")
+
+        tmp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            return self.upload_file(
+                parent_path=clean_parent,
+                filename=clean_name,
+                source_path=tmp_path,
+                mime_type=mime_type,
+            )
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
 
     @staticmethod
     def _sync_client_to_dict(client: Any) -> dict:

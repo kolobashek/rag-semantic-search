@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,40 @@ def test_registry_folder_size_bytes_map_sums_descendants(tmp_path: Path) -> None
     assert sizes[docs.id] == 20
     assert sizes[archive.id] == 8
     assert sizes[empty.id] == 0
+
+
+def test_service_create_blank_files(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+    registry.ensure_root_folder(root_name='Обмен', source_path='')
+
+    word = service.create_blank_file(parent_path='', filename='Plan', file_type='word')
+    excel = service.create_blank_file(parent_path='', filename='Budget', file_type='excel')
+    text = service.create_blank_file(parent_path='', filename='Notes', file_type='text')
+
+    assert word['name'] == 'Plan.docx'
+    assert word['mime_type'] == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    assert excel['name'] == 'Budget.xlsx'
+    assert excel['mime_type'] == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    assert text['name'] == 'Notes.txt'
+    assert text['mime_type'] == 'text/plain'
+    assert text['size_bytes'] == 0
+    with zipfile.ZipFile(storage.root / word['storage_key']) as archive:
+        assert 'word/document.xml' in archive.namelist()
+    with zipfile.ZipFile(storage.root / excel['storage_key']) as archive:
+        assert 'xl/workbook.xml' in archive.namelist()
+        assert 'xl/worksheets/sheet1.xml' in archive.namelist()
+
+
+def test_service_create_blank_file_refuses_existing_path(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / 'storage')))
+    registry.ensure_root_folder(root_name='Обмен', source_path='')
+    service.create_blank_file(parent_path='', filename='Plan.docx', file_type='word')
+
+    with pytest.raises(RuntimeError, match='уже существует'):
+        service.create_blank_file(parent_path='', filename='Plan.docx', file_type='word')
 
 
 def test_registry_search_nodes_page_filters_and_paginates(tmp_path: Path) -> None:
