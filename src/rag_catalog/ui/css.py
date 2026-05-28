@@ -1156,7 +1156,7 @@ def _install_css() -> None:
           .rag-pipeline-actions { justify-content: flex-start; flex-wrap: wrap; }
           .rag-explorer-v2-layout {
             display: block;
-            height: max(320px, calc(100vh - 220px));
+            height: max(320px, calc(100vh - 194px));
             min-height: 0;
             overflow: hidden;
           }
@@ -1191,6 +1191,9 @@ def _install_css() -> None:
           .rag-selection-bar {
             flex-wrap: wrap;
             align-content: center;
+          }
+          .cd-drop-zone {
+            display: none !important;
           }
           .rag-mobile-panel-dialog {
             width: min(420px, calc(100vw - 24px));
