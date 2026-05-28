@@ -72,6 +72,56 @@ def render_explorer_screen(
 
         star.on("click.stop", toggle)
 
+    def _selection_key(scope: str, path: str) -> str:
+        return f"{scope}:{path}"
+
+    def _selected_set() -> set[str]:
+        return set(getattr(state, "explorer_selected_paths", []) or [])
+
+    def _set_selected(keys: set[str]) -> None:
+        state.explorer_selected_paths = sorted(keys)
+
+    def _toggle_selected(key: str) -> None:
+        selected = _selected_set()
+        if key in selected:
+            selected.remove(key)
+        else:
+            selected.add(key)
+        _set_selected(selected)
+
+    def _clear_selection() -> None:
+        state.explorer_selected_paths = []
+
+    def _render_selection_bar(*, scope: str, visible_keys: List[str]) -> None:
+        selected = [key for key in state.explorer_selected_paths if key.startswith(f"{scope}:")]
+        if not selected:
+            return
+        visible = set(visible_keys)
+        all_visible_selected = bool(visible) and visible.issubset(set(selected))
+        with ui.row().classes("rag-selection-bar w-full items-center gap-2"):
+            ui.icon("checklist", size="18px")
+            ui.label(f"Выбрано: {len(selected)}").classes("font-semibold")
+            ui.button(
+                "Снять",
+                icon="close",
+                on_click=lambda: (_clear_selection(), render_fn()),
+                color=None,
+            ).props("flat dense no-caps")
+            if visible_keys:
+                ui.button(
+                    "Все на странице" if not all_visible_selected else "Снять страницу",
+                    icon="select_all",
+                    on_click=lambda: (
+                        _set_selected(
+                            (_selected_set() | set(visible_keys))
+                            if not all_visible_selected
+                            else (_selected_set() - set(visible_keys))
+                        ),
+                        render_fn(),
+                    ),
+                    color=None,
+                ).props("flat dense no-caps")
+
     # ── Explorer / Cloud Drive screen ─────────────────────────────────────────
 
     def _render_cd_explorer(page_state: PageState, svc: "CloudDriveService") -> None:  # noqa: PLR0912,PLR0915
@@ -89,8 +139,73 @@ def render_explorer_screen(
         def _cd_open_folder(cd_path: str) -> None:
             page_state.explorer_cd_path = cd_path
             page_state.explorer_page = 0
+            page_state.explorer_selected_paths = []
             _log_app_event(page_state, "cd_explorer", "open_folder", details={"cd_path": cd_path})
             render_fn()
+
+        def _cd_open_tree_dialog() -> None:
+            with ui.dialog() as dlg, ui.card().classes("rag-mobile-panel-dialog p-3 gap-2"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.icon("account_tree", size="20px")
+                    ui.label("Дерево").classes("font-semibold flex-1")
+                    ui.button(icon="close", on_click=dlg.close, color=None).props("flat round dense")
+                if root_folder is None:
+                    ui.label("Реестр пуст.").classes("rag-meta")
+                else:
+                    ancestor_paths = {folder.path for folder in breadcrumbs}
+                    open_paths = set(page_state.explorer_tree_open) | ancestor_paths | {root_folder.path}
+
+                    def _dialog_node(folder: CloudDriveFolder, depth: int) -> None:
+                        children = svc.registry.list_child_folders(folder.id)
+                        is_current = folder.path == cd_path or (not cd_path and folder.is_root)
+                        label = "Корень" if folder.is_root else folder.name
+                        with ui.row().classes("rag-tree-row" + (" active" if is_current else "")).style(f"padding-left:{depth * 12}px"):
+                            ui.button(
+                                label,
+                                icon="folder_open" if folder.path in open_paths or is_current else "folder",
+                                on_click=lambda p=folder.path: (dlg.close(), _cd_open_folder(p)),
+                                color=None,
+                            ).props("flat align=left no-caps dense").classes(
+                                "rag-nav-button rag-tree-button rag-tree-label"
+                                + (" active" if is_current else "")
+                            )
+                        if folder.path in open_paths:
+                            for child in children:
+                                _dialog_node(child, depth + 1)
+
+                    with ui.column().classes("w-full gap-0 rag-mobile-panel-body"):
+                        _dialog_node(root_folder, 0)
+            dlg.open()
+
+        def _cd_open_filters_dialog() -> None:
+            with ui.dialog() as dlg, ui.card().classes("rag-mobile-panel-dialog p-3 gap-3"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.icon("filter_alt", size="20px")
+                    ui.label("Фильтры и вид").classes("font-semibold flex-1")
+                    ui.button(icon="close", on_click=dlg.close, color=None).props("flat round dense")
+                ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes("rag-meta")
+                ui.label(f"Тип: {page_state.explorer_ext}").classes(
+                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_ext != "Все" else "")
+                )
+                view_select = ui.select(
+                    ["Таблица", "Список"],
+                    value=page_state.explorer_view if page_state.explorer_view in ("Таблица", "Список") else "Таблица",
+                    label="Вид",
+                ).props("dense outlined").classes("w-full")
+                sort_select = ui.select(
+                    ["По имени", "По размеру", "По дате"],
+                    value=page_state.explorer_sort,
+                    label="Сортировка",
+                ).props("dense outlined").classes("w-full")
+
+                def _apply_mobile_filters() -> None:
+                    page_state.explorer_view = str(view_select.value or "Таблица")
+                    page_state.explorer_sort = str(sort_select.value or "По имени")
+                    dlg.close()
+                    render_fn()
+
+                ui.button("Применить", icon="check", on_click=_apply_mobile_filters).props("unelevated dense no-caps").classes("w-full")
+            dlg.open()
 
         async def _cd_upload_dialog() -> None:
             """File-picker dialog that uploads files to the current Cloud Drive folder."""
@@ -546,13 +661,15 @@ def render_explorer_screen(
                 folder_search.on("keydown.enter", _search_current_folder)
 
             with ui.row().classes("rag-explorer-actionline"):
+                ui.button("Дерево", icon="account_tree", on_click=_cd_open_tree_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
+                ui.button("Фильтры", icon="filter_alt", on_click=_cd_open_filters_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
                 ui.button("Загрузить", icon="upload", on_click=_cd_upload_dialog, color=None).props("outline dense no-caps")
                 ui.button("Папка", icon="add", on_click=_cd_new_folder_dialog, color=None).props("flat dense no-caps")
                 ui.separator().props("vertical")
-                ui.button(f"тип: {page_state.explorer_ext.lower()}", color=None).props("flat dense no-caps")
-                ui.button("изменён: любой", color=None).props("flat dense no-caps")
-                ui.button("размер: любой", color=None).props("flat dense no-caps")
-                ui.button("фильтр", icon="add", color=None).props("flat dense no-caps")
+                ui.button(f"тип: {page_state.explorer_ext.lower()}", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
+                ui.button("изменён: любой", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
+                ui.button("размер: любой", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
+                ui.button("фильтр", icon="add", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
                 ui.space()
                 ui.label("Сорт:").classes("rag-explorer-sort-label")
                 ui.select(
@@ -688,6 +805,10 @@ def render_explorer_screen(
 
         # ── Main column ───────────────────────────────────────────────────
         with main_col:
+            visible_keys = [
+                *[_selection_key("cd", folder.path) for folder in child_folders],
+                *[_selection_key("cd", f.path) for f in page_files],
+            ]
             if _is_trash_view:
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.icon("delete_outline", size="22px").classes("text-slate-500")
@@ -739,6 +860,7 @@ def render_explorer_screen(
                 with ui.element("span").classes("cd-status-badge cd-status-done text-xs"):
                     ui.icon("cloud_done", size="14px")
                     ui.label("Cloud Drive")
+            _render_selection_bar(scope="cd", visible_keys=visible_keys)
 
             # Empty state
             if root_folder is None:
@@ -760,7 +882,15 @@ def render_explorer_screen(
                     if child_folders:
                         with ui.column().classes("rag-explorer-list w-full"):
                             for folder in child_folders:
-                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                item_key = _selection_key("cd", folder.path)
+                                with ui.row().classes(
+                                    "rag-explorer-item w-full p-2 items-center gap-3"
+                                    + (" selected" if item_key in _selected_set() else "")
+                                ):
+                                    ui.checkbox(
+                                        value=item_key in _selected_set(),
+                                        on_change=lambda _e, k=item_key: (_toggle_selected(k), render_fn()),
+                                    ).props("dense").classes("rag-select-checkbox")
                                     ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
                                     with ui.column().classes("flex-1 gap-0"):
                                         ui.button(
@@ -793,7 +923,15 @@ def render_explorer_screen(
                             return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
                         with ui.column().classes("rag-explorer-list w-full"):
                             for f in page_files:
-                                with ui.row().classes("rag-explorer-item w-full p-2 items-center gap-3"):
+                                item_key = _selection_key("cd", f.path)
+                                with ui.row().classes(
+                                    "rag-explorer-item w-full p-2 items-center gap-3"
+                                    + (" selected" if item_key in _selected_set() else "")
+                                ):
+                                    ui.checkbox(
+                                        value=item_key in _selected_set(),
+                                        on_change=lambda _e, k=item_key: (_toggle_selected(k), render_fn()),
+                                    ).props("dense").classes("rag-select-checkbox")
                                     ui.html(_file_badge_html(f.name), sanitize=False)
                                     with ui.column().classes("flex-1 gap-0"):
                                         ui.button(
@@ -849,6 +987,17 @@ def render_explorer_screen(
                         return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
                     with ui.column().classes("w-full gap-0"):
                         with ui.element("div").classes("rag-file-table-header"):
+                            ui.checkbox(
+                                value=bool(visible_keys) and set(visible_keys).issubset(_selected_set()),
+                                on_change=lambda _e: (
+                                    _set_selected(
+                                        (_selected_set() | set(visible_keys))
+                                        if not set(visible_keys).issubset(_selected_set())
+                                        else (_selected_set() - set(visible_keys))
+                                    ),
+                                    render_fn(),
+                                ),
+                            ).props("dense").classes("rag-select-checkbox")
                             ui.element("div")
                             ui.label("Имя").classes("rag-col-header")
                             ui.label("Изменён").classes("rag-col-header")
@@ -857,7 +1006,12 @@ def render_explorer_screen(
                             ui.label("Индекс").classes("rag-col-header")
                             ui.element("div")
                         for folder in child_folders:
-                            with ui.element("div").classes("rag-file-table-row"):
+                            item_key = _selection_key("cd", folder.path)
+                            with ui.element("div").classes("rag-file-table-row" + (" selected" if item_key in _selected_set() else "")):
+                                ui.checkbox(
+                                    value=item_key in _selected_set(),
+                                    on_change=lambda _e, k=item_key: (_toggle_selected(k), render_fn()),
+                                ).props("dense").classes("rag-select-checkbox")
                                 ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
@@ -891,7 +1045,12 @@ def render_explorer_screen(
                                                     auto_close=True,
                                                 ).classes("text-negative")
                         for f in page_files:
-                            with ui.element("div").classes("rag-file-table-row"):
+                            item_key = _selection_key("cd", f.path)
+                            with ui.element("div").classes("rag-file-table-row" + (" selected" if item_key in _selected_set() else "")):
+                                ui.checkbox(
+                                    value=item_key in _selected_set(),
+                                    on_change=lambda _e, k=item_key: (_toggle_selected(k), render_fn()),
+                                ).props("dense").classes("rag-select-checkbox")
                                 ui.html(_file_badge_html(f.name), sanitize=False)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
@@ -1022,6 +1181,7 @@ def render_explorer_screen(
     def open_folder(path: Path) -> None:
         state.explorer_path = str(path)
         state.explorer_page = 0
+        state.explorer_selected_paths = []
         _get_auth_db(state).touch_favorite(username=_username(state), path=str(path))
         _log_app_event(state, "explorer", "open_folder", details={"path": str(path)})
         render_fn()
@@ -1149,9 +1309,18 @@ def render_explorer_screen(
         icon = _file_icon_svg(str(path), "Каталог" if is_dir else "Файл")
         click = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
         system_class = " system" if not is_dir and _is_system_file(path) else ""
-        tile = ui.column().classes(f"rag-explorer-item items-center gap-1 p-2 {size_class}{system_class}")
+        item_key = _selection_key("fs", str(path))
+        tile = ui.column().classes(
+            f"rag-explorer-item items-center gap-1 p-2 {size_class}{system_class}"
+            + (" selected" if item_key in _selected_set() else "")
+        )
         tile.props(explorer_context_props(path, is_dir=is_dir))
         with tile:
+            with ui.element("div").classes("rag-tile-select-wrap"):
+                ui.checkbox(
+                    value=item_key in _selected_set(),
+                    on_change=lambda _e, k=item_key: (_toggle_selected(k), render_fn()),
+                ).props("dense").classes("rag-select-checkbox")
             with ui.element("div").classes("rag-tile-star-wrap"):
                 render_star(path, item_type="folder" if is_dir else "file")
             opener = ui.column().classes("rag-explorer-opener items-center gap-1 cursor-pointer").on("click", click)
@@ -1172,9 +1341,17 @@ def render_explorer_screen(
         except Exception:
             size, modified = "", ""
         system_class = " system" if not is_dir and _is_system_file(path) else ""
-        row = ui.row().classes(f"rag-explorer-item w-full p-2 items-center gap-3{system_class}")
+        item_key = _selection_key("fs", str(path))
+        row = ui.row().classes(
+            f"rag-explorer-item w-full p-2 items-center gap-3{system_class}"
+            + (" selected" if item_key in _selected_set() else "")
+        )
         row.props(explorer_context_props(path, is_dir=is_dir))
         with row:
+            ui.checkbox(
+                value=item_key in _selected_set(),
+                on_change=lambda _e, k=item_key: (_toggle_selected(k), render_fn()),
+            ).props("dense").classes("rag-select-checkbox")
             ui.html(_file_badge_html(str(path), "Каталог" if is_dir else "Файл"), sanitize=False)
             action = (lambda p=path: open_folder(p)) if is_dir else (lambda p=path: open_file(p))
             with ui.column().classes("flex-1 gap-0"):
@@ -1293,6 +1470,7 @@ def render_explorer_screen(
         dirs, files, total_files = _file_rows(current, state)
         state.explorer_page = max(0, min(state.explorer_page, max(0, (len(files) - 1) // PAGE_SIZE)))
         page_files = files[state.explorer_page * PAGE_SIZE : (state.explorer_page + 1) * PAGE_SIZE]
+        visible_keys = [_selection_key("fs", str(path)) for path in [*dirs, *page_files]]
 
         with entries_area:
             with ui.row().classes("w-full items-center gap-2"):
@@ -1301,6 +1479,7 @@ def render_explorer_screen(
                 if current == root:
                     up_button.disable()
                 ui.label(f"папок {len(dirs)} · файлов {total_files}").classes("rag-path")
+            _render_selection_bar(scope="fs", visible_keys=visible_keys)
 
             if state.favorites:
                 with ui.row().classes("rag-bookmarks"):

@@ -390,18 +390,30 @@ def _install_css() -> None:
         .rag-explorer-v2-layout {
           display: grid;
           grid-template-columns: minmax(220px, 260px) minmax(0, 1fr) minmax(220px, 280px);
-          align-items: start;
+          align-items: stretch;
+          height: calc(100vh - 208px);
+          min-height: 360px;
+          overflow: hidden;
+        }
+        body:has(.rag-explorer-v2-layout),
+        body:has(.rag-explorer-v2-layout) .q-page {
+          overflow: hidden;
         }
         .rag-explorer-tree,
         .rag-explorer-details {
-          position: sticky;
-          top: 66px;
-          max-height: calc(100vh - 84px);
-          overflow: auto;
+          position: static;
+          height: 100%;
+          min-height: 0;
+          overflow: hidden;
         }
         .rag-explorer-files {
           min-width: 0;
+          height: 100%;
+          min-height: 0;
+          overflow-y: auto;
+          overscroll-behavior: contain;
         }
+        .rag-explorer-mobile-only { display: none !important; }
         .rag-explorer-commandbar {
           padding: 14px 8px 2px;
         }
@@ -878,6 +890,11 @@ def _install_css() -> None:
           border-color: rgba(59, 130, 246, 0.3);
           box-shadow: 0 10px 20px -10px rgba(59, 130, 246, 0.15);
         }
+        .rag-explorer-item.selected,
+        .rag-file-table-row.selected {
+          border-color: color-mix(in srgb, var(--rag-accent) 55%, var(--rag-border));
+          background: color-mix(in srgb, var(--rag-accent) 10%, var(--rag-surface));
+        }
         .rag-explorer-item.system {
           opacity: .55;
           color: #64748b;
@@ -933,6 +950,25 @@ def _install_css() -> None:
           top: 4px;
           right: 4px;
           z-index: 2;
+        }
+        .rag-tile-select-wrap {
+          position: absolute;
+          top: 4px;
+          left: 4px;
+          z-index: 3;
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--rag-surface) 88%, transparent);
+        }
+        .rag-select-checkbox {
+          flex: 0 0 auto;
+        }
+        .rag-selection-bar {
+          min-height: 36px;
+          padding: 6px 8px;
+          border: 1px solid color-mix(in srgb, var(--rag-accent) 42%, var(--rag-border));
+          border-radius: 8px;
+          background: color-mix(in srgb, var(--rag-accent) 10%, var(--rag-surface));
+          color: var(--rag-text);
         }
         .rag-favorite-star.header {
           opacity: .65;
@@ -1106,14 +1142,35 @@ def _install_css() -> None:
           .rag-index-config-layout { display: flex; flex-direction: column; }
           .rag-pipeline-row { display: flex; flex-direction: column; align-items: stretch; }
           .rag-pipeline-actions { justify-content: flex-start; flex-wrap: wrap; }
-          .rag-explorer-v2-layout { display: flex; flex-direction: column; }
-          .rag-explorer-tree {
-            position: static;
-            max-height: 300px;
-            overflow: auto;
-            width: 100%;
+          .rag-explorer-v2-layout {
+            display: block;
+            height: max(280px, calc(100vh - 330px));
+            min-height: 0;
+            overflow: hidden;
           }
-          .rag-explorer-details { display: none; }
+          .rag-explorer-tree,
+          .rag-explorer-details { display: none !important; }
+          .rag-explorer-files {
+            height: 100%;
+            width: 100%;
+            max-height: none;
+            overflow-y: auto;
+          }
+          .rag-explorer-mobile-only { display: inline-flex !important; }
+          .rag-filter-top-action { display: none !important; }
+          .rag-file-table-header,
+          .rag-file-table-row {
+            grid-template-columns: 28px 42px minmax(180px,1fr) 92px 78px 72px 56px 44px;
+            min-width: 760px;
+          }
+          .rag-mobile-panel-dialog {
+            width: min(420px, calc(100vw - 24px));
+            max-height: 82vh;
+          }
+          .rag-mobile-panel-body {
+            max-height: 66vh;
+            overflow-y: auto;
+          }
         }
 
         /* ================================================================
@@ -1428,7 +1485,7 @@ def _install_css() -> None:
         .rag-file-table-header,
         .rag-file-table-row {
           display: grid;
-          grid-template-columns: 44px minmax(220px,1fr) 120px 88px 84px 74px 88px;
+          grid-template-columns: 30px 44px minmax(220px,1fr) 120px 88px 84px 74px 88px;
           align-items: center;
           gap: 8px;
           width: 100%;

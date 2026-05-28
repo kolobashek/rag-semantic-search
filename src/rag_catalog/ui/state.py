@@ -63,6 +63,7 @@ class PageState:
     explorer_page: int = 0
     explorer_cd_path: str = ""
     explorer_tree_open: List[str] = field(default_factory=list)
+    explorer_selected_paths: List[str] = field(default_factory=list)
     cloud_tab: str = "files"
     screen_scroll: Dict[str, int] = field(default_factory=dict)
     screen_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -123,6 +124,7 @@ def capture_screen_state(state: PageState, screen: Optional[str] = None) -> Dict
             "explorer_page": state.explorer_page,
             "explorer_cd_path": state.explorer_cd_path,
             "explorer_tree_open": list(state.explorer_tree_open),
+            "explorer_selected_paths": list(state.explorer_selected_paths),
         }
     elif current == "cloud":
         snapshot = {"cloud_tab": state.cloud_tab}
@@ -171,6 +173,7 @@ def restore_screen_state(state: PageState, screen: Optional[str] = None) -> bool
         state.explorer_page = int(snapshot.get("explorer_page") or 0)
         state.explorer_cd_path = str(snapshot.get("explorer_cd_path") or "")
         state.explorer_tree_open = list(snapshot.get("explorer_tree_open") or [])
+        state.explorer_selected_paths = list(snapshot.get("explorer_selected_paths") or [])
         return True
 
     if current == "cloud":
