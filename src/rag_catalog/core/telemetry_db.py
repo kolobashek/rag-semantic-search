@@ -345,6 +345,7 @@ class TelemetryDB:
                         extracted_text TEXT NOT NULL DEFAULT '',
                         pages INTEGER NOT NULL DEFAULT 0,
                         char_count INTEGER NOT NULL DEFAULT 0,
+                        line_count INTEGER NOT NULL DEFAULT 0,
                         status TEXT NOT NULL DEFAULT 'ok',
                         error_text TEXT NOT NULL DEFAULT '',
                         ts_processed TEXT NOT NULL,
@@ -432,6 +433,9 @@ class TelemetryDB:
         ocr_cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocr_runs)").fetchall()}
         if "worker_pid" not in ocr_cols:
             conn.execute("ALTER TABLE ocr_runs ADD COLUMN worker_pid INTEGER NOT NULL DEFAULT 0")
+        ocr_result_cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocr_file_results)").fetchall()}
+        if "line_count" not in ocr_result_cols:
+            conn.execute("ALTER TABLE ocr_file_results ADD COLUMN line_count INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_default_search_aliases(self, conn: sqlite3.Connection) -> None:
         now = _utc_now()
@@ -1398,24 +1402,26 @@ class TelemetryDB:
         error: str = "",
     ) -> None:
         """Сохранить (или обновить) результат OCR для файла."""
+        line_count = sum(1 for line in str(text or "").splitlines() if line.strip())
         with self._lock:
             with self._connect() as conn:
                 self._prepare_connection(conn)
                 conn.execute(
                     """
                     INSERT INTO ocr_file_results
-                        (file_path, file_mtime, extracted_text, pages, char_count, status, error_text, ts_processed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (file_path, file_mtime, extracted_text, pages, char_count, line_count, status, error_text, ts_processed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_path) DO UPDATE SET
                         file_mtime   = excluded.file_mtime,
                         extracted_text = excluded.extracted_text,
                         pages        = excluded.pages,
                         char_count   = excluded.char_count,
+                        line_count   = excluded.line_count,
                         status       = excluded.status,
                         error_text   = excluded.error_text,
                         ts_processed = excluded.ts_processed
                     """,
-                    (file_path, float(file_mtime), text, int(pages), int(chars), status, error, _utc_now()),
+                    (file_path, float(file_mtime), text, int(pages), int(chars), line_count, status, error, _utc_now()),
                 )
                 conn.commit()
 

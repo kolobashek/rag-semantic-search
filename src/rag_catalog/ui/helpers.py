@@ -60,6 +60,8 @@ FILE_PREVIEW_EXTENSIONS = {".txt", ".log", ".csv", ".json", ".md", ".py", ".ps1"
 INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
 OCR_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
 OCR_CAPABLE_EXTENSIONS = {".pdf", *OCR_IMAGE_EXTENSIONS}
+OCR_INVENTORY_CACHE_TTL_SECONDS = 60.0
+_OCR_INVENTORY_CACHE: Dict[str, Any] = {}
 OFFICE_PREVIEW_EXTENSIONS = {".docx", ".xlsx", ".xls", ".rtf"}
 PAGE_SIZE = 80
 SYSTEM_FILE_EXTENSIONS = {
@@ -1501,6 +1503,18 @@ def _find_headless_active_ocr(db_path: Path) -> Optional[Dict[str, Any]]:
 
 def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Return OCR inventory across index_state and cached OCR results."""
+    qdrant_dir = Path(str(cfg.get("qdrant_db_path") or "")).expanduser()
+    state_file = qdrant_dir / "index_state.db"
+    telemetry_file = _telemetry_db_path(cfg)
+    cache_key = f"{state_file}|{telemetry_file}"
+    now = time.monotonic()
+    cached = _OCR_INVENTORY_CACHE.get(cache_key)
+    if cached and now - float(cached.get("ts") or 0) < OCR_INVENTORY_CACHE_TTL_SECONDS:
+        data = dict(cached.get("data") or {})
+        data["status_counts"] = dict(data.get("status_counts") or {})
+        data["cached"] = True
+        return data
+
     out: Dict[str, Any] = {
         "found": False,
         "ocr_capable_total": 0,
@@ -1515,8 +1529,6 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "recognized_lines": 0,
         "status_counts": {},
     }
-    qdrant_dir = Path(str(cfg.get("qdrant_db_path") or "")).expanduser()
-    state_file = qdrant_dir / "index_state.db"
     state_rows: Dict[str, Dict[str, Any]] = {}
     candidate_paths: set[str] = set()
     small_pdf_mb_raw = cfg.get("small_pdf_mb")
@@ -1559,10 +1571,13 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     ocr_rows: List[Dict[str, Any]] = []
     try:
+        result_cols = _db_query_dicts(telemetry_file, "PRAGMA table_info(ocr_file_results)")
+        has_line_count = any(str(row.get("name") or "") == "line_count" for row in result_cols)
+        line_expr = "line_count" if has_line_count else "0 AS line_count"
         ocr_rows = _db_query_dicts(
-            _telemetry_db_path(cfg),
-            """
-            SELECT file_path, status, pages, char_count, extracted_text, error_text, ts_processed
+            telemetry_file,
+            f"""
+            SELECT file_path, status, pages, char_count, {line_expr}
             FROM ocr_file_results
             """,
         )
@@ -1597,8 +1612,7 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         recognized_paths.add(path)
         recognized_pages += int(row.get("pages") or 0)
         recognized_chars += chars
-        text = str(row.get("extracted_text") or "")
-        recognized_lines += sum(1 for line in text.splitlines() if line.strip())
+        recognized_lines += int(row.get("line_count") or 0)
         state = state_rows.get(path) or {}
         if (
             str(state.get("stage") or "") != "content"
@@ -1625,6 +1639,9 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "status_counts": status_counts,
         }
     )
+    cached_data = dict(out)
+    cached_data["status_counts"] = dict(status_counts)
+    _OCR_INVENTORY_CACHE[cache_key] = {"ts": now, "data": cached_data}
     return out
 
 
