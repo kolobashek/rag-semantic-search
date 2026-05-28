@@ -36,6 +36,39 @@ def test_registry_root_folder_and_stats(tmp_path: Path) -> None:
     assert root.is_root is True
 
 
+def test_registry_folder_size_bytes_map_sums_descendants(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')
+    docs = registry.upsert_folder(path='Docs', name='Docs', parent_id=root.id, depth=1)
+    archive = registry.upsert_folder(path='Docs/Archive', name='Archive', parent_id=docs.id, depth=2)
+    empty = registry.upsert_folder(path='Empty', name='Empty', parent_id=root.id, depth=1)
+    registry.upsert_file(
+        folder_id=docs.id,
+        path='Docs/current.pdf',
+        name='current.pdf',
+        storage_key='objects/current',
+        mime_type='application/pdf',
+        size_bytes=12,
+        checksum='current',
+    )
+    registry.upsert_file(
+        folder_id=archive.id,
+        path='Docs/Archive/old.pdf',
+        name='old.pdf',
+        storage_key='objects/old',
+        mime_type='application/pdf',
+        size_bytes=8,
+        checksum='old',
+    )
+
+    sizes = registry.folder_size_bytes_map([root.id, docs.id, archive.id, empty.id])
+
+    assert sizes[root.id] == 20
+    assert sizes[docs.id] == 20
+    assert sizes[archive.id] == 8
+    assert sizes[empty.id] == 0
+
+
 def test_registry_search_nodes_page_filters_and_paginates(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')

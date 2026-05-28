@@ -623,6 +623,38 @@ class CloudDriveRegistryDB:
             ).fetchall()
             return [self._file_from_row(row) for row in rows]
 
+    def folder_size_bytes_map(self, folder_ids: List[str]) -> Dict[str, int]:
+        """Return recursive logical file sizes for the requested folders."""
+        clean_ids = [str(folder_id) for folder_id in folder_ids if str(folder_id or "").strip()]
+        if not clean_ids:
+            return {}
+        placeholders = ",".join("?" for _ in clean_ids)
+        query = f"""
+            WITH RECURSIVE descendants(root_id, folder_id) AS (
+                SELECT id, id
+                FROM cloud_folders
+                WHERE id IN ({placeholders}) AND deleted_at=''
+                UNION ALL
+                SELECT descendants.root_id, child.id
+                FROM cloud_folders AS child
+                JOIN descendants ON child.parent_id = descendants.folder_id
+                WHERE child.deleted_at=''
+            )
+            SELECT descendants.root_id AS folder_id,
+                   COALESCE(SUM(cloud_files.size_bytes), 0) AS size_bytes
+            FROM descendants
+            LEFT JOIN cloud_files
+              ON cloud_files.folder_id = descendants.folder_id
+             AND cloud_files.deleted_at=''
+            GROUP BY descendants.root_id
+        """
+        sizes = {folder_id: 0 for folder_id in clean_ids}
+        with self._connect() as conn:
+            rows = conn.execute(query, clean_ids).fetchall()
+        for row in rows:
+            sizes[str(row["folder_id"])] = int(row["size_bytes"] or 0)
+        return sizes
+
     @staticmethod
     def _escape_like(value: str) -> str:
         return (

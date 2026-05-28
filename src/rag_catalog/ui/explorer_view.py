@@ -616,12 +616,34 @@ def render_explorer_screen(
         if ext_q:
             child_files = [f for f in child_files if f.name.lower().endswith(ext_q.lower())]
 
+        try:
+            child_folder_sizes = svc.registry.folder_size_bytes_map([folder.id for folder in child_folders])
+        except Exception:
+            child_folder_sizes = {}
+
+        def _cd_can_show_folder_size(folder: CloudDriveFolder) -> bool:
+            if _is_admin(page_state):
+                return True
+            try:
+                if svc.registry.is_user_home_folder_path(folder.path):
+                    username = str((page_state.current_user or {}).get("username") or "").strip().lower()
+                    return bool(username) and folder.path.strip("/").lower() == username
+            except Exception:
+                return False
+            return True
+
+        def _cd_folder_size_label(folder: CloudDriveFolder) -> str:
+            if not _cd_can_show_folder_size(folder):
+                return "—"
+            return _cd_file_size(int(child_folder_sizes.get(folder.id, 0) or 0))
+
         sort_key = page_state.explorer_sort
         rev = page_state.explorer_desc
         if sort_key == "По имени":
             child_folders.sort(key=lambda x: x.name.lower(), reverse=rev)
             child_files.sort(key=lambda x: x.name.lower(), reverse=rev)
         elif sort_key == "По размеру":
+            child_folders.sort(key=lambda x: child_folder_sizes.get(x.id, 0), reverse=rev)
             child_files.sort(key=lambda x: x.size_bytes, reverse=rev)
         elif sort_key == "По дате":
             child_files.sort(key=lambda x: x.updated_at, reverse=rev)
@@ -1049,7 +1071,7 @@ def render_explorer_screen(
                                         color=None,
                                     ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
                                 ui.label("—").classes("rag-meta text-xs")
-                                ui.label("папка").classes("rag-meta text-xs")
+                                ui.label(_cd_folder_size_label(folder)).classes("rag-meta text-xs")
                                 ui.label("admin").classes("rag-meta text-xs")
                                 ui.label("✓").classes("rag-file-table-index-ok")
                                 with ui.element("div").classes("rag-file-table-actions"):
