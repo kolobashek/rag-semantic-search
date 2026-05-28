@@ -1128,6 +1128,15 @@ def _install_css() -> None:
         }
         @media (max-width: 760px) {
           .rag-page { width: calc(100vw - 20px); padding-top: 18px; }
+          body:has(.rag-explorer-v2-layout) .q-page > .nicegui-content {
+            padding-top: 4px;
+          }
+          .rag-page:has(.rag-explorer-v2-layout) {
+            padding-top: 4px;
+          }
+          .rag-page:has(.rag-explorer-v2-layout) > .w-full {
+            gap: 8px;
+          }
           .rag-title { font-size: 28px; }
           .rag-actions .q-btn { width: auto; }
           .rag-search-box { box-shadow: 0 4px 12px rgba(23, 32, 44, 0.06); }
@@ -1156,7 +1165,7 @@ def _install_css() -> None:
           .rag-pipeline-actions { justify-content: flex-start; flex-wrap: wrap; }
           .rag-explorer-v2-layout {
             display: block;
-            height: max(320px, calc(100vh - 194px));
+            height: max(320px, calc(100vh - 168px));
             min-height: 0;
             overflow: hidden;
           }
