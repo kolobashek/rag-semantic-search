@@ -9,7 +9,18 @@ from __future__ import annotations
 from nicegui import ui
 
 
+_INTERACTION_SCRIPT_CACHE = ""
+
+
+def _install_interaction_javascript() -> None:
+    """Install client-side interaction helpers for the current NiceGUI client."""
+    if _INTERACTION_SCRIPT_CACHE:
+        ui.run_javascript(_INTERACTION_SCRIPT_CACHE)
+
+
 def _install_css() -> None:
+    global _INTERACTION_SCRIPT_CACHE
+
     ui.add_head_html('<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">')
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">')
     ui.add_head_html("""<style>
@@ -224,6 +235,76 @@ def _install_css() -> None:
           padding: 10px 0 32px;
         }
         .rag-page.search { padding-top: 4px; }
+        .rag-global-busy {
+          position: fixed;
+          left: 50%;
+          bottom: 18px;
+          z-index: 2300;
+          display: none;
+          align-items: center;
+          gap: 10px;
+          width: min(420px, calc(100vw - 28px));
+          min-height: 44px;
+          padding: 8px 12px;
+          border: 1px solid var(--rag-border-strong);
+          border-radius: 8px;
+          color: var(--rag-text);
+          background: color-mix(in srgb, var(--rag-surface) 94%, transparent);
+          box-shadow: 0 18px 42px -24px rgba(0,0,0,.62);
+          transform: translate(-50%, 12px);
+          opacity: 0;
+          pointer-events: none;
+          backdrop-filter: blur(14px);
+          transition: opacity .14s ease, transform .14s ease;
+        }
+        .rag-global-busy.show {
+          display: flex;
+          opacity: 1;
+          transform: translate(-50%, 0);
+        }
+        .rag-busy-spinner {
+          width: 18px;
+          height: 18px;
+          border: 2px solid color-mix(in srgb, var(--rag-accent) 22%, transparent);
+          border-top-color: var(--rag-accent);
+          border-radius: 999px;
+          animation: rag-spin .75s linear infinite;
+          flex: 0 0 auto;
+        }
+        .rag-busy-content {
+          display: grid;
+          gap: 5px;
+          min-width: 0;
+          flex: 1;
+        }
+        .rag-busy-label {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 13px;
+          font-weight: 500;
+        }
+        .rag-busy-skeleton {
+          height: 5px;
+          border-radius: 999px;
+          overflow: hidden;
+          background: color-mix(in srgb, var(--rag-border) 56%, transparent);
+        }
+        .rag-busy-skeleton::before {
+          content: "";
+          display: block;
+          width: 42%;
+          height: 100%;
+          border-radius: inherit;
+          background: linear-gradient(90deg, transparent, var(--rag-accent), transparent);
+          animation: rag-loading-bar 1.1s ease-in-out infinite;
+        }
+        @keyframes rag-spin { to { transform: rotate(360deg); } }
+        @keyframes rag-loading-bar {
+          0% { transform: translateX(-120%); opacity: .35; }
+          50% { opacity: .8; }
+          100% { transform: translateX(260%); opacity: .35; }
+        }
         .rag-title, h1, h2, h3, .text-2xl, .text-xl {
           font-family: var(--rag-font-display);
           letter-spacing: 0;
@@ -2117,11 +2198,43 @@ def _install_css() -> None:
           text-transform: uppercase; letter-spacing: 0.08em;
         }
         </style>""")
-    ui.add_body_html(
-        """
-        <div id="rag-global-context-menu" class="rag-context-menu" role="menu"></div>
-        <script>
+    interaction_script = """
         (() => {
+          let busyTimer = null;
+          const busy = () => document.getElementById('rag-global-busy');
+          window.ragShowBusy = (label = 'Выполняется...', options = {}) => {
+            const el = busy();
+            if (!el) return;
+            const text = el.querySelector('.rag-busy-label');
+            if (text) text.textContent = String(label || 'Выполняется...');
+            el.classList.add('show');
+            if (busyTimer) window.clearTimeout(busyTimer);
+            const timeout = Number(options.timeout || 1800);
+            if (timeout > 0) {
+              busyTimer = window.setTimeout(() => window.ragHideBusy(), timeout);
+            }
+          };
+          window.ragHideBusy = () => {
+            const el = busy();
+            if (!el) return;
+            if (busyTimer) window.clearTimeout(busyTimer);
+            busyTimer = null;
+            el.classList.remove('show');
+          };
+          const clickBusy = (event) => {
+            const target = event.target.closest('button, .q-btn, [role="button"], a[href]');
+            if (!target) return;
+            if (target.closest('.q-menu, .rag-context-menu')) return;
+            if (target.disabled || target.getAttribute('aria-disabled') === 'true') return;
+            const raw = target.innerText || target.getAttribute('aria-label') || target.getAttribute('title') || '';
+            const label = raw.trim().replace(/\\s+/g, ' ').slice(0, 64) || 'Выполняется...';
+            window.ragShowBusy(label, { timeout: 1200 });
+          };
+          if (!window.__ragBusyInstalled) {
+            window.__ragBusyInstalled = true;
+            document.addEventListener('click', clickBusy, true);
+          }
+
           if (window.__ragContextMenuInstalled) return;
           window.__ragContextMenuInstalled = true;
           const menu = () => document.getElementById('rag-global-context-menu');
@@ -2231,6 +2344,17 @@ def _install_css() -> None:
           document.addEventListener('scroll', hide, true);
           document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
         })();
-        </script>
+        """
+    _INTERACTION_SCRIPT_CACHE = interaction_script
+    ui.add_body_html(
+        """
+        <div id="rag-global-busy" class="rag-global-busy" role="status" aria-live="polite">
+          <span class="rag-busy-spinner" aria-hidden="true"></span>
+          <span class="rag-busy-content">
+            <span class="rag-busy-label">Выполняется...</span>
+            <span class="rag-busy-skeleton" aria-hidden="true"></span>
+          </span>
+        </div>
+        <div id="rag-global-context-menu" class="rag-context-menu" role="menu"></div>
         """
     )

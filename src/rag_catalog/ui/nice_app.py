@@ -26,7 +26,7 @@ from . import jobs_view as _jobs_view
 from . import settings_view as _settings_view
 from . import stats_view as _stats_view
 from .auth_session import complete_login_session, logout_session, restore_session, touch_session
-from .css import _install_css
+from .css import _install_css, _install_interaction_javascript
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
@@ -103,6 +103,17 @@ SEARCH_PRESETS = [
     ("Таблицы", "реестр xlsx"),
 ]
 
+APP_SCREEN_SPECS = (
+    {"key": "search", "route": "/search", "title": "Поиск", "label": "Поиск", "icon": "search", "header": True, "drawer": True},
+    {"key": "explorer", "route": "/explorer", "title": "Проводник", "label": "Файлы", "icon": "folder", "header": True, "drawer": True},
+    {"key": "jobs", "route": "/jobs", "title": "Задачи", "label": "Задачи", "icon": "queue", "header": True, "drawer": True},
+    {"key": "index", "route": "/index", "title": "Индекс", "label": "Индекс", "icon": "filter_center_focus", "drawer_icon": "analytics", "header": True, "drawer": True, "admin_only": True},
+    {"key": "stats", "route": "/stats", "title": "Аналитика", "label": "Аналитика", "icon": "query_stats", "header": False, "drawer": True, "admin_only": True},
+    {"key": "settings", "route": "/settings", "title": "Настройки", "label": "Настройки", "icon": "settings", "header": False, "drawer": False},
+)
+APP_SCREEN_TITLES = {str(spec["key"]): str(spec["title"]) for spec in APP_SCREEN_SPECS}
+APP_SCREEN_ROUTES = {str(spec["key"]): str(spec["route"]) for spec in APP_SCREEN_SPECS}
+
 if LOGO_PATH.exists():
     app.add_static_file(local_file=LOGO_PATH, url_path="/rag-logo.png")
 
@@ -128,6 +139,7 @@ def _build_page(initial_screen: str = "search") -> None:
     state.screen = initial_screen
     state.explorer_path = str(Path(str(state.cfg.get("catalog_path") or "")))
     _install_css()
+    ui.timer(0.0, _install_interaction_javascript, once=True)
     restore_session(state, on_restored=_load_user_state)
 
     dark_mode = ui.dark_mode(state.theme == "dark")
@@ -227,6 +239,9 @@ def _build_page(initial_screen: str = "search") -> None:
     def set_screen(screen: str, *, close_drawer: bool = False) -> None:
         if screen == "cloud":
             screen = "explorer"
+        ui.run_javascript(
+            "window.ragShowBusy && window.ragShowBusy('Открываю экран...', { timeout: 4000, skeleton: true });"
+        )
         touch_activity()
         prev_screen = state.screen
         capture_screen_state(state, prev_screen)
@@ -285,32 +300,24 @@ def _build_page(initial_screen: str = "search") -> None:
     def update_nav() -> None:
         is_admin = str((state.current_user or {}).get("role") or "") == "admin"
         nav_items = [
-            ("search",   "Поиск",      "search"),
-            ("explorer", "Файлы",      "folder"),
-            ("jobs",     "Задачи",     "queue"),
+            spec for spec in APP_SCREEN_SPECS
+            if spec.get("drawer") and (not spec.get("admin_only") or is_admin)
         ]
-        if is_admin:
-            nav_items += [
-                ("index", "Индекс",    "analytics"),
-                ("stats", "Аналитика", "query_stats"),
-            ]
 
         # ── Header nav tabs (desktop) ──────────────────────
         header_nav.clear()
         if state.current_user:
             header_items = [
-                ("search", "Поиск", "search", lambda: set_screen("search"), state.screen == "search"),
-                ("explorer", "Файлы", "folder", lambda: set_screen("explorer"), state.screen == "explorer"),
+                spec for spec in APP_SCREEN_SPECS
+                if spec.get("header") and (not spec.get("admin_only") or is_admin)
             ]
-            if is_admin:
-                header_items.append(("index", "Индекс", "filter_center_focus", lambda: set_screen("index"), state.screen == "index"))
-            header_items.append(("jobs", "Задачи", "queue", lambda: set_screen("jobs"), state.screen == "jobs"))
             with header_nav:
-                for _key, label, icon_name, action, is_active in header_items:
-                    active_cls = "active" if is_active else ""
+                for spec in header_items:
+                    key = str(spec["key"])
+                    active_cls = "active" if state.screen == key else ""
                     tab = ui.button(
-                        label, icon=icon_name,
-                        on_click=action,
+                        str(spec["label"]), icon=str(spec["icon"]),
+                        on_click=lambda s=key: set_screen(s),
                     ).props("flat no-caps").classes(f"rag-nav-tab {active_cls}")
                     tab._props["style"] = "font-size:13px;font-weight:500"
 
@@ -344,7 +351,10 @@ def _build_page(initial_screen: str = "search") -> None:
         # ── Left drawer nav (mobile / supplementary) ────────
         nav_area.clear()
         with nav_area:
-            for screen, label, icon_name in nav_items:
+            for spec in nav_items:
+                screen = str(spec["key"])
+                label = str(spec["label"])
+                icon_name = str(spec.get("drawer_icon") or spec["icon"])
                 color = "primary" if state.screen == screen else None
                 ui.button(label, icon=icon_name, on_click=lambda s=screen: set_screen(s, close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
@@ -2247,12 +2257,7 @@ def _build_page(initial_screen: str = "search") -> None:
         if state.screen == "search":
             page_root.classes(add="search")
         header_title.set_text({
-            "search": "Поиск",
-            "explorer": "Проводник",
-            "index": "Индекс",
-            "settings": "Настройки",
-            "stats": "Аналитика",
-            "jobs": "Задачи",
+            **APP_SCREEN_TITLES,
         }.get(state.screen, "Поиск"))
         if state.header_breadcrumbs is not None:
             state.header_breadcrumbs.clear()
@@ -2397,6 +2402,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 "if (Number.isFinite(v) && v > 0) window.scrollTo({top:v, behavior:'instant'});"
                 "})();"
             ),
+            once=True,
+        )
+        ui.timer(
+            0.08,
+            lambda: ui.run_javascript("window.ragHideBusy && window.ragHideBusy();"),
             once=True,
         )
 
