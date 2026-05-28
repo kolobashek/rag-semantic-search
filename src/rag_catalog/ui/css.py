@@ -880,7 +880,7 @@ def _install_css() -> None:
           min-width: 0;
           background: var(--rag-surface);
           border: 1px solid var(--rag-border);
-          border-radius: 12px;
+          border-radius: 8px;
           color: var(--rag-text);
           backdrop-filter: blur(8px);
           transition: all 0.2s ease;
@@ -891,7 +891,9 @@ def _install_css() -> None:
           box-shadow: 0 10px 20px -10px rgba(59, 130, 246, 0.15);
         }
         .rag-explorer-item.selected,
-        .rag-file-table-row.selected {
+        .rag-file-table-row.selected,
+        .rag-explorer-item:has(.rag-select-checkbox .q-checkbox__inner--truthy),
+        .rag-file-table-row:has(.rag-select-checkbox .q-checkbox__inner--truthy) {
           border-color: color-mix(in srgb, var(--rag-accent) 55%, var(--rag-border));
           background: color-mix(in srgb, var(--rag-accent) 10%, var(--rag-surface));
         }
@@ -958,15 +960,75 @@ def _install_css() -> None:
           z-index: 3;
           border-radius: 999px;
           background: color-mix(in srgb, var(--rag-surface) 88%, transparent);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity .12s ease;
+        }
+        .rag-explorer-item:hover .rag-tile-select-wrap,
+        .rag-explorer-item:has(.rag-select-checkbox .q-checkbox__inner--truthy) .rag-tile-select-wrap {
+          opacity: 1;
+          pointer-events: auto;
         }
         .rag-select-checkbox {
           flex: 0 0 auto;
         }
+        .rag-select-checkbox .q-checkbox__inner {
+          font-size: 22px;
+          width: 22px;
+          min-width: 22px;
+          height: 22px;
+        }
+        .rag-select-checkbox .q-checkbox__bg {
+          border-width: 1px;
+          border-radius: 4px;
+        }
+        .rag-explorer-item .rag-select-checkbox,
+        .rag-file-table-row .rag-select-checkbox {
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity .12s ease;
+        }
+        .rag-explorer-item:hover .rag-select-checkbox,
+        .rag-file-table-row:hover .rag-select-checkbox,
+        .rag-explorer-item:has(.rag-select-checkbox .q-checkbox__inner--truthy) .rag-select-checkbox,
+        .rag-file-table-row:has(.rag-select-checkbox .q-checkbox__inner--truthy) .rag-select-checkbox {
+          opacity: 1;
+          pointer-events: auto;
+        }
+        .rag-tile-select-wrap .rag-select-checkbox {
+          pointer-events: auto;
+        }
+        .rag-select-page-checkbox {
+          opacity: 1 !important;
+          pointer-events: auto !important;
+        }
+        .rag-select-page-checkbox.rag-select-partial .q-checkbox__inner {
+          color: var(--rag-accent);
+        }
+        .rag-select-page-checkbox.rag-select-partial .q-checkbox__bg {
+          position: relative;
+          background: var(--rag-accent);
+          border-color: var(--rag-accent);
+        }
+        .rag-select-page-checkbox.rag-select-partial .q-checkbox__svg {
+          display: none;
+        }
+        .rag-select-page-checkbox.rag-select-partial .q-checkbox__bg::after {
+          content: "";
+          position: absolute;
+          left: 4px;
+          right: 4px;
+          top: 50%;
+          height: 2px;
+          border-radius: 999px;
+          background: white;
+          transform: translateY(-50%);
+        }
         .rag-selection-bar {
-          min-height: 36px;
-          padding: 6px 8px;
+          min-height: 32px;
+          padding: 4px 7px;
           border: 1px solid color-mix(in srgb, var(--rag-accent) 42%, var(--rag-border));
-          border-radius: 8px;
+          border-radius: 6px;
           background: color-mix(in srgb, var(--rag-accent) 10%, var(--rag-surface));
           color: var(--rag-text);
         }
@@ -1181,7 +1243,7 @@ def _install_css() -> None:
           .rag-filter-top-action { display: none !important; }
           .rag-file-table-header,
           .rag-file-table-row {
-            grid-template-columns: 28px 42px minmax(0,1fr) 68px;
+            grid-template-columns: 24px 40px minmax(0,1fr) 64px;
             min-width: 0;
           }
           .rag-file-table-header > :nth-child(4),
@@ -1526,12 +1588,12 @@ def _install_css() -> None:
         .rag-file-table-header,
         .rag-file-table-row {
           display: grid;
-          grid-template-columns: 30px 44px minmax(220px,1fr) 120px 88px 84px 74px 88px;
+          grid-template-columns: 26px 40px minmax(220px,1fr) 120px 88px 84px 74px 88px;
           align-items: center;
-          gap: 8px;
+          gap: 7px;
           width: 100%;
           box-sizing: border-box;
-          padding: 5px 10px;
+          padding: 4px 8px;
         }
         .rag-file-table-header {
           border-bottom: 1px solid var(--rag-border);
@@ -1539,9 +1601,9 @@ def _install_css() -> None:
           margin-bottom: 2px;
         }
         .rag-file-table-row {
-          min-height: 42px;
-          border-radius: 6px;
-          border-bottom: 1px solid color-mix(in srgb, var(--rag-border) 72%, transparent);
+          min-height: 38px;
+          border-radius: 5px;
+          border-bottom: 1px solid color-mix(in srgb, var(--rag-border) 54%, transparent);
           transition: background 0.1s;
         }
         .rag-file-table-row:hover { background: var(--rag-hover); }
@@ -1973,7 +2035,48 @@ def _install_css() -> None:
             m.style.top = Math.min(event.clientY, window.innerHeight - 160) + 'px';
             m.style.display = 'block';
           };
+          let longPressTimer = null;
+          let longPressX = 0;
+          let longPressY = 0;
+          const clearLongPress = () => {
+            if (longPressTimer) clearTimeout(longPressTimer);
+            longPressTimer = null;
+          };
+          const longPressSelect = (event) => {
+            if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
+            if (event.target.closest('.rag-select-checkbox, input, textarea, select, .q-menu')) return;
+            const item = event.target.closest('.rag-file-table-row, .rag-explorer-item');
+            if (!item) return;
+            const checkbox = item.querySelector('.rag-select-checkbox');
+            if (!checkbox) return;
+            longPressX = event.clientX;
+            longPressY = event.clientY;
+            longPressTimer = window.setTimeout(() => {
+              item.dataset.ragLongPress = '1';
+              checkbox.click();
+              if (navigator.vibrate) navigator.vibrate(12);
+              clearLongPress();
+            }, 520);
+          };
+          const longPressMove = (event) => {
+            if (!longPressTimer) return;
+            if (Math.abs(event.clientX - longPressX) > 10 || Math.abs(event.clientY - longPressY) > 10) {
+              clearLongPress();
+            }
+          };
+          const suppressLongPressClick = (event) => {
+            const item = event.target.closest('.rag-file-table-row, .rag-explorer-item');
+            if (!item || item.dataset.ragLongPress !== '1') return;
+            event.preventDefault();
+            event.stopPropagation();
+            delete item.dataset.ragLongPress;
+          };
           document.addEventListener('contextmenu', show);
+          document.addEventListener('pointerdown', longPressSelect, { passive: true });
+          document.addEventListener('pointermove', longPressMove, { passive: true });
+          document.addEventListener('pointerup', clearLongPress, true);
+          document.addEventListener('pointercancel', clearLongPress, true);
+          document.addEventListener('click', suppressLongPressClick, true);
           document.addEventListener('click', hide);
           document.addEventListener('scroll', hide, true);
           document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });

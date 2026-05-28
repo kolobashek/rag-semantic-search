@@ -103,8 +103,22 @@ def render_explorer_screen(
     def _refresh_selection_bar(refs: dict[str, Any]) -> None:
         scope = str(refs.get("scope") or "")
         selected = [key for key in state.explorer_selected_paths if key.startswith(f"{scope}:")]
+        visible = set(refs.get("visible_keys") or [])
+        selected_set = _selected_set()
         refs["bar"].set_visibility(bool(selected))
         refs["label"].set_text(f"Выбрано: {len(selected)}")
+        page_checkbox = refs.get("page_checkbox")
+        if page_checkbox is not None:
+            all_visible = bool(visible) and visible.issubset(selected_set)
+            partial_visible = bool(visible & selected_set) and not all_visible
+            refs["syncing"] = True
+            try:
+                if bool(getattr(page_checkbox, "value", False)) != all_visible:
+                    page_checkbox.set_value(all_visible)
+            finally:
+                refs["syncing"] = False
+            page_checkbox.classes(remove="rag-select-empty rag-select-partial rag-select-all")
+            page_checkbox.classes(add="rag-select-all" if all_visible else ("rag-select-partial" if partial_visible else "rag-select-empty"))
 
     def _set_visible_checkboxes(refs: dict[str, Any], value: bool) -> None:
         for key, checkbox in dict(refs.get("checkboxes") or {}).items():
@@ -134,15 +148,20 @@ def render_explorer_screen(
                 on_click=lambda: (_clear_selection(), _set_visible_checkboxes(refs, False), _refresh_selection_bar(refs)),
                 color=None,
             ).props("flat dense no-caps")
-            if visible_keys:
-                ui.button(
-                    "Все на странице",
-                    icon="select_all",
-                    on_click=lambda: _toggle_visible_selection(refs),
-                    color=None,
-                ).props("flat dense no-caps")
         _refresh_selection_bar(refs)
         return refs
+
+    def _selection_page_checkbox(refs: dict[str, Any]) -> None:
+        checkbox = ui.checkbox(value=False).props("dense").classes("rag-select-checkbox rag-select-page-checkbox")
+
+        def _on_page_toggle(_: Any) -> None:
+            if refs.get("syncing"):
+                return
+            _toggle_visible_selection(refs)
+
+        checkbox.on_value_change(_on_page_toggle)
+        refs["page_checkbox"] = checkbox
+        _refresh_selection_bar(refs)
 
     def _selection_checkbox(key: str, refs: dict[str, Any]) -> None:
         checkbox = ui.checkbox(
@@ -1010,7 +1029,7 @@ def render_explorer_screen(
                         return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
                     with ui.column().classes("w-full gap-0"):
                         with ui.element("div").classes("rag-file-table-header"):
-                            ui.element("div")
+                            _selection_page_checkbox(selection_refs)
                             ui.element("div")
                             ui.label("Имя").classes("rag-col-header")
                             ui.label("Изменён").classes("rag-col-header")
