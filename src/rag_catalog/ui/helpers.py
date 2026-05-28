@@ -13,6 +13,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Optional
@@ -477,6 +478,76 @@ def _popular_queries(cfg: Dict[str, Any], exclude_username: str = "", limit: int
         (exclude_username.strip().lower(),),
     )
     return _dedupe_queries([str(row.get("query") or "") for row in rows], limit=limit)
+
+
+_POPULAR_QUERY_STOPWORDS = {
+    "and",
+    "the",
+    "или",
+    "для",
+    "как",
+    "что",
+    "это",
+    "где",
+    "при",
+    "над",
+    "под",
+    "без",
+    "все",
+    "всех",
+    "найти",
+    "нужен",
+    "нужно",
+    "документ",
+    "документы",
+    "файл",
+    "файлы",
+    "скан",
+    "type",
+    "path",
+    "after",
+    "before",
+    "creator",
+    "editor",
+    "from",
+}
+
+
+def _query_keyword_candidates(query: str) -> List[str]:
+    text = str(query or "").replace("ё", "е").lower()
+    words = re.findall(r"[a-zа-я0-9][a-zа-я0-9\-]{2,}", text, flags=re.IGNORECASE)
+    out: List[str] = []
+    for word in words:
+        token = word.strip("-")
+        if not token or token in _POPULAR_QUERY_STOPWORDS:
+            continue
+        if token.isdigit() or ":" in token:
+            continue
+        if token in {"doc", "docx", "xls", "xlsx", "pdf", "jpg", "png"}:
+            continue
+        out.append(token)
+    return out
+
+
+def _popular_query_terms(cfg: Dict[str, Any], exclude_username: str = "", limit: int = 6) -> List[str]:
+    rows = _db_query_dicts(
+        _telemetry_db_path(cfg),
+        """
+        SELECT COALESCE(NULLIF(query_original, ''), query) AS query, COUNT(*) AS cnt
+        FROM search_logs
+        WHERE query <> '' AND lower(username) != ?
+        GROUP BY lower(COALESCE(NULLIF(query_original, ''), query))
+        ORDER BY cnt DESC
+        LIMIT 120
+        """,
+        (exclude_username.strip().lower(),),
+    )
+    counter: Counter[str] = Counter()
+    for row in rows:
+        weight = max(1, int(row.get("cnt") or 1))
+        for token in dict.fromkeys(_query_keyword_candidates(str(row.get("query") or ""))):
+            counter[token] += weight
+    return [word for word, _count in counter.most_common(max(1, int(limit)))]
 
 
 def _search_suggestions(state: PageState, typed: str = "") -> List[str]:

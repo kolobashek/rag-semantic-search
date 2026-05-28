@@ -75,6 +75,7 @@ from rag_catalog.ui.helpers import (
     _filter_cloud_drive_search_results,
     _is_system_file,
     _normalize_search_results,
+    _popular_query_terms,
     _read_index_stats,
     _read_index_telemetry,
     _run_catalog_search,
@@ -127,6 +128,59 @@ def test_ensure_searcher_reuses_shared_cache(monkeypatch) -> None:
 
     assert first_searcher is second_searcher
     assert len(created) == 1
+
+
+def test_popular_query_terms_generalize_search_logs(tmp_path: Path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    cfg = {"telemetry_db_path": str(db_path)}
+
+    for _ in range(3):
+        db.log_search(
+            source="nicegui",
+            query="договор поставки",
+            query_original="договор поставки",
+            query_used="договор поставки",
+            limit_value=10,
+            file_type=None,
+            content_only=False,
+            results_count=2,
+            duration_ms=10,
+            ok=True,
+            username="other",
+        )
+    db.log_search(
+        source="nicegui",
+        query="для документов",
+        query_original="для документов",
+        query_used="для документов",
+        limit_value=10,
+        file_type=None,
+        content_only=False,
+        results_count=1,
+        duration_ms=10,
+        ok=True,
+        username="other",
+    )
+    db.log_search(
+        source="nicegui",
+        query="счет",
+        query_original="счет",
+        query_used="счет",
+        limit_value=10,
+        file_type=None,
+        content_only=False,
+        results_count=1,
+        duration_ms=10,
+        ok=True,
+        username="ivan",
+    )
+
+    terms = _popular_query_terms(cfg, exclude_username="ivan", limit=3)
+
+    assert terms[:2] == ["договор", "поставки"]
+    assert "документы" not in terms
+    assert "счет" not in terms
 
 
 class _SearchBackend:

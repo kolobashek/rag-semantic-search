@@ -272,9 +272,17 @@ def _install_css() -> None:
           animation: rag-search-rise .26s cubic-bezier(.2, .8, .2, 1);
         }
         .rag-search-presets {
-          max-width: 1024px;
+          width: min(682px, 66.666%) !important;
+          max-width: 682px;
           margin-inline: auto;
-          justify-content: flex-start;
+          justify-content: center;
+          align-items: stretch;
+          flex-wrap: wrap;
+        }
+        .rag-search-presets .q-btn {
+          flex: 1 1 104px;
+          min-width: 92px;
+          max-width: 142px;
         }
         @keyframes rag-search-rise {
           from { transform: translateY(18px); opacity: .96; }
@@ -1380,6 +1388,21 @@ def _install_css() -> None:
           .rag-title { font-size: 28px; }
           .rag-actions .q-btn { width: auto; }
           .rag-search-box { box-shadow: 0 4px 12px rgba(23, 32, 44, 0.06); }
+          .rag-search-header {
+            max-width: calc(100vw - 24px);
+          }
+          .rag-search-presets {
+            width: calc(100% - 4px) !important;
+            max-width: 100%;
+            display: grid !important;
+            grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+            justify-content: stretch;
+          }
+          .rag-search-presets .q-btn {
+            width: 100%;
+            min-width: 0;
+            max-width: none;
+          }
           .rag-search-toolbar { top: 50px; }
           .rag-explorer-commandbar { padding: 6px 0 0; }
           .rag-explorer-topline,

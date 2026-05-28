@@ -52,6 +52,7 @@ from .helpers import (
     _open_os_path,
     _parse_search_query,
     _popular_queries,
+    _popular_query_terms,
     _preview_file,
     _preview_office_file,
     _read_index_telemetry,
@@ -102,6 +103,36 @@ SEARCH_PRESETS = [
     ("PDF", "pdf скан"),
     ("Таблицы", "реестр xlsx"),
 ]
+_SEARCH_PRESET_DEFAULT_TERMS = {
+    "договор",
+    "договоры",
+    "счет",
+    "счета",
+    "счёт",
+    "счёта",
+    "паспорт",
+    "паспорта",
+    "pdf",
+    "таблица",
+    "таблицы",
+    "реестр",
+}
+
+
+def _search_preset_items(state: PageState, *, limit: int = 8) -> List[tuple[str, str]]:
+    items = list(SEARCH_PRESETS)
+    used = {str(label).strip().lower().replace("ё", "е") for label, _query in items}
+    used.update(_SEARCH_PRESET_DEFAULT_TERMS)
+    username = _username(state)
+    for term in _popular_query_terms(state.cfg, exclude_username=username, limit=limit * 2):
+        key = str(term or "").strip().lower().replace("ё", "е")
+        if not key or key in used:
+            continue
+        used.add(key)
+        items.append((key.capitalize(), key))
+        if len(items) >= limit:
+            break
+    return items
 
 APP_SCREEN_SPECS = (
     {"key": "search", "route": "/search", "title": "Поиск", "label": "Поиск", "icon": "search", "header": True, "drawer": True},
@@ -1630,7 +1661,7 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.label(state.search_error).classes("text-red-700 rag-card p-4")
         if not state.searched_query:
             with ui.row().classes("rag-search-presets w-full gap-3"):
-                for label, query in SEARCH_PRESETS:
+                for label, query in _search_preset_items(state):
                     ui.button(label, on_click=choose_query_handler(query)).props("outline")
             return
         # Cloud Drive registry quick-match hints (shown before semantic results)
