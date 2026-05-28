@@ -192,7 +192,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
     page_root = ui.column().classes("rag-page gap-5")
     with page_root:
-        content = ui.column().classes("w-full gap-5")
+        content = ui.column().classes("rag-page-content w-full gap-5")
     screen_containers: Dict[str, Any] = {}
     initialized_screens: set[str] = set()
     dirty_screens: set[str] = set()
@@ -211,6 +211,14 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def current_content_container() -> Any:
         return screen_containers.get(state.screen) or content
+
+    def update_page_mode() -> None:
+        page_root.classes(remove="search search-empty search-active")
+        if state.screen != "search":
+            return
+        page_root.classes(add="search")
+        has_search_activity = bool(state.searched_query or state.search_error or state.search_lazy_loading or state.results)
+        page_root.classes(add="search-active" if has_search_activity else "search-empty")
 
     def touch_activity() -> None:
         touch_session(state, min_interval_minutes=60)
@@ -809,6 +817,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 _stop_managed_timer(_t)
                 setattr(state, _timer_attr, None)
         target = current_content_container()
+        update_page_mode()
         target.clear()
         initialized_screens.discard(state.screen)
         with target:
@@ -818,7 +827,7 @@ def _build_page(initial_screen: str = "search") -> None:
         initialized_screens.add(state.screen)
 
     def render_search_header() -> None:
-        with ui.column().classes("w-full gap-2"):
+        with ui.column().classes("rag-search-header w-full gap-2"):
             render_search_box()
             render_search_filters_bar()
 
@@ -1620,7 +1629,7 @@ def _build_page(initial_screen: str = "search") -> None:
         if state.search_error:
             ui.label(state.search_error).classes("text-red-700 rag-card p-4")
         if not state.searched_query:
-            with ui.row().classes("w-full gap-3"):
+            with ui.row().classes("rag-search-presets w-full gap-3"):
                 for label, query in SEARCH_PRESETS:
                     ui.button(label, on_click=choose_query_handler(query)).props("outline")
             return
@@ -2255,9 +2264,7 @@ def _build_page(initial_screen: str = "search") -> None:
         _jobs_view.render_jobs_screen(state, render_fn=render)
 
     def render() -> None:
-        page_root.classes(remove="search")
-        if state.screen == "search":
-            page_root.classes(add="search")
+        update_page_mode()
         header_title.set_text({
             **APP_SCREEN_TITLES,
         }.get(state.screen, "Поиск"))

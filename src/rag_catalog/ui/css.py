@@ -238,7 +238,48 @@ def _install_css() -> None:
           margin: 0 auto;
           padding: 10px 0 32px;
         }
-        .rag-page.search { padding-top: 4px; }
+        .rag-page-content {
+          transition: min-height .34s ease, padding .34s ease, justify-content .34s ease;
+        }
+        .rag-page.search {
+          padding-top: 4px;
+          transition: min-height .34s ease, padding .34s ease;
+        }
+        .rag-page.search .rag-page-content {
+          align-items: center;
+        }
+        .rag-page.search-empty {
+          min-height: calc(100dvh - 58px);
+        }
+        .rag-page.search-empty .rag-page-content {
+          min-height: calc(100dvh - 96px);
+          justify-content: center;
+          padding-bottom: 0;
+        }
+        .rag-page.search-active .rag-page-content {
+          min-height: 0;
+          justify-content: flex-start;
+          padding-bottom: 0;
+        }
+        .rag-search-header {
+          width: 100%;
+          max-width: 1024px;
+          margin-inline: auto;
+          transform: translateY(0);
+          transition: transform .34s cubic-bezier(.2, .8, .2, 1), max-width .2s ease;
+        }
+        .rag-page.search-active .rag-search-header {
+          animation: rag-search-rise .26s cubic-bezier(.2, .8, .2, 1);
+        }
+        .rag-search-presets {
+          max-width: 1024px;
+          margin-inline: auto;
+          justify-content: flex-start;
+        }
+        @keyframes rag-search-rise {
+          from { transform: translateY(18px); opacity: .96; }
+          to { transform: translateY(0); opacity: 1; }
+        }
         .rag-global-busy {
           position: fixed;
           left: 50%;

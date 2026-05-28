@@ -45,11 +45,13 @@ def test_screen_transitions_have_busy_feedback_contract() -> None:
     assert "Открываю экран" in source
     assert "window.ragHideBusy" in source
     assert "APP_SCREEN_SPECS" in source
+    assert "search-empty" in source
+    assert "search-active" in source
 
     for key in nice_app.APP_SCREEN_ROUTES:
         if key == "settings":
             continue
-        assert f'state.screen == "{key}"' in source or f'state.screen == \'{key}\'' in source
+        assert f'render_{key}_screen()' in source or f'"{key}"' in source
 
 
 def test_global_click_feedback_and_skeleton_are_installed() -> None:
