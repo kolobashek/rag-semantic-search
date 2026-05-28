@@ -1024,6 +1024,39 @@ def _install_css() -> None:
           background: white;
           transform: translateY(-50%);
         }
+        .rag-file-select-icon {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 40px;
+          min-width: 40px;
+          height: 38px;
+        }
+        .rag-file-select-icon.header {
+          height: 26px;
+          justify-content: flex-start;
+        }
+        .rag-file-select-overlay {
+          position: absolute;
+          left: -2px;
+          top: -1px;
+          z-index: 2;
+          border-radius: 5px;
+          background: color-mix(in srgb, var(--rag-surface) 72%, transparent);
+          box-shadow: 0 0 0 1px color-mix(in srgb, var(--rag-border) 72%, transparent);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity .12s ease;
+        }
+        .rag-file-table-row:hover .rag-file-select-overlay,
+        .rag-file-table-row:has(.rag-select-checkbox .q-checkbox__inner--truthy) .rag-file-select-overlay {
+          opacity: 1;
+          pointer-events: auto;
+        }
+        .rag-file-select-overlay .rag-select-checkbox {
+          display: flex;
+        }
         .rag-selection-bar {
           min-height: 32px;
           padding: 4px 7px;
@@ -1243,17 +1276,17 @@ def _install_css() -> None:
           .rag-filter-top-action { display: none !important; }
           .rag-file-table-header,
           .rag-file-table-row {
-            grid-template-columns: 24px 40px minmax(0,1fr) 64px;
+            grid-template-columns: 40px minmax(0,1fr) 64px;
             min-width: 0;
           }
-          .rag-file-table-header > :nth-child(4),
+          .rag-file-table-header > :nth-child(3),
+          .rag-file-table-header > :nth-child(5),
           .rag-file-table-header > :nth-child(6),
           .rag-file-table-header > :nth-child(7),
-          .rag-file-table-header > :nth-child(8),
-          .rag-file-table-row > :nth-child(4),
+          .rag-file-table-row > :nth-child(3),
+          .rag-file-table-row > :nth-child(5),
           .rag-file-table-row > :nth-child(6),
-          .rag-file-table-row > :nth-child(7),
-          .rag-file-table-row > :nth-child(8) {
+          .rag-file-table-row > :nth-child(7) {
             display: none !important;
           }
           .rag-file-table-actions .q-btn:not(:last-child) {
@@ -1623,7 +1656,7 @@ def _install_css() -> None:
         .rag-file-table-header,
         .rag-file-table-row {
           display: grid;
-          grid-template-columns: 26px 40px minmax(220px,1fr) 120px 88px 84px 74px 88px;
+          grid-template-columns: 40px minmax(220px,1fr) 120px 88px 84px 74px 88px;
           align-items: center;
           gap: 7px;
           width: 100%;

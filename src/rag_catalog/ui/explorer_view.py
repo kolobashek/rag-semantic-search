@@ -170,6 +170,12 @@ def render_explorer_screen(
         ).props("dense").classes("rag-select-checkbox")
         refs.setdefault("checkboxes", {})[key] = checkbox
 
+    def _selection_badge(path_or_ext: str, kind: str, key: str, refs: dict[str, Any]) -> None:
+        with ui.element("div").classes("rag-file-select-icon"):
+            ui.html(_file_badge_html(path_or_ext, kind), sanitize=False)
+            with ui.element("div").classes("rag-file-select-overlay"):
+                _selection_checkbox(key, refs)
+
     # ── Explorer / Cloud Drive screen ─────────────────────────────────────────
 
     def _render_cd_explorer(page_state: PageState, svc: "CloudDriveService") -> None:  # noqa: PLR0912,PLR0915
@@ -1113,8 +1119,8 @@ def render_explorer_screen(
                         return f"/api/cloud-drive/download?path={quote(file_path, safe='')}"
                     with ui.column().classes("w-full gap-0"):
                         with ui.element("div").classes("rag-file-table-header"):
-                            _selection_page_checkbox(selection_refs)
-                            ui.element("div")
+                            with ui.element("div").classes("rag-file-select-icon header"):
+                                _selection_page_checkbox(selection_refs)
                             ui.label("Имя").classes("rag-col-header")
                             ui.label("Изменён").classes("rag-col-header")
                             ui.label("Размер").classes("rag-col-header")
@@ -1124,8 +1130,7 @@ def render_explorer_screen(
                         for folder in child_folders:
                             item_key = _selection_key("cd", folder.path)
                             with ui.element("div").classes("rag-file-table-row" + (" selected" if item_key in _selected_set() else "")):
-                                _selection_checkbox(item_key, selection_refs)
-                                ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
+                                _selection_badge(folder.name, "Каталог", item_key, selection_refs)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
                                         folder.name,
@@ -1160,8 +1165,7 @@ def render_explorer_screen(
                         for f in page_files:
                             item_key = _selection_key("cd", f.path)
                             with ui.element("div").classes("rag-file-table-row" + (" selected" if item_key in _selected_set() else "")):
-                                _selection_checkbox(item_key, selection_refs)
-                                ui.html(_file_badge_html(f.name), sanitize=False)
+                                _selection_badge(f.name, "Файл", item_key, selection_refs)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
                                         f.name,
