@@ -1132,19 +1132,31 @@ def _install_css() -> None:
           .rag-actions .q-btn { width: auto; }
           .rag-search-box { box-shadow: 0 4px 12px rgba(23, 32, 44, 0.06); }
           .rag-search-toolbar { top: 50px; }
-          .rag-explorer-commandbar { padding: 10px 0 0; }
+          .rag-explorer-commandbar { padding: 6px 0 0; }
           .rag-explorer-topline,
           .rag-explorer-actionline { gap: 6px; }
-          .rag-explorer-pathbar { order: 10; flex: 1 0 100%; min-width: 0; }
-          .rag-explorer-folder-search { flex: 1 0 100%; min-width: 0; }
-          .rag-explorer-actionline .q-field { flex: 1 1 140px; }
+          .rag-explorer-topline,
+          .rag-explorer-actionline {
+            flex-wrap: nowrap;
+            overflow: hidden;
+          }
+          .rag-explorer-pathbar {
+            order: 0;
+            flex: 1 1 auto;
+            min-width: 0;
+          }
+          .rag-explorer-folder-search,
+          .rag-explorer-sort-label,
+          .rag-explorer-actionline .q-field {
+            display: none !important;
+          }
           .rag-index-layout,
           .rag-index-config-layout { display: flex; flex-direction: column; }
           .rag-pipeline-row { display: flex; flex-direction: column; align-items: stretch; }
           .rag-pipeline-actions { justify-content: flex-start; flex-wrap: wrap; }
           .rag-explorer-v2-layout {
             display: block;
-            height: max(280px, calc(100vh - 330px));
+            height: max(320px, calc(100vh - 220px));
             min-height: 0;
             overflow: hidden;
           }
