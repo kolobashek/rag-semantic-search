@@ -143,11 +143,12 @@ def _build_page(initial_screen: str = "search") -> None:
                     ui.icon("manage_search").classes("text-2xl")
                 ui.label("Rag-search").classes("rag-hdr-brand-name")
                 ui.label("v3.4").classes("rag-chip rag-mono-label rag-version-chip")
-            # ── Center: nav tabs ──────────────────────────────
-            header_nav = ui.element("nav").classes("rag-hdr-nav")
+            # ── Center: nav tabs or explorer path ─────────────
+            with ui.element("div").classes("rag-hdr-center"):
+                header_nav = ui.element("nav").classes("rag-hdr-nav")
+                header_breadcrumbs = ui.row().classes("rag-header-breadcrumbs rag-breadcrumbs items-center gap-1 no-wrap")
             # ── Right: actions ────────────────────────────────
             with ui.element("div").classes("rag-hdr-actions"):
-                header_breadcrumbs = ui.row().classes("rag-header-breadcrumbs items-center gap-1")
                 header_actions = ui.row().classes("rag-header-actions items-center gap-1")
                 state.header_breadcrumbs = header_breadcrumbs
                 state.header_explorer_actions = header_actions

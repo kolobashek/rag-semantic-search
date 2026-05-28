@@ -1311,7 +1311,7 @@ def _install_css() -> None:
         }
         .rag-hdr-grid {
           display: grid;
-          grid-template-columns: 220px 1fr minmax(260px, 320px);
+          grid-template-columns: 220px minmax(0, 1fr) auto;
           align-items: center;
           width: 100%; height: 100%;
           gap: 0;
@@ -1336,6 +1336,35 @@ def _install_css() -> None:
         }
         .rag-hdr-nav {
           display: flex; gap: 4px; align-items: center; justify-content: center; height: 56px;
+        }
+        .rag-hdr-center {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 0;
+          height: 56px;
+          overflow: hidden;
+        }
+        .rag-hdr-center:has(.rag-header-breadcrumbs:not(:empty)) .rag-hdr-nav {
+          display: none;
+        }
+        .rag-header-breadcrumbs {
+          flex: 1 1 auto;
+          max-width: 100%;
+          overflow: hidden;
+          justify-content: flex-start;
+          padding: 0 10px;
+          color: var(--rag-text);
+        }
+        .rag-header-breadcrumbs .q-btn {
+          max-width: min(220px, 34vw);
+        }
+        .rag-header-breadcrumbs .q-btn__content,
+        .rag-header-breadcrumbs .block {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         .rag-hdr-actions {
           display: flex; gap: 8px; align-items: center; justify-content: flex-end; height: 56px;
@@ -1393,6 +1422,12 @@ def _install_css() -> None:
         @media (max-width: 900px) {
           .rag-hdr-grid { grid-template-columns: auto 1fr auto; }
           .rag-hdr-nav { display: none; }
+          .rag-header-breadcrumbs {
+            padding: 0 6px;
+          }
+          .rag-header-breadcrumbs .q-btn {
+            max-width: 36vw;
+          }
           .rag-hdr-brand-name,
           .rag-version-chip,
           .rag-header-status { display: none !important; }

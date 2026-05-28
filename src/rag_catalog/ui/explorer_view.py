@@ -662,9 +662,26 @@ def render_explorer_screen(
         breadcrumbs = _cd_breadcrumb_chain(svc, cd_path)
         root_folder = svc.registry.get_root_folder()
 
-        # Keep global header for product navigation only; explorer has local breadcrumbs.
-        if page_state.header_breadcrumbs is not None:
+        def _render_cd_header_breadcrumbs() -> None:
+            if page_state.header_breadcrumbs is None:
+                return
             page_state.header_breadcrumbs.clear()
+            with page_state.header_breadcrumbs:
+                ui.icon("folder", size="16px").classes("text-slate-400")
+                for idx, folder in enumerate(breadcrumbs):
+                    label = "Корень" if folder.is_root else folder.name
+                    button = ui.button(
+                        label,
+                        on_click=lambda p=folder.path: _cd_open_folder(p),
+                        color=None,
+                    ).props("flat dense no-caps")
+                    button.tooltip(folder.path or "Корень")
+                    if idx < len(breadcrumbs) - 1:
+                        ui.icon("chevron_right").classes("text-slate-500")
+
+        _render_cd_header_breadcrumbs()
+        if page_state.header_breadcrumbs is not None:
+            page_state.header_breadcrumbs.set_visibility(True)
         if page_state.header_explorer_actions is not None:
             page_state.header_explorer_actions.clear()
 
@@ -759,7 +776,7 @@ def render_explorer_screen(
         can_go_up = bool(cd_path and root_folder is not None and cd_path != root_folder.path)
 
         with ui.column().classes("rag-explorer-commandbar w-full gap-2"):
-            with ui.row().classes("rag-explorer-topline"):
+            with ui.row().classes("rag-explorer-actionline"):
                 up_btn = ui.button(
                     icon="arrow_upward",
                     on_click=lambda: _cd_open_folder(parent_path),
@@ -768,17 +785,6 @@ def render_explorer_screen(
                 if not can_go_up:
                     up_btn.disable()
                 ui.button(icon="refresh", on_click=lambda: render_fn(), color=None).props("flat round dense").classes("rag-explorer-iconbtn").tooltip("Обновить")
-                with ui.row().classes("rag-explorer-pathbar rag-breadcrumbs items-center gap-1 no-wrap"):
-                    ui.icon("folder", size="16px").classes("text-slate-400")
-                    for idx, folder in enumerate(breadcrumbs):
-                        label = "Корень" if folder.is_root else folder.name
-                        ui.button(
-                            label,
-                            on_click=lambda p=folder.path: _cd_open_folder(p),
-                            color=None,
-                        ).props("flat dense no-caps").tooltip(folder.path or "Корень")
-                        if idx < len(breadcrumbs) - 1:
-                            ui.icon("chevron_right").classes("text-slate-500")
                 folder_search = ui.input(
                     placeholder="семантический поиск в этой папке",
                 ).props("dense borderless clearable").classes("rag-explorer-folder-search")
@@ -790,8 +796,6 @@ def render_explorer_screen(
                     await choose_query_fn(f"{query} path:{cd_path}" if cd_path else query)
 
                 folder_search.on("keydown.enter", _search_current_folder)
-
-            with ui.row().classes("rag-explorer-actionline"):
                 ui.button("Дерево", icon="account_tree", on_click=_cd_open_tree_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
                 ui.button("Фильтры", icon="filter_alt", on_click=_cd_open_filters_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
                 ui.button("Загрузить", icon="upload", on_click=_cd_upload_dialog, color=None).props("outline dense no-caps")
@@ -1492,20 +1496,6 @@ def render_explorer_screen(
         except Exception:
             return []
 
-    def render_breadcrumbs(root_path: Path, current_path: Path) -> None:
-        parts = _explorer_path_parts(root_path, current_path)
-        with ui.row().classes("rag-breadcrumbs flex-1 min-w-0 items-center gap-1 no-wrap"):
-            for idx, part in enumerate(parts):
-                label = "Обмен" if part == root_path else part.name
-                btn = ui.button(
-                    label,
-                    on_click=lambda p=part: (_log_app_event(state, "explorer", "breadcrumb", details={"path": str(p)}), open_folder(p)),
-                    color=None,
-                ).props("flat dense no-caps")
-                btn.tooltip(str(part))
-                if idx < len(parts) - 1:
-                    ui.icon("chevron_right").classes("text-slate-400")
-
     def render_tree_node(path: Path, depth: int, current_path: Path, ancestors: set[str]) -> None:
         path_key = str(path)
         is_current = path_key == str(current_path)
@@ -1560,10 +1550,28 @@ def render_explorer_screen(
             state.explorer_path = str(root)
             current = root
 
-        # Keep current folder controls inside the explorer toolbar. Duplicating them
-        # in the global header makes the path ambiguous on narrow screens.
-        if state.header_breadcrumbs is not None:
+        def _render_fs_header_breadcrumbs() -> None:
+            if state.header_breadcrumbs is None:
+                return
             state.header_breadcrumbs.clear()
+            with state.header_breadcrumbs:
+                ui.icon("folder", size="16px").classes("text-slate-400")
+                parts = _explorer_path_parts(root, current)
+                for idx, part in enumerate(parts):
+                    label = "Обмен" if part == root else part.name
+                    button = ui.button(
+                        label,
+                        on_click=lambda p=part: (
+                            _log_app_event(state, "explorer", "breadcrumb", details={"path": str(p)}),
+                            open_folder(p),
+                        ),
+                        color=None,
+                    ).props("flat dense no-caps")
+                    button.tooltip(str(part))
+                    if idx < len(parts) - 1:
+                        ui.icon("chevron_right").classes("text-slate-500")
+
+        _render_fs_header_breadcrumbs()
         if state.header_explorer_actions is not None:
             state.header_explorer_actions.clear()
 
@@ -1700,7 +1708,6 @@ def render_explorer_screen(
             up_btn = ui.button(icon="arrow_upward", on_click=lambda: open_folder(current_for_toolbar.parent), color=None).props("flat round dense").tooltip("На уровень вверх")
             if current_for_toolbar == root:
                 up_btn.disable()
-            render_breadcrumbs(root, current_for_toolbar)
             ui.button(icon="refresh", on_click=lambda: render_fn(), color=None).props("flat round dense").tooltip("Обновить")
             render_star(current_for_toolbar, item_type="folder")
         with ui.row().classes("rag-card w-full p-2 gap-2 items-center"):
