@@ -26,7 +26,7 @@ from . import jobs_view as _jobs_view
 from . import settings_view as _settings_view
 from . import stats_view as _stats_view
 from .auth_session import complete_login_session, logout_session, restore_session, touch_session
-from .css import _install_css, _install_interaction_javascript
+from .css import INTERACTION_JS_PATH, _install_css, _install_interaction_javascript
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
@@ -116,6 +116,8 @@ APP_SCREEN_ROUTES = {str(spec["key"]): str(spec["route"]) for spec in APP_SCREEN
 
 if LOGO_PATH.exists():
     app.add_static_file(local_file=LOGO_PATH, url_path="/rag-logo.png")
+if INTERACTION_JS_PATH.exists():
+    app.add_static_file(local_file=INTERACTION_JS_PATH, url_path="/rag-interactions.js")
 
 
 def _client_alive() -> bool:
@@ -2394,21 +2396,23 @@ def _build_page(initial_screen: str = "search") -> None:
             initialized_screens.add(current_screen)
             dirty_screens.discard(current_screen)
         active_screen_ref[0] = current_screen
-        ui.timer(
-            0.05,
-            lambda screen=current_screen: ui.run_javascript(
-                "(() => {"
-                f"const v = Number(sessionStorage.getItem('rag-scroll-{screen}') || 0);"
-                "if (Number.isFinite(v) && v > 0) window.scrollTo({top:v, behavior:'instant'});"
-                "})();"
-            ),
-            once=True,
-        )
-        ui.timer(
-            0.08,
-            lambda: ui.run_javascript("window.ragHideBusy && window.ragHideBusy();"),
-            once=True,
-        )
+        if _client_alive():
+            with target:
+                ui.timer(
+                    0.05,
+                    lambda screen=current_screen: ui.run_javascript(
+                        "(() => {"
+                        f"const v = Number(sessionStorage.getItem('rag-scroll-{screen}') || 0);"
+                        "if (Number.isFinite(v) && v > 0) window.scrollTo({top:v, behavior:'instant'});"
+                        "})();"
+                    ),
+                    once=True,
+                )
+                ui.timer(
+                    0.08,
+                    lambda: ui.run_javascript("window.ragHideBusy && window.ragHideBusy();"),
+                    once=True,
+                )
 
     # ── Preview drawer (живёт вне content, не сбрасывается при render()) ──
     preview_drawer = ui.element("div").classes("rag-preview-drawer closed")

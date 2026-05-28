@@ -54,15 +54,21 @@ def test_screen_transitions_have_busy_feedback_contract() -> None:
 
 def test_global_click_feedback_and_skeleton_are_installed() -> None:
     source = inspect.getsource(css._install_css)
+    interaction_js = css.INTERACTION_JS_PATH.read_text(encoding="utf-8")
 
     for token in (
         "rag-global-busy",
         "rag-busy-spinner",
         "rag-busy-skeleton",
+        "/rag-interactions.js",
+        "@keyframes rag-loading-bar",
+    ):
+        assert token in source
+
+    for token in (
         "window.ragShowBusy",
         "window.ragHideBusy",
         "clickBusy",
         "document.addEventListener('click', clickBusy, true)",
-        "@keyframes rag-loading-bar",
     ):
-        assert token in source
+        assert token in interaction_js
