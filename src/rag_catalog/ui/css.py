@@ -1225,12 +1225,17 @@ def _install_css() -> None:
           .rag-page { width: calc(100vw - 20px); padding-top: 18px; }
           body:has(.rag-explorer-v2-layout) .q-page > .nicegui-content {
             padding-top: 4px;
+            padding-bottom: 0;
           }
           .rag-page:has(.rag-explorer-v2-layout) {
             padding-top: 4px;
+            padding-bottom: 0;
+            min-height: 0;
+            overflow: hidden;
           }
           .rag-page:has(.rag-explorer-v2-layout) > .w-full {
             gap: 8px;
+            min-height: 0;
           }
           .rag-title { font-size: 28px; }
           .rag-actions .q-btn { width: auto; }
@@ -1260,7 +1265,7 @@ def _install_css() -> None:
           .rag-pipeline-actions { justify-content: flex-start; flex-wrap: wrap; }
           .rag-explorer-v2-layout {
             display: block;
-            height: max(320px, calc(100vh - 168px));
+            height: calc(100dvh - 126px);
             min-height: 0;
             overflow: hidden;
           }
