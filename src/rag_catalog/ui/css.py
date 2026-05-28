@@ -1620,6 +1620,10 @@ def _install_css() -> None:
         .rag-file-badge.img { background: #fce7f3; color: #db2777; }
         .rag-file-badge.txt { background: var(--rag-sunken); color: var(--rag-muted); }
         .rag-file-badge.fld { background: #fef3c7; color: #92400e; }
+        .rag-file-badge .rag-folder-badge-icon {
+          font-size: 21px;
+          line-height: 1;
+        }
         body.body--dark .rag-file-badge.pdf { background: #450a0a; color: #fca5a5; }
         body.body--dark .rag-file-badge.doc { background: #1e3a5f; color: #93c5fd; }
         body.body--dark .rag-file-badge.xls { background: #14532d; color: #86efac; }

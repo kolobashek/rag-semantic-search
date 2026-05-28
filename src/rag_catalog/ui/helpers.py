@@ -2034,7 +2034,11 @@ def _file_badge_html(path_or_ext: str, kind: str = "Файл") -> str:
     """CSS badge <span> for ui.html() in list/table rows — uses rag-file-badge CSS."""
     ext = Path(str(path_or_ext or "")).suffix.lower() or str(path_or_ext or "").lower()
     if kind == "Каталог":
-        css_cls, label = "fld", "FLD"
+        return (
+            '<span class="rag-file-badge fld" aria-label="Папка">'
+            '<span class="material-icons rag-folder-badge-icon" aria-hidden="true">folder</span>'
+            "</span>"
+        )
     elif ext in {".doc", ".docx"}:
         css_cls, label = "doc", "DOC"
     elif ext in {".xls", ".xlsx", ".csv"}:
