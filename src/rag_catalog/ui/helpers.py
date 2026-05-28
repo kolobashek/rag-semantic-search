@@ -2140,6 +2140,12 @@ def _load_user_state(state: PageState) -> None:
         state.explorer_sort = str(explorer.get("sort") or state.explorer_sort)
         state.explorer_desc = bool(explorer.get("desc", state.explorer_desc))
         state.explorer_ext = str(explorer.get("ext") or state.explorer_ext)
+        state.explorer_hidden_paths = [
+            str(path)
+            for path in (explorer.get("hidden_paths") or [])
+            if str(path or "").strip()
+        ]
+        state.explorer_show_hidden = bool(explorer.get("show_hidden", state.explorer_show_hidden))
     ui_settings = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
     if ui_settings:
         theme = str(ui_settings.get("theme") or "").strip().lower()
@@ -2181,6 +2187,8 @@ def _save_explorer_settings(state: PageState) -> None:
         "sort": state.explorer_sort,
         "desc": state.explorer_desc,
         "ext": state.explorer_ext,
+        "hidden_paths": list(dict.fromkeys(str(path) for path in state.explorer_hidden_paths if str(path or "").strip())),
+        "show_hidden": bool(state.explorer_show_hidden),
     }
     auth_db.save_user_settings(username=username, settings=settings)
     _log_app_event(state, "explorer", "save_settings", details=settings["explorer"])

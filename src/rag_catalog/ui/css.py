@@ -1062,12 +1062,22 @@ def _install_css() -> None:
           display: flex;
         }
         .rag-selection-bar {
+          position: fixed;
+          left: 50%;
+          bottom: 18px;
+          z-index: 1200;
+          width: min(720px, calc(100vw - 32px));
+          transform: translateX(-50%);
           min-height: 32px;
           padding: 4px 7px;
           border: 1px solid color-mix(in srgb, var(--rag-accent) 42%, var(--rag-border));
-          border-radius: 6px;
-          background: color-mix(in srgb, var(--rag-accent) 10%, var(--rag-surface));
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--rag-surface) 92%, transparent);
           color: var(--rag-text);
+          box-shadow: 0 12px 30px -18px rgba(0,0,0,.55);
+          backdrop-filter: blur(14px);
+          justify-content: center;
+          flex-wrap: nowrap;
         }
         .rag-favorite-star.header {
           opacity: .65;
@@ -1289,10 +1299,7 @@ def _install_css() -> None:
           .rag-file-table-actions .q-btn:not(:last-child) {
             display: none !important;
           }
-          .rag-selection-bar {
-            flex-wrap: wrap;
-            align-content: center;
-          }
+          .rag-selection-bar { width: min(520px, calc(100vw - 24px)); bottom: 10px; }
           .cd-drop-zone {
             display: none !important;
           }
@@ -1679,6 +1686,15 @@ def _install_css() -> None:
           transition: background 0.1s;
         }
         .rag-file-table-row:hover { background: var(--rag-hover); }
+        .rag-hidden-item {
+          opacity: .46;
+        }
+        .rag-hidden-item:hover {
+          opacity: .72;
+        }
+        .rag-context-action-hidden {
+          display: none !important;
+        }
         .rag-file-table-name .q-btn {
           width: 100%;
           min-width: 0;
@@ -2133,13 +2149,29 @@ def _install_css() -> None:
               });
               if (itemType === 'file' && itemUrl) {
                 addButton(m, 'Скачать', () => {
-                  const a = document.createElement('a');
-                  a.href = itemUrl;
-                  a.download = '';
-                  document.body.appendChild(a);
-                  a.click();
-                  a.remove();
+                  const downloadButton = item.querySelector('[data-rag-download]');
+                  if (downloadButton) {
+                    downloadButton.click();
+                  } else {
+                    const a = document.createElement('a');
+                    a.href = itemUrl;
+                    a.download = '';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                  }
                 });
+              }
+              addButton(m, 'Копировать', () => item.querySelector('[data-rag-copy]')?.click());
+              addButton(m, 'Вырезать', () => item.querySelector('[data-rag-cut]')?.click());
+              addButton(m, 'Удалить', () => item.querySelector('[data-rag-delete]')?.click());
+              addButton(m, 'Поделиться', () => item.querySelector('[data-rag-share]')?.click());
+              addButton(m, 'Отправить', () => item.querySelector('[data-rag-send]')?.click());
+              addButton(m, 'Архивировать', () => item.querySelector('[data-rag-archive]')?.click());
+              if (item.dataset.ragHidden === 'true') {
+                addButton(m, 'Показать в интерфейсе', () => item.querySelector('[data-rag-unhide]')?.click());
+              } else {
+                addButton(m, 'Скрыть из интерфейса', () => item.querySelector('[data-rag-hide]')?.click());
               }
               addButton(m, 'Показать в ОС', () => item.querySelector('[data-rag-os]')?.click());
               addButton(m, item.dataset.ragFavorite === 'true' ? 'Убрать из избранного' : 'Добавить в избранное', () => item.querySelector('[data-rag-favorite-button]')?.click());

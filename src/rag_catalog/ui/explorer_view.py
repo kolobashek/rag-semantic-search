@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 from urllib.parse import quote
@@ -59,6 +60,8 @@ def render_explorer_screen(
     choose_query_fn: Callable,
     query_handler: Callable,
 ) -> None:
+    state._explorer_selection_action = None
+
     def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
         active = _is_favorite(state, str(path))
         icon = "star" if active else "star_border"
@@ -75,8 +78,36 @@ def render_explorer_screen(
     def _selection_key(scope: str, path: str) -> str:
         return f"{scope}:{path}"
 
+    def _selection_path(key: str) -> str:
+        return key.split(":", 1)[1] if ":" in key else key
+
     def _selected_set() -> set[str]:
         return set(getattr(state, "explorer_selected_paths", []) or [])
+
+    def _selected_paths(scope: str) -> List[str]:
+        prefix = f"{scope}:"
+        return [_selection_path(key) for key in getattr(state, "explorer_selected_paths", []) if key.startswith(prefix)]
+
+    def _hidden_key(scope: str, path: str) -> str:
+        return _selection_key(scope, str(path or "").strip().replace("\\", "/").strip("/"))
+
+    def _hidden_set() -> set[str]:
+        return set(getattr(state, "explorer_hidden_paths", []) or [])
+
+    def _is_hidden(scope: str, path: str) -> bool:
+        return _hidden_key(scope, path) in _hidden_set()
+
+    def _set_hidden(scope: str, paths: List[str], hidden: bool) -> None:
+        keys = _hidden_set()
+        for path in paths:
+            key = _hidden_key(scope, path)
+            if not key.endswith(":"):
+                if hidden:
+                    keys.add(key)
+                else:
+                    keys.discard(key)
+        state.explorer_hidden_paths = sorted(keys)
+        _save_explorer_settings(state)
 
     def _set_selected(keys: set[str]) -> None:
         state.explorer_selected_paths = sorted(keys)
@@ -132,22 +163,35 @@ def render_explorer_screen(
         _set_visible_checkboxes(refs, should_select)
         _refresh_selection_bar(refs)
 
+    def _selection_action(scope: str, action: str) -> None:
+        handler = getattr(state, "_explorer_selection_action", None)
+        if callable(handler):
+            handler(scope, action)
+            return
+        ui.notify("Действие для этого режима пока недоступно.", type="warning")
+
     def _render_selection_bar(*, scope: str, visible_keys: List[str]) -> dict[str, Any]:
         refs: dict[str, Any] = {
             "scope": scope,
             "visible_keys": list(visible_keys),
             "checkboxes": {},
         }
-        refs["bar"] = ui.row().classes("rag-selection-bar w-full items-center gap-2")
+        refs["bar"] = ui.row().classes("rag-selection-bar w-full items-center gap-1")
         with refs["bar"]:
             ui.icon("checklist", size="18px")
             refs["label"] = ui.label("").classes("font-semibold")
+            ui.button(icon="content_copy", on_click=lambda: _selection_action(scope, "copy"), color=None).props("flat round dense").tooltip("Копировать")
+            ui.button(icon="content_cut", on_click=lambda: _selection_action(scope, "cut"), color=None).props("flat round dense").tooltip("Вырезать")
+            ui.button(icon="delete_outline", on_click=lambda: _selection_action(scope, "delete"), color=None).props("flat round dense").tooltip("Удалить")
+            ui.button(icon="ios_share", on_click=lambda: _selection_action(scope, "share"), color=None).props("flat round dense").tooltip("Поделиться")
+            ui.button(icon="send", on_click=lambda: _selection_action(scope, "send"), color=None).props("flat round dense").tooltip("Отправить")
+            ui.button(icon="archive", on_click=lambda: _selection_action(scope, "archive"), color=None).props("flat round dense").tooltip("Архивировать")
+            ui.button(icon="visibility_off", on_click=lambda: _selection_action(scope, "hide"), color=None).props("flat round dense").tooltip("Скрыть из интерфейса")
             ui.button(
-                "Снять",
                 icon="close",
                 on_click=lambda: (_clear_selection(), _set_visible_checkboxes(refs, False), _refresh_selection_bar(refs)),
                 color=None,
-            ).props("flat dense no-caps")
+            ).props("flat round dense").tooltip("Снять выделение")
         _refresh_selection_bar(refs)
         return refs
 
@@ -251,10 +295,16 @@ def render_explorer_screen(
                     value=page_state.explorer_sort,
                     label="Сортировка",
                 ).props("dense outlined").classes("w-full")
+                show_hidden_cb = ui.checkbox(
+                    "Показать скрытые",
+                    value=bool(page_state.explorer_show_hidden),
+                ).props("dense")
 
                 def _apply_mobile_filters() -> None:
                     page_state.explorer_view = str(view_select.value or "Таблица")
                     page_state.explorer_sort = str(sort_select.value or "По имени")
+                    page_state.explorer_show_hidden = bool(show_hidden_cb.value)
+                    _save_explorer_settings(page_state)
                     dlg.close()
                     render_fn()
 
@@ -655,6 +705,203 @@ def render_explorer_screen(
             except Exception as exc:
                 ui.notify(f"Ошибка восстановления: {exc}", type="negative")
 
+        def _cd_unique_name(dest_parent_path: str, desired_name: str, *, is_folder: bool) -> str:
+            clean_parent = str(dest_parent_path or "").strip().replace("\\", "/").strip("/")
+            raw_name = str(desired_name or ("Папка" if is_folder else "Файл")).strip().strip("/\\")
+            stem = Path(raw_name).stem if not is_folder else raw_name
+            suffix = Path(raw_name).suffix if not is_folder else ""
+            candidates = [raw_name, f"{stem} копия{suffix}"]
+            candidates.extend(f"{stem} копия {idx}{suffix}" for idx in range(2, 1000))
+            for name in candidates:
+                target = f"{clean_parent}/{name}" if clean_parent else name
+                if svc.registry.get_node_by_path(target) is None:
+                    return name
+            raise RuntimeError("Не удалось подобрать свободное имя.")
+
+        def _cd_copy_file_to_parent(file_row: CloudDriveFile, dest_parent_path: str, *, preferred_name: str = "") -> CloudDriveFile:
+            parent = svc.registry.get_root_folder() if not dest_parent_path else svc.registry.get_folder_by_path(dest_parent_path)
+            if parent is None:
+                raise RuntimeError(f"Целевая папка не найдена: {dest_parent_path or '/'}")
+            name = _cd_unique_name(dest_parent_path, preferred_name or file_row.name, is_folder=False)
+            target_path = f"{dest_parent_path.strip('/')}/{name}" if dest_parent_path.strip("/") else name
+            copied = svc.registry.upsert_file(
+                folder_id=parent.id,
+                path=target_path,
+                name=name,
+                storage_key=file_row.storage_key,
+                mime_type=file_row.mime_type,
+                size_bytes=file_row.size_bytes,
+                checksum=file_row.checksum,
+                source_path=file_row.source_path,
+                source_mtime=file_row.source_mtime,
+            )
+            queue = getattr(svc, "_queue_reindex_file", None)
+            if callable(queue):
+                queue(copied, reason="copy")
+            return copied
+
+        def _cd_copy_folder_to_parent(folder: CloudDriveFolder, dest_parent_path: str, *, preferred_name: str = "") -> CloudDriveFolder:
+            if folder.is_root:
+                raise RuntimeError("Корневую папку копировать нельзя.")
+            name = _cd_unique_name(dest_parent_path, preferred_name or folder.name, is_folder=True)
+            created = svc.create_folder(parent_path=dest_parent_path, name=name)
+            new_path = str(created.get("path") or "").strip("/")
+            for child_file in svc.registry.list_files_in_folder(folder.id):
+                _cd_copy_file_to_parent(child_file, new_path, preferred_name=child_file.name)
+            for child_folder in svc.registry.list_child_folders(folder.id):
+                _cd_copy_folder_to_parent(child_folder, new_path, preferred_name=child_folder.name)
+            saved = svc.registry.get_folder_by_path(new_path)
+            if saved is None:
+                raise RuntimeError(f"Созданная папка не найдена: {new_path}")
+            return saved
+
+        def _cd_copy_node_to_parent(source_path: str, dest_parent_path: str) -> None:
+            node = svc.registry.get_node_by_path(source_path)
+            if node is None:
+                raise RuntimeError(f"Узел не найден: {source_path}")
+            if hasattr(node, "folder_id"):
+                _cd_copy_file_to_parent(node, dest_parent_path)
+            else:
+                _cd_copy_folder_to_parent(node, dest_parent_path)
+
+        def _cd_set_clipboard(paths: List[str], mode: str) -> None:
+            clean_paths = [str(path).strip().replace("\\", "/").strip("/") for path in paths if str(path).strip()]
+            if not clean_paths:
+                ui.notify("Ничего не выбрано.", type="warning")
+                return
+            state.explorer_clipboard = {"scope": "cd", "mode": mode, "paths": clean_paths}
+            ui.notify(("Скопировано" if mode == "copy" else "Вырезано") + f": {len(clean_paths)}", type="positive")
+            _log_app_event(page_state, "cd_explorer", f"clipboard_{mode}", details={"count": len(clean_paths)})
+
+        async def _cd_paste_clipboard() -> None:
+            clipboard = dict(getattr(state, "explorer_clipboard", {}) or {})
+            if clipboard.get("scope") != "cd":
+                ui.notify("В буфере нет элементов Cloud Drive.", type="warning")
+                return
+            paths = [str(path).strip().replace("\\", "/").strip("/") for path in (clipboard.get("paths") or []) if str(path).strip()]
+            if not paths:
+                ui.notify("Буфер пуст.", type="warning")
+                return
+            dest = page_state.explorer_cd_path or ""
+            mode = str(clipboard.get("mode") or "copy")
+            try:
+                if mode == "cut":
+                    for source_path in paths:
+                        node = svc.registry.get_node_by_path(source_path)
+                        if node is None:
+                            continue
+                        name = _cd_unique_name(dest, getattr(node, "name", Path(source_path).name), is_folder=not hasattr(node, "folder_id"))
+                        await run.io_bound(svc.move_node, source_path=source_path, dest_parent_path=dest, new_name=name)
+                    state.explorer_clipboard = {}
+                else:
+                    for source_path in paths:
+                        await run.io_bound(_cd_copy_node_to_parent, source_path, dest)
+                _clear_selection()
+                ui.notify(f"Вставлено: {len(paths)}", type="positive")
+                _log_app_event(page_state, "cd_explorer", "paste", details={"mode": mode, "count": len(paths), "dest": dest})
+                render_fn()
+            except Exception as exc:
+                ui.notify(f"Ошибка вставки: {exc}", type="negative")
+
+        def _cd_share_paths(paths: List[str], *, verb: str = "Поделиться") -> None:
+            text = "\n".join(path or "/" for path in paths)
+            ui.run_javascript(f"navigator.clipboard && navigator.clipboard.writeText({json.dumps(text)})")
+            ui.notify(f"{verb}: ссылки/пути скопированы в буфер.", type="positive")
+
+        def _cd_archive_paths(paths: List[str]) -> None:
+            export_dir = Path("runtime") / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            zip_path = export_dir / f"cloud-drive-selection-{int(time.time())}.zip"
+            added = 0
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for node_path in paths:
+                    node = svc.registry.get_node_by_path(node_path)
+                    files = [node] if node is not None and hasattr(node, "folder_id") else (
+                        svc.registry.list_files_under_path(node.path) if node is not None else []
+                    )
+                    for file_row in files:
+                        descriptor = svc.get_download_descriptor(file_row.path)
+                        local_path = descriptor.get("file_path")
+                        if not local_path:
+                            continue
+                        archive.write(str(local_path), arcname=file_row.path)
+                        added += 1
+            if not added:
+                zip_path.unlink(missing_ok=True)
+                ui.notify("Нет доступных локальных файлов для архива.", type="warning")
+                return
+            _log_app_event(page_state, "cd_explorer", "archive", details={"count": added, "zip": str(zip_path)})
+            ui.download(zip_path, filename=zip_path.name)
+            ui.notify(f"Архив создан: {added} файлов.", type="positive")
+
+        def _cd_delete_selected_dialog(paths: List[str]) -> None:
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-96"):
+                ui.label("Удалить выбранное?").classes("text-lg font-semibold text-red-700")
+                ui.label(f"Объектов: {len(paths)}").classes("rag-meta")
+                ui.label("Удаление переместит элементы в корзину Cloud Drive.").classes("text-xs text-red-600")
+
+                async def _do_delete() -> None:
+                    try:
+                        for node_path in paths:
+                            if not _cd_can(node_path, "editor"):
+                                raise RuntimeError(f"Нет прав на удаление: {node_path}")
+                            await run.io_bound(svc.delete_node, path=node_path)
+                        _clear_selection()
+                        dlg.close()
+                        ui.notify(f"Удалено: {len(paths)}", type="positive")
+                        _log_app_event(page_state, "cd_explorer", "delete_selected", details={"count": len(paths)})
+                        render_fn()
+                    except Exception as exc:
+                        ui.notify(f"Ошибка удаления: {exc}", type="negative")
+
+                with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                    ui.button("Отмена", on_click=dlg.close).props("flat dense")
+                    ui.button("Удалить", icon="delete_forever", on_click=_do_delete, color="negative").props("unelevated dense")
+            dlg.open()
+
+        def _cd_hide_paths(paths: List[str]) -> None:
+            _set_hidden("cd", paths, True)
+            _clear_selection()
+            ui.notify(f"Скрыто из интерфейса: {len(paths)}", type="positive")
+            _log_app_event(page_state, "cd_explorer", "hide", details={"count": len(paths)})
+            render_fn()
+
+        def _cd_unhide_paths(paths: List[str]) -> None:
+            _set_hidden("cd", paths, False)
+            _clear_selection()
+            ui.notify(f"Вернулось в интерфейс: {len(paths)}", type="positive")
+            _log_app_event(page_state, "cd_explorer", "unhide", details={"count": len(paths)})
+            render_fn()
+
+        def _cd_selection_action(scope: str, action: str) -> None:
+            if scope != "cd":
+                ui.notify("Действие доступно только в Cloud Drive.", type="warning")
+                return
+            paths = _selected_paths("cd")
+            if not paths:
+                ui.notify("Ничего не выбрано.", type="warning")
+                return
+            if action == "copy":
+                _cd_set_clipboard(paths, "copy")
+            elif action == "cut":
+                _cd_set_clipboard(paths, "cut")
+            elif action == "delete":
+                _cd_delete_selected_dialog(paths)
+            elif action == "share":
+                _cd_share_paths(paths, verb="Поделиться")
+            elif action == "send":
+                _cd_share_paths(paths, verb="Отправить")
+            elif action == "archive":
+                _cd_archive_paths(paths)
+            elif action == "hide":
+                _cd_hide_paths(paths)
+            elif action == "unhide":
+                _cd_unhide_paths(paths)
+            else:
+                ui.notify("Неизвестное действие.", type="warning")
+
+        page_state._explorer_selection_action = _cd_selection_action
+
         cd_path = page_state.explorer_cd_path or ""
         _is_trash_view = cd_path == "__trash__"
         if _is_trash_view:
@@ -691,6 +938,35 @@ def render_explorer_screen(
         if page_state.header_explorer_actions is not None:
             page_state.header_explorer_actions.clear()
 
+        def _cd_context_props(node_path: str, *, is_folder: bool, download_url: str = "") -> str:
+            attrs = {
+                "data-rag-context": "explorer-item",
+                "data-rag-scope": "cd",
+                "data-rag-type": "folder" if is_folder else "file",
+                "data-rag-path": quote(str(node_path or ""), safe=""),
+                "data-rag-url": download_url,
+                "data-rag-favorite": "false",
+                "data-rag-hidden": "true" if _is_hidden("cd", node_path) else "false",
+            }
+            return " ".join(f'{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items())
+
+        def _cd_single_action(node_path: str, action: str) -> None:
+            _set_selected({_selection_key("cd", node_path)})
+            _cd_selection_action("cd", action)
+
+        def _cd_hidden_action_buttons(node_path: str, *, is_folder: bool, open_action: Callable[[], None], download_url: str = "") -> None:
+            ui.button(on_click=open_action).props("data-rag-open").classes("rag-context-action-hidden")
+            if not is_folder and download_url:
+                ui.button(on_click=lambda url=download_url: ui.navigate.to(url, new_tab=True)).props("data-rag-download").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "copy")).props("data-rag-copy").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "cut")).props("data-rag-cut").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "delete")).props("data-rag-delete").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "share")).props("data-rag-share").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "send")).props("data-rag-send").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "archive")).props("data-rag-archive").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "hide")).props("data-rag-hide").classes("rag-context-action-hidden")
+            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "unhide")).props("data-rag-unhide").classes("rag-context-action-hidden")
+
         # filter & sort
         name_q = page_state.explorer_filter.strip().lower()
         ext_q = page_state.explorer_ext if page_state.explorer_ext != "Все" else ""
@@ -699,6 +975,9 @@ def render_explorer_screen(
             child_files   = [f for f in child_files   if name_q in f.name.lower()]
         if ext_q:
             child_files = [f for f in child_files if f.name.lower().endswith(ext_q.lower())]
+        if not page_state.explorer_show_hidden:
+            child_folders = [f for f in child_folders if not _is_hidden("cd", f.path)]
+            child_files = [f for f in child_files if not _is_hidden("cd", f.path)]
 
         try:
             child_folder_sizes = svc.registry.folder_size_bytes_map([folder.id for folder in child_folders])
@@ -806,11 +1085,22 @@ def render_explorer_screen(
                 ui.button("Фильтры", icon="filter_alt", on_click=_cd_open_filters_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
                 ui.button("Загрузить", icon="upload", on_click=_cd_upload_dialog, color=None).props("outline dense no-caps")
                 ui.button("Создать", icon="add", on_click=_cd_create_picker_dialog, color=None).props("flat dense no-caps")
+                if dict(getattr(page_state, "explorer_clipboard", {}) or {}).get("scope") == "cd":
+                    ui.button("Вставить", icon="content_paste", on_click=_cd_paste_clipboard, color=None).props("outline dense no-caps")
                 ui.separator().props("vertical")
                 ui.button(f"тип: {page_state.explorer_ext.lower()}", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
                 ui.button("изменён: любой", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
                 ui.button("размер: любой", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
-                ui.button("фильтр", icon="add", color=None).props("flat dense no-caps").classes("rag-filter-top-action")
+                ui.button(
+                    "скрытые: да" if page_state.explorer_show_hidden else "скрытые: нет",
+                    icon="visibility" if page_state.explorer_show_hidden else "visibility_off",
+                    color=None,
+                    on_click=lambda: (
+                        setattr(page_state, "explorer_show_hidden", not bool(page_state.explorer_show_hidden)),
+                        _save_explorer_settings(page_state),
+                        render_fn(),
+                    ),
+                ).props("flat dense no-caps").classes("rag-filter-top-action")
                 ui.space()
                 ui.label("Сорт:").classes("rag-explorer-sort-label")
                 ui.select(
@@ -856,6 +1146,8 @@ def render_explorer_screen(
                     is_current = folder.path == cd_path or (not cd_path and folder.is_root)
                     is_ancestor = folder.path in ancestor_paths and not is_current
                     children = svc.registry.list_child_folders(folder.id)
+                    if not page_state.explorer_show_hidden:
+                        children = [child for child in children if not _is_hidden("cd", child.path)]
                     has_children = bool(children)
                     is_open = folder.path in open_paths
                     icon = "folder_open" if is_open or is_current else "folder"
@@ -864,6 +1156,7 @@ def render_explorer_screen(
                         "rag-tree-row"
                         + (" active" if is_current else "")
                         + (" ancestor" if is_ancestor else "")
+                        + (" rag-hidden-item" if _is_hidden("cd", folder.path) else "")
                     )
                     with ui.element("div").classes(row_classes).style(f"padding-left: {depth * 12}px"):
                         if has_children:
@@ -939,6 +1232,9 @@ def render_explorer_screen(
                 ui.label(f"Вид: {page_state.explorer_view}").classes("rag-chip rag-filter-chip")
                 ui.label(f"Сорт.: {page_state.explorer_sort}").classes(
                     "rag-chip rag-filter-chip" + (" active" if page_state.explorer_sort != "По имени" or page_state.explorer_desc else "")
+                )
+                ui.label("Скрытые: показаны" if page_state.explorer_show_hidden else "Скрытые: скрыты").classes(
+                    "rag-chip rag-filter-chip" + (" active" if page_state.explorer_show_hidden else "")
                 )
 
         # ── Main column ───────────────────────────────────────────────────
@@ -1024,10 +1320,13 @@ def render_explorer_screen(
                         with ui.column().classes("rag-explorer-list w-full"):
                             for folder in child_folders:
                                 item_key = _selection_key("cd", folder.path)
-                                with ui.row().classes(
+                                folder_row = ui.row().classes(
                                     "rag-explorer-item w-full p-2 items-center gap-3"
                                     + (" selected" if item_key in _selected_set() else "")
-                                ):
+                                    + (" rag-hidden-item" if _is_hidden("cd", folder.path) else "")
+                                )
+                                folder_row.props(_cd_context_props(folder.path, is_folder=True))
+                                with folder_row:
                                     _selection_checkbox(item_key, selection_refs)
                                     ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
                                     with ui.column().classes("flex-1 gap-0"):
@@ -1035,7 +1334,8 @@ def render_explorer_screen(
                                             folder.name,
                                             on_click=lambda p=folder.path: _cd_open_folder(p),
                                             color=None,
-                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                        ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
+                                    _cd_hidden_action_buttons(folder.path, is_folder=True, open_action=lambda p=folder.path: _cd_open_folder(p))
                                     render_star(Path(folder.source_path or folder.path), item_type="folder")
                                     if not folder.is_root:
                                         with ui.button(icon="more_vert", color=None).props("flat round dense"):
@@ -1062,10 +1362,14 @@ def render_explorer_screen(
                         with ui.column().classes("rag-explorer-list w-full"):
                             for f in page_files:
                                 item_key = _selection_key("cd", f.path)
-                                with ui.row().classes(
+                                download_url = _cd_download_url(f.path)
+                                file_row = ui.row().classes(
                                     "rag-explorer-item w-full p-2 items-center gap-3"
                                     + (" selected" if item_key in _selected_set() else "")
-                                ):
+                                    + (" rag-hidden-item" if _is_hidden("cd", f.path) else "")
+                                )
+                                file_row.props(_cd_context_props(f.path, is_folder=False, download_url=download_url))
+                                with file_row:
                                     _selection_checkbox(item_key, selection_refs)
                                     ui.html(_file_badge_html(f.name), sanitize=False)
                                     with ui.column().classes("flex-1 gap-0"):
@@ -1073,7 +1377,8 @@ def render_explorer_screen(
                                             f.name,
                                             on_click=lambda fi=f: _cd_open_file(fi),
                                             color=None,
-                                        ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                        ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
+                                    _cd_hidden_action_buttons(f.path, is_folder=False, open_action=lambda fi=f: _cd_open_file(fi), download_url=download_url)
                                     ui.button(
                                         icon="history",
                                         on_click=lambda fi=f: _cd_versions_dialog(fi),
@@ -1087,7 +1392,7 @@ def render_explorer_screen(
                                         ).props("flat round dense").tooltip("Просмотреть файл")
                                         ui.button(
                                             icon="download",
-                                            on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
+                                            on_click=lambda url=download_url: ui.navigate.to(url, new_tab=True),
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
                                     _render_file_status(f.id)
@@ -1140,14 +1445,21 @@ def render_explorer_screen(
                             ui.element("div")
                         for folder in child_folders:
                             item_key = _selection_key("cd", folder.path)
-                            with ui.element("div").classes("rag-file-table-row" + (" selected" if item_key in _selected_set() else "")):
+                            folder_row_classes = (
+                                "rag-file-table-row"
+                                + (" selected" if item_key in _selected_set() else "")
+                                + (" rag-hidden-item" if _is_hidden("cd", folder.path) else "")
+                            )
+                            folder_row = ui.element("div").classes(folder_row_classes)
+                            folder_row.props(_cd_context_props(folder.path, is_folder=True))
+                            with folder_row:
                                 _selection_badge(folder.name, "Каталог", item_key, selection_refs)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
                                         folder.name,
                                         on_click=lambda p=folder.path: _cd_open_folder(p),
                                         color=None,
-                                    ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                    ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
                                 ui.label("—").classes("rag-meta text-xs")
                                 ui.label(_cd_folder_size_label(folder)).classes("rag-meta text-xs")
                                 ui.label("admin").classes("rag-meta text-xs")
@@ -1173,16 +1485,25 @@ def render_explorer_screen(
                                                     on_click=lambda fo=folder: _cd_delete_dialog(fo.path, fo.name, is_folder=True),
                                                     auto_close=True,
                                                 ).classes("text-negative")
+                                _cd_hidden_action_buttons(folder.path, is_folder=True, open_action=lambda p=folder.path: _cd_open_folder(p))
                         for f in page_files:
                             item_key = _selection_key("cd", f.path)
-                            with ui.element("div").classes("rag-file-table-row" + (" selected" if item_key in _selected_set() else "")):
+                            download_url = _cd_download_url(f.path)
+                            file_row_classes = (
+                                "rag-file-table-row"
+                                + (" selected" if item_key in _selected_set() else "")
+                                + (" rag-hidden-item" if _is_hidden("cd", f.path) else "")
+                            )
+                            file_row = ui.element("div").classes(file_row_classes)
+                            file_row.props(_cd_context_props(f.path, is_folder=False, download_url=download_url))
+                            with file_row:
                                 _selection_badge(f.name, "Файл", item_key, selection_refs)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
                                     ui.button(
                                         f.name,
                                         on_click=lambda fi=f: _cd_open_file(fi),
                                         color=None,
-                                    ).props("flat align=left no-caps dense").classes("rag-nav-button w-full")
+                                    ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
                                 ui.label(f.updated_at[:10] if f.updated_at else "—").classes("rag-meta text-xs")
                                 ui.label(_cd_file_size(f.size_bytes) if f.size_bytes else "—").classes("rag-meta text-xs")
                                 ui.label("admin").classes("rag-meta text-xs")
@@ -1212,7 +1533,7 @@ def render_explorer_screen(
                                         ).props("flat round dense").tooltip("Просмотреть файл")
                                         ui.button(
                                             icon="download",
-                                            on_click=lambda url=_cd_download_url(f.path): ui.navigate.to(url, new_tab=True),
+                                            on_click=lambda url=download_url: ui.navigate.to(url, new_tab=True),
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
                                     render_star(Path(f.source_path or f.path or f.name), item_type="file")
@@ -1241,6 +1562,7 @@ def render_explorer_screen(
                                                 on_click=lambda fi=f: _cd_delete_dialog(fi.path, fi.name, is_folder=False),
                                                 auto_close=True,
                                             ).classes("text-negative")
+                                _cd_hidden_action_buttons(f.path, is_folder=False, open_action=lambda fi=f: _cd_open_file(fi), download_url=download_url)
 
                 # Pagination
                 if total_files > page_size:
