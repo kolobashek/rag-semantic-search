@@ -58,6 +58,8 @@ _DAY_RU = {"Mon": "Пн", "Tue": "Вт", "Wed": "Ср", "Thu": "Чт", "Fri": "�
 
 FILE_PREVIEW_EXTENSIONS = {".txt", ".log", ".csv", ".json", ".md", ".py", ".ps1", ".xml", ".html", ".css"}
 INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
+OCR_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
+OCR_CAPABLE_EXTENSIONS = {".pdf", *OCR_IMAGE_EXTENSIONS}
 OFFICE_PREVIEW_EXTENSIONS = {".docx", ".xlsx", ".xls", ".rtf"}
 PAGE_SIZE = 80
 SYSTEM_FILE_EXTENSIONS = {
@@ -228,10 +230,10 @@ def _preview_office_file(path: Path, limit: int = 12000) -> str:
 def _db_query_dicts(db_path: Path, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
     if not db_path.exists():
         return []
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=30000;")
         cur = conn.execute(query, params or ())
         return [dict(row) for row in cur.fetchall()]
     except Exception:
@@ -1497,6 +1499,135 @@ def _find_headless_active_ocr(db_path: Path) -> Optional[Dict[str, Any]]:
     }
 
 
+def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return OCR inventory across index_state and cached OCR results."""
+    out: Dict[str, Any] = {
+        "found": False,
+        "ocr_capable_total": 0,
+        "eligible_total": 0,
+        "pending_candidates": 0,
+        "recognized_files": 0,
+        "partial_files": 0,
+        "empty_files": 0,
+        "error_files": 0,
+        "recognized_pages": 0,
+        "recognized_chars": 0,
+        "recognized_lines": 0,
+        "status_counts": {},
+    }
+    qdrant_dir = Path(str(cfg.get("qdrant_db_path") or "")).expanduser()
+    state_file = qdrant_dir / "index_state.db"
+    state_rows: Dict[str, Dict[str, Any]] = {}
+    candidate_paths: set[str] = set()
+    small_pdf_mb_raw = cfg.get("small_pdf_mb")
+    min_pdf_size = max(0, int(float(2.0 if small_pdf_mb_raw in (None, "") else small_pdf_mb_raw) * 1_048_576))
+    if state_file.exists():
+        try:
+            with sqlite3.connect(str(state_file), timeout=30.0) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """
+                    SELECT full_path, extension, size_bytes, stage, status, indexed_stage
+                    FROM state_entries
+                    WHERE lower(extension) IN (?,?,?,?,?,?,?,?,?)
+                    """,
+                    tuple(sorted(OCR_CAPABLE_EXTENSIONS)),
+                ).fetchall()
+            for row in rows:
+                path = str(row["full_path"] or "").strip()
+                if not path:
+                    continue
+                ext = str(row["extension"] or "").lower()
+                stage = str(row["stage"] or "")
+                status = str(row["status"] or "")
+                indexed_stage = str(row["indexed_stage"] or "")
+                state_rows[path] = {
+                    "extension": ext,
+                    "size_bytes": int(row["size_bytes"] or 0),
+                    "stage": stage,
+                    "status": status,
+                    "indexed_stage": indexed_stage,
+                }
+                needs_content = stage != "content" or status in {"empty", "error", "deferred_ocr"} or indexed_stage in {"", "metadata", "small"}
+                if ext == ".pdf":
+                    if int(row["size_bytes"] or 0) >= min_pdf_size and needs_content:
+                        candidate_paths.add(path)
+                elif ext in OCR_IMAGE_EXTENSIONS and needs_content:
+                    candidate_paths.add(path)
+        except Exception as exc:
+            out["state_error"] = str(exc)
+
+    ocr_rows: List[Dict[str, Any]] = []
+    try:
+        ocr_rows = _db_query_dicts(
+            _telemetry_db_path(cfg),
+            """
+            SELECT file_path, status, pages, char_count, extracted_text, error_text, ts_processed
+            FROM ocr_file_results
+            """,
+        )
+        out["found"] = True
+    except Exception as exc:
+        out["telemetry_error"] = str(exc)
+
+    result_paths: set[str] = set()
+    recognized_paths: set[str] = set()
+    empty_paths: set[str] = set()
+    error_paths: set[str] = set()
+    partial_paths: set[str] = set()
+    status_counts: Dict[str, int] = {}
+    recognized_pages = 0
+    recognized_chars = 0
+    recognized_lines = 0
+
+    for row in ocr_rows:
+        path = str(row.get("file_path") or "").strip()
+        if not path:
+            continue
+        result_paths.add(path)
+        status = str(row.get("status") or "unknown").strip().lower() or "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+        chars = int(row.get("char_count") or 0)
+        if status == "error":
+            error_paths.add(path)
+            continue
+        if status == "empty" or chars <= 0:
+            empty_paths.add(path)
+            continue
+        recognized_paths.add(path)
+        recognized_pages += int(row.get("pages") or 0)
+        recognized_chars += chars
+        text = str(row.get("extracted_text") or "")
+        recognized_lines += sum(1 for line in text.splitlines() if line.strip())
+        state = state_rows.get(path) or {}
+        if (
+            str(state.get("stage") or "") != "content"
+            or str(state.get("indexed_stage") or "") not in {"content", "large"}
+            or str(state.get("status") or "") in {"empty", "error", "deferred_ocr"}
+        ):
+            partial_paths.add(path)
+
+    relevant_paths = candidate_paths | result_paths
+    pending_paths = candidate_paths - recognized_paths - empty_paths - error_paths
+    out.update(
+        {
+            "found": bool(state_rows or ocr_rows or out.get("found")),
+            "ocr_capable_total": len(state_rows),
+            "eligible_total": len(relevant_paths),
+            "pending_candidates": len(pending_paths),
+            "recognized_files": len(recognized_paths),
+            "partial_files": len(partial_paths),
+            "empty_files": len(empty_paths),
+            "error_files": len(error_paths),
+            "recognized_pages": recognized_pages,
+            "recognized_chars": recognized_chars,
+            "recognized_lines": recognized_lines,
+            "status_counts": status_counts,
+        }
+    )
+    return out
+
+
 def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
     db_path = _telemetry_db_path(cfg)
     last_run = _db_query_dicts(
@@ -1674,6 +1805,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         WHERE ts_finished IS NOT NULL
         """,
     )
+    ocr_inventory = _read_ocr_inventory(cfg)
     return {
         "last_run": last_run[0] if last_run else None,
         "active_runs": active_runs,
@@ -1684,6 +1816,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "active_ocr": active_ocr_row,
         "last_ocr": last_ocr[0] if last_ocr else None,
         "ocr_summary": ocr_summary[0] if ocr_summary else {},
+        "ocr_inventory": ocr_inventory,
     }
 
 

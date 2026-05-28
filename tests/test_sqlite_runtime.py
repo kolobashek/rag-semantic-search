@@ -26,6 +26,17 @@ class _WalFailsButReadableConnection:
         return _Cursor("")
 
 
+class _JournalPragmasFailButReadableConnection:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def execute(self, sql: str):
+        self.calls.append(sql)
+        if sql in {"PRAGMA journal_mode=WAL;", "PRAGMA journal_mode;", "PRAGMA journal_mode=DELETE;"}:
+            raise sqlite3.OperationalError("disk I/O error")
+        return _Cursor("")
+
+
 def test_prepare_sqlite_connection_falls_back_when_wal_fails() -> None:
     conn = _WalFailsButReadableConnection()
 
@@ -35,3 +46,14 @@ def test_prepare_sqlite_connection_falls_back_when_wal_fails() -> None:
     assert "PRAGMA journal_mode=WAL;" in conn.calls
     assert "PRAGMA journal_mode;" in conn.calls
     assert "PRAGMA synchronous=NORMAL;" in conn.calls
+
+
+def test_prepare_sqlite_connection_keeps_readable_connection_when_journal_pragmas_fail() -> None:
+    conn = _JournalPragmasFailButReadableConnection()
+
+    prepare_sqlite_connection(conn)  # type: ignore[arg-type]
+
+    assert "PRAGMA journal_mode=WAL;" in conn.calls
+    assert "PRAGMA journal_mode;" in conn.calls
+    assert "PRAGMA journal_mode=DELETE;" in conn.calls
+    assert "SELECT 1;" in conn.calls

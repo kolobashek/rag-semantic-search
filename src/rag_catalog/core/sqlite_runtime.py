@@ -6,6 +6,13 @@ import sqlite3
 import time
 
 
+def _try_normal_sync(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except sqlite3.OperationalError:
+        pass
+
+
 def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> None:
     """Prepare a SQLite connection without failing on redundant WAL setup races.
 
@@ -26,16 +33,24 @@ def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> 
                 try:
                     row = conn.execute("PRAGMA journal_mode;").fetchone()
                     if row and str(row[0] or "").strip():
-                        conn.execute("PRAGMA synchronous=NORMAL;")
+                        _try_normal_sync(conn)
                         return
-                except sqlite3.OperationalError:
-                    try:
-                        conn.execute("PRAGMA journal_mode=DELETE;")
-                        conn.execute("PRAGMA synchronous=NORMAL;")
-                        return
-                    except sqlite3.OperationalError:
-                        raise exc
-            conn.execute("PRAGMA synchronous=NORMAL;")
+                except sqlite3.OperationalError as journal_exc:
+                    last_error = journal_exc
+                try:
+                    conn.execute("PRAGMA journal_mode=DELETE;")
+                    _try_normal_sync(conn)
+                    return
+                except sqlite3.OperationalError as delete_exc:
+                    last_error = delete_exc
+                try:
+                    conn.execute("SELECT 1;")
+                    _try_normal_sync(conn)
+                    return
+                except sqlite3.OperationalError as readable_exc:
+                    last_error = readable_exc
+                    raise readable_exc from exc
+            _try_normal_sync(conn)
             return
         except sqlite3.OperationalError as exc:
             last_error = exc

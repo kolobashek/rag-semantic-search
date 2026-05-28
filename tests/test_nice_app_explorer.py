@@ -303,6 +303,79 @@ def test_index_telemetry_reads_stage_and_ocr_progress(tmp_path) -> None:
     assert telemetry["active_ocr"]["processed_pdfs"] == 2
 
 
+def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
+    qdrant_dir = tmp_path / "qdrant"
+    state_db = IndexStateDB(str(qdrant_dir / "index_state.db"))
+    catalog = tmp_path / "catalog"
+    done_pdf = catalog / "done.pdf"
+    partial_pdf = catalog / "partial.pdf"
+    pending_pdf = catalog / "pending.pdf"
+    error_pdf = catalog / "error.pdf"
+    state_db.upsert_many(
+        [
+            {
+                "full_path": str(done_pdf),
+                "fingerprint": "1",
+                "mtime": 1.0,
+                "stage": "content",
+                "indexed_stage": "content",
+                "status": "ok",
+                "size_bytes": 10,
+                "extension": ".pdf",
+            },
+            {
+                "full_path": str(partial_pdf),
+                "fingerprint": "2",
+                "mtime": 1.0,
+                "stage": "small",
+                "indexed_stage": "small",
+                "status": "ok",
+                "size_bytes": 10,
+                "extension": ".pdf",
+            },
+            {
+                "full_path": str(pending_pdf),
+                "fingerprint": "3",
+                "mtime": 1.0,
+                "stage": "small",
+                "indexed_stage": "small",
+                "status": "ok",
+                "size_bytes": 10,
+                "extension": ".pdf",
+            },
+            {
+                "full_path": str(error_pdf),
+                "fingerprint": "4",
+                "mtime": 1.0,
+                "stage": "error",
+                "indexed_stage": "small",
+                "status": "error",
+                "size_bytes": 10,
+                "extension": ".pdf",
+            },
+        ]
+    )
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    db.save_ocr_file_result(str(done_pdf), 1.0, text="line 1\nline 2", pages=2, chars=12, status="ok")
+    db.save_ocr_file_result(str(partial_pdf), 1.0, text="line 3", pages=1, chars=6, status="ok")
+    db.save_ocr_file_result(str(error_pdf), 1.0, status="error", error="boom")
+
+    telemetry = _read_index_telemetry({
+        "telemetry_db_path": str(db_path),
+        "qdrant_db_path": str(qdrant_dir),
+        "small_pdf_mb": 0,
+    })
+
+    inventory = telemetry["ocr_inventory"]
+    assert inventory["eligible_total"] == 4
+    assert inventory["recognized_files"] == 2
+    assert inventory["partial_files"] == 1
+    assert inventory["pending_candidates"] == 1
+    assert inventory["error_files"] == 1
+    assert inventory["recognized_lines"] == 3
+
+
 def test_index_telemetry_uses_runtime_marker_before_run_row_exists(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "telemetry.db"
     TelemetryDB(str(db_path))

@@ -359,6 +359,13 @@ def render_index_screen(
             is_running = status_str == "running"
             processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
             total_f = int(row.get("total_files") or row.get("found_scanned") or 0)
+            ocr_inventory = dict(row.get("_ocr_inventory") or {}) if is_ocr else {}
+            if is_ocr and not is_running and ocr_inventory:
+                inventory_total = int(ocr_inventory.get("eligible_total") or 0)
+                inventory_done = int(ocr_inventory.get("recognized_files") or 0)
+                if inventory_total > 0:
+                    total_f = inventory_total
+                    processed = min(inventory_done, inventory_total)
             note_text = str(row.get("note") or row.get("run_note") or "").strip()
             progress_unknown = bool(is_running and total_f <= 0 and (
                 row.get("_progress_unknown")
@@ -380,7 +387,16 @@ def render_index_screen(
             elif is_ocr:
                 count_label = f"{processed:,} / {total_f:,}".replace(",", " ")
                 pct_label = f"{pct * 100:.0f}%"
-                stats_text = f"найдено {int(row.get('found_scanned') or 0):,} · обработано {int(row.get('processed_pdfs') or 0):,}"
+                if not is_running and ocr_inventory:
+                    stats_text = (
+                        f"подходящих {int(ocr_inventory.get('eligible_total') or 0):,} · "
+                        f"распознано {int(ocr_inventory.get('recognized_files') or 0):,} · "
+                        f"частично {int(ocr_inventory.get('partial_files') or 0):,} · "
+                        f"ошибок {int(ocr_inventory.get('error_files') or 0):,} · "
+                        f"строк {int(ocr_inventory.get('recognized_lines') or 0):,}"
+                    )
+                else:
+                    stats_text = f"найдено {int(row.get('found_scanned') or 0):,} · обработано {int(row.get('processed_pdfs') or 0):,}"
             else:
                 count_label = f"{processed:,} / {total_f:,}".replace(",", " ")
                 pct_label = f"{pct * 100:.0f}%"
@@ -411,6 +427,8 @@ def render_index_screen(
                     issue_text = ""
             shared_row = dict(row)
             shared_row["stage"] = label
+            if is_ocr and ocr_inventory:
+                shared_row["ocr_inventory"] = ocr_inventory
             if is_ocr:
                 shared_row["_log_path"] = PROJECT_ROOT / "logs" / "ocr.log"
             return {
@@ -539,8 +557,10 @@ def render_index_screen(
                         row = {"stage": stage_key, "status": "running", "processed_files": 0, "total_files": 0, "duration_sec": 0}
                 result[stage_key] = row
             ocr_row = dict(fresh.get("last_ocr") or {})
+            ocr_row["_ocr_inventory"] = dict(fresh.get("ocr_inventory") or {})
             if fresh.get("active_ocr"):
                 ocr_row.update(fresh.get("active_ocr") or {})
+                ocr_row["_ocr_inventory"] = dict(fresh.get("ocr_inventory") or {})
                 # OCR triggers index_rag --stage large; use its live progress counter
                 active_large = active_by_stage.get("large")
                 if active_large:
