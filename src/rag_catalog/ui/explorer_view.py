@@ -993,7 +993,10 @@ def render_explorer_screen(
                 return
 
             # Entry stats bar
-            with ui.row().classes("w-full items-center gap-2 px-1"):
+            stats_classes = "rag-cd-entry-stats w-full items-center gap-2 px-1"
+            if page_state.explorer_view != "Список":
+                stats_classes += " rag-cd-table-stats"
+            with ui.row().classes(stats_classes):
                 ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes("rag-path flex-1")
                 with ui.element("span").classes("cd-status-badge cd-status-done text-xs"):
                     ui.icon("cloud_done", size="14px")
@@ -1121,9 +1124,17 @@ def render_explorer_screen(
                         with ui.element("div").classes("rag-file-table-header"):
                             with ui.element("div").classes("rag-file-select-icon header"):
                                 _selection_page_checkbox(selection_refs)
-                            ui.label("Имя").classes("rag-col-header")
+                            with ui.element("div").classes("rag-file-table-head-name min-w-0"):
+                                ui.label("Имя").classes("rag-col-header rag-col-name-title")
+                                ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes(
+                                    "rag-path rag-cd-mobile-count"
+                                )
                             ui.label("Изменён").classes("rag-col-header")
-                            ui.label("Размер").classes("rag-col-header")
+                            with ui.element("div").classes("rag-file-table-head-size min-w-0"):
+                                ui.label("Размер").classes("rag-col-header rag-col-size-title")
+                                with ui.element("span").classes("cd-status-badge cd-status-done text-xs rag-cd-mobile-badge"):
+                                    ui.icon("cloud_done", size="14px")
+                                    ui.label("Cloud Drive")
                             ui.label("Автор").classes("rag-col-header")
                             ui.label("Индекс").classes("rag-col-header")
                             ui.element("div")

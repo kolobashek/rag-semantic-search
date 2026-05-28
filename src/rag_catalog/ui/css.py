@@ -1281,23 +1281,11 @@ def _install_css() -> None:
             max-height: none;
             overflow-y: auto;
           }
-          .rag-explorer-mobile-only { display: inline-flex !important; }
-          .rag-filter-top-action { display: none !important; }
-          .rag-file-table-header,
-          .rag-file-table-row {
-            grid-template-columns: 40px minmax(0,1fr) 64px;
-            min-width: 0;
-          }
-          .rag-file-table-header > :nth-child(3),
-          .rag-file-table-header > :nth-child(5),
-          .rag-file-table-header > :nth-child(6),
-          .rag-file-table-header > :nth-child(7),
-          .rag-file-table-row > :nth-child(3),
-          .rag-file-table-row > :nth-child(5),
-          .rag-file-table-row > :nth-child(6),
-          .rag-file-table-row > :nth-child(7) {
+          .rag-cd-table-stats {
             display: none !important;
           }
+          .rag-explorer-mobile-only { display: inline-flex !important; }
+          .rag-filter-top-action { display: none !important; }
           .rag-file-table-actions .q-btn:not(:last-child) {
             display: none !important;
           }
@@ -1726,6 +1714,52 @@ def _install_css() -> None:
           text-transform: uppercase;
           letter-spacing: 0.06em;
           white-space: nowrap;
+        }
+        .rag-cd-mobile-count,
+        .rag-cd-mobile-badge {
+          display: none !important;
+        }
+        .rag-file-table-head-name,
+        .rag-file-table-head-size {
+          min-width: 0;
+        }
+        @media (max-width: 760px) {
+          .rag-file-table-header,
+          .rag-file-table-row {
+            grid-template-columns: 40px minmax(0,1fr) 104px;
+            min-width: 0;
+          }
+          .rag-file-table-header > :nth-child(3),
+          .rag-file-table-header > :nth-child(5),
+          .rag-file-table-header > :nth-child(6),
+          .rag-file-table-header > :nth-child(7),
+          .rag-file-table-row > :nth-child(3),
+          .rag-file-table-row > :nth-child(5),
+          .rag-file-table-row > :nth-child(6),
+          .rag-file-table-row > :nth-child(7) {
+            display: none !important;
+          }
+          .rag-file-table-header {
+            min-height: 38px;
+          }
+          .rag-col-name-title,
+          .rag-col-size-title {
+            display: none !important;
+          }
+          .rag-cd-mobile-count {
+            display: block !important;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 12px;
+          }
+          .rag-cd-mobile-badge {
+            display: inline-flex !important;
+            max-width: 100%;
+            justify-content: center;
+            white-space: nowrap;
+          }
         }
 
         /* === SHIMMER ANIMATION === */
