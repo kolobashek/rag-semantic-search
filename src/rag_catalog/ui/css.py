@@ -1453,10 +1453,13 @@ def _install_css() -> None:
           }
         }
         @media (max-width: 900px) {
-          .rag-hdr-grid { grid-template-columns: auto 1fr auto; }
+          .rag-hdr-grid {
+            grid-template-columns: auto 1fr auto;
+            column-gap: 8px;
+          }
           .rag-hdr-nav { display: none; }
           .rag-header-breadcrumbs {
-            padding: 0 6px;
+            padding: 0 6px 0 10px;
           }
           .rag-header-breadcrumbs .q-btn {
             max-width: 36vw;
