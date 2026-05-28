@@ -1160,8 +1160,25 @@ def _install_css() -> None:
           .rag-filter-top-action { display: none !important; }
           .rag-file-table-header,
           .rag-file-table-row {
-            grid-template-columns: 28px 42px minmax(180px,1fr) 92px 78px 72px 56px 44px;
-            min-width: 760px;
+            grid-template-columns: 28px 42px minmax(0,1fr) 68px;
+            min-width: 0;
+          }
+          .rag-file-table-header > :nth-child(4),
+          .rag-file-table-header > :nth-child(6),
+          .rag-file-table-header > :nth-child(7),
+          .rag-file-table-header > :nth-child(8),
+          .rag-file-table-row > :nth-child(4),
+          .rag-file-table-row > :nth-child(6),
+          .rag-file-table-row > :nth-child(7),
+          .rag-file-table-row > :nth-child(8) {
+            display: none !important;
+          }
+          .rag-file-table-actions .q-btn:not(:last-child) {
+            display: none !important;
+          }
+          .rag-selection-bar {
+            flex-wrap: wrap;
+            align-content: center;
           }
           .rag-mobile-panel-dialog {
             width: min(420px, calc(100vw - 24px));
