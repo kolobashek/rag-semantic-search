@@ -473,6 +473,10 @@ def _install_css() -> None:
           min-height: 30px !important;
           height: 30px !important;
           border-radius: 7px !important;
+          font-weight: 400 !important;
+        }
+        .rag-explorer-actionline .q-btn__content {
+          font-weight: 400 !important;
         }
         .rag-explorer-actionline .q-field {
           min-width: 120px;
