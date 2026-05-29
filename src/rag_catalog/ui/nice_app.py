@@ -58,6 +58,7 @@ from .helpers import (
     _popular_query_terms,
     _preview_file,
     _preview_office_file,
+    _qdrant_http_ready,
     _read_index_telemetry,
     _remember_query,
     _resolve_catalog_file,
@@ -170,10 +171,10 @@ def _ollama_endpoint_available(ollama_url: str, timeout: float = 0.35) -> bool:
 
 def _ui_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
     try:
-        raw = float(cfg.get("ui_search_timeout_sec") or 6.0)
+        raw = float(cfg.get("ui_search_timeout_sec") or 20.0)
     except (TypeError, ValueError):
-        raw = 6.0
-    return max(2.0, min(30.0, raw))
+        raw = 20.0
+    return max(5.0, min(45.0, raw))
 
 
 def _ui_quick_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
@@ -182,6 +183,26 @@ def _ui_quick_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
     except (TypeError, ValueError):
         raw = 2.5
     return max(1.0, min(10.0, raw))
+
+
+_IO_TIMEOUT = object()
+
+
+async def _run_io_bound_with_ui_timeout(func: Any, *args: Any, timeout: float, **kwargs: Any) -> Any:
+    """Return a timeout sentinel without waiting for a non-cancellable worker thread."""
+    task = asyncio.create_task(run.io_bound(func, *args, **kwargs))
+    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    if task in done:
+        return await task
+
+    def _consume_late_result(done_task: asyncio.Task[Any]) -> None:
+        try:
+            done_task.result()
+        except Exception:
+            pass
+
+    task.add_done_callback(_consume_late_result)
+    return _IO_TIMEOUT
 
 
 def _client_alive() -> bool:
@@ -495,7 +516,10 @@ def _build_page(initial_screen: str = "search") -> None:
         if searcher is not None:
             state.searcher = searcher
         if searcher is None or not searcher.connected:
-            state.search_error = state.searcher_error or "Поисковик подключается. Повторите запрос через несколько секунд."
+            if not _qdrant_http_ready(state.cfg):
+                state.search_error = "Qdrant восстанавливает индекс. Повторите запрос через несколько секунд."
+            else:
+                state.search_error = state.searcher_error or "Поисковик подключается. Повторите запрос через несколько секунд."
             state.search_lazy_loading = False
             render_safely()
             return
@@ -509,16 +533,16 @@ def _build_page(initial_screen: str = "search") -> None:
         expand_model = str(state.cfg.get("llm_expand_model") or "phi3:mini")
         rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
         try:
-            quick_results = await asyncio.wait_for(
-                run.io_bound(
-                    _run_quick_name_search,
-                    searcher,
-                    query=semantic_q,
-                    limit=state.limit,
-                    file_type=effective_file_type,
-                ),
+            quick_results = await _run_io_bound_with_ui_timeout(
+                _run_quick_name_search,
+                searcher,
+                query=semantic_q,
+                limit=state.limit,
+                file_type=effective_file_type,
                 timeout=_ui_quick_search_timeout_seconds(state.cfg),
             )
+            if quick_results is _IO_TIMEOUT:
+                raise TimeoutError
             if state.search_request_id != request_id:
                 return
             quick_results = _filter_cloud_drive_search_results(state.cfg, state.current_user, quick_results)
@@ -567,7 +591,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     "exact_matches": exact_count,
                 },
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if state.search_request_id != request_id:
                 return
             state.search_lazy_loading = False
@@ -604,29 +628,6 @@ def _build_page(initial_screen: str = "search") -> None:
             render_safely()
             return
 
-        if getattr(searcher, "_embedder", None) is None:
-            state.search_lazy_loading = False
-            state.search_stats_hint = (
-                f"{state.search_stats_hint} · семантика прогревается"
-                if state.search_stats_hint else "Семантический поиск прогревается"
-            )
-            if not state.results:
-                state.search_error = (
-                    "Семантическая модель еще прогревается. "
-                    "Быстрых совпадений нет; повторите запрос через несколько секунд."
-                )
-            _log_app_event(
-                state,
-                "search",
-                "run_full_skipped",
-                details={
-                    "query": query,
-                    "reason": "embedder_cold",
-                },
-            )
-            render_safely()
-            return
-
         # Ленивая догрузка: сначала, при необходимости, расширяем запрос через LLM.
         search_query = semantic_q
         if llm_expand_enabled:
@@ -644,21 +645,21 @@ def _build_page(initial_screen: str = "search") -> None:
                 pass
 
         try:
-            full_results = await asyncio.wait_for(
-                run.io_bound(
-                    _run_catalog_search,
-                    searcher,
-                    limit=state.limit,
-                    file_type=effective_file_type,
-                    content_only=state.content_only,
-                    title_only=state.title_only,
-                    username=_username(state),
-                    query=search_query,
-                    query_original=query,
-                    query_used=search_query,
-                ),
+            full_results = await _run_io_bound_with_ui_timeout(
+                _run_catalog_search,
+                searcher,
+                limit=state.limit,
+                file_type=effective_file_type,
+                content_only=state.content_only,
+                title_only=state.title_only,
+                username=_username(state),
+                query=search_query,
+                query_original=query,
+                query_used=search_query,
                 timeout=_ui_search_timeout_seconds(state.cfg),
             )
+            if full_results is _IO_TIMEOUT:
+                raise TimeoutError
             if state.search_request_id != request_id:
                 return
             merged = _merge_search_results(state.results, full_results, limit=state.limit)
@@ -688,7 +689,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     "title_only": bool(state.title_only),
                 },
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if state.search_request_id != request_id:
                 return
             state.search_lazy_loading = False
@@ -788,9 +789,22 @@ def _build_page(initial_screen: str = "search") -> None:
             state.search_lazy_loading = False
             render_safely()
 
+    def schedule_search(query: str) -> None:
+        task = asyncio.create_task(run_search(query))
+
+        def _handle_search_exception(done_task: asyncio.Task[Any]) -> None:
+            try:
+                done_task.result()
+            except Exception as exc:
+                state.search_lazy_loading = False
+                state.search_error = f"Ошибка поиска: {exc}"
+                render_safely()
+
+        task.add_done_callback(_handle_search_exception)
+
     async def choose_query(query: str) -> None:
-        # Прямой async-обработчик: пресеты больше не зависят от ui.timer и гонок с перерисовкой.
-        await run_search(query)
+        # Schedule search work outside the click event so the websocket stays responsive.
+        schedule_search(query)
 
     def choose_query_handler(query: str) -> Any:
         async def handler() -> None:
@@ -951,8 +965,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 ui.button(icon="help_outline", on_click=help_dlg.open, color=None).props("flat round dense").tooltip("Синтаксис поиска")
 
-                async def submit_click() -> None:
-                    await run_search(str(search_input.value or ""))
+                def submit_click() -> None:
+                    schedule_search(str(search_input.value or ""))
 
                 ui.button(icon="search", on_click=submit_click, color="primary").props("unelevated round").tooltip("Поиск (Ctrl+K для фокуса)")
 
@@ -960,10 +974,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 state.query = str(search_input.value or "")
                 render_suggestions(suggest_area, state.query)
 
-            async def submit_from_input(_: events.GenericEventArguments | None = None) -> None:
+            def submit_from_input(_: events.GenericEventArguments | None = None) -> None:
                 typed = str(search_input.value or "")
                 suggest_area.clear()
-                await run_search(typed)
+                schedule_search(typed)
 
             def close_suggestions(_: events.GenericEventArguments | None = None) -> None:
                 suggest_area.clear()
@@ -2571,22 +2585,16 @@ def _build_page(initial_screen: str = "search") -> None:
             dirty_screens.discard(current_screen)
         active_screen_ref[0] = current_screen
         if _client_alive():
-            with target:
-                ui.timer(
-                    0.05,
-                    lambda screen=current_screen: ui.run_javascript(
-                        "(() => {"
-                        f"const v = Number(sessionStorage.getItem('rag-scroll-{screen}') || 0);"
-                        "if (Number.isFinite(v) && v > 0) window.scrollTo({top:v, behavior:'instant'});"
-                        "})();"
-                    ),
-                    once=True,
+            try:
+                ui.run_javascript(
+                    "requestAnimationFrame(() => {"
+                    f"const v = Number(sessionStorage.getItem('rag-scroll-{current_screen}') || 0);"
+                    "if (Number.isFinite(v) && v > 0) window.scrollTo({top:v, behavior:'instant'});"
+                    "setTimeout(() => { window.ragHideBusy && window.ragHideBusy(); }, 80);"
+                    "});"
                 )
-                ui.timer(
-                    0.08,
-                    lambda: ui.run_javascript("window.ragHideBusy && window.ragHideBusy();"),
-                    once=True,
-                )
+            except Exception:
+                pass
 
     # ── Preview drawer (живёт вне content, не сбрасывается при render()) ──
     preview_drawer = ui.element("div").classes("rag-preview-drawer closed")

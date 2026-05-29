@@ -265,7 +265,7 @@ class RAGSearcher:
             else:
                 from sentence_transformers import SentenceTransformer  # noqa: PLC0415
                 logger.info("Загрузка модели эмбеддинга: %s", model_name)
-                self._embedder = SentenceTransformer(model_name)
+                self._embedder = SentenceTransformer(model_name, local_files_only=True)
         return self._embedder
 
     @property
@@ -762,6 +762,9 @@ class RAGSearcher:
                     if len(items) >= max_items:
                         self._fs_cache = {"ts": now, "items": items}
                         return items
+                if items:
+                    self._fs_cache = {"ts": now, "items": items}
+                    return items
                 for dirpath, dirnames, _filenames in os.walk(root):
                     base = Path(dirpath)
                     for dirname in dirnames:

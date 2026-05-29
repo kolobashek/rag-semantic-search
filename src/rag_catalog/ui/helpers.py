@@ -13,6 +13,8 @@ import re
 import sqlite3
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
@@ -1926,9 +1928,23 @@ def _searcher_cache_key(cfg: Dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _qdrant_http_ready(cfg: Dict[str, Any], *, timeout: float = 0.75) -> bool:
+    qdrant_url = str(cfg.get("qdrant_url") or "").strip().rstrip("/")
+    if not qdrant_url:
+        return True
+    try:
+        req = urllib.request.Request(f"{qdrant_url}/collections", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= int(resp.status) < 500
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+        return False
+
+
 def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
     """Preload shared searcher/embedder after startup so first user search is not cold."""
     try:
+        if not _qdrant_http_ready(cfg):
+            return
         key = _searcher_cache_key(cfg)
         searcher = _SEARCHER_CACHE.get(key)
         if searcher is None:
@@ -1943,6 +1959,8 @@ def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
 
 
 def _cached_searcher_if_ready(cfg: Dict[str, Any]) -> Optional[RAGSearcher]:
+    if not _qdrant_http_ready(cfg):
+        return None
     searcher = _SEARCHER_CACHE.get(_searcher_cache_key(cfg))
     if searcher is not None and searcher.connected:
         return searcher

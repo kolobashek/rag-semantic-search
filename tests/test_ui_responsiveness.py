@@ -113,20 +113,72 @@ def test_ollama_endpoint_probe_is_fast_and_tolerant(monkeypatch) -> None:
 
 
 def test_ui_search_timeout_has_safe_bounds() -> None:
-    assert nice_app._ui_search_timeout_seconds({}) == 6.0
-    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "0.5"}) == 2.0
-    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "60"}) == 30.0
-    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "bad"}) == 6.0
+    assert nice_app._ui_search_timeout_seconds({}) == 20.0
+    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "0.5"}) == 5.0
+    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "60"}) == 45.0
+    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "90"}) == 45.0
+    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "bad"}) == 20.0
     assert nice_app._ui_quick_search_timeout_seconds({}) == 2.5
     assert nice_app._ui_quick_search_timeout_seconds({"ui_quick_search_timeout_sec": "0.5"}) == 1.0
     assert nice_app._ui_quick_search_timeout_seconds({"ui_quick_search_timeout_sec": "60"}) == 10.0
 
 
-def test_search_does_not_start_semantic_pass_before_embedder_is_warm() -> None:
+def test_search_keeps_websocket_responsive_while_semantic_pass_runs() -> None:
     source = inspect.getsource(nice_app._build_page)
 
-    assert 'getattr(searcher, "_embedder", None) is None' in source
     assert "_cached_searcher_if_ready" in source
-    assert "run_full_skipped" in source
+    assert "_qdrant_http_ready" in source
+    assert "_run_io_bound_with_ui_timeout" in source
+    assert "schedule_search" in source
+    assert "asyncio.create_task(run_search(query))" in source
+    assert "await run_search(typed)" not in source
+    assert "asyncio.wait_for" not in source
     assert "run_quick_timeout" in source
-    assert "Семантический поиск прогревается" in source
+    assert "run_full_timeout" in source
+
+
+def test_render_does_not_attach_busy_timers_to_rebuilt_content() -> None:
+    source = inspect.getsource(nice_app._build_page)
+
+    assert "window.ragHideBusy" in source
+    assert "setTimeout(() => { window.ragHideBusy" in source
+    assert "ui.timer(\n                    0.08" not in source
+
+
+def test_search_embedder_uses_local_model_cache() -> None:
+    from rag_catalog.core import rag_core
+
+    source = inspect.getsource(rag_core.RAGSearcher.embedder.fget)
+
+    assert "local_files_only=True" in source
+
+
+def test_qdrant_readiness_probe_handles_disconnected_server(monkeypatch) -> None:
+    from rag_catalog.ui import helpers
+
+    class DummyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(helpers.urllib.request, "urlopen", lambda req, timeout: DummyResponse())
+    assert helpers._qdrant_http_ready({"qdrant_url": "http://127.0.0.1:6333"})
+
+    def failing_urlopen(req, timeout):
+        raise OSError("empty reply")
+
+    monkeypatch.setattr(helpers.urllib.request, "urlopen", failing_urlopen)
+    assert not helpers._qdrant_http_ready({"qdrant_url": "http://127.0.0.1:6333"})
+
+
+def test_launcher_status_reports_qdrant_http_readiness() -> None:
+    from rag_catalog.cli import launcher
+
+    source = inspect.getsource(launcher._status)
+
+    assert "qdrant.ready" in source
+    assert "_http_ready" in source

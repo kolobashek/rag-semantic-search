@@ -13,6 +13,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -164,6 +166,15 @@ def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
         with socket.create_connection((host, port), timeout=timeout):
             return True
     except OSError:
+        return False
+
+
+def _http_ready(url: str, *, timeout: float = 1.0) -> bool:
+    try:
+        req = urllib.request.Request(str(url).rstrip("/") + "/collections", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= int(resp.status) < 500
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
         return False
 
 
@@ -447,8 +458,11 @@ def _status(host: str, port: int) -> int:
     else:
         q_host = str(target["host"])
         q_port = int(target["port"])
+        q_port_open = _port_open(q_host, q_port)
+        q_ready = _http_ready(str(target["url"])) if q_port_open else False
         print(f"- qdrant.mode: server ({target['url']})")
-        print(f"- qdrant.port: {'open' if _port_open(q_host, q_port) else 'closed'} ({q_host}:{q_port})")
+        print(f"- qdrant.port: {'open' if q_port_open else 'closed'} ({q_host}:{q_port})")
+        print(f"- qdrant.ready: {'yes' if q_ready else 'no'}")
         print(f"- qdrant.managed: {'yes' if _pid_file(cfg, 'qdrant').exists() else 'no'}")
 
     print(f"- bot.process: {'up' if bot_alive else 'down'} (pid={bot_pid or '-'})")

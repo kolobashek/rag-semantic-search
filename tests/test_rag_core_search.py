@@ -342,13 +342,12 @@ def test_rerank_results_reorders_top_candidates_with_cross_encoder_scores() -> N
     assert out[0]["reranker_score"] == 10.0
 
 
-def test_refresh_fs_cache_uses_state_db_with_ancestor_and_empty_folders(tmp_path: Path) -> None:
+def test_refresh_fs_cache_uses_state_db_without_network_tree_walk(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog"
     qdrant = tmp_path / "qdrant"
     file_path = catalog / "a" / "b" / "doc.pdf"
-    empty_dir = catalog / "empty"
     file_path.parent.mkdir(parents=True)
-    empty_dir.mkdir()
+    (catalog / "empty").mkdir()
     file_path.write_text("x", encoding="utf-8")
     state_db = IndexStateDB(str(qdrant / "index_state.db"))
     state_db.upsert_many(
@@ -371,7 +370,7 @@ def test_refresh_fs_cache_uses_state_db_with_ancestor_and_empty_folders(tmp_path
 
     assert "a" in folders
     assert str(Path("a") / "b") in {Path(path).as_posix().replace("/", "\\") for path in folders}
-    assert "empty" in folders
+    assert "empty" not in folders
 
 
 def test_refresh_fs_cache_ignores_empty_catalog_path() -> None:
