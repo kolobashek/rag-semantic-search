@@ -570,6 +570,17 @@ def _install_css(initial_theme: str = "light") -> None:
         body:has(.rag-explorer-v2-layout) .q-page {
           overflow: hidden;
         }
+        body:has(.rag-explorer-v2-layout) .q-page > .nicegui-content {
+          padding-top: 0;
+          padding-bottom: 0;
+        }
+        .rag-page:has(.rag-explorer-v2-layout) {
+          padding-top: 0;
+          padding-bottom: 0;
+        }
+        .rag-page:has(.rag-explorer-v2-layout) > .w-full {
+          gap: 8px;
+        }
         .rag-explorer-tree,
         .rag-explorer-details {
           position: static;
@@ -591,7 +602,8 @@ def _install_css(initial_theme: str = "light") -> None:
         }
         .rag-explorer-mobile-only { display: none !important; }
         .rag-explorer-commandbar {
-          padding: 8px 8px 2px;
+          gap: 4px !important;
+          padding: 2px 8px 2px;
         }
         .rag-explorer-topline,
         .rag-explorer-actionline {
@@ -607,13 +619,14 @@ def _install_css(initial_theme: str = "light") -> None:
           min-width: 0;
           flex: 0 1 auto;
           max-width: min(360px, 32vw);
-          height: 32px;
+          height: 26px;
           padding: 0 4px 0 0;
           color: var(--rag-text);
           overflow: hidden;
         }
         .rag-explorer-inline-breadcrumbs .q-btn {
-          min-height: 30px;
+          min-height: 26px;
+          height: 26px;
           max-width: min(220px, 24vw);
           padding: 0 6px;
         }
@@ -658,7 +671,7 @@ def _install_css(initial_theme: str = "light") -> None:
           box-shadow: none !important;
         }
         .rag-explorer-actionline {
-          padding-top: 6px;
+          padding-top: 0;
           flex-wrap: wrap;
         }
         .rag-explorer-actionline .q-btn {

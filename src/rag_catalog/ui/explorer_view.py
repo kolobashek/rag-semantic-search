@@ -1070,8 +1070,8 @@ def render_explorer_screen(
         can_go_up = bool(cd_path and root_folder is not None and cd_path != root_folder.path)
 
         with ui.column().classes("rag-explorer-commandbar w-full gap-2"):
+            _render_cd_inline_breadcrumbs()
             with ui.row().classes("rag-explorer-actionline"):
-                _render_cd_inline_breadcrumbs()
                 up_btn = ui.button(
                     icon="arrow_upward",
                     on_click=lambda: _cd_open_folder(parent_path),
@@ -1933,8 +1933,8 @@ def render_explorer_screen(
         visible_keys = [_selection_key("fs", str(path)) for path in [*dirs, *page_files]]
 
         with entries_area:
+            _render_fs_inline_breadcrumbs()
             with ui.row().classes("w-full items-center gap-2"):
-                _render_fs_inline_breadcrumbs()
                 up_button = ui.button(icon="arrow_upward", on_click=lambda: (_log_app_event(state, "explorer", "up", details={"path": str(current.parent)}), open_folder(current.parent)), color=None).props("outline round dense")
                 up_button.tooltip("На уровень выше")
                 if current == root:

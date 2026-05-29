@@ -99,7 +99,7 @@ def test_header_nav_not_hidden_by_breadcrumbs_on_desktop() -> None:
     assert ".rag-hdr-nav { display: none; }" in source
 
 
-def test_desktop_explorer_breadcrumbs_are_compact_in_command_line() -> None:
+def test_desktop_explorer_breadcrumbs_are_compact_but_separate_from_actions() -> None:
     css_source = inspect.getsource(css._install_css)
     explorer_source = inspect.getsource(__import__("rag_catalog.ui.explorer_view", fromlist=["render_explorer_screen"]).render_explorer_screen)
 
@@ -107,8 +107,12 @@ def test_desktop_explorer_breadcrumbs_are_compact_in_command_line() -> None:
     assert "flex: 0 1 auto" in css_source
     assert "max-width: min(360px, 32vw)" in css_source
     assert "width: min(720px, 100%)" not in css_source
-    assert "with ui.row().classes(\"rag-explorer-actionline\"):\n                _render_cd_inline_breadcrumbs()" in explorer_source
-    assert "with ui.row().classes(\"w-full items-center gap-2\"):\n                _render_fs_inline_breadcrumbs()" in explorer_source
+    assert "body:has(.rag-explorer-v2-layout) .q-page > .nicegui-content" in css_source
+    assert ".rag-page:has(.rag-explorer-v2-layout)" in css_source
+    assert "padding-top: 0" in css_source
+    assert "padding-top: 6px" not in css_source
+    assert "_render_cd_inline_breadcrumbs()\n            with ui.row().classes(\"rag-explorer-actionline\"):" in explorer_source
+    assert "_render_fs_inline_breadcrumbs()\n            with ui.row().classes(\"w-full items-center gap-2\"):" in explorer_source
 
 
 def test_search_header_animation_avoids_vertical_jump() -> None:
