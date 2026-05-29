@@ -2920,6 +2920,16 @@ def _build_page(initial_screen: str = "search") -> None:
 
     preview_drawer_scrim.on("click", lambda: close_preview_drawer())
 
+    with ui.element("div").classes("rag-context-action-hidden"):
+        ui.button(
+            on_click=lambda: (mark_screen_dirty(state.screen), render_safely()),
+            color=None,
+        ).props("data-rag-refresh-screen")
+        ui.button(
+            on_click=lambda: set_screen("settings"),
+            color=None,
+        ).props("data-rag-open-settings")
+
     render()
 
     def _refresh_recovered_search() -> None:

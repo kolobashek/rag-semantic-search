@@ -178,6 +178,19 @@ def test_browser_diagnostics_are_installed() -> None:
     assert "browser_event action=" in api_source
 
 
+def test_context_menu_avoids_hard_page_reload() -> None:
+    from rag_catalog.ui.css import INTERACTION_JS_PATH
+
+    build_source = inspect.getsource(nice_app._build_page)
+    js_source = INTERACTION_JS_PATH.read_text(encoding="utf-8")
+
+    assert "data-rag-refresh-screen" in build_source
+    assert "data-rag-open-settings" in build_source
+    assert "location.reload()" not in js_source
+    assert "location.href = '/settings'" not in js_source
+    assert "closestElement(event.target" in js_source
+
+
 def test_search_recovery_restores_results_after_reload() -> None:
     from rag_catalog.ui.state import PageState
 

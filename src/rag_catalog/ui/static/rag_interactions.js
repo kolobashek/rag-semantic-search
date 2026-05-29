@@ -166,10 +166,14 @@
     if (window.__ragOverflowTitlesInstalled) return;
     window.__ragOverflowTitlesInstalled = true;
 
+    const closestElement = (target, selector) => {
+      const node = target && typeof target.closest === 'function' ? target : target?.parentElement;
+      return node && typeof node.closest === 'function' ? node.closest(selector) : null;
+    };
     const textBoxFor = (el) => el.querySelector('.block') || el;
     const isOverflowing = (el) => el && el.scrollWidth > el.clientWidth + 1;
     const sync = (event) => {
-      const el = event.target.closest('[data-rag-overflow-title]');
+      const el = closestElement(event.target, '[data-rag-overflow-title]');
       if (!el) return;
       const textBox = textBoxFor(el);
       if (isOverflowing(textBox)) {
@@ -179,7 +183,7 @@
       }
     };
     const clear = (event) => {
-      const el = event.target.closest('[data-rag-overflow-title]');
+      const el = closestElement(event.target, '[data-rag-overflow-title]');
       if (el) el.removeAttribute('title');
     };
 
@@ -246,9 +250,9 @@
       addButton(m, item.dataset.ragFavorite === 'true' ? 'Убрать из избранного' : 'Добавить в избранное', () => item.querySelector('[data-rag-favorite-button]')?.click());
       addButton(m, 'Поделиться путем', () => navigator.clipboard && navigator.clipboard.writeText(itemPath));
     } else {
-      addButton(m, 'Обновить экран', () => location.reload());
+      addButton(m, 'Обновить экран', () => document.querySelector('[data-rag-refresh-screen]')?.click());
       addButton(m, 'Скопировать адрес экрана', () => navigator.clipboard && navigator.clipboard.writeText(location.href));
-      addButton(m, 'Настройки', () => { location.href = '/settings'; });
+      addButton(m, 'Настройки', () => document.querySelector('[data-rag-open-settings]')?.click());
     }
     m.style.left = Math.min(event.clientX, window.innerWidth - 240) + 'px';
     m.style.top = Math.min(event.clientY, window.innerHeight - 160) + 'px';
