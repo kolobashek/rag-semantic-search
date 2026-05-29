@@ -591,7 +591,7 @@ def _install_css(initial_theme: str = "light") -> None:
         }
         .rag-explorer-mobile-only { display: none !important; }
         .rag-explorer-commandbar {
-          padding: 14px 8px 2px;
+          padding: 8px 8px 2px;
         }
         .rag-explorer-topline,
         .rag-explorer-actionline {
@@ -605,14 +605,16 @@ def _install_css(initial_theme: str = "light") -> None:
           display: none;
           align-items: center;
           min-width: 0;
-          width: min(720px, 100%);
+          flex: 0 1 auto;
+          max-width: min(360px, 32vw);
           height: 32px;
-          padding: 0 8px;
+          padding: 0 4px 0 0;
           color: var(--rag-text);
+          overflow: hidden;
         }
         .rag-explorer-inline-breadcrumbs .q-btn {
           min-height: 30px;
-          max-width: min(260px, 32vw);
+          max-width: min(220px, 24vw);
           padding: 0 6px;
         }
         .rag-explorer-iconbtn {
