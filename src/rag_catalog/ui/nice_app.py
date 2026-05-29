@@ -315,11 +315,11 @@ def _build_page(initial_screen: str = "search") -> None:
     state = PageState(cfg=load_config())
     state.screen = initial_screen
     state.explorer_path = str(Path(str(state.cfg.get("catalog_path") or "")))
-    _install_css()
-    ui.timer(0.0, _install_interaction_javascript, once=True)
     restore_session(state, on_restored=_load_user_state)
     if initial_screen == "search":
         _restore_search_recovery(state)
+    _install_css(state.theme)
+    ui.timer(0.0, _install_interaction_javascript, once=True)
 
     dark_mode = ui.dark_mode(state.theme == "dark")
 
@@ -420,6 +420,13 @@ def _build_page(initial_screen: str = "search") -> None:
         state.theme = "dark" if state.theme == "light" else "light"
         dark_mode.set_value(state.theme == "dark")
         theme_button.set_icon("light_mode" if state.theme == "dark" else "dark_mode")
+        ui.run_javascript(
+            "try {"
+            f"localStorage.setItem('rag-theme', {json.dumps(state.theme)});"
+            f"document.documentElement.dataset.ragTheme = {json.dumps(state.theme)};"
+            f"document.documentElement.style.colorScheme = {json.dumps(state.theme)};"
+            "} catch (_) {}"
+        )
         _save_ui_settings(state)
         _log_app_event(state, "ui", "theme_toggle", details={"theme": state.theme})
 

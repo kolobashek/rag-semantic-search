@@ -21,8 +21,37 @@ def _install_interaction_javascript() -> None:
         ui.run_javascript(_INTERACTION_SCRIPT_CACHE)
 
 
-def _install_css() -> None:
+def _install_css(initial_theme: str = "light") -> None:
     global _INTERACTION_SCRIPT_CACHE
+
+    theme = "dark" if str(initial_theme or "").strip().lower() == "dark" else "light"
+    ui.add_head_html(f"""<script>
+        (() => {{
+          try {{
+            const stored = localStorage.getItem('rag-theme');
+            const theme = stored === 'dark' || stored === 'light' ? stored : {theme!r};
+            document.documentElement.dataset.ragTheme = theme;
+            document.documentElement.style.colorScheme = theme;
+            document.documentElement.style.background = theme === 'dark' ? '#0c0c0f' : '#fafaf7';
+          }} catch (_) {{
+            document.documentElement.style.background = {('#0c0c0f' if theme == 'dark' else '#fafaf7')!r};
+          }}
+        }})();
+        </script>
+        <style>
+          html, body, #app, .q-layout, .q-page-container {{
+            background: #fafaf7;
+            color: #14141a;
+          }}
+          html[data-rag-theme="dark"],
+          html[data-rag-theme="dark"] body,
+          html[data-rag-theme="dark"] #app,
+          html[data-rag-theme="dark"] .q-layout,
+          html[data-rag-theme="dark"] .q-page-container {{
+            background: #0c0c0f;
+            color: #f4f4f7;
+          }}
+        </style>""")
 
     ui.add_head_html('<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">')
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">')

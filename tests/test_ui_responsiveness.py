@@ -76,6 +76,18 @@ def test_global_click_feedback_and_skeleton_are_installed() -> None:
         assert token in interaction_js
 
 
+def test_dark_theme_has_prepaint_before_frontend_boot() -> None:
+    css_source = inspect.getsource(css._install_css)
+    page_source = inspect.getsource(nice_app._build_page)
+
+    assert "localStorage.getItem('rag-theme')" in css_source
+    assert "document.documentElement.dataset.ragTheme" in css_source
+    assert 'html[data-rag-theme="dark"]' in css_source
+    assert "#0c0c0f" in css_source
+    assert "_install_css(state.theme)" in page_source
+    assert "localStorage.setItem('rag-theme'" in page_source
+
+
 def test_search_header_animation_avoids_vertical_jump() -> None:
     source = inspect.getsource(css._install_css)
 
