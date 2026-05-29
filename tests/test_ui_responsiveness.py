@@ -166,6 +166,34 @@ def test_browser_diagnostics_are_installed() -> None:
     assert "browser_event action=" in api_source
 
 
+def test_search_recovery_restores_results_after_reload() -> None:
+    from rag_catalog.ui.state import PageState
+
+    nice_app._SEARCH_RECOVERY_CACHE.clear()
+    state = PageState(cfg={})
+    state.current_user = {"username": "release_smoke"}
+    state.auth_token = "session-token"
+    state.query = "договор поставки"
+    state.searched_query = "договор поставки"
+    state.search_request_id = 7
+    state.search_lazy_loading = True
+    state.search_stats_hint = "Быстро найдено: 1"
+    state.results = [{"filename": "Договор.pdf", "score": 1.0}]
+
+    nice_app._persist_search_recovery(state, "quick_results")
+
+    restored = PageState(cfg={})
+    restored.current_user = {"username": "release_smoke"}
+    restored.auth_token = "session-token"
+
+    assert nice_app._restore_search_recovery(restored)
+    assert restored.search_request_id == 7
+    assert restored.searched_query == "договор поставки"
+    assert restored.results == [{"filename": "Договор.pdf", "score": 1.0}]
+    assert restored.search_lazy_loading is False
+    assert "восстановлено после переподключения" in restored.search_stats_hint
+
+
 def test_search_embedder_uses_local_model_cache() -> None:
     from rag_catalog.core import rag_core
 

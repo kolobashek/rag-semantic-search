@@ -107,6 +107,96 @@ SEARCH_PRESETS = [
     ("PDF", "pdf скан"),
     ("Таблицы", "реестр xlsx"),
 ]
+
+_SEARCH_RECOVERY_TTL_SEC = 30 * 60
+_SEARCH_RECOVERY_CACHE: Dict[str, Dict[str, Any]] = {}
+_SEARCH_RECOVERY_LOCK = threading.Lock()
+
+
+def _search_recovery_key(state: PageState) -> str:
+    username = _username(state) or "anonymous"
+    token = str(state.auth_token or "").strip()
+    if not token:
+        try:
+            token = str(app.storage.user.get("auth_token") or "").strip()
+        except Exception:
+            token = ""
+    return f"{username}:{token[:18] if token else 'no-token'}"
+
+
+def _trim_search_recovery_cache() -> None:
+    cutoff = _time.time() - _SEARCH_RECOVERY_TTL_SEC
+    stale = [
+        key for key, payload in _SEARCH_RECOVERY_CACHE.items()
+        if float(payload.get("ts") or 0) < cutoff
+    ]
+    for key in stale:
+        _SEARCH_RECOVERY_CACHE.pop(key, None)
+
+
+def _persist_search_recovery(state: PageState, reason: str) -> None:
+    if not state.current_user:
+        return
+    snapshot = capture_screen_state(state, "search")
+    if not snapshot:
+        return
+    payload = {
+        "ts": _time.time(),
+        "username": _username(state),
+        "request_id": state.search_request_id,
+        "reason": reason,
+        "snapshot": snapshot,
+    }
+    with _SEARCH_RECOVERY_LOCK:
+        _trim_search_recovery_cache()
+        _SEARCH_RECOVERY_CACHE[_search_recovery_key(state)] = payload
+
+
+def _restore_search_recovery(state: PageState) -> bool:
+    if not state.current_user:
+        return False
+    with _SEARCH_RECOVERY_LOCK:
+        payload = dict(_SEARCH_RECOVERY_CACHE.get(_search_recovery_key(state)) or {})
+    if not payload:
+        return False
+    if _time.time() - float(payload.get("ts") or 0) > _SEARCH_RECOVERY_TTL_SEC:
+        return False
+    if str(payload.get("username") or "") != _username(state):
+        return False
+    raw_snapshot = payload.get("snapshot")
+    if not isinstance(raw_snapshot, dict):
+        return False
+    snapshot = dict(raw_snapshot)
+    if not (snapshot.get("searched_query") or snapshot.get("query") or snapshot.get("results")):
+        return False
+
+    was_loading = bool(snapshot.get("search_lazy_loading") or snapshot.get("rag_answer_loading"))
+    setattr(state, "_search_recovery_was_loading", was_loading)
+    snapshot["search_lazy_loading"] = False
+    snapshot["rag_answer_loading"] = False
+    if was_loading:
+        hint = str(snapshot.get("search_stats_hint") or "").strip()
+        suffix = "восстановлено после переподключения"
+        snapshot["search_stats_hint"] = f"{hint} · {suffix}" if hint and suffix not in hint else (hint or suffix)
+    state.screen_cache["search"] = snapshot
+    restored = restore_screen_state(state, "search")
+    if restored:
+        state.search_request_id = max(state.search_request_id, int(payload.get("request_id") or 0))
+        _log_app_event(
+            state,
+            "search",
+            "restore_after_reload",
+            details={
+                "reason": str(payload.get("reason") or ""),
+                "request_id": state.search_request_id,
+                "results": len(state.results),
+                "query": state.searched_query or state.query,
+                "age_sec": round(_time.time() - float(payload.get("ts") or 0), 1),
+                "was_loading": was_loading,
+            },
+        )
+    return restored
+
 _SEARCH_PRESET_DEFAULT_TERMS = {
     "договор",
     "договоры",
@@ -228,6 +318,8 @@ def _build_page(initial_screen: str = "search") -> None:
     _install_css()
     ui.timer(0.0, _install_interaction_javascript, once=True)
     restore_session(state, on_restored=_load_user_state)
+    if initial_screen == "search":
+        _restore_search_recovery(state)
 
     dark_mode = ui.dark_mode(state.theme == "dark")
 
@@ -571,6 +663,7 @@ def _build_page(initial_screen: str = "search") -> None:
             ),
         )
         _client_diag("search_run_start", _search_diag({"query": query}))
+        _persist_search_recovery(state, "run_start")
         render_results_loading()
         searcher = state.searcher if state.searcher is not None and state.searcher.connected else _cached_searcher_if_ready(state.cfg)
         if searcher is not None:
@@ -593,6 +686,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     }
                 ),
             )
+            _persist_search_recovery(state, "no_searcher")
             render_safely()
             return
 
@@ -629,6 +723,7 @@ def _build_page(initial_screen: str = "search") -> None:
             exact_count = _count_exact_name_matches(query, quick_results)
             state.search_stats_hint = f"Быстро найдено: {len(quick_results)} · точных совпадений: {exact_count}"
             state.search_lazy_loading = True
+            _persist_search_recovery(state, "quick_results")
             if not _client_alive():
                 _log_app_event(
                     state,
@@ -666,6 +761,7 @@ def _build_page(initial_screen: str = "search") -> None:
                         "duration_ms": round((_time.perf_counter() - quick_started) * 1000),
                     },
                 )
+                _persist_search_recovery(state, "numeric_exact")
                 render_safely()
                 return
             _log_app_event(
@@ -685,6 +781,7 @@ def _build_page(initial_screen: str = "search") -> None:
             state.search_lazy_loading = True
             state.search_stats_hint = "Быстрый файловый проход прогревается"
             state.search_error = ""
+            _persist_search_recovery(state, "quick_timeout")
             _log_app_event(
                 state,
                 "search",
@@ -701,6 +798,7 @@ def _build_page(initial_screen: str = "search") -> None:
         except Exception as exc:
             state.search_error = str(exc)
             state.search_lazy_loading = False
+            _persist_search_recovery(state, "quick_error")
             _log_app_event(
                 state,
                 "search",
@@ -805,6 +903,7 @@ def _build_page(initial_screen: str = "search") -> None:
             )
             if cloud_semantic_count:
                 state.search_stats_hint = f"{state.search_stats_hint} · Cloud Drive: {cloud_semantic_count}"
+            _persist_search_recovery(state, "full_results")
             _log_app_event(
                 state,
                 "search",
@@ -832,6 +931,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     "Семантический поиск не ответил быстро. "
                     "Модель может прогреваться; попробуйте повторить запрос через несколько секунд."
                 )
+            _persist_search_recovery(state, "full_timeout")
             _log_app_event(
                 state,
                 "search",
@@ -864,10 +964,12 @@ def _build_page(initial_screen: str = "search") -> None:
             )
             if not state.results:
                 state.search_error = str(exc)
+            _persist_search_recovery(state, "full_error")
 
         full_results_rendered = False
         if state.search_request_id == request_id:
             state.search_lazy_loading = False
+            _persist_search_recovery(state, "render_final")
             _log_app_event(
                 state,
                 "search",
@@ -936,6 +1038,7 @@ def _build_page(initial_screen: str = "search") -> None:
 
         if state.search_request_id == request_id and (rag_answer_changed or not full_results_rendered):
             state.search_lazy_loading = False
+            _persist_search_recovery(state, "done")
             _log_app_event(
                 state,
                 "search",
@@ -2811,6 +2914,29 @@ def _build_page(initial_screen: str = "search") -> None:
     preview_drawer_scrim.on("click", lambda: close_preview_drawer())
 
     render()
+
+    def _refresh_recovered_search() -> None:
+        if state.screen != "search" or not getattr(state, "_search_recovery_was_loading", False):
+            return
+        previous_hint = state.search_stats_hint
+        previous_count = len(state.results)
+        if _restore_search_recovery(state):
+            _log_app_event(
+                state,
+                "search",
+                "restore_refresh",
+                details={
+                    "previous_results": previous_count,
+                    "results": len(state.results),
+                    "previous_hint": previous_hint,
+                    "stats_hint": state.search_stats_hint,
+                },
+            )
+            mark_screen_dirty("search")
+            render_safely()
+
+    if getattr(state, "_search_recovery_was_loading", False):
+        ui.timer(8.0, _refresh_recovered_search, once=True)
 
     def _setup_keyboard_shortcuts() -> None:
         ui.run_javascript(
