@@ -74,3 +74,59 @@ def test_global_click_feedback_and_skeleton_are_installed() -> None:
         "document.addEventListener('click', clickBusy, true)",
     ):
         assert token in interaction_js
+
+
+def test_search_header_animation_avoids_vertical_jump() -> None:
+    source = inspect.getsource(css._install_css)
+
+    assert "rag-search-settle" in source
+    assert "translateY(18px)" not in source
+    assert "rag-search-rise" not in source
+
+
+def test_ollama_endpoint_probe_is_fast_and_tolerant(monkeypatch) -> None:
+    calls = []
+
+    class DummyConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_create_connection(address, timeout):
+        calls.append((address, timeout))
+        return DummyConnection()
+
+    monkeypatch.setattr(nice_app.socket, "create_connection", fake_create_connection)
+
+    assert nice_app._ollama_endpoint_available("http://localhost:11434")
+    assert calls == [(("localhost", 11434), 0.35)]
+    assert not nice_app._ollama_endpoint_available("")
+
+    def failing_create_connection(address, timeout):
+        raise OSError("refused")
+
+    monkeypatch.setattr(nice_app.socket, "create_connection", failing_create_connection)
+
+    assert not nice_app._ollama_endpoint_available("http://localhost:11434")
+
+
+def test_ui_search_timeout_has_safe_bounds() -> None:
+    assert nice_app._ui_search_timeout_seconds({}) == 6.0
+    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "0.5"}) == 2.0
+    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "60"}) == 30.0
+    assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "bad"}) == 6.0
+    assert nice_app._ui_quick_search_timeout_seconds({}) == 2.5
+    assert nice_app._ui_quick_search_timeout_seconds({"ui_quick_search_timeout_sec": "0.5"}) == 1.0
+    assert nice_app._ui_quick_search_timeout_seconds({"ui_quick_search_timeout_sec": "60"}) == 10.0
+
+
+def test_search_does_not_start_semantic_pass_before_embedder_is_warm() -> None:
+    source = inspect.getsource(nice_app._build_page)
+
+    assert 'getattr(searcher, "_embedder", None) is None' in source
+    assert "_cached_searcher_if_ready" in source
+    assert "run_full_skipped" in source
+    assert "run_quick_timeout" in source
+    assert "Семантический поиск прогревается" in source

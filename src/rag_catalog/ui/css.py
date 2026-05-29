@@ -268,10 +268,10 @@ def _install_css() -> None:
           margin-inline: auto;
           z-index: 30;
           transform: translateY(0);
-          transition: transform .34s cubic-bezier(.2, .8, .2, 1), max-width .2s ease;
+          transition: opacity .18s ease, max-width .2s ease;
         }
         .rag-page.search-active .rag-search-header {
-          animation: rag-search-rise .26s cubic-bezier(.2, .8, .2, 1);
+          animation: rag-search-settle .18s ease-out;
         }
         .rag-search-presets {
           position: relative;
@@ -288,9 +288,9 @@ def _install_css() -> None:
           min-width: 92px;
           max-width: 142px;
         }
-        @keyframes rag-search-rise {
-          from { transform: translateY(18px); opacity: .96; }
-          to { transform: translateY(0); opacity: 1; }
+        @keyframes rag-search-settle {
+          from { opacity: .88; }
+          to { opacity: 1; }
         }
         .rag-global-busy {
           position: fixed;

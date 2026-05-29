@@ -1942,6 +1942,13 @@ def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
         pass
 
 
+def _cached_searcher_if_ready(cfg: Dict[str, Any]) -> Optional[RAGSearcher]:
+    searcher = _SEARCHER_CACHE.get(_searcher_cache_key(cfg))
+    if searcher is not None and searcher.connected:
+        return searcher
+    return None
+
+
 def _ensure_searcher(state: PageState) -> Optional[RAGSearcher]:
     if state.searcher is not None:
         return state.searcher

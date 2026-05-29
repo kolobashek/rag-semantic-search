@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import html
 import json
 import re
+import socket
 import sys
 import threading
 import time as _time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from nicegui import app, events, run, ui
 
@@ -32,6 +34,7 @@ from .helpers import (
     INLINE_IMAGE_EXTENSIONS,
     OFFICE_PREVIEW_EXTENSIONS,
     _apply_query_operators,
+    _cached_searcher_if_ready,
     _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
@@ -149,6 +152,36 @@ if LOGO_PATH.exists():
     app.add_static_file(local_file=LOGO_PATH, url_path="/rag-logo.png")
 if INTERACTION_JS_PATH.exists():
     app.add_static_file(local_file=INTERACTION_JS_PATH, url_path="/rag-interactions.js")
+
+
+def _ollama_endpoint_available(ollama_url: str, timeout: float = 0.35) -> bool:
+    """Fast TCP probe used to avoid delayed UI rerenders when local LLM is down."""
+    try:
+        parsed = urlparse(str(ollama_url or "").strip())
+        host = parsed.hostname
+        if not host:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def _ui_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
+    try:
+        raw = float(cfg.get("ui_search_timeout_sec") or 6.0)
+    except (TypeError, ValueError):
+        raw = 6.0
+    return max(2.0, min(30.0, raw))
+
+
+def _ui_quick_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
+    try:
+        raw = float(cfg.get("ui_quick_search_timeout_sec") or 2.5)
+    except (TypeError, ValueError):
+        raw = 2.5
+    return max(1.0, min(10.0, raw))
 
 
 def _client_alive() -> bool:
@@ -458,24 +491,33 @@ def _build_page(initial_screen: str = "search") -> None:
         state.active_type_filter = None
         _remember_query(state, query)
         render_results_loading()
-        searcher = _ensure_searcher(state)
+        searcher = state.searcher if state.searcher is not None and state.searcher.connected else _cached_searcher_if_ready(state.cfg)
+        if searcher is not None:
+            state.searcher = searcher
         if searcher is None or not searcher.connected:
-            state.search_error = state.searcher_error or "Нет подключения к Qdrant."
+            state.search_error = state.searcher_error or "Поисковик подключается. Повторите запрос через несколько секунд."
+            state.search_lazy_loading = False
             render_safely()
             return
 
-        llm_enabled = bool(state.cfg.get("llm_enabled"))
-        llm_expand_enabled = llm_enabled and bool(state.ai_search_expand)
         ollama_url = str(state.cfg.get("ollama_url") or "http://localhost:11434")
+        llm_enabled = bool(state.cfg.get("llm_enabled"))
+        llm_available = False
+        if llm_enabled:
+            llm_available = await run.io_bound(_ollama_endpoint_available, ollama_url)
+        llm_expand_enabled = llm_enabled and llm_available and bool(state.ai_search_expand)
         expand_model = str(state.cfg.get("llm_expand_model") or "phi3:mini")
         rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
         try:
-            quick_results = await run.io_bound(
-                _run_quick_name_search,
-                searcher,
-                query=semantic_q,
-                limit=state.limit,
-                file_type=effective_file_type,
+            quick_results = await asyncio.wait_for(
+                run.io_bound(
+                    _run_quick_name_search,
+                    searcher,
+                    query=semantic_q,
+                    limit=state.limit,
+                    file_type=effective_file_type,
+                ),
+                timeout=_ui_quick_search_timeout_seconds(state.cfg),
             )
             if state.search_request_id != request_id:
                 return
@@ -486,6 +528,7 @@ def _build_page(initial_screen: str = "search") -> None:
             state.search_lazy_loading = True
             if not _client_alive():
                 return
+            render_safely()
             has_numeric_exact = any(
                 str(item.get("retrieval_source") or "") in {"numeric_fs_exact", "numeric_exact"}
                 for item in quick_results
@@ -524,6 +567,27 @@ def _build_page(initial_screen: str = "search") -> None:
                     "exact_matches": exact_count,
                 },
             )
+        except asyncio.TimeoutError:
+            if state.search_request_id != request_id:
+                return
+            state.search_lazy_loading = False
+            state.search_stats_hint = "Файловый индекс прогревается"
+            state.search_error = (
+                "Файловый индекс еще подготавливается. "
+                "Повторите запрос через несколько секунд."
+            )
+            _log_app_event(
+                state,
+                "search",
+                "run_quick_timeout",
+                ok=False,
+                details={
+                    "query": query,
+                    "timeout_sec": _ui_quick_search_timeout_seconds(state.cfg),
+                },
+            )
+            render_safely()
+            return
         except Exception as exc:
             state.search_error = str(exc)
             state.search_lazy_loading = False
@@ -535,6 +599,29 @@ def _build_page(initial_screen: str = "search") -> None:
                 details={
                     "query": query,
                     "error": str(exc),
+                },
+            )
+            render_safely()
+            return
+
+        if getattr(searcher, "_embedder", None) is None:
+            state.search_lazy_loading = False
+            state.search_stats_hint = (
+                f"{state.search_stats_hint} · семантика прогревается"
+                if state.search_stats_hint else "Семантический поиск прогревается"
+            )
+            if not state.results:
+                state.search_error = (
+                    "Семантическая модель еще прогревается. "
+                    "Быстрых совпадений нет; повторите запрос через несколько секунд."
+                )
+            _log_app_event(
+                state,
+                "search",
+                "run_full_skipped",
+                details={
+                    "query": query,
+                    "reason": "embedder_cold",
                 },
             )
             render_safely()
@@ -557,17 +644,20 @@ def _build_page(initial_screen: str = "search") -> None:
                 pass
 
         try:
-            full_results = await run.io_bound(
-                _run_catalog_search,
-                searcher,
-                limit=state.limit,
-                file_type=effective_file_type,
-                content_only=state.content_only,
-                title_only=state.title_only,
-                username=_username(state),
-                query=search_query,
-                query_original=query,
-                query_used=search_query,
+            full_results = await asyncio.wait_for(
+                run.io_bound(
+                    _run_catalog_search,
+                    searcher,
+                    limit=state.limit,
+                    file_type=effective_file_type,
+                    content_only=state.content_only,
+                    title_only=state.title_only,
+                    username=_username(state),
+                    query=search_query,
+                    query_original=query,
+                    query_used=search_query,
+                ),
+                timeout=_ui_search_timeout_seconds(state.cfg),
             )
             if state.search_request_id != request_id:
                 return
@@ -598,6 +688,30 @@ def _build_page(initial_screen: str = "search") -> None:
                     "title_only": bool(state.title_only),
                 },
             )
+        except asyncio.TimeoutError:
+            if state.search_request_id != request_id:
+                return
+            state.search_lazy_loading = False
+            state.search_stats_hint = (
+                f"{state.search_stats_hint} · семантика прогревается"
+                if state.search_stats_hint else "Семантический поиск прогревается"
+            )
+            if not state.results:
+                state.search_error = (
+                    "Семантический поиск не ответил быстро. "
+                    "Модель может прогреваться; попробуйте повторить запрос через несколько секунд."
+                )
+            _log_app_event(
+                state,
+                "search",
+                "run_full_timeout",
+                ok=False,
+                details={
+                    "query": query,
+                    "query_used": search_query,
+                    "timeout_sec": _ui_search_timeout_seconds(state.cfg),
+                },
+            )
         except Exception as exc:
             if state.search_request_id != request_id:
                 return
@@ -617,12 +731,21 @@ def _build_page(initial_screen: str = "search") -> None:
             if not state.results:
                 state.search_error = str(exc)
 
+        full_results_rendered = False
         if state.search_request_id == request_id:
             state.search_lazy_loading = False
             render_safely()
+            full_results_rendered = True
 
         # RAG Q&A — только после полной догрузки
-        if llm_enabled and state.results and not state.search_error and state.search_request_id == request_id:
+        rag_answer_changed = False
+        if (
+            llm_enabled
+            and llm_available
+            and state.results
+            and not state.search_error
+            and state.search_request_id == request_id
+        ):
             searcher_for_answer = _ensure_searcher(state)
             if searcher_for_answer is not None:
                 state.rag_answer_loading = True
@@ -638,17 +761,30 @@ def _build_page(initial_screen: str = "search") -> None:
                     state.rag_answer_text = str(ans.get("answer") or "")
                     state.rag_answer_ok = bool(ans.get("ok", True))
                     state.rag_answer_sources = list(ans.get("sources") or [])
+                    rag_answer_changed = True
                 except Exception as exc:
                     if state.search_request_id != request_id:
                         return
                     state.rag_answer_text = f"Ошибка LLM: {exc}"
                     state.rag_answer_ok = False
                     state.rag_answer_sources = []
+                    rag_answer_changed = True
                 finally:
                     if state.search_request_id == request_id:
                         state.rag_answer_loading = False
+        elif llm_enabled and not llm_available:
+            _log_app_event(
+                state,
+                "search",
+                "llm_skip",
+                details={
+                    "query": query,
+                    "reason": "ollama_unavailable",
+                    "ollama_url": ollama_url,
+                },
+            )
 
-        if state.search_request_id == request_id:
+        if state.search_request_id == request_id and (rag_answer_changed or not full_results_rendered):
             state.search_lazy_loading = False
             render_safely()
 
@@ -1777,7 +1913,7 @@ def _build_page(initial_screen: str = "search") -> None:
                         for _src in _sel_sources:
                             ui.label(_src).classes("rag-chip text-xs")
 
-        if not state.results and not state.search_lazy_loading:
+        if not state.results and not state.search_lazy_loading and not state.search_error:
             with ui.column().classes("rag-card w-full p-6 gap-3 items-center"):
                 ui.icon("search_off", size="40px").classes("text-slate-300 dark:text-slate-600")
                 ui.label("Совпадений не найдено.").classes("text-lg font-semibold text-slate-500")
