@@ -1573,9 +1573,6 @@ def _install_css(initial_theme: str = "light") -> None:
           height: 56px;
           overflow: hidden;
         }
-        .rag-hdr-center:has(.rag-header-breadcrumbs:not(:empty)) .rag-hdr-nav {
-          display: none;
-        }
         .rag-header-breadcrumbs {
           flex: 1 1 auto;
           max-width: 100%;
@@ -1645,6 +1642,9 @@ def _install_css(initial_theme: str = "light") -> None:
         @media (max-width: 1100px) {
           .rag-mobile-menu-button {
             display: inline-flex !important;
+          }
+          .rag-hdr-center:has(.rag-header-breadcrumbs:not(:empty)) .rag-hdr-nav {
+            display: none;
           }
         }
         @media (max-width: 900px) {

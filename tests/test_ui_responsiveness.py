@@ -88,6 +88,17 @@ def test_dark_theme_has_prepaint_before_frontend_boot() -> None:
     assert "localStorage.setItem('rag-theme'" in page_source
 
 
+def test_header_nav_not_hidden_by_breadcrumbs_on_desktop() -> None:
+    source = inspect.getsource(css._install_css)
+    breadcrumb_rule = ".rag-hdr-center:has(.rag-header-breadcrumbs:not(:empty)) .rag-hdr-nav"
+    rule_index = source.index(breadcrumb_rule)
+    breakpoint_index = source.rindex("@media (max-width: 1100px)", 0, rule_index)
+
+    assert breakpoint_index < rule_index
+    assert ".rag-mobile-menu-button" in source[breakpoint_index:rule_index]
+    assert ".rag-hdr-nav { display: none; }" in source
+
+
 def test_search_header_animation_avoids_vertical_jump() -> None:
     source = inspect.getsource(css._install_css)
 
