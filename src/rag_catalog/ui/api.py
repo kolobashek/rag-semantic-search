@@ -10,6 +10,7 @@ Depends on: .state, .system, .helpers, core modules.
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import tempfile
 from pathlib import Path
@@ -29,6 +30,8 @@ from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
 
 AuthHeader = Annotated[str, Header(alias="Authorization")]
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # ─────────────────────────── auth helpers (API-only) ───────────────────────
 
@@ -168,6 +171,69 @@ def api_device_code(request: Request) -> Dict[str, Any]:
 def api_ping() -> Dict[str, Any]:
     """Health check — no auth required. Used by sync clients to test connectivity."""
     return {"ok": True, "service": "rag-catalog"}
+
+
+def _compact_ui_event_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 3:
+        return str(value)[:250]
+    if isinstance(value, dict):
+        return {
+            str(key)[:80]: _compact_ui_event_value(val, depth=depth + 1)
+            for key, val in list(value.items())[:40]
+        }
+    if isinstance(value, list):
+        return [_compact_ui_event_value(item, depth=depth + 1) for item in value[:40]]
+    if isinstance(value, str):
+        return value[:1000]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)[:500]
+
+
+@app.post("/api/ui-events")
+async def api_ui_events(request: Request) -> Dict[str, Any]:
+    """Best-effort browser diagnostics for page reloads, JS errors and websocket overlays."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {"payload": payload}
+    cfg = load_config()
+    action = str(payload.get("action") or "client_event").strip()[:80] or "client_event"
+    details = _compact_ui_event_value(payload)
+    if not isinstance(details, dict):
+        details = {"payload": details}
+    details["client_host"] = request.client.host if request.client else ""
+    details["user_agent"] = str(request.headers.get("user-agent") or "")[:500]
+    details["referer"] = str(request.headers.get("referer") or "")[:1000]
+    username = ""
+    try:
+        token = str(app.storage.user.get("auth_token") or "").strip()
+        if token:
+            user = _get_api_auth_db(cfg).get_user_by_session(token)
+            username = str((user or {}).get("username") or "")
+    except Exception:
+        username = ""
+    try:
+        TelemetryDB(str(_telemetry_db_path(cfg))).log_app_event(
+            username=username,
+            screen=str(payload.get("path") or payload.get("url") or "browser")[:120],
+            feature="browser",
+            action=action,
+            ok=not action.endswith("_error") and "error" not in action,
+            details=details,
+        )
+    except Exception:
+        pass
+    try:
+        details_json = json.dumps(details, ensure_ascii=False, sort_keys=True, default=str)
+        if len(details_json) > 4000:
+            details_json = f"{details_json[:4000]}…"
+        logger.info("browser_event action=%s username=%s details=%s", action, username, details_json)
+    except Exception:
+        pass
+    return {"ok": True}
 
 
 # Bump this whenever packaging/build.ps1 produces a new exe

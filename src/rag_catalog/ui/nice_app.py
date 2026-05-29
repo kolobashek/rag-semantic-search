@@ -179,9 +179,9 @@ def _ui_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
 
 def _ui_quick_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
     try:
-        raw = float(cfg.get("ui_quick_search_timeout_sec") or 2.5)
+        raw = float(cfg.get("ui_quick_search_timeout_sec") or 8.0)
     except (TypeError, ValueError):
-        raw = 2.5
+        raw = 8.0
     return max(1.0, min(10.0, raw))
 
 
@@ -467,6 +467,13 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def render_safely() -> None:
         if not _client_alive():
+            _log_app_event(
+                state,
+                "diagnostics",
+                "render_skip_client_dead",
+                ok=False,
+                details={"screen": state.screen, "request_id": state.search_request_id},
+            )
             return
         try:
             render()
@@ -476,8 +483,44 @@ def _build_page(initial_screen: str = "search") -> None:
                 "client this element belongs to has been deleted" in message
                 or "parent element this slot belongs to has been deleted" in message
             ):
+                _log_app_event(
+                    state,
+                    "diagnostics",
+                    "render_client_deleted",
+                    ok=False,
+                    details={"screen": state.screen, "request_id": state.search_request_id, "error": message[:500]},
+                )
                 return
             raise
+
+    def _search_diag(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        details: Dict[str, Any] = {
+            "request_id": state.search_request_id,
+            "screen": state.screen,
+            "query": state.query,
+            "searched_query": state.searched_query,
+            "results": len(state.results),
+            "lazy_loading": bool(state.search_lazy_loading),
+            "has_error": bool(state.search_error),
+            "error": state.search_error[:500],
+            "stats_hint": state.search_stats_hint[:500],
+            "client_alive": _client_alive(),
+        }
+        if extra:
+            details.update(extra)
+        return details
+
+    def _client_diag(action: str, details: Optional[Dict[str, Any]] = None) -> None:
+        if not _client_alive():
+            return
+        try:
+            ui.run_javascript(
+                "window.ragDiagLog && window.ragDiagLog("
+                f"{json.dumps(action)}, {json.dumps(details or {}, ensure_ascii=False, default=str)}"
+                ");"
+            )
+        except Exception:
+            pass
 
     async def run_search(explicit_query: Optional[str] = None) -> None:
         touch_activity()
@@ -511,6 +554,23 @@ def _build_page(initial_screen: str = "search") -> None:
         state.displayed_count = 10
         state.active_type_filter = None
         _remember_query(state, query)
+        search_started = _time.perf_counter()
+        _log_app_event(
+            state,
+            "search",
+            "run_start",
+            details=_search_diag(
+                {
+                    "query": query,
+                    "semantic_query": semantic_q,
+                    "file_type": effective_file_type,
+                    "limit": state.limit,
+                    "content_only": bool(state.content_only),
+                    "title_only": bool(state.title_only),
+                }
+            ),
+        )
+        _client_diag("search_run_start", _search_diag({"query": query}))
         render_results_loading()
         searcher = state.searcher if state.searcher is not None and state.searcher.connected else _cached_searcher_if_ready(state.cfg)
         if searcher is not None:
@@ -521,6 +581,18 @@ def _build_page(initial_screen: str = "search") -> None:
             else:
                 state.search_error = state.searcher_error or "Поисковик подключается. Повторите запрос через несколько секунд."
             state.search_lazy_loading = False
+            _log_app_event(
+                state,
+                "search",
+                "run_no_searcher",
+                ok=False,
+                details=_search_diag(
+                    {
+                        "qdrant_ready": _qdrant_http_ready(state.cfg),
+                        "searcher_error": state.searcher_error,
+                    }
+                ),
+            )
             render_safely()
             return
 
@@ -532,7 +604,14 @@ def _build_page(initial_screen: str = "search") -> None:
         llm_expand_enabled = llm_enabled and llm_available and bool(state.ai_search_expand)
         expand_model = str(state.cfg.get("llm_expand_model") or "phi3:mini")
         rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
+        quick_started = _time.perf_counter()
         try:
+            _log_app_event(
+                state,
+                "search",
+                "run_quick_start",
+                details=_search_diag({"timeout_sec": _ui_quick_search_timeout_seconds(state.cfg)}),
+            )
             quick_results = await _run_io_bound_with_ui_timeout(
                 _run_quick_name_search,
                 searcher,
@@ -551,6 +630,13 @@ def _build_page(initial_screen: str = "search") -> None:
             state.search_stats_hint = f"Быстро найдено: {len(quick_results)} · точных совпадений: {exact_count}"
             state.search_lazy_loading = True
             if not _client_alive():
+                _log_app_event(
+                    state,
+                    "search",
+                    "run_quick_client_dead",
+                    ok=False,
+                    details=_search_diag({"quick_results": len(quick_results)}),
+                )
                 return
             render_safely()
             has_numeric_exact = any(
@@ -577,6 +663,7 @@ def _build_page(initial_screen: str = "search") -> None:
                         "results": len(quick_results),
                         "exact_matches": exact_count,
                         "numeric_exact": True,
+                        "duration_ms": round((_time.perf_counter() - quick_started) * 1000),
                     },
                 )
                 render_safely()
@@ -589,17 +676,15 @@ def _build_page(initial_screen: str = "search") -> None:
                     "query": query,
                     "results": len(quick_results),
                     "exact_matches": exact_count,
+                    "duration_ms": round((_time.perf_counter() - quick_started) * 1000),
                 },
             )
         except TimeoutError:
             if state.search_request_id != request_id:
                 return
-            state.search_lazy_loading = False
-            state.search_stats_hint = "Файловый индекс прогревается"
-            state.search_error = (
-                "Файловый индекс еще подготавливается. "
-                "Повторите запрос через несколько секунд."
-            )
+            state.search_lazy_loading = True
+            state.search_stats_hint = "Быстрый файловый проход прогревается"
+            state.search_error = ""
             _log_app_event(
                 state,
                 "search",
@@ -608,10 +693,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 details={
                     "query": query,
                     "timeout_sec": _ui_quick_search_timeout_seconds(state.cfg),
+                    "duration_ms": round((_time.perf_counter() - quick_started) * 1000),
+                    **_search_diag(),
                 },
             )
             render_safely()
-            return
         except Exception as exc:
             state.search_error = str(exc)
             state.search_lazy_loading = False
@@ -623,6 +709,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 details={
                     "query": query,
                     "error": str(exc),
+                    "duration_ms": round((_time.perf_counter() - quick_started) * 1000),
                 },
             )
             render_safely()
@@ -631,7 +718,14 @@ def _build_page(initial_screen: str = "search") -> None:
         # Ленивая догрузка: сначала, при необходимости, расширяем запрос через LLM.
         search_query = semantic_q
         if llm_expand_enabled:
+            llm_expand_started = _time.perf_counter()
             try:
+                _log_app_event(
+                    state,
+                    "search",
+                    "llm_expand_start",
+                    details=_search_diag({"model": expand_model, "ollama_url": ollama_url}),
+                )
                 from rag_catalog.core.llm import expand_query  # noqa: PLC0415
                 expanded = await run.io_bound(
                     expand_query, semantic_q, model=expand_model, ollama_url=ollama_url
@@ -641,10 +735,45 @@ def _build_page(initial_screen: str = "search") -> None:
                 if expanded and expanded.lower() != semantic_q.lower():
                     state.expanded_query = expanded
                     search_query = expanded
-            except Exception:
-                pass
+                _log_app_event(
+                    state,
+                    "search",
+                    "llm_expand",
+                    details=_search_diag(
+                        {
+                            "expanded": bool(expanded and expanded.lower() != semantic_q.lower()),
+                            "query_used": search_query,
+                            "duration_ms": round((_time.perf_counter() - llm_expand_started) * 1000),
+                        }
+                    ),
+                )
+            except Exception as exc:
+                _log_app_event(
+                    state,
+                    "search",
+                    "llm_expand",
+                    ok=False,
+                    details=_search_diag(
+                        {
+                            "error": str(exc),
+                            "duration_ms": round((_time.perf_counter() - llm_expand_started) * 1000),
+                        }
+                    ),
+                )
 
+        full_started = _time.perf_counter()
         try:
+            _log_app_event(
+                state,
+                "search",
+                "run_full_start",
+                details=_search_diag(
+                    {
+                        "query_used": search_query,
+                        "timeout_sec": _ui_search_timeout_seconds(state.cfg),
+                    }
+                ),
+            )
             full_results = await _run_io_bound_with_ui_timeout(
                 _run_catalog_search,
                 searcher,
@@ -687,6 +816,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     "cloud_results": cloud_semantic_count,
                     "content_only": bool(state.content_only),
                     "title_only": bool(state.title_only),
+                    "duration_ms": round((_time.perf_counter() - full_started) * 1000),
                 },
             )
         except TimeoutError:
@@ -711,6 +841,8 @@ def _build_page(initial_screen: str = "search") -> None:
                     "query": query,
                     "query_used": search_query,
                     "timeout_sec": _ui_search_timeout_seconds(state.cfg),
+                    "duration_ms": round((_time.perf_counter() - full_started) * 1000),
+                    **_search_diag(),
                 },
             )
         except Exception as exc:
@@ -727,6 +859,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     "error": str(exc),
                     "content_only": bool(state.content_only),
                     "title_only": bool(state.title_only),
+                    "duration_ms": round((_time.perf_counter() - full_started) * 1000),
                 },
             )
             if not state.results:
@@ -735,6 +868,15 @@ def _build_page(initial_screen: str = "search") -> None:
         full_results_rendered = False
         if state.search_request_id == request_id:
             state.search_lazy_loading = False
+            _log_app_event(
+                state,
+                "search",
+                "run_render_final",
+                details=_search_diag(
+                    {"duration_ms": round((_time.perf_counter() - search_started) * 1000)}
+                ),
+            )
+            _client_diag("search_render_final", _search_diag())
             render_safely()
             full_results_rendered = True
 
@@ -751,6 +893,13 @@ def _build_page(initial_screen: str = "search") -> None:
             if searcher_for_answer is not None:
                 state.rag_answer_loading = True
                 if not _client_alive():
+                    _log_app_event(
+                        state,
+                        "search",
+                        "rag_answer_client_dead",
+                        ok=False,
+                        details=_search_diag(),
+                    )
                     return
                 try:
                     ans = await run.io_bound(
@@ -787,9 +936,23 @@ def _build_page(initial_screen: str = "search") -> None:
 
         if state.search_request_id == request_id and (rag_answer_changed or not full_results_rendered):
             state.search_lazy_loading = False
+            _log_app_event(
+                state,
+                "search",
+                "run_done",
+                details=_search_diag(
+                    {
+                        "duration_ms": round((_time.perf_counter() - search_started) * 1000),
+                        "rag_answer_changed": bool(rag_answer_changed),
+                    }
+                ),
+            )
+            _client_diag("search_run_done", _search_diag())
             render_safely()
 
     def schedule_search(query: str) -> None:
+        _log_app_event(state, "search", "schedule", details=_search_diag({"query": query}))
+        _client_diag("search_schedule", _search_diag({"query": query}))
         task = asyncio.create_task(run_search(query))
 
         def _handle_search_exception(done_task: asyncio.Task[Any]) -> None:
@@ -798,6 +961,13 @@ def _build_page(initial_screen: str = "search") -> None:
             except Exception as exc:
                 state.search_lazy_loading = False
                 state.search_error = f"Ошибка поиска: {exc}"
+                _log_app_event(
+                    state,
+                    "search",
+                    "task_exception",
+                    ok=False,
+                    details=_search_diag({"error": str(exc)}),
+                )
                 render_safely()
 
         task.add_done_callback(_handle_search_exception)
@@ -988,6 +1158,8 @@ def _build_page(initial_screen: str = "search") -> None:
             search_input.on("keyup.escape", close_suggestions)
 
     def render_results_loading() -> None:
+        _log_app_event(state, "search", "render_loading", details=_search_diag())
+        _client_diag("search_loading_render", _search_diag())
         # Stop all periodic timers so they don't fire a concurrent render() while we await
         for _timer_attr in (
             "cloud_drive_timer", "scheduler_timer",
@@ -2445,6 +2617,7 @@ def _build_page(initial_screen: str = "search") -> None:
         _jobs_view.render_jobs_screen(state, render_fn=render)
 
     def render() -> None:
+        render_started = _time.perf_counter()
         update_page_mode()
         header_title.set_text({
             **APP_SCREEN_TITLES,
@@ -2562,6 +2735,22 @@ def _build_page(initial_screen: str = "search") -> None:
             initialized_screens,
             dirty_screens,
         )
+        _log_app_event(
+            state,
+            "diagnostics",
+            "render_start",
+            details={
+                "screen": current_screen,
+                "previous_screen": previous_screen,
+                "rebuild": bool(rebuild),
+                "initialized": sorted(initialized_screens),
+                "dirty": sorted(dirty_screens),
+                "request_id": state.search_request_id,
+                "results": len(state.results),
+                "lazy_loading": bool(state.search_lazy_loading),
+                "has_error": bool(state.search_error),
+            },
+        )
         if rebuild:
             target.clear()
             with target:
@@ -2595,6 +2784,20 @@ def _build_page(initial_screen: str = "search") -> None:
                 )
             except Exception:
                 pass
+        _log_app_event(
+            state,
+            "diagnostics",
+            "render_done",
+            details={
+                "screen": current_screen,
+                "rebuild": bool(rebuild),
+                "duration_ms": round((_time.perf_counter() - render_started) * 1000),
+                "request_id": state.search_request_id,
+                "results": len(state.results),
+                "lazy_loading": bool(state.search_lazy_loading),
+                "has_error": bool(state.search_error),
+            },
+        )
 
     # ── Preview drawer (живёт вне content, не сбрасывается при render()) ──
     preview_drawer = ui.element("div").classes("rag-preview-drawer closed")

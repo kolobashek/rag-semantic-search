@@ -7,6 +7,8 @@ Imported by: helpers.py, api.py, nice_app.py.
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional
@@ -18,6 +20,9 @@ from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .system import _telemetry_db_path
+
+_APP_EVENT_LOGGER = logging.getLogger("rag_catalog.ui.events")
+_APP_EVENT_LOGGER.setLevel(logging.INFO)
 
 # ─────────────────────────── PageState ─────────────────────────────────────
 
@@ -272,6 +277,7 @@ def _log_app_event(
     ok: bool = True,
     details: Optional[Dict[str, Any]] = None,
 ) -> None:
+    event_details = details or {}
     try:
         _get_telemetry(state).log_app_event(
             username=_username(state),
@@ -279,7 +285,22 @@ def _log_app_event(
             feature=feature,
             action=action,
             ok=ok,
-            details=details or {},
+            details=event_details,
+        )
+    except Exception:
+        pass
+    try:
+        details_json = json.dumps(event_details, ensure_ascii=False, sort_keys=True, default=str)
+        if len(details_json) > 4000:
+            details_json = f"{details_json[:4000]}…"
+        _APP_EVENT_LOGGER.info(
+            "app_event screen=%s feature=%s action=%s ok=%s username=%s details=%s",
+            state.screen,
+            feature,
+            action,
+            bool(ok),
+            _username(state),
+            details_json,
         )
     except Exception:
         pass

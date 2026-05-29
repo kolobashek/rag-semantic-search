@@ -118,7 +118,7 @@ def test_ui_search_timeout_has_safe_bounds() -> None:
     assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "60"}) == 45.0
     assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "90"}) == 45.0
     assert nice_app._ui_search_timeout_seconds({"ui_search_timeout_sec": "bad"}) == 20.0
-    assert nice_app._ui_quick_search_timeout_seconds({}) == 2.5
+    assert nice_app._ui_quick_search_timeout_seconds({}) == 8.0
     assert nice_app._ui_quick_search_timeout_seconds({"ui_quick_search_timeout_sec": "0.5"}) == 1.0
     assert nice_app._ui_quick_search_timeout_seconds({"ui_quick_search_timeout_sec": "60"}) == 10.0
 
@@ -134,7 +134,13 @@ def test_search_keeps_websocket_responsive_while_semantic_pass_runs() -> None:
     assert "await run_search(typed)" not in source
     assert "asyncio.wait_for" not in source
     assert "run_quick_timeout" in source
+    assert "Быстрый файловый проход прогревается" in source
+    assert "Файловый индекс еще подготавливается" not in source
     assert "run_full_timeout" in source
+    assert "run_start" in source
+    assert "run_full_start" in source
+    assert "run_render_final" in source
+    assert "render_skip_client_dead" in source
 
 
 def test_render_does_not_attach_busy_timers_to_rebuilt_content() -> None:
@@ -143,6 +149,21 @@ def test_render_does_not_attach_busy_timers_to_rebuilt_content() -> None:
     assert "window.ragHideBusy" in source
     assert "setTimeout(() => { window.ragHideBusy" in source
     assert "ui.timer(\n                    0.08" not in source
+
+
+def test_browser_diagnostics_are_installed() -> None:
+    import rag_catalog.ui.api as api
+    from rag_catalog.ui.css import INTERACTION_JS_PATH
+
+    api_source = inspect.getsource(api)
+    js_source = INTERACTION_JS_PATH.read_text(encoding="utf-8")
+
+    assert "window.ragDiagLog" in js_source
+    assert "connection_lost_visible" in js_source
+    assert "javascript_error" in js_source
+    assert "unhandled_rejection_error" in js_source
+    assert '@app.post("/api/ui-events")' in api_source
+    assert "browser_event action=" in api_source
 
 
 def test_search_embedder_uses_local_model_cache() -> None:

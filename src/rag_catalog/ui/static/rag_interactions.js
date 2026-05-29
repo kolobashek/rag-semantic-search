@@ -38,6 +38,130 @@
     document.addEventListener('click', clickBusy, true);
   }
 
+  const installDiagnostics = () => {
+    if (window._ragDiagInit) return;
+    window._ragDiagInit = true;
+    const now = () => Math.round(performance.now());
+    const sid = sessionStorage.getItem('rag-diag-session') ||
+      (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+    sessionStorage.setItem('rag-diag-session', sid);
+    const basePayload = () => {
+      const text = document.body ? document.body.innerText : '';
+      const input = document.querySelector('.rag-search-box input, input[placeholder^="Введите название"]');
+      return {
+        session_id: sid,
+        url: location.href,
+        path: location.pathname,
+        ready_state: document.readyState,
+        online: navigator.onLine,
+        visibility: document.visibilityState,
+        elapsed_ms: now(),
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          dpr: window.devicePixelRatio || 1,
+          scroll_y: Math.round(window.scrollY || 0),
+        },
+        search: {
+          query: input ? String(input.value || '').slice(0, 250) : '',
+          has_results_header: text.includes('Результаты по запросу'),
+          has_loading_label: text.includes('Ищу совпадения'),
+          has_connection_lost: text.includes('Соединение потеряно'),
+          has_preparing_error: text.includes('Файловый индекс еще подготавливается'),
+          has_semantic_timeout: text.includes('Семантический поиск не ответил быстро'),
+        },
+      };
+    };
+    const send = (action, details = {}) => {
+      const body = JSON.stringify({ action, ...basePayload(), details });
+      try {
+        if (navigator.sendBeacon) {
+          const blob = new Blob([body], { type: 'application/json' });
+          if (navigator.sendBeacon('/api/ui-events', blob)) return;
+        }
+      } catch (_) {}
+      fetch('/api/ui-events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    };
+    window.ragDiagLog = send;
+
+    const navEntry = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+    send('client_diag_ready', { navigation_type: navEntry ? navEntry.type : '' });
+    window.addEventListener('online', () => send('browser_online'));
+    window.addEventListener('offline', () => send('browser_offline'));
+    window.addEventListener('visibilitychange', () => send('visibility_change'));
+    window.addEventListener('pagehide', (event) => send('pagehide', { persisted: !!event.persisted }));
+    window.addEventListener('pageshow', (event) => send('pageshow', { persisted: !!event.persisted }));
+    window.addEventListener('beforeunload', () => send('beforeunload'));
+    window.addEventListener('error', (event) => send('javascript_error', {
+      message: String(event.message || '').slice(0, 1000),
+      source: String(event.filename || '').slice(0, 500),
+      line: event.lineno || 0,
+      col: event.colno || 0,
+    }));
+    window.addEventListener('unhandledrejection', (event) => send('unhandled_rejection_error', {
+      reason: String(event.reason && (event.reason.stack || event.reason.message || event.reason) || '').slice(0, 1500),
+    }));
+
+    const wrapHistory = (name) => {
+      const original = history[name];
+      if (!original || original._ragDiagWrapped) return;
+      const wrapped = function(...args) {
+        const result = original.apply(this, args);
+        setTimeout(() => send('route_change', { method: name }), 0);
+        return result;
+      };
+      wrapped._ragDiagWrapped = true;
+      history[name] = wrapped;
+    };
+    wrapHistory('pushState');
+    wrapHistory('replaceState');
+    window.addEventListener('popstate', () => send('route_change', { method: 'popstate' }));
+
+    let lastLost = false;
+    let lastLoading = false;
+    let lastPreparing = false;
+    const scan = () => {
+      const text = document.body ? document.body.innerText : '';
+      const lost = text.includes('Соединение потеряно');
+      const loading = text.includes('Ищу совпадения');
+      const preparing = text.includes('Файловый индекс еще подготавливается');
+      if (lost !== lastLost) {
+        lastLost = lost;
+        send(lost ? 'connection_lost_visible' : 'connection_lost_hidden', { excerpt: text.slice(0, 1200) });
+      }
+      if (loading !== lastLoading) {
+        lastLoading = loading;
+        send(loading ? 'search_loading_visible' : 'search_loading_hidden');
+      }
+      if (preparing !== lastPreparing) {
+        lastPreparing = preparing;
+        send(preparing ? 'preparing_error_visible' : 'preparing_error_hidden', { excerpt: text.slice(0, 1200) });
+      }
+    };
+    let pending = false;
+    const scheduleScan = () => {
+      if (pending) return;
+      pending = true;
+      setTimeout(() => {
+        pending = false;
+        scan();
+      }, 120);
+    };
+    new MutationObserver(scheduleScan).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    setInterval(scan, 2000);
+    scan();
+  };
+  installDiagnostics();
+
   if (window.__ragContextMenuInstalled) return;
   window.__ragContextMenuInstalled = true;
 

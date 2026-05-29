@@ -26,7 +26,11 @@ def _install_css() -> None:
 
     ui.add_head_html('<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">')
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">')
-    ui.add_head_html('<script defer src="/rag-interactions.js"></script>')
+    try:
+        interactions_version = int(INTERACTION_JS_PATH.stat().st_mtime)
+    except OSError:
+        interactions_version = 0
+    ui.add_head_html(f'<script defer src="/rag-interactions.js?v={interactions_version}"></script>')
     ui.add_head_html("""<style>
         :root {
           --rag-font-display: 'Manrope', system-ui, -apple-system, sans-serif;
