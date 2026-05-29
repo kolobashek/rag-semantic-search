@@ -601,6 +601,20 @@ def _install_css(initial_theme: str = "light") -> None:
           gap: 10px;
           min-width: 0;
         }
+        .rag-explorer-inline-breadcrumbs {
+          display: none;
+          align-items: center;
+          min-width: 0;
+          width: min(720px, 100%);
+          height: 32px;
+          padding: 0 8px;
+          color: var(--rag-text);
+        }
+        .rag-explorer-inline-breadcrumbs .q-btn {
+          min-height: 30px;
+          max-width: min(260px, 32vw);
+          padding: 0 6px;
+        }
         .rag-explorer-iconbtn {
           width: 32px !important;
           height: 32px !important;
@@ -1645,6 +1659,14 @@ def _install_css(initial_theme: str = "light") -> None:
           }
           .rag-hdr-center:has(.rag-header-breadcrumbs:not(:empty)) .rag-hdr-nav {
             display: none;
+          }
+        }
+        @media (min-width: 1101px) {
+          .rag-header-breadcrumbs {
+            display: none !important;
+          }
+          .rag-explorer-inline-breadcrumbs {
+            display: flex;
           }
         }
         @media (max-width: 900px) {
