@@ -262,9 +262,11 @@ def _install_css() -> None:
           padding-bottom: 0;
         }
         .rag-search-header {
+          position: relative;
           width: 100%;
           max-width: 1024px;
           margin-inline: auto;
+          z-index: 30;
           transform: translateY(0);
           transition: transform .34s cubic-bezier(.2, .8, .2, 1), max-width .2s ease;
         }
@@ -272,6 +274,8 @@ def _install_css() -> None:
           animation: rag-search-rise .26s cubic-bezier(.2, .8, .2, 1);
         }
         .rag-search-presets {
+          position: relative;
+          z-index: 1;
           width: min(682px, 66.666%) !important;
           max-width: 682px;
           margin-inline: auto;
@@ -375,7 +379,7 @@ def _install_css() -> None:
         .rag-card:hover {
           box-shadow: 0 14px 30px -18px rgba(20, 20, 26, 0.36);
         }
-        .rag-search-shell { position: relative; z-index: 5; }
+        .rag-search-shell { position: relative; z-index: 40; }
         .rag-search-box {
           background: var(--rag-search-bg);
           border: 1px solid var(--rag-border);
@@ -440,10 +444,10 @@ def _install_css() -> None:
           background: var(--rag-suggest-bg);
           border: 1px solid var(--rag-border);
           border-radius: 16px;
-          box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.18);
-          backdrop-filter: blur(16px);
+          box-shadow: 0 28px 64px -18px rgba(0, 0, 0, 0.48);
+          backdrop-filter: none;
           overflow: hidden;
-          z-index: 30;
+          z-index: 80;
         }
         .rag-result {
           background: var(--rag-surface);
