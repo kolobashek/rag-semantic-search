@@ -577,6 +577,11 @@ def _install_css(initial_theme: str = "light") -> None:
           min-height: 0;
           overflow: hidden;
         }
+        .rag-explorer-tree {
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          scrollbar-gutter: stable;
+        }
         .rag-explorer-files {
           min-width: 0;
           height: 100%;
@@ -2558,6 +2563,13 @@ def _install_css(initial_theme: str = "light") -> None:
           }
         }
         .rag-explorer-tree .rag-tree-filter { margin-bottom: 10px; }
+        .rag-tree-row .rag-tree-button,
+        .rag-tree-row .rag-tree-button:hover,
+        .rag-tree-row .rag-tree-button.active,
+        .rag-tree-row .rag-tree-button.active:hover {
+          background: transparent !important;
+          box-shadow: none !important;
+        }
         </style>""")
     _INTERACTION_SCRIPT_CACHE = INTERACTION_JS_PATH.read_text(encoding="utf-8") if INTERACTION_JS_PATH.exists() else ""
     ui.add_body_html(

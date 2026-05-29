@@ -162,6 +162,34 @@
   };
   installDiagnostics();
 
+  const installOverflowTitles = () => {
+    if (window.__ragOverflowTitlesInstalled) return;
+    window.__ragOverflowTitlesInstalled = true;
+
+    const textBoxFor = (el) => el.querySelector('.block') || el;
+    const isOverflowing = (el) => el && el.scrollWidth > el.clientWidth + 1;
+    const sync = (event) => {
+      const el = event.target.closest('[data-rag-overflow-title]');
+      if (!el) return;
+      const textBox = textBoxFor(el);
+      if (isOverflowing(textBox)) {
+        el.setAttribute('title', el.dataset.ragOverflowTitle || '');
+      } else {
+        el.removeAttribute('title');
+      }
+    };
+    const clear = (event) => {
+      const el = event.target.closest('[data-rag-overflow-title]');
+      if (el) el.removeAttribute('title');
+    };
+
+    document.addEventListener('mouseenter', sync, true);
+    document.addEventListener('focusin', sync, true);
+    document.addEventListener('mouseleave', clear, true);
+    document.addEventListener('focusout', clear, true);
+  };
+  installOverflowTitles();
+
   if (window.__ragContextMenuInstalled) return;
   window.__ragContextMenuInstalled = true;
 

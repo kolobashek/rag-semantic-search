@@ -62,6 +62,9 @@ def render_explorer_screen(
 ) -> None:
     state._explorer_selection_action = None
 
+    def _overflow_title_prop(value: object) -> str:
+        return f'data-rag-overflow-title="{html.escape(str(value), quote=True)}"'
+
     def render_star(path: Path, *, item_type: Optional[str] = None) -> None:
         active = _is_favorite(state, str(path))
         icon = "star" if active else "star_border"
@@ -263,9 +266,8 @@ def render_explorer_screen(
                                 icon="folder_open" if folder.path in open_paths or is_current else "folder",
                                 on_click=lambda p=folder.path: (dlg.close(), _cd_open_folder(p)),
                                 color=None,
-                            ).props("flat align=left no-caps dense").classes(
+                            ).props(f"flat align=left no-caps dense {_overflow_title_prop(folder.path or 'Корень')}").classes(
                                 "rag-nav-button rag-tree-button rag-tree-label"
-                                + (" active" if is_current else "")
                             )
                         if folder.path in open_paths:
                             for child in children:
@@ -1175,10 +1177,9 @@ def render_explorer_screen(
                             color=None,
                         ).props("flat align=left no-caps dense").classes(
                             "rag-nav-button rag-tree-button rag-tree-label"
-                            + (" active" if is_current else "")
                             + (" ancestor" if is_ancestor else "")
                         )
-                        btn.tooltip(folder.path or "Корень")
+                        btn.props(_overflow_title_prop(folder.path or "Корень"))
                     if has_children and is_open:
                         for child in children:
                             _render_tree_node_cd(child, depth + 1)
@@ -1849,8 +1850,7 @@ def render_explorer_screen(
             icon=icon,
             on_click=lambda p=path: open_folder(p),
             color=None,
-        ).props("flat align=left no-caps dense").classes(" ".join(class_bits)).style(f"padding-left: {depth * 12}px")
-        btn.tooltip(str(path))
+        ).props(f"flat align=left no-caps dense {_overflow_title_prop(path)}").classes(" ".join(class_bits)).style(f"padding-left: {depth * 12}px")
         if is_current or is_ancestor:
             for child in _child_dirs(path):
                 render_tree_node(child, depth + 1, current_path, ancestors)
@@ -2009,7 +2009,7 @@ def render_explorer_screen(
                             icon="folder" if str(fav.get("item_type") or "") == "folder" else "description",
                             on_click=lambda p=fav_path: go_explorer_fn(str(p)),
                             color=None,
-                        ).props("flat align=left no-caps dense").classes("rag-nav-button rag-tree-button w-full")
+                        ).props(f"flat align=left no-caps dense {_overflow_title_prop(fav.get('path') or fav_path)}").classes("rag-nav-button rag-tree-button w-full")
                 else:
                     ui.label("Нет закреплённых элементов").classes("rag-meta")
                 ui.label("ДЕРЕВО").classes("rag-section-label")
@@ -2022,7 +2022,7 @@ def render_explorer_screen(
                                 icon="folder",
                                 on_click=lambda p=m: open_folder(p),
                                 color=None,
-                            ).props("flat align=left no-caps dense").classes("rag-nav-button rag-tree-button w-full").tooltip(str(m))
+                            ).props(f"flat align=left no-caps dense {_overflow_title_prop(m)}").classes("rag-nav-button rag-tree-button w-full")
                     else:
                         ui.label("Совпадений нет").classes("rag-meta text-xs px-2")
                 else:
