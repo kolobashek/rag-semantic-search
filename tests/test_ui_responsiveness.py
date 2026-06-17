@@ -232,6 +232,21 @@ def test_cloud_drive_settings_exposes_import_sources_ui() -> None:
     assert "list_bootstrap_jobs(limit=8)" not in source
 
 
+def test_cloud_drive_settings_exposes_acl_management_ui() -> None:
+    source = inspect.getsource(settings_view.render_settings_screen)
+
+    assert "Доступы Cloud Drive" in source
+    assert "Добавить правило доступа" in source
+    assert "grant_acl_permission" in source
+    assert "revoke_acl_permission" in source
+    assert "service.grant_path_permission" in source
+    assert "service.grant_permission" in source
+    assert "service.list_permissions" in source
+    assert "service.revoke_permission" in source
+    assert "permissions_grant_ui" in source
+    assert "permissions_revoke_ui" in source
+
+
 def test_search_recovery_restores_results_after_reload() -> None:
     from rag_catalog.ui.state import PageState
 

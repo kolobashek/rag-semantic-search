@@ -752,6 +752,38 @@ def render_settings_screen(
 
             ui.separator()
             with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("lock", size="18px").classes("text-indigo-400")
+                ui.label("Доступы Cloud Drive").classes("font-semibold text-sm")
+                ui.space()
+                acl_refresh_btn = ui.button(icon="refresh").props("flat dense round size=sm").classes("text-indigo-400")
+                acl_refresh_btn.tooltip("Обновить права")
+            ui.label(
+                "Выдавайте доступ к папке или файлу пользователю, роли или всем. "
+                "Если в реестре есть хотя бы одно правило, Cloud Drive переходит из совместимого open-access режима в ACL-режим."
+            ).classes("rag-meta text-xs")
+            acl_box = ui.column().classes("w-full gap-2")
+            with ui.expansion("Добавить правило доступа", icon="person_add").classes("w-full"):
+                acl_path_input = ui.input("Путь в Cloud Drive (* = весь реестр)", value="*").props("dense outlined").classes("w-full")
+                acl_path_input.tooltip("Например: Общие/Договоры. Значение * выдаёт глобальный доступ.")
+                with ui.row().classes("w-full gap-2 items-center"):
+                    acl_subject_type = ui.select(
+                        {"user": "Пользователь", "role": "Роль", "*": "Все"},
+                        value="user",
+                        label="Кому",
+                    ).props("dense outlined").classes("min-w-40")
+                    acl_subject_id = ui.input("Логин / роль / *", value="").props("dense outlined").classes("flex-1")
+                acl_access = ui.select(
+                    {"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"},
+                    value="viewer",
+                    label="Уровень доступа",
+                ).props("dense outlined").classes("w-full max-w-xs")
+                with ui.row().classes("w-full justify-end gap-2"):
+                    grant_acl_btn = ui.button("Выдать доступ", icon="lock_open").props("outline dense")
+            acl_filter_input = ui.input("Фильтр прав по пути", value="").props("dense outlined clearable").classes("w-full")
+            acl_filter_input.tooltip("Оставьте пустым, чтобы видеть все правила. Укажите путь, чтобы увидеть применимые правила.")
+
+            ui.separator()
+            with ui.row().classes("w-full items-center gap-2"):
                 ui.icon("schedule", size="18px").classes("text-indigo-400")
                 ui.label("Автосинхронизация").classes("font-semibold text-sm")
             ui.label(
@@ -1100,6 +1132,69 @@ def render_settings_screen(
                                     on_click=lambda _e=None, sid=source_id, next_enabled=not enabled: _schedule_async(lambda sid=sid, next_enabled=next_enabled: set_import_source_enabled(sid, next_enabled)),
                                 ).props("flat dense round size=sm").tooltip("Выключить" if enabled else "Включить")
 
+            _ACL_SUBJECT_LABELS = {"user": "Пользователь", "role": "Роль", "*": "Все"}
+            _ACL_RESOURCE_LABELS = {"global": "Весь реестр", "path": "Путь", "folder": "Папка", "file": "Файл"}
+            _ACL_ACCESS_LABELS = {"viewer": "Просмотр", "read": "Просмотр", "editor": "Редактирование", "write": "Редактирование", "admin": "Администрирование", "owner": "Администрирование"}
+
+            def _permission_target_label(permission: Dict[str, Any]) -> str:
+                resource_type = str(permission.get("resource_type") or "").strip().lower()
+                resource_id = str(permission.get("resource_id") or "").strip()
+                if resource_type == "global" or resource_id == "*":
+                    return "Весь реестр"
+                return resource_id or "-"
+
+            def render_acl_permissions(
+                permissions: Optional[List[Dict[str, Any]]] = None,
+                error: Optional[str] = None,
+            ) -> None:
+                acl_box.clear()
+                cfg_now = build_cloud_config()
+                if permissions is None and error is None:
+                    if not str(cfg_now.get("cloud_drive_db_path") or "").strip():
+                        with acl_box:
+                            with ui.element("div").classes("cd-empty-state w-full"):
+                                ui.icon("settings", size="24px").classes("opacity-30")
+                                ui.label("Сохраните настройки Cloud Drive, чтобы управлять доступами.").classes("text-center")
+                        return
+                    try:
+                        service = CloudDriveService.from_config(cfg_now)
+                        permissions = service.list_permissions(path=str(acl_filter_input.value or "").strip())
+                    except Exception as exc:
+                        error = str(exc)
+                if error is not None:
+                    with acl_box:
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("error_outline", size="24px").classes("text-red-400 opacity-70")
+                            ui.label(f"Не удалось прочитать права: {error}").classes("text-center text-red-600 text-xs")
+                    return
+                with acl_box:
+                    if not permissions:
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("lock_open", size="24px").classes("opacity-30")
+                            ui.label("Правила доступа не заданы. До первого правила действует совместимый open-access режим.").classes("text-center")
+                        return
+                    for permission in permissions:
+                        permission_id = str(permission.get("id") or "")
+                        subject_type = str(permission.get("subject_type") or "").strip().lower()
+                        subject_id = str(permission.get("subject_id") or "").strip() or "*"
+                        resource_type = str(permission.get("resource_type") or "").strip().lower()
+                        access = str(permission.get("access_level") or "").strip().lower()
+                        with ui.element("div").classes("cd-jobs-card w-full"):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.icon("lock", size="18px").classes("text-indigo-400")
+                                ui.label(f"{_ACL_SUBJECT_LABELS.get(subject_type, subject_type)}: {subject_id}").classes("text-sm font-medium truncate")
+                                ui.space()
+                                ui.label(_ACL_ACCESS_LABELS.get(access, access or "-")).classes("rag-meta text-xs")
+                            ui.label(f"{_ACL_RESOURCE_LABELS.get(resource_type, resource_type or 'Ресурс')}: {_permission_target_label(permission)}").classes("rag-path text-xs truncate")
+                            created_at = str(permission.get("created_at") or "").strip()
+                            if created_at:
+                                ui.label(f"Создано: {created_at[:19].replace(chr(84), chr(32))}").classes("rag-meta text-xs")
+                            with ui.row().classes("gap-1 mt-1"):
+                                ui.button(
+                                    icon="delete",
+                                    on_click=lambda _e=None, pid=permission_id: _schedule_async(lambda pid=pid: revoke_acl_permission(pid)),
+                                ).props("flat dense round size=sm color=negative").tooltip("Отозвать доступ")
+
             def build_cloud_config() -> Dict[str, Any]:
                 values = current_cloud_values()
                 cfg = dict(state.cfg)
@@ -1242,6 +1337,7 @@ def render_settings_screen(
                     render_bootstrap_status()
                     render_bootstrap_jobs()
                     render_import_sources()
+                    render_acl_permissions()
                     await refresh_storage_coverage()
                 except Exception:
                     render_cloud_stats(None, title="Статистика реестра")
@@ -1377,6 +1473,55 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось запустить источник: {exc}", type="negative")
 
+            async def grant_acl_permission() -> None:
+                try:
+                    subject_type = str(acl_subject_type.value or "").strip().lower()
+                    subject_id = str(acl_subject_id.value or "").strip()
+                    if subject_type == "*":
+                        subject_id = "*"
+                    elif not subject_id:
+                        ui.notify("Укажите логин пользователя или название роли.", type="warning")
+                        return
+                    target_path = str(acl_path_input.value or "").strip()
+                    access_level = str(acl_access.value or "viewer").strip().lower()
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    if target_path in {"", "*"}:
+                        def _grant_global() -> Dict[str, str]:
+                            return service.grant_permission(
+                                subject_type=subject_type,
+                                subject_id=subject_id,
+                                resource_type="global",
+                                resource_id="*",
+                                access_level=access_level,
+                            )
+                        permission = await run.io_bound(_grant_global)
+                    else:
+                        def _grant_path() -> Dict[str, str]:
+                            return service.grant_path_permission(
+                                subject_type=subject_type,
+                                subject_id=subject_id,
+                                path=target_path,
+                                access_level=access_level,
+                            )
+                        permission = await run.io_bound(_grant_path)
+                    render_acl_permissions()
+                    _log_app_event(state, "cloud_drive", "permissions_grant_ui", details=permission)
+                    ui.notify("Доступ выдан.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось выдать доступ: {exc}", type="negative")
+
+            async def revoke_acl_permission(permission_id: str) -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    ok = await run.io_bound(service.revoke_permission, permission_id)
+                    render_acl_permissions()
+                    _log_app_event(state, "cloud_drive", "permissions_revoke_ui", details={"permission_id": permission_id, "ok": ok})
+                    ui.notify("Доступ отозван." if ok else "Правило доступа не найдено.", type="positive" if ok else "warning")
+                except Exception as exc:
+                    ui.notify(f"Не удалось отозвать доступ: {exc}", type="negative")
+
             async def cancel_bootstrap_job(job_id: str) -> None:
                 try:
                     cfg = persist_cloud_values(current_cloud_values())
@@ -1443,6 +1588,7 @@ def render_settings_screen(
             render_bootstrap_status()
             render_bootstrap_jobs()
             render_import_sources()
+            render_acl_permissions()
             _schedule_async(refresh_registry_stats)
 
             enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
@@ -1457,6 +1603,10 @@ def render_settings_screen(
             autosync_select.on_value_change(lambda _: refresh_cloud_dirty())
             import_sources_refresh_btn.on_click(lambda: render_import_sources())
             save_import_source_btn.on_click(lambda: _schedule_async(save_import_source))
+            acl_refresh_btn.on_click(lambda: render_acl_permissions())
+            acl_filter_input.on_value_change(lambda _: render_acl_permissions())
+            acl_subject_type.on_value_change(lambda _: acl_subject_id.set_value("*") if str(acl_subject_type.value or "") == "*" else None)
+            grant_acl_btn.on_click(lambda: _schedule_async(grant_acl_permission))
 
             with action_row:
                 with ui.row().classes("rag-dirty-actions-inner"):
@@ -1493,6 +1643,13 @@ def render_settings_screen(
                         render_import_sources(sources=sources_list)
                     except Exception as exc:
                         render_import_sources(error=str(exc))
+                    try:
+                        def _get_permissions() -> List[Dict[str, Any]]:
+                            return CloudDriveService.from_config(cfg_now).list_permissions(path=str(acl_filter_input.value or "").strip())
+                        permissions_list = await run.io_bound(_get_permissions)
+                        render_acl_permissions(permissions=permissions_list)
+                    except Exception as exc:
+                        render_acl_permissions(error=str(exc))
 
                 _autosync_tick(bootstrap_state=bs_data)
 
