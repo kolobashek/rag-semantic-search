@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from rag_catalog.ui import css, nice_app
+from rag_catalog.ui import css, nice_app, settings_view
 
 
 def test_primary_screen_registry_covers_all_route_pages() -> None:
@@ -216,6 +216,20 @@ def test_context_menu_avoids_hard_page_reload() -> None:
     assert "location.reload()" not in js_source
     assert "location.href = '/settings'" not in js_source
     assert "closestElement(event.target" in js_source
+
+
+def test_cloud_drive_settings_exposes_import_sources_ui() -> None:
+    source = inspect.getsource(settings_view.render_settings_screen)
+
+    assert "Источники импорта" in source
+    assert "Добавить или обновить источник" in source
+    assert "list_import_sources(limit=50)" in source
+    assert "service.upsert_import_source" in source
+    assert "service.create_import_job" in source
+    assert "service.run_import_job(job_id)" in source
+    assert "set_import_source_enabled" in source
+    assert "list_jobs(limit=8)" in source
+    assert "list_bootstrap_jobs(limit=8)" not in source
 
 
 def test_search_recovery_restores_results_after_reload() -> None:

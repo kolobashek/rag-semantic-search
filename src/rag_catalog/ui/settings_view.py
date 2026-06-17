@@ -723,6 +723,35 @@ def render_settings_screen(
 
             ui.separator()
             with ui.row().classes("w-full items-center gap-2"):
+                ui.icon("scanner", size="18px").classes("text-indigo-400")
+                ui.label("Источники импорта").classes("font-semibold text-sm")
+                ui.space()
+                import_sources_refresh_btn = ui.button(icon="refresh").props("flat dense round size=sm").classes("text-indigo-400")
+                import_sources_refresh_btn.tooltip("Обновить источники")
+            ui.label(
+                "Подключайте сетевые папки сканеров и внешних систем как входящие каналы. "
+                "Файлы копируются в Cloud Drive, а исходная папка остаётся только источником импорта."
+            ).classes("rag-meta text-xs")
+            import_sources_box = ui.column().classes("w-full gap-2")
+            with ui.expansion("Добавить или обновить источник", icon="add").classes("w-full"):
+                import_name_input = ui.input("Название", value="Сканер").props("dense outlined").classes("w-full")
+                with ui.row().classes("w-full items-center gap-1"):
+                    import_source_input = ui.input("Исходная папка", value="").props("dense outlined").classes("flex-1")
+                    import_source_input.tooltip("Папка, куда пишет сканер или внешняя система.")
+                    btn_import_source = ui.button(icon="folder_open").props("flat dense round").classes("text-indigo-400 mt-1")
+                    btn_import_source.tooltip("Выбрать папку")
+                    btn_import_source.on_click(lambda: _pick_folder_dialog(import_source_input, title="Выберите исходную папку"))
+                import_target_input = ui.input("Папка в Cloud Drive", value="Входящие/Сканер").props("dense outlined").classes("w-full")
+                import_target_input.tooltip("Куда складывать импортированные файлы внутри Cloud Drive.")
+                with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                    import_files_input = ui.checkbox("Копировать файлы", value=True)
+                    import_enabled_input = ui.checkbox("Включён", value=True)
+                    ui.space()
+                    save_import_source_btn = ui.button("Сохранить источник", icon="save").props("outline dense")
+            import_run_limit = ui.number("Лимит запуска источника (0 = без лимита)", value=0, min=0, step=100).props("dense outlined").classes("w-full max-w-xs")
+
+            ui.separator()
+            with ui.row().classes("w-full items-center gap-2"):
                 ui.icon("schedule", size="18px").classes("text-indigo-400")
                 ui.label("Автосинхронизация").classes("font-semibold text-sm")
             ui.label(
@@ -849,6 +878,7 @@ def render_settings_screen(
 
             _JOB_TYPE_LABELS: Dict[str, str] = {
                 "bootstrap": "Импорт реестра",
+                "import": "Источник импорта",
                 "reindex": "Реиндексация",
                 "scan": "Сканирование структуры",
                 "cleanup": "Очистка",
@@ -917,7 +947,7 @@ def render_settings_screen(
                         return
                     try:
                         service = CloudDriveService.from_config(cfg_now)
-                        jobs = service.list_bootstrap_jobs(limit=8)
+                        jobs = service.list_jobs(limit=8)
                     except Exception as exc:
                         error = str(exc)
                 if error is not None:
@@ -940,7 +970,12 @@ def render_settings_screen(
                         norm_status = {"pending": "pending", "running": "running", "completed": "done", "failed": "error", "cancelled": "cancelled"}.get(raw_status, raw_status)
                         imported_files = _safe_int(progress.get("imported_files"), 0)
                         total_files = _safe_int(progress.get("total_files"), 0)
-                        catalog_src = str(progress.get("catalog") or progress.get("current_path") or "").strip()
+                        catalog_src = str(
+                            progress.get("source_path")
+                            or progress.get("catalog")
+                            or progress.get("current_path")
+                            or ""
+                        ).strip()
                         error_text = str(job.last_error or progress.get("error") or "").strip()
                         import_files_flag = bool(progress.get("import_files", True))
                         job_type_raw = str(getattr(job, "job_type", "") or "bootstrap")
@@ -975,8 +1010,95 @@ def render_settings_screen(
                             with ui.row().classes("gap-1 mt-1"):
                                 if raw_status in {"running", "pending"}:
                                     ui.button(icon="close", on_click=lambda _e=None, jid=job.id: cancel_bootstrap_job(jid)).props("flat dense round size=sm color=negative").tooltip("Отменить задачу")
-                                if raw_status in {"failed", "cancelled", "completed"}:
+                                if job_type_raw == "bootstrap" and raw_status in {"failed", "cancelled", "completed"}:
                                     ui.button(icon="replay", on_click=lambda _e=None, jid=job.id: retry_bootstrap_job(jid)).props("flat dense round size=sm").tooltip("Повторить задачу")
+
+            def _run_import_source_background(cfg: Dict[str, Any], *, job_id: str) -> None:
+                try:
+                    service = CloudDriveService.from_config(cfg)
+                    service.run_import_job(job_id)
+                except Exception:
+                    pass
+
+            def render_import_sources(
+                sources: Optional[List[Dict[str, Any]]] = None,
+                error: Optional[str] = None,
+            ) -> None:
+                import_sources_box.clear()
+                cfg_now = build_cloud_config()
+                if sources is None and error is None:
+                    if not str(cfg_now.get("cloud_drive_db_path") or "").strip():
+                        with import_sources_box:
+                            with ui.element("div").classes("cd-empty-state w-full"):
+                                ui.icon("settings", size="24px").classes("opacity-30")
+                                ui.label("Сохраните настройки Cloud Drive, чтобы управлять источниками.").classes("text-center")
+                        return
+                    try:
+                        service = CloudDriveService.from_config(cfg_now)
+                        sources = service.list_import_sources(limit=50)
+                    except Exception as exc:
+                        error = str(exc)
+                if error is not None:
+                    with import_sources_box:
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("error_outline", size="24px").classes("text-red-400 opacity-70")
+                            ui.label(f"Не удалось прочитать источники: {error}").classes("text-center text-red-600 text-xs")
+                    return
+                with import_sources_box:
+                    if not sources:
+                        with ui.element("div").classes("cd-empty-state w-full"):
+                            ui.icon("scanner", size="24px").classes("opacity-30")
+                            ui.label("Источники не настроены. Добавьте папку сканера или внешней системы.").classes("text-center")
+                        return
+                    for source in sources:
+                        source_id = str(source.get("id") or "")
+                        enabled = bool(source.get("enabled"))
+                        status = str(source.get("last_status") or "idle")
+                        stats = dict(source.get("stats") or {})
+                        imported = _safe_int(stats.get("imported_files"), 0)
+                        skipped = _safe_int(stats.get("skipped_files"), 0)
+                        status_meta = {
+                            "idle": ("radio_button_unchecked", "cd-status-cancelled", "Не запускался"),
+                            "pending": ("schedule", "cd-status-pending", "Ожидание"),
+                            "running": ("sync", "cd-status-running", "Выполняется"),
+                            "completed": ("check_circle", "cd-status-done", "Завершён"),
+                            "failed": ("error", "cd-status-error", "Ошибка"),
+                            "cancelled": ("cancel", "cd-status-cancelled", "Отменён"),
+                        }
+                        icon_name, css_cls, label_ru = status_meta.get(status, ("help", "cd-status-cancelled", status or "Статус"))
+                        with ui.element("div").classes("cd-jobs-card w-full"):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.icon("scanner", size="18px").classes("text-indigo-400")
+                                ui.label(str(source.get("name") or "Источник")).classes("text-sm font-medium truncate")
+                                ui.space()
+                                if enabled:
+                                    ui.label("включён").classes("rag-meta text-xs text-green-600")
+                                else:
+                                    ui.label("выключен").classes("rag-meta text-xs text-orange-600")
+                            ui.label(str(source.get("source_path") or "")).classes("rag-path text-xs truncate")
+                            target = str(source.get("target_path") or "").strip() or "Корень"
+                            ui.label(f"Cloud Drive: {target}").classes("rag-meta text-xs truncate")
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap mt-1"):
+                                with ui.element("span").classes(f"cd-status-badge {css_cls}"):
+                                    ui.icon(icon_name, size="14px")
+                                    ui.label(label_ru)
+                                if imported or skipped:
+                                    ui.label(f"Файлов: {imported} · пропущено: {skipped}").classes("rag-meta text-xs")
+                                last_scan = str(source.get("last_scan_at") or "").strip()
+                                if last_scan:
+                                    ui.label(last_scan[:19].replace(chr(84), chr(32))).classes("rag-meta text-xs")
+                            last_error = str(source.get("last_error") or "").strip()
+                            if last_error:
+                                ui.label(last_error).classes("text-red-600 text-xs truncate")
+                            with ui.row().classes("gap-1 mt-1"):
+                                ui.button(
+                                    icon="play_arrow",
+                                    on_click=lambda _e=None, sid=source_id: _schedule_async(lambda sid=sid: run_import_source(sid)),
+                                ).props("flat dense round size=sm").tooltip("Запустить импорт")
+                                ui.button(
+                                    icon="pause" if enabled else "play_circle",
+                                    on_click=lambda _e=None, sid=source_id, next_enabled=not enabled: _schedule_async(lambda sid=sid, next_enabled=next_enabled: set_import_source_enabled(sid, next_enabled)),
+                                ).props("flat dense round size=sm").tooltip("Выключить" if enabled else "Включить")
 
             def build_cloud_config() -> Dict[str, Any]:
                 values = current_cloud_values()
@@ -1119,6 +1241,7 @@ def render_settings_screen(
                     render_cloud_stats(stats_obj, title="Статистика реестра")
                     render_bootstrap_status()
                     render_bootstrap_jobs()
+                    render_import_sources()
                     await refresh_storage_coverage()
                 except Exception:
                     render_cloud_stats(None, title="Статистика реестра")
@@ -1196,6 +1319,64 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось запустить импорт: {exc}", type="negative")
 
+            async def save_import_source() -> None:
+                try:
+                    source_path = str(import_source_input.value or "").strip()
+                    if not source_path:
+                        ui.notify("Укажите исходную папку источника.", type="warning")
+                        return
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    def _save_source() -> Dict[str, Any]:
+                        return service.upsert_import_source(
+                            name=str(import_name_input.value or "").strip(),
+                            source_path=source_path,
+                            target_path=str(import_target_input.value or "").strip(),
+                            import_files=bool(import_files_input.value),
+                            enabled=bool(import_enabled_input.value),
+                            created_by=_username(state),
+                        )
+                    source = await run.io_bound(_save_source)
+                    render_import_sources()
+                    _log_app_event(state, "cloud_drive", "import_source_save", details={"source_id": source.get("id"), "source_path": source.get("source_path"), "target_path": source.get("target_path")})
+                    ui.notify("Источник импорта сохранён.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось сохранить источник: {exc}", type="negative")
+
+            async def set_import_source_enabled(source_id: str, enabled: bool) -> None:
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    await run.io_bound(service.set_import_source_enabled, source_id, enabled)
+                    render_import_sources()
+                    ui.notify("Источник включён." if enabled else "Источник выключен.", type="positive" if enabled else "warning")
+                except Exception as exc:
+                    ui.notify(f"Не удалось изменить источник: {exc}", type="negative")
+
+            async def run_import_source(source_id: str) -> None:
+                limit_value = int(import_run_limit.value or 0)
+                try:
+                    cfg = persist_cloud_values(current_cloud_values())
+                    service = await run.io_bound(CloudDriveService.from_config, cfg)
+                    def _create_job() -> Any:
+                        return service.create_import_job(
+                            source_id=source_id,
+                            max_files=None if limit_value <= 0 else limit_value,
+                        )
+                    job = await run.io_bound(_create_job)
+                    threading.Thread(
+                        target=_run_import_source_background,
+                        kwargs={"cfg": cfg, "job_id": job.id},
+                        name="cloud-drive-import-source",
+                        daemon=True,
+                    ).start()
+                    render_import_sources()
+                    render_bootstrap_jobs()
+                    _log_app_event(state, "cloud_drive", "import_source_run", details={"source_id": source_id, "job_id": job.id, "limit": limit_value})
+                    ui.notify("Импорт источника запущен в фоне.", type="positive")
+                except Exception as exc:
+                    ui.notify(f"Не удалось запустить источник: {exc}", type="negative")
+
             async def cancel_bootstrap_job(job_id: str) -> None:
                 try:
                     cfg = persist_cloud_values(current_cloud_values())
@@ -1261,6 +1442,7 @@ def render_settings_screen(
             render_cloud_stats(None, title="Статистика реестра")
             render_bootstrap_status()
             render_bootstrap_jobs()
+            render_import_sources()
             _schedule_async(refresh_registry_stats)
 
             enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
@@ -1273,6 +1455,8 @@ def render_settings_screen(
             s3_access_input.on_value_change(lambda _: refresh_cloud_dirty())
             s3_secret_input.on_value_change(lambda _: refresh_cloud_dirty())
             autosync_select.on_value_change(lambda _: refresh_cloud_dirty())
+            import_sources_refresh_btn.on_click(lambda: render_import_sources())
+            save_import_source_btn.on_click(lambda: _schedule_async(save_import_source))
 
             with action_row:
                 with ui.row().classes("rag-dirty-actions-inner"):
@@ -1297,11 +1481,18 @@ def render_settings_screen(
                 if db_path:
                     try:
                         def _get_jobs() -> list:
-                            return CloudDriveService.from_config(cfg_now).list_bootstrap_jobs(limit=8)
+                            return CloudDriveService.from_config(cfg_now).list_jobs(limit=8)
                         jobs_list = await run.io_bound(_get_jobs)
                         render_bootstrap_jobs(jobs=jobs_list)
                     except Exception as exc:
                         render_bootstrap_jobs(error=str(exc))
+                    try:
+                        def _get_sources() -> List[Dict[str, Any]]:
+                            return CloudDriveService.from_config(cfg_now).list_import_sources(limit=50)
+                        sources_list = await run.io_bound(_get_sources)
+                        render_import_sources(sources=sources_list)
+                    except Exception as exc:
+                        render_import_sources(error=str(exc))
 
                 _autosync_tick(bootstrap_state=bs_data)
 

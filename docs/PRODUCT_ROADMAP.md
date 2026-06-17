@@ -352,6 +352,7 @@ Done criteria:
 - DONE 2026-05-27: release smoke повторен после baseline: launcher status показывает web/Qdrant up, Cloud Drive CLI stats green (`76205` files, `109836` versions, pending jobs `0`), support bundle/backup/restore green; Docker smoke исправлен на default isolated ports `18080`/`16333` и health probes вернули HTTP 200. Runtime warning: Telegram bot down из-за timeout к `api.telegram.org` при включенном токене.
 - DONE 2026-05-27: Cloud Drive preview включен для storage-backed файлов: API `GET /api/cloud-drive/preview` отдает local storage inline, explorer/search открывают drawer просмотра без зависимости от исходного `source_path`, ACL/session проверяются тем же контуром, что download.
 - DONE 2026-05-27: backend scanner/import ingestion добавлен: `cloud_import_sources`, durable `import` jobs, CLI `import-source-add/list/run`, admin API для import sources, копирование новых/изменённых файлов в storage и постановка `reindex` только для изменившихся версий.
+- DONE 2026-06-16: admin UI для scanner/import sources добавлен в настройки Cloud Drive: список источников, добавление/обновление папки, enable/disable, запуск import job в фоне, лимит пробного запуска и отображение import jobs в общей истории задач.
 
 Состав:
 
@@ -370,7 +371,7 @@ Done criteria:
 
 - registry search с ACL и pagination;
 - UI sharing для внутренних пользователей;
-- import folders and scanner ingestion backend done; следующий слой - UI управления источниками и расписание;
+- import folders and scanner ingestion backend + admin UI done; следующий слой - расписание/политики по отдельным источникам и более подробная диагностика ошибок импорта;
 - search quality v2: eval cases под реальные документы;
 - latency profiling and cache tuning;
 - ACL management UI;
