@@ -33,6 +33,7 @@ from rag_catalog.core.log_history import (
     read_history_tail_lines,
 )
 from rag_catalog.core.rag_core import RAGSearcher
+from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .state import (
     PageState,
@@ -40,6 +41,7 @@ from .state import (
     _get_telemetry,
     _log_app_event,
     _username,
+    _users_db_path,
 )
 from .system import (
     _STAGE_LABELS,
@@ -1224,6 +1226,16 @@ def _cd_acl_allows(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) 
         return True
     username = str((user or {}).get("username") or "").strip().lower()
     role = str((user or {}).get("role") or "").strip().lower()
+    group_keys = {
+        str(group_id or "").strip().lower()
+        for group_id in ((user or {}).get("group_ids") or [])
+        if str(group_id or "").strip()
+    }
+    for group in ((user or {}).get("groups") or []):
+        if isinstance(group, dict):
+            for key in (group.get("id"), group.get("name")):
+                if str(key or "").strip():
+                    group_keys.add(str(key).strip().lower())
     normalized_path = str(path or "").strip().strip("/")
 
     def _prefixes(section: str, key: str) -> list[str]:
@@ -1242,6 +1254,7 @@ def _cd_acl_allows(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) 
     allowed = [
         *_prefixes("users", username),
         *_prefixes("roles", role),
+        *(prefix for group_key in group_keys for prefix in _prefixes("groups", group_key)),
     ]
     if not allowed:
         return False
@@ -1271,6 +1284,7 @@ def _cd_registry_acl_allows(
             svc.user_can_access(
                 username=str((user or {}).get("username") or ""),
                 role=str((user or {}).get("role") or ""),
+                groups=[str(group_id) for group_id in ((user or {}).get("group_ids") or [])],
                 path=path,
                 file_id=file_id,
                 required_level=required_level,
@@ -1329,10 +1343,20 @@ def _filter_cloud_drive_search_results(
 ) -> List[Dict[str, Any]]:
     if not results:
         return results
+    effective_user = dict(user or {})
+    username = str(effective_user.get("username") or "").strip().lower()
+    if username:
+        try:
+            fresh_user = UserAuthDB(str(_users_db_path(cfg))).get_user(username=username)
+            if fresh_user is not None:
+                effective_user = fresh_user
+        except Exception:
+            effective_user["group_ids"] = []
+            effective_user["groups"] = []
     service: CloudDriveService | None = None
     decisions: Dict[tuple[str, str], bool] = {}
     filtered: List[Dict[str, Any]] = []
-    is_admin = str((user or {}).get("role") or "").strip().lower() == "admin"
+    is_admin = str(effective_user.get("role") or "").strip().lower() == "admin"
     for item in results:
         if service is None:
             try:
@@ -1354,7 +1378,7 @@ def _filter_cloud_drive_search_results(
         key = (cloud_file_id, node_path)
         allowed = decisions.get(key)
         if allowed is None:
-            allowed = _cd_registry_acl_allows(cfg, user, node_path, file_id=cloud_file_id, service=service)
+            allowed = _cd_registry_acl_allows(cfg, effective_user, node_path, file_id=cloud_file_id, service=service)
             decisions[key] = allowed
         if allowed:
             item.setdefault("cloud_path", node_path)

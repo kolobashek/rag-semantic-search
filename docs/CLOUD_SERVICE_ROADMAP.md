@@ -161,7 +161,7 @@ Exit gate: другой инженер поднимает и проверяет 
 Результаты:
 
 - DONE 2026-07-10: Explorer sharing для пользователей/ролей: grant/revoke и `who has access` без перезагрузки страницы;
-- группы и membership management;
+- IMPLEMENTED 2026-07-10: группы и membership management: immutable group ID, active/archive lifecycle, admin UI/API и group ACL в Explorer/API/search; остаётся browser smoke экрана управления группами;
 - DONE 2026-07-10: public links как default-off tenant policy: строгий expiration, active list, copy/revoke, API enforcement и audit без сырого token;
 - audit coverage для чувствительных пользовательских и admin actions;
 - admin health view и backup freshness;
@@ -302,7 +302,7 @@ flowchart LR
 ### P0 - До Paid Dedicated Pilot
 
 1. DONE 2026-07-10: Explorer sharing для пользователей/ролей, `who has access`, expiration/revoke и default-off public-link policy.
-2. Добавить группы и membership management; подключить группы к Explorer sharing.
+2. IMPLEMENTED 2026-07-10: группы/membership и group sharing подключены к session, Explorer, API и search ACL; закрыть browser smoke экрана управления группами.
 3. Устранить hard reload/reconnect/search-reset сценарии и добавить browser regression tests.
 4. Довести audit coverage и negative ACL tests до всех read/share/delete flows.
 5. Автоматизировать fresh install, upgrade preflight и restore drill.

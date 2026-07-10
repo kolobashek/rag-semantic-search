@@ -25,7 +25,7 @@ MAX_SESSION_TTL_DAYS = 7
 SESSION_TTL_SETTING_KEY = "session_ttl_days"
 SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
 ANY_TELEGRAM_CHAT_ID = "*"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _utc_now() -> str:
@@ -89,6 +89,26 @@ class UserAuthDB:
                         created_at TEXT NOT NULL,
                         verified_at TEXT,
                         last_login_at TEXT
+                    );
+
+                    CREATE TABLE IF NOT EXISTS user_groups (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_by TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS user_group_members (
+                        group_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        added_by TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(group_id, username),
+                        FOREIGN KEY(group_id) REFERENCES user_groups(id) ON DELETE CASCADE,
+                        FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
                     );
 
                     CREATE TABLE IF NOT EXISTS verification_tokens (
@@ -198,6 +218,12 @@ class UserAuthDB:
 
                     CREATE INDEX IF NOT EXISTS idx_users_status
                       ON users(status);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_groups_name
+                      ON user_groups(lower(name));
+                    CREATE INDEX IF NOT EXISTS idx_user_groups_status
+                      ON user_groups(status, lower(name));
+                    CREATE INDEX IF NOT EXISTS idx_user_group_members_username
+                      ON user_group_members(username, group_id);
                     CREATE INDEX IF NOT EXISTS idx_tokens_code
                       ON verification_tokens(code, telegram_chat_id, status);
                     CREATE INDEX IF NOT EXISTS idx_reset_tokens_code
@@ -1000,6 +1026,8 @@ class UserAuthDB:
                         (_utc_now(), usr),
                     )
                 data.pop("password_hash", None)
+                data["groups"] = self._list_user_groups_conn(conn, usr)
+                data["group_ids"] = [str(group["id"]) for group in data["groups"]]
                 return data
 
     def login_with_reason(
@@ -1032,6 +1060,8 @@ class UserAuthDB:
         with self._lock:
             with self._connect() as conn:
                 conn.execute("UPDATE users SET last_login_at=? WHERE username=?", (_utc_now(), usr))
+                data["groups"] = self._list_user_groups_conn(conn, usr)
+                data["group_ids"] = [str(group["id"]) for group in data["groups"]]
         return {"user": data, "reason": "ok"}
 
     def has_default_admin_password(self) -> bool:
@@ -1190,6 +1220,8 @@ class UserAuthDB:
                 if row is None or str(row["status"]) != "active":
                     return None
                 user = dict(row)
+                user["groups"] = self._list_user_groups_conn(conn, str(user.get("username") or ""))
+                user["group_ids"] = [str(group["id"]) for group in user["groups"]]
         self.touch_session(value)
         return user
 
@@ -1219,7 +1251,12 @@ class UserAuthDB:
                     """,
                     (usr,),
                 ).fetchone()
-                return dict(row) if row else None
+                if row is None:
+                    return None
+                user = dict(row)
+                user["groups"] = self._list_user_groups_conn(conn, usr)
+                user["group_ids"] = [str(group["id"]) for group in user["groups"]]
+                return user
 
     def get_user_by_telegram_chat_id(self, telegram_chat_id: str) -> Optional[Dict[str, Any]]:
         chat = str(telegram_chat_id or "").strip()
@@ -1237,7 +1274,12 @@ class UserAuthDB:
                     """,
                     (chat,),
                 ).fetchone()
-                return dict(row) if row else None
+                if row is None:
+                    return None
+                user = dict(row)
+                user["groups"] = self._list_user_groups_conn(conn, str(user.get("username") or ""))
+                user["group_ids"] = [str(group["id"]) for group in user["groups"]]
+                return user
 
     def _sanitize_username_hint(self, value: str) -> str:
         normalized = re.sub(r"[^a-z0-9_.-]+", "_", str(value or "").strip().lower())
@@ -1372,7 +1414,192 @@ class UserAuthDB:
                     ORDER BY role='admin' DESC, username
                     """
                 ).fetchall()
-                return [dict(row) for row in rows]
+                users = [dict(row) for row in rows]
+                for user in users:
+                    username = str(user.get("username") or "")
+                    user["groups"] = self._list_user_groups_conn(conn, username, active_only=False)
+                    user["group_ids"] = [str(group["id"]) for group in user["groups"] if group.get("status") == "active"]
+                return users
+
+    @staticmethod
+    def _list_user_groups_conn(
+        conn: sqlite3.Connection,
+        username: str,
+        *,
+        active_only: bool = True,
+    ) -> list[Dict[str, Any]]:
+        usr = str(username or "").strip().lower()
+        if not usr:
+            return []
+        status_clause = "AND g.status='active'" if active_only else ""
+        rows = conn.execute(
+            f"""
+            SELECT g.id, g.name, g.description, g.status, g.created_by, g.created_at, g.updated_at,
+                   m.added_by, m.created_at AS member_since
+            FROM user_group_members m
+            JOIN user_groups g ON g.id=m.group_id
+            WHERE m.username=? {status_clause}
+            ORDER BY lower(g.name)
+            """,
+            (usr,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_user_groups(self, *, username: str, active_only: bool = True) -> list[Dict[str, Any]]:
+        with self._lock:
+            with self._connect() as conn:
+                return self._list_user_groups_conn(conn, username, active_only=active_only)
+
+    def get_group(self, group_id: str) -> Optional[Dict[str, Any]]:
+        clean_id = str(group_id or "").strip().lower()
+        if not clean_id:
+            return None
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute("SELECT * FROM user_groups WHERE lower(id)=?", (clean_id,)).fetchone()
+                if row is None:
+                    return None
+                group = dict(row)
+                group["members"] = [
+                    str(member["username"])
+                    for member in conn.execute(
+                        "SELECT username FROM user_group_members WHERE group_id=? ORDER BY lower(username)",
+                        (str(row["id"]),),
+                    ).fetchall()
+                ]
+                group["member_count"] = len(group["members"])
+                return group
+
+    def list_groups(self, *, include_archived: bool = True) -> list[Dict[str, Any]]:
+        where = "" if include_archived else "WHERE g.status='active'"
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT g.*, COUNT(m.username) AS member_count
+                    FROM user_groups g
+                    LEFT JOIN user_group_members m ON m.group_id=g.id
+                    {where}
+                    GROUP BY g.id
+                    ORDER BY g.status!='active', lower(g.name)
+                    """
+                ).fetchall()
+                groups = [dict(row) for row in rows]
+                members = conn.execute(
+                    "SELECT group_id, username FROM user_group_members ORDER BY lower(username)"
+                ).fetchall()
+        members_by_group: Dict[str, list[str]] = {}
+        for member in members:
+            members_by_group.setdefault(str(member["group_id"]), []).append(str(member["username"]))
+        for group in groups:
+            group["members"] = members_by_group.get(str(group["id"]), [])
+        return groups
+
+    def create_group(
+        self,
+        *,
+        name: str,
+        description: str = "",
+        created_by: str = "",
+    ) -> Dict[str, Any]:
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            raise RuntimeError("Укажите название группы.")
+        if len(clean_name) > 120:
+            raise RuntimeError("Название группы не должно превышать 120 символов.")
+        group_id = secrets.token_hex(16)
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO user_groups (id, name, description, status, created_by, created_at, updated_at)
+                        VALUES (?, ?, ?, 'active', ?, ?, ?)
+                        """,
+                        (
+                            group_id,
+                            clean_name,
+                            str(description or "").strip(),
+                            str(created_by or "").strip().lower(),
+                            now,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise RuntimeError("Группа с таким названием уже существует.") from exc
+        return self.get_group(group_id) or {}
+
+    def update_group(
+        self,
+        *,
+        group_id: str,
+        name: str,
+        description: str = "",
+        status: str = "active",
+    ) -> Optional[Dict[str, Any]]:
+        clean_id = str(group_id or "").strip()
+        clean_name = str(name or "").strip()
+        clean_status = str(status or "active").strip().lower()
+        if not clean_id or not clean_name:
+            raise RuntimeError("Не заданы группа или название.")
+        if len(clean_name) > 120:
+            raise RuntimeError("Название группы не должно превышать 120 символов.")
+        if clean_status not in {"active", "archived"}:
+            raise RuntimeError("Недопустимый статус группы.")
+        with self._lock:
+            with self._connect() as conn:
+                try:
+                    cur = conn.execute(
+                        """
+                        UPDATE user_groups
+                        SET name=?, description=?, status=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (clean_name, str(description or "").strip(), clean_status, _utc_now(), clean_id),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise RuntimeError("Группа с таким названием уже существует.") from exc
+                if cur.rowcount <= 0:
+                    return None
+        return self.get_group(clean_id)
+
+    def add_group_member(self, *, group_id: str, username: str, added_by: str = "") -> bool:
+        clean_id = str(group_id or "").strip()
+        usr = str(username or "").strip().lower()
+        if not clean_id or not usr:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                group = conn.execute("SELECT status FROM user_groups WHERE id=?", (clean_id,)).fetchone()
+                user = conn.execute("SELECT status FROM users WHERE username=?", (usr,)).fetchone()
+                if group is None:
+                    raise RuntimeError("Группа не найдена.")
+                if str(group["status"] or "") != "active":
+                    raise RuntimeError("Нельзя добавлять участников в архивную группу.")
+                if user is None:
+                    raise RuntimeError("Пользователь не найден.")
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO user_group_members (group_id, username, added_by, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (clean_id, usr, str(added_by or "").strip().lower(), _utc_now()),
+                )
+                return cur.rowcount > 0
+
+    def remove_group_member(self, *, group_id: str, username: str) -> bool:
+        clean_id = str(group_id or "").strip()
+        usr = str(username or "").strip().lower()
+        if not clean_id or not usr:
+            return False
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "DELETE FROM user_group_members WHERE group_id=? AND username=?",
+                    (clean_id, usr),
+                )
+                return cur.rowcount > 0
 
     def update_profile(
         self,

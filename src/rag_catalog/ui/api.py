@@ -433,6 +433,110 @@ def api_cloud_drive_import_source_run(
     return result
 
 
+@app.get("/api/user-groups")
+def api_user_groups(
+    include_archived: bool = False,
+    authorization: AuthHeader = "",
+) -> List[Dict[str, Any]]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    is_admin = str(user.get("role") or "") == "admin"
+    groups = _get_api_auth_db(cfg).list_groups(include_archived=bool(include_archived and is_admin))
+    if is_admin:
+        return groups
+    return [
+        {"id": group.get("id"), "name": group.get("name"), "description": group.get("description", "")}
+        for group in groups
+        if str(group.get("status") or "") == "active"
+    ]
+
+
+@app.post("/api/user-groups")
+def api_user_group_create(
+    name: str = "",
+    description: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True, admin_only=True)
+    try:
+        group = _get_api_auth_db(cfg).create_group(
+            name=name,
+            description=description,
+            created_by=str(user.get("username") or ""),
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "group_create", ok=False, details={"name": name, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "group_create", details={"group_id": group.get("id"), "name": group.get("name")})
+    return group
+
+
+@app.patch("/api/user-groups")
+def api_user_group_update(
+    group_id: str = "",
+    name: str = "",
+    description: str = "",
+    status: str = "active",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True, admin_only=True)
+    try:
+        group = _get_api_auth_db(cfg).update_group(
+            group_id=group_id,
+            name=name,
+            description=description,
+            status=status,
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "group_update", ok=False, details={"group_id": group_id, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    if group is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена.")
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "group_update",
+        details={"group_id": group.get("id"), "name": group.get("name"), "status": group.get("status")},
+    )
+    return group
+
+
+@app.post("/api/user-groups/members")
+def api_user_group_member_add(
+    group_id: str = "",
+    username: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True, admin_only=True)
+    try:
+        added = _get_api_auth_db(cfg).add_group_member(
+            group_id=group_id,
+            username=username,
+            added_by=str(user.get("username") or ""),
+        )
+    except RuntimeError as exc:
+        _audit_cloud_drive_api_event(cfg, user, "group_member_add", ok=False, details={"group_id": group_id, "username": username, "error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_cloud_drive_api_event(cfg, user, "group_member_add", ok=added, details={"group_id": group_id, "username": username})
+    return {"ok": bool(added), "group_id": str(group_id or "").strip(), "username": str(username or "").strip().lower()}
+
+
+@app.delete("/api/user-groups/members")
+def api_user_group_member_remove(
+    group_id: str = "",
+    username: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True, admin_only=True)
+    removed = _get_api_auth_db(cfg).remove_group_member(group_id=group_id, username=username)
+    _audit_cloud_drive_api_event(cfg, user, "group_member_remove", ok=removed, details={"group_id": group_id, "username": username})
+    return {"ok": bool(removed), "group_id": str(group_id or "").strip(), "username": str(username or "").strip().lower()}
+
+
 @app.post("/api/cloud-drive/permissions")
 def api_cloud_drive_permissions(
     subject_type: str = "",
@@ -446,6 +550,12 @@ def api_cloud_drive_permissions(
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
+    clean_subject_type = str(subject_type or "").strip().lower()
+    if clean_subject_type == "group":
+        group = _get_api_auth_db(cfg).get_group(subject_id)
+        if group is None or str(group.get("status") or "") != "active":
+            raise HTTPException(status_code=400, detail="Активная группа не найдена.")
+        subject_id = str(group.get("id") or "")
     is_admin = str(user.get("role") or "") == "admin"
     if not is_admin:
         if not str(path or "").strip():
@@ -454,8 +564,8 @@ def api_cloud_drive_permissions(
             raise HTTPException(status_code=403, detail="Только админ может выдавать доступ по resource_id.")
         if str(access_level or "viewer").strip().lower() not in {"viewer", "read", "editor", "write"}:
             raise HTTPException(status_code=403, detail="Пользователь может выдавать только чтение или редактирование.")
-        if str(subject_type or "").strip().lower() not in {"user", "*"}:
-            raise HTTPException(status_code=403, detail="Пользователь может открыть доступ всем или конкретному пользователю.")
+        if clean_subject_type not in {"user", "group", "*"}:
+            raise HTTPException(status_code=403, detail="Пользователь может открыть доступ всем, пользователю или группе.")
         _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
     try:
         if str(path or "").strip() or not str(resource_type or "").strip():

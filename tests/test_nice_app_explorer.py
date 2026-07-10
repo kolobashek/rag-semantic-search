@@ -68,6 +68,11 @@ from rag_catalog.ui.api import (
     api_cloud_drive_trash,
     api_cloud_drive_upload,
     api_cloud_drive_versions,
+    api_user_group_create,
+    api_user_group_member_add,
+    api_user_group_member_remove,
+    api_user_group_update,
+    api_user_groups,
 )
 from rag_catalog.ui.helpers import (
     _apply_explorer_filter_input,
@@ -2097,6 +2102,84 @@ def test_cloud_drive_search_filter_uses_registry_acl(tmp_path) -> None:
     )
 
     assert [item["filename"] for item in filtered] == ["report.txt"]
+
+
+def test_group_membership_controls_api_and_search_acl(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_enabled": True,
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "users_db_path": str(tmp_path / "users.db"),
+    }
+    auth_db = UserAuthDB(cfg["users_db_path"])
+    assert auth_db.admin_create_user(username="alice", password="8215", role="user", status="active")
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    finance = service.registry.upsert_folder(path="Finance", name="Finance", parent_id=root.id, depth=1)
+    finance_file = service.registry.upsert_file(
+        folder_id=finance.id,
+        path="Finance/report.txt",
+        name="report.txt",
+        storage_key="objects/report",
+        mime_type="text/plain",
+        size_bytes=12,
+        checksum="report",
+        source_path="",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    admin = {"username": "admin", "role": "admin", "status": "active", "group_ids": []}
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: dict(admin))
+
+    group = api_user_group_create(name="Finance team", description="Financial documents")
+    assert api_user_group_member_add(group_id=group["id"], username="alice")["ok"] is True
+    assert api_user_groups(include_archived=True)[0]["members"] == ["alice"]
+    permission = api_cloud_drive_permissions(
+        subject_type="group",
+        subject_id=group["id"],
+        path="Finance",
+        access_level="viewer",
+    )
+    assert permission["subject_type"] == "group"
+
+    alice = auth_db.get_user(username="alice")
+    assert alice is not None
+    assert alice["group_ids"] == [group["id"]]
+    assert service.user_can_access(
+        username="alice",
+        role="user",
+        groups=alice["group_ids"],
+        path="Finance/report.txt",
+    )
+    assert [
+        item["filename"]
+        for item in _filter_cloud_drive_search_results(
+            cfg,
+            alice,
+            [{"filename": "report.txt", "cloud_file_id": finance_file.id, "cloud_path": finance_file.path}],
+        )
+    ] == ["report.txt"]
+
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: dict(alice))
+    public_groups = api_user_groups()
+    assert public_groups == [{"id": group["id"], "name": "Finance team", "description": "Financial documents"}]
+
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: dict(admin))
+    api_user_group_update(
+        group_id=group["id"],
+        name="Finance team",
+        description="Financial documents",
+        status="archived",
+    )
+    alice_after_archive = auth_db.get_user(username="alice")
+    assert alice_after_archive is not None
+    assert alice_after_archive["group_ids"] == []
+    assert _filter_cloud_drive_search_results(
+        cfg,
+        alice,
+        [{"filename": "report.txt", "cloud_file_id": finance_file.id, "cloud_path": finance_file.path}],
+    ) == []
+    assert api_user_group_member_remove(group_id=group["id"], username="alice")["ok"] is True
 
 
 def test_cloud_drive_search_filter_maps_filesystem_paths_to_registry_acl(tmp_path) -> None:

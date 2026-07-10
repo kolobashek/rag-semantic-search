@@ -185,7 +185,8 @@ Cloud Drive — registry-backed файловый слой: папки, файл�
 - soft delete, trash, restore;
 - immutable storage keys and checksum dedup;
 - reindex and cleanup jobs with durable leases and stale-job recovery;
-- registry-backed ACL/RBAC: user/role grants for path, folder, file, `viewer/editor/admin` access levels;
+- registry-backed ACL/RBAC: user/group/role grants for path, folder, file, `viewer/editor/admin` access levels;
+- user groups: immutable group id, active/archived lifecycle, membership management and session/search ACL propagation;
 - Explorer sharing: выдача и отзыв внутренних доступов, `who has access`, управляемые public links со сроком действия;
 - index coverage diagnostics: registry files vs current `index_state.db`;
 - sync clients, folder pairs, selective sync, conflicts;
@@ -253,6 +254,11 @@ POST /api/cloud-drive/import-sources/run
 GET  /api/cloud-drive/changes
 GET  /api/cloud-drive/storage-health
 GET  /api/cloud-drive/index-coverage
+GET  /api/user-groups
+POST /api/user-groups
+PATCH /api/user-groups
+POST /api/user-groups/members
+DELETE /api/user-groups/members
 GET  /api/cloud-drive/permissions
 DELETE /api/cloud-drive/permissions
 POST /api/cloud-drive/share-links

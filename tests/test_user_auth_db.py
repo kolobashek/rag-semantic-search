@@ -90,6 +90,65 @@ def test_session_token_restores_and_revokes_user(tmp_path) -> None:
     assert db.get_user_by_session(token) is None
 
 
+def test_group_membership_is_exposed_in_login_and_session(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    assert db.admin_create_user(
+        username="alice",
+        display_name="Alice",
+        password="secret",
+        role="user",
+        status="active",
+        must_change_password=False,
+    )
+    group = db.create_group(name="Бухгалтерия", description="Финансовые документы", created_by="admin")
+
+    assert db.add_group_member(group_id=group["id"], username="alice", added_by="admin") is True
+    assert db.add_group_member(group_id=group["id"], username="alice", added_by="admin") is False
+
+    login_user = db.login(username="alice", password="secret")
+    assert login_user is not None
+    assert login_user["group_ids"] == [group["id"]]
+    assert login_user["groups"][0]["name"] == "Бухгалтерия"
+
+    session = db.create_session(username="alice")
+    restored = db.get_user_by_session(session)
+    assert restored is not None
+    assert restored["group_ids"] == [group["id"]]
+
+    renamed = db.update_group(
+        group_id=group["id"],
+        name="Финансы",
+        description="Обновлено",
+        status="active",
+    )
+    assert renamed is not None
+    assert renamed["id"] == group["id"]
+    assert db.get_user(username="alice")["groups"][0]["name"] == "Финансы"
+
+    archived = db.update_group(
+        group_id=group["id"],
+        name="Финансы",
+        description="Обновлено",
+        status="archived",
+    )
+    assert archived is not None
+    assert db.get_user(username="alice")["group_ids"] == []
+    assert db.list_user_groups(username="alice", active_only=False)[0]["status"] == "archived"
+    with pytest.raises(RuntimeError, match="архивную группу"):
+        db.add_group_member(group_id=group["id"], username="admin", added_by="admin")
+
+    assert db.remove_group_member(group_id=group["id"], username="alice") is True
+    assert db.remove_group_member(group_id=group["id"], username="alice") is False
+
+
+def test_group_names_are_unique_case_insensitively(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    db.create_group(name="Managers")
+
+    with pytest.raises(RuntimeError, match="уже существует"):
+        db.create_group(name="managers")
+
+
 def test_session_default_ttl_is_seven_days(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     token = db.create_session(username="admin")

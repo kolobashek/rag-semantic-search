@@ -7,7 +7,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from rag_catalog.core.db_contract import ensure_schema_version
 from rag_catalog.core.sqlite_runtime import prepare_sqlite_connection
@@ -896,7 +896,7 @@ class CloudDriveRegistryDB:
         clean_subject_type = str(subject_type or "").strip().lower()
         clean_resource_type = str(resource_type or "").strip().lower()
         clean_access = str(access_level or "viewer").strip().lower()
-        if clean_subject_type not in {"user", "role", "*"}:
+        if clean_subject_type not in {"user", "role", "group", "*"}:
             raise RuntimeError("Недопустимый subject_type для Cloud Drive permission.")
         if clean_resource_type not in {"file", "folder", "path", "global"}:
             raise RuntimeError("Недопустимый resource_type для Cloud Drive permission.")
@@ -1297,12 +1297,14 @@ class CloudDriveRegistryDB:
         *,
         username: str,
         role: str = "",
+        groups: Iterable[str] | None = None,
         path: str = "",
         file_id: str = "",
         required_level: str = "viewer",
     ) -> bool:
         clean_username = str(username or "").strip().lower()
         clean_role = str(role or "").strip().lower()
+        clean_groups = {str(group or "").strip().lower() for group in (groups or []) if str(group or "").strip()}
         clean_path = self._normalize_path(path)
         clean_file_id = str(file_id or "").strip()
         required_rank = self._access_rank(required_level)
@@ -1360,6 +1362,8 @@ class CloudDriveRegistryDB:
                 return bool(clean_username or subject_id == "*")
             if subject_type == "role" and subject_id in {clean_role, "*"}:
                 return bool(clean_role or subject_id == "*")
+            if subject_type == "group" and subject_id in clean_groups:
+                return True
             return False
 
         def path_matches(resource_id: str) -> bool:

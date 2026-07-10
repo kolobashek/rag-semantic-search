@@ -132,11 +132,161 @@ def render_settings_screen(
                 ui.button("Создать", icon="person_add", on_click=create_user).props("unelevated")
 
             users = auth_db.list_users()
+            ui.separator()
+            with ui.expansion("Группы доступа", icon="groups").classes("w-full"):
+                ui.label(
+                    "Группы объединяют пользователей для выдачи прав в Cloud Drive. "
+                    "Архивная группа сохраняет историю, но больше не даёт доступ."
+                ).classes("rag-meta text-xs")
+                with ui.expansion("Создать группу", icon="group_add").classes("w-full"):
+                    new_group_name = ui.input("Название группы").props("dense outlined").classes("w-full")
+                    new_group_description = ui.input("Описание").props("dense outlined").classes("w-full")
+
+                    def create_group() -> None:
+                        try:
+                            group = auth_db.create_group(
+                                name=str(new_group_name.value or ""),
+                                description=str(new_group_description.value or ""),
+                                created_by=_username(state),
+                            )
+                            _log_app_event(
+                                state,
+                                "settings",
+                                "group_create_ui",
+                                details={"group_id": group.get("id"), "name": group.get("name")},
+                            )
+                            ui.notify("Группа создана.", type="positive")
+                            render_fn()
+                        except Exception as exc:
+                            ui.notify(f"Не удалось создать группу: {exc}", type="negative")
+
+                    ui.button("Создать группу", icon="group_add", on_click=create_group).props("outline dense")
+
+                groups = auth_db.list_groups(include_archived=True)
+                if not groups:
+                    ui.label("Групп пока нет.").classes("rag-meta text-xs")
+                user_options = {
+                    str(user.get("username") or ""): str(user.get("display_name") or user.get("username") or "")
+                    for user in users
+                    if str(user.get("username") or "")
+                }
+                for group in groups:
+                    group_id = str(group.get("id") or "")
+                    group_name = str(group.get("name") or "")
+                    group_status = str(group.get("status") or "active")
+                    members = [str(username) for username in (group.get("members") or [])]
+                    status_label = "архив" if group_status == "archived" else "активна"
+                    with ui.expansion(
+                        f"{group_name} · {len(members)} уч. · {status_label}",
+                        icon="group_off" if group_status == "archived" else "groups",
+                    ).classes("w-full"):
+                        group_name_input = ui.input("Название", value=group_name).props("dense outlined").classes("w-full")
+                        group_description_input = ui.input(
+                            "Описание",
+                            value=str(group.get("description") or ""),
+                        ).props("dense outlined").classes("w-full")
+                        group_status_input = ui.select(
+                            {"active": "Активна", "archived": "Архивная"},
+                            value=group_status,
+                            label="Статус",
+                        ).props("dense outlined").classes("w-full max-w-xs")
+
+                        def save_group(
+                            group_id: str = group_id,
+                            name_input: Any = group_name_input,
+                            description_input: Any = group_description_input,
+                            status_input: Any = group_status_input,
+                        ) -> None:
+                            try:
+                                saved = auth_db.update_group(
+                                    group_id=group_id,
+                                    name=str(name_input.value or ""),
+                                    description=str(description_input.value or ""),
+                                    status=str(status_input.value or "active"),
+                                )
+                                if saved is None:
+                                    raise RuntimeError("Группа не найдена.")
+                                _log_app_event(
+                                    state,
+                                    "settings",
+                                    "group_update_ui",
+                                    details={"group_id": group_id, "status": saved.get("status")},
+                                )
+                                ui.notify("Группа обновлена.", type="positive")
+                                _refresh_current_user(state)
+                                render_fn()
+                            except Exception as exc:
+                                ui.notify(f"Не удалось обновить группу: {exc}", type="negative")
+
+                        ui.button("Сохранить группу", icon="save", on_click=save_group).props("outline dense")
+                        ui.separator()
+                        ui.label("Участники").classes("text-sm font-medium")
+                        available_users = {key: label for key, label in user_options.items() if key not in members}
+                        member_select = ui.select(
+                            available_users,
+                            label="Добавить пользователя",
+                        ).props("dense outlined").classes("w-full")
+                        member_select.set_enabled(group_status == "active" and bool(available_users))
+
+                        def add_member(
+                            group_id: str = group_id,
+                            member_select: Any = member_select,
+                        ) -> None:
+                            username = str(member_select.value or "")
+                            if not username:
+                                ui.notify("Выберите пользователя.", type="warning")
+                                return
+                            try:
+                                added = auth_db.add_group_member(
+                                    group_id=group_id,
+                                    username=username,
+                                    added_by=_username(state),
+                                )
+                                _log_app_event(
+                                    state,
+                                    "settings",
+                                    "group_member_add_ui",
+                                    details={"group_id": group_id, "username": username, "ok": added},
+                                )
+                                ui.notify("Участник добавлен." if added else "Пользователь уже в группе.", type="positive" if added else "warning")
+                                render_fn()
+                            except Exception as exc:
+                                ui.notify(f"Не удалось добавить участника: {exc}", type="negative")
+
+                        ui.button("Добавить", icon="person_add", on_click=add_member).props("flat dense")
+                        if not members:
+                            ui.label("Нет участников.").classes("rag-meta text-xs")
+                        for member_username in members:
+                            with ui.row().classes("w-full items-center gap-2 py-1"):
+                                ui.icon("person", size="16px").classes("text-slate-400")
+                                ui.label(user_options.get(member_username, member_username)).classes("text-sm flex-1 truncate")
+
+                                def remove_member(
+                                    group_id: str = group_id,
+                                    username: str = member_username,
+                                ) -> None:
+                                    removed = auth_db.remove_group_member(group_id=group_id, username=username)
+                                    _log_app_event(
+                                        state,
+                                        "settings",
+                                        "group_member_remove_ui",
+                                        details={"group_id": group_id, "username": username, "ok": removed},
+                                    )
+                                    ui.notify("Участник удалён." if removed else "Участник уже удалён.", type="positive" if removed else "warning")
+                                    _refresh_current_user(state)
+                                    render_fn()
+
+                                ui.button(
+                                    icon="person_remove",
+                                    on_click=remove_member,
+                                ).props('flat dense round size=sm color=negative aria-label="Удалить участника"').tooltip("Удалить из группы")
+
             for user in users:
                 username = str(user.get("username") or "")
                 role = str(user.get("role") or "user")
                 status = str(user.get("status") or "")
-                with ui.expansion(f"{username} · {role} · {status}", icon="person").classes("w-full"):
+                group_count = len(user.get("group_ids") or [])
+                with ui.expansion(f"{username} · {role} · {status} · групп: {group_count}", icon="person").classes("w-full"):
                     initial_user = {
                         "display_name": str(user.get("display_name") or ""),
                         "telegram_chat_id": str(user.get("telegram_chat_id") or ""),
@@ -766,20 +916,40 @@ def render_settings_screen(
                 acl_refresh_btn = ui.button(icon="refresh").props("flat dense round size=sm").classes("text-indigo-400")
                 acl_refresh_btn.tooltip("Обновить права")
             ui.label(
-                "Выдавайте доступ к папке или файлу пользователю, роли или всем. "
+                "Выдавайте доступ к папке или файлу пользователю, группе, роли или всем. "
                 "Если в реестре есть хотя бы одно правило, Cloud Drive переходит из совместимого open-access режима в ACL-режим."
             ).classes("rag-meta text-xs")
+            try:
+                all_acl_groups = _get_auth_db(state).list_groups(include_archived=True)
+            except Exception:
+                all_acl_groups = []
+            acl_group_options = {
+                str(group.get("id") or ""): str(group.get("name") or group.get("id") or "")
+                for group in all_acl_groups
+                if str(group.get("id") or "") and str(group.get("status") or "") == "active"
+            }
+            acl_group_labels = {
+                str(group.get("id") or ""): (
+                    f"{str(group.get('name') or group.get('id') or '')} (архив)"
+                    if str(group.get("status") or "") == "archived"
+                    else str(group.get("name") or group.get("id") or "")
+                )
+                for group in all_acl_groups
+                if str(group.get("id") or "")
+            }
             acl_box = ui.column().classes("w-full gap-2")
             with ui.expansion("Добавить правило доступа", icon="person_add").classes("w-full"):
                 acl_path_input = ui.input("Путь в Cloud Drive (* = весь реестр)", value="*").props("dense outlined").classes("w-full")
                 acl_path_input.tooltip("Например: Общие/Договоры. Значение * выдаёт глобальный доступ.")
                 with ui.row().classes("w-full gap-2 items-center"):
                     acl_subject_type = ui.select(
-                        {"user": "Пользователь", "role": "Роль", "*": "Все"},
+                        {"user": "Пользователь", "group": "Группа", "role": "Роль", "*": "Все"},
                         value="user",
                         label="Кому",
                     ).props("dense outlined").classes("min-w-40")
                     acl_subject_id = ui.input("Логин / роль / *", value="").props("dense outlined").classes("flex-1")
+                    acl_group_id = ui.select(acl_group_options, label="Группа").props("dense outlined").classes("flex-1")
+                    acl_group_id.set_visibility(False)
                 acl_access = ui.select(
                     {"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"},
                     value="viewer",
@@ -1142,7 +1312,7 @@ def render_settings_screen(
                                     on_click=lambda _e=None, sid=source_id, next_enabled=not enabled: _schedule_async(lambda sid=sid, next_enabled=next_enabled: set_import_source_enabled(sid, next_enabled)),
                                 ).props("flat dense round size=sm").tooltip("Выключить" if enabled else "Включить")
 
-            _ACL_SUBJECT_LABELS = {"user": "Пользователь", "role": "Роль", "*": "Все"}
+            _ACL_SUBJECT_LABELS = {"user": "Пользователь", "group": "Группа", "role": "Роль", "*": "Все"}
             _ACL_RESOURCE_LABELS = {"global": "Весь реестр", "path": "Путь", "folder": "Папка", "file": "Файл"}
             _ACL_ACCESS_LABELS = {"viewer": "Просмотр", "read": "Просмотр", "editor": "Редактирование", "write": "Редактирование", "admin": "Администрирование", "owner": "Администрирование"}
 
@@ -1192,7 +1362,8 @@ def render_settings_screen(
                         with ui.element("div").classes("cd-jobs-card w-full"):
                             with ui.row().classes("w-full items-center gap-2"):
                                 ui.icon("lock", size="18px").classes("text-indigo-400")
-                                ui.label(f"{_ACL_SUBJECT_LABELS.get(subject_type, subject_type)}: {subject_id}").classes("text-sm font-medium truncate")
+                                subject_name = acl_group_labels.get(subject_id, subject_id) if subject_type == "group" else subject_id
+                                ui.label(f"{_ACL_SUBJECT_LABELS.get(subject_type, subject_type)}: {subject_name}").classes("text-sm font-medium truncate")
                                 ui.space()
                                 ui.label(_ACL_ACCESS_LABELS.get(access, access or "-")).classes("rag-meta text-xs")
                             ui.label(f"{_ACL_RESOURCE_LABELS.get(resource_type, resource_type or 'Ресурс')}: {_permission_target_label(permission)}").classes("rag-path text-xs truncate")
@@ -1490,11 +1661,13 @@ def render_settings_screen(
             async def grant_acl_permission() -> None:
                 try:
                     subject_type = str(acl_subject_type.value or "").strip().lower()
-                    subject_id = str(acl_subject_id.value or "").strip()
+                    subject_id = str(
+                        (acl_group_id.value if subject_type == "group" else acl_subject_id.value) or ""
+                    ).strip()
                     if subject_type == "*":
                         subject_id = "*"
                     elif not subject_id:
-                        ui.notify("Укажите логин пользователя или название роли.", type="warning")
+                        ui.notify("Укажите пользователя, группу или роль.", type="warning")
                         return
                     target_path = str(acl_path_input.value or "").strip()
                     access_level = str(acl_access.value or "viewer").strip().lower()
@@ -1620,7 +1793,14 @@ def render_settings_screen(
             save_import_source_btn.on_click(lambda: _schedule_async(save_import_source))
             acl_refresh_btn.on_click(lambda: render_acl_permissions())
             acl_filter_input.on_value_change(lambda _: render_acl_permissions())
-            acl_subject_type.on_value_change(lambda _: acl_subject_id.set_value("*") if str(acl_subject_type.value or "") == "*" else None)
+            def refresh_acl_subject_input() -> None:
+                is_group = str(acl_subject_type.value or "") == "group"
+                acl_subject_id.set_visibility(not is_group)
+                acl_group_id.set_visibility(is_group)
+                if str(acl_subject_type.value or "") == "*":
+                    acl_subject_id.set_value("*")
+
+            acl_subject_type.on_value_change(lambda _: refresh_acl_subject_input())
             grant_acl_btn.on_click(lambda: _schedule_async(grant_acl_permission))
 
             with action_row:

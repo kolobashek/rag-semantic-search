@@ -172,6 +172,33 @@ def test_registry_user_permissions_close_open_default_for_regular_users(tmp_path
     assert registry.user_can_access(username='root', role='admin', path='Private/secret.txt', required_level='admin')
 
 
+def test_registry_group_permission_uses_explicit_membership(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен')
+    folder = registry.upsert_folder(path='Finance', name='Finance', parent_id=root.id, depth=1)
+    registry.grant_permission(
+        subject_type='group',
+        subject_id='group-finance',
+        resource_type='folder',
+        resource_id=folder.id,
+        access_level='viewer',
+    )
+
+    assert registry.user_can_access(
+        username='alice',
+        role='user',
+        groups=['group-finance'],
+        path='Finance/report.pdf',
+    )
+    assert not registry.user_can_access(username='alice', role='user', groups=[], path='Finance/report.pdf')
+    assert not registry.user_can_access(
+        username='alice',
+        role='user',
+        groups=['another-group'],
+        path='Finance/report.pdf',
+    )
+
+
 def test_registry_upsert_file_is_idempotent_for_same_content(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')

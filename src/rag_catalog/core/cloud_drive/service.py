@@ -9,7 +9,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +354,7 @@ class CloudDriveService:
         *,
         username: str,
         role: str = "",
+        groups: Iterable[str] | None = None,
         path: str = "",
         file_id: str = "",
         required_level: str = "viewer",
@@ -361,6 +362,7 @@ class CloudDriveService:
         return self.registry.user_can_access(
             username=username,
             role=role,
+            groups=groups,
             path=path,
             file_id=file_id,
             required_level=required_level,

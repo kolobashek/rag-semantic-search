@@ -229,10 +229,20 @@ def render_explorer_screen(
         """Registry-backed Cloud Drive explorer screen."""
         from rag_catalog.core.cloud_drive.models import CloudDriveFile, CloudDriveFolder  # noqa: PLC0415
 
+        try:
+            fresh_user = _get_auth_db(page_state).get_user(username=_username(page_state))
+            if fresh_user is not None:
+                page_state.current_user = fresh_user
+        except Exception:
+            if page_state.current_user is not None:
+                page_state.current_user["group_ids"] = []
+                page_state.current_user["groups"] = []
+
         def _cd_can(path: str, level: str = "viewer") -> bool:
             return svc.user_can_access(
                 username=_username(page_state),
                 role=str((page_state.current_user or {}).get("role") or ""),
+                groups=[str(group_id) for group_id in ((page_state.current_user or {}).get("group_ids") or [])],
                 path=path,
                 required_level=level,
             )
@@ -817,6 +827,24 @@ def render_explorer_screen(
 
             single_path = clean_paths[0] if len(clean_paths) == 1 else ""
             public_links_enabled = bool(page_state.cfg.get("cloud_drive_public_links_enabled"))
+            try:
+                share_groups = _get_auth_db(page_state).list_groups(include_archived=True)
+            except Exception:
+                share_groups = []
+            share_group_options = {
+                str(group.get("id") or ""): str(group.get("name") or group.get("id") or "")
+                for group in share_groups
+                if str(group.get("id") or "") and str(group.get("status") or "") == "active"
+            }
+            share_group_labels = {
+                str(group.get("id") or ""): (
+                    f"{str(group.get('name') or group.get('id') or '')} (архив)"
+                    if str(group.get("status") or "") == "archived"
+                    else str(group.get("name") or group.get("id") or "")
+                )
+                for group in share_groups
+                if str(group.get("id") or "")
+            }
 
             with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-full max-w-2xl max-h-[90vh] overflow-y-auto"):
                 ui.label(verb).classes("text-lg font-semibold")
@@ -830,11 +858,13 @@ def render_explorer_screen(
                 with ui.expansion("Внутренний доступ", icon="person_add", value=True).classes("w-full"):
                     with ui.row().classes("w-full gap-2 items-center"):
                         share_subject_type = ui.select(
-                            {"user": "Пользователь", "role": "Роль", "*": "Все"},
+                            {"user": "Пользователь", "group": "Группа", "role": "Роль", "*": "Все"},
                             value="user",
                             label="Кому",
                         ).props("dense outlined").classes("min-w-40")
                         share_subject_id = ui.input("Логин / роль / *", value="").props("dense outlined").classes("flex-1")
+                        share_group_id = ui.select(share_group_options, label="Группа").props("dense outlined").classes("flex-1")
+                        share_group_id.set_visibility(False)
                     share_access = ui.select(
                         {"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"},
                         value="viewer",
@@ -856,12 +886,13 @@ def render_explorer_screen(
                                 return
                             node = svc.registry.get_node_by_path(single_path)
                             direct_ids = {single_path, str(getattr(node, "id", "") or "")}
-                            subject_labels = {"user": "Пользователь", "role": "Роль", "*": "Все"}
+                            subject_labels = {"user": "Пользователь", "group": "Группа", "role": "Роль", "*": "Все"}
                             access_labels = {"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"}
                             for permission in permissions:
                                 permission_id = str(permission.get("id") or "")
                                 subject_type = str(permission.get("subject_type") or "")
                                 subject_id = str(permission.get("subject_id") or "*")
+                                subject_name = share_group_labels.get(subject_id, subject_id) if subject_type == "group" else subject_id
                                 access_level = str(permission.get("access_level") or "viewer")
                                 resource_type = str(permission.get("resource_type") or "")
                                 resource_id = str(permission.get("resource_id") or "")
@@ -874,7 +905,7 @@ def render_explorer_screen(
                                 with ui.row().classes("w-full items-center gap-2 py-1"):
                                     ui.icon("person" if subject_type == "user" else "group", size="16px").classes("text-slate-400")
                                     with ui.column().classes("gap-0 min-w-0 flex-1"):
-                                        ui.label(f"{subject_labels.get(subject_type, subject_type)}: {subject_id}").classes("text-sm truncate")
+                                        ui.label(f"{subject_labels.get(subject_type, subject_type)}: {subject_name}").classes("text-sm truncate")
                                         ui.label(f"{access_labels.get(access_level, access_level)} · {scope}").classes("rag-meta text-xs")
                                     ui.button(
                                         icon="person_remove",
@@ -906,11 +937,13 @@ def render_explorer_screen(
                     async def _grant_internal_share() -> None:
                         try:
                             subject_type = str(share_subject_type.value or "").strip().lower()
-                            subject_id = str(share_subject_id.value or "").strip()
+                            subject_id = str(
+                                (share_group_id.value if subject_type == "group" else share_subject_id.value) or ""
+                            ).strip()
                             if subject_type == "*":
                                 subject_id = "*"
                             elif not subject_id:
-                                ui.notify("Укажите логин пользователя или роль.", type="warning")
+                                ui.notify("Укажите пользователя, группу или роль.", type="warning")
                                 return
                             access_level = str(share_access.value or "viewer").strip().lower()
                             granted: list[dict[str, str]] = []
@@ -934,7 +967,14 @@ def render_explorer_screen(
                         except Exception as exc:
                             ui.notify(f"Не удалось выдать доступ: {exc}", type="negative")
 
-                    share_subject_type.on_value_change(lambda _: share_subject_id.set_value("*") if str(share_subject_type.value or "") == "*" else None)
+                    def refresh_share_subject_input() -> None:
+                        is_group = str(share_subject_type.value or "") == "group"
+                        share_subject_id.set_visibility(not is_group)
+                        share_group_id.set_visibility(is_group)
+                        if str(share_subject_type.value or "") == "*":
+                            share_subject_id.set_value("*")
+
+                    share_subject_type.on_value_change(lambda _: refresh_share_subject_input())
                     ui.button("Выдать доступ", icon="lock_open", on_click=_grant_internal_share).props("outline dense")
                     _render_internal_access()
 

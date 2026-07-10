@@ -264,6 +264,22 @@ def test_cloud_drive_explorer_exposes_complete_sharing_workflow() -> None:
     assert "cloud_drive_public_links_enabled" in explorer_source
     assert "Разрешить публичные ссылки" in settings_source
     assert 'audit_values[secret_key] = "***"' in settings_source
+    assert '"group": "Группа"' in explorer_source
+    assert "share_group_options" in explorer_source
+
+
+def test_settings_exposes_group_membership_management() -> None:
+    source = inspect.getsource(settings_view.render_settings_screen)
+
+    assert "Группы доступа" in source
+    assert "Создать группу" in source
+    assert "auth_db.list_groups" in source
+    assert "auth_db.create_group" in source
+    assert "auth_db.update_group" in source
+    assert "auth_db.add_group_member" in source
+    assert "auth_db.remove_group_member" in source
+    assert "group_member_add_ui" in source
+    assert "group_member_remove_ui" in source
 
 
 def test_search_recovery_restores_results_after_reload() -> None:
