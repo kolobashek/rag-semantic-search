@@ -23,7 +23,7 @@ from .models import (
     CloudDriveSyncPair,
 )
 
-CLOUD_DRIVE_SCHEMA_VERSION = 7
+CLOUD_DRIVE_SCHEMA_VERSION = 8
 
 
 def _utc_now() -> str:
@@ -253,7 +253,11 @@ class CloudDriveRegistryDB:
                 conn.executescript(
                     '''
                     CREATE INDEX IF NOT EXISTS idx_cloud_folders_parent ON cloud_folders(parent_id, name);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_folders_parent_active_cover
+                        ON cloud_folders(parent_id, deleted_at, id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_folder ON cloud_files(folder_id, name);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_files_folder_active_size
+                        ON cloud_files(folder_id, deleted_at, size_bytes);
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_storage_key ON cloud_files(storage_key);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);
@@ -1302,56 +1306,115 @@ class CloudDriveRegistryDB:
         file_id: str = "",
         required_level: str = "viewer",
     ) -> bool:
+        clean_path = self._normalize_path(path)
+        clean_file_id = str(file_id or "").strip()
+        decisions = self.user_access_map(
+            username=username,
+            role=role,
+            groups=groups,
+            nodes=[(clean_path, clean_file_id)],
+            required_level=required_level,
+        )
+        return bool(decisions.get((clean_path, clean_file_id), False))
+
+    def user_access_map(
+        self,
+        *,
+        username: str,
+        role: str = "",
+        groups: Iterable[str] | None = None,
+        nodes: Iterable[tuple[str, str]] = (),
+        required_level: str = "viewer",
+    ) -> Dict[tuple[str, str], bool]:
+        """Resolve ACL decisions for multiple nodes with one registry snapshot."""
         clean_username = str(username or "").strip().lower()
         clean_role = str(role or "").strip().lower()
         clean_groups = {str(group or "").strip().lower() for group in (groups or []) if str(group or "").strip()}
-        clean_path = self._normalize_path(path)
-        clean_file_id = str(file_id or "").strip()
+        clean_nodes = list(dict.fromkeys(
+            (self._normalize_path(path), str(file_id or "").strip())
+            for path, file_id in nodes
+        ))
+        if not clean_nodes:
+            return {}
         required_rank = self._access_rank(required_level)
         if required_rank <= 0:
             required_rank = self._access_rank("viewer")
         if clean_role == "admin":
-            return True
-        if not clean_path and required_rank <= self._access_rank("viewer"):
-            return True
-        if required_rank <= self._access_rank("viewer") and self.is_user_home_folder_path(clean_path):
-            return True
+            return {node: True for node in clean_nodes}
+
+        path_prefixes: set[str] = {""}
+
+        def _add_path_prefixes(clean_path: str) -> None:
+            built = ""
+            for segment in clean_path.split("/"):
+                if not segment:
+                    continue
+                built = f"{built}/{segment}".strip("/")
+                path_prefixes.add(built)
+
+        for clean_path, _file_id in clean_nodes:
+            _add_path_prefixes(clean_path)
+        clean_file_ids = {file_id for _path, file_id in clean_nodes if file_id}
+
+        def _chunks(values: Iterable[str], size: int = 500) -> Iterable[list[str]]:
+            batch = list(values)
+            for offset in range(0, len(batch), size):
+                yield batch[offset : offset + size]
+
         with self._connect() as conn:
             if conn.execute("SELECT 1 FROM cloud_permissions LIMIT 1").fetchone() is None:
-                return True
-            file_row = None
-            folder_row = None
-            if clean_file_id:
-                file_row = conn.execute("SELECT * FROM cloud_files WHERE id=?", (clean_file_id,)).fetchone()
-                if file_row is not None and not clean_path:
-                    clean_path = self._normalize_path(str(file_row["path"] or ""))
-            if clean_path:
-                folder_row = conn.execute(
-                    "SELECT * FROM cloud_folders WHERE path=?",
-                    (clean_path,),
-                ).fetchone()
-                if file_row is None:
-                    file_row = conn.execute(
-                        "SELECT * FROM cloud_files WHERE path=?",
-                        (clean_path,),
-                    ).fetchone()
-            folder_ids = self._folder_ancestor_ids_for_path(
-                conn,
-                clean_path,
-                file_folder_id=str(file_row["folder_id"] or "") if file_row is not None else "",
-            )
-            if folder_row is not None:
-                folder_ids.add(str(folder_row["id"]))
-            file_ids = {clean_file_id} if clean_file_id else set()
-            if file_row is not None:
-                file_ids.add(str(file_row["id"]))
+                return {node: True for node in clean_nodes}
 
-            rows = conn.execute(
+            permission_rows = conn.execute(
                 """
                 SELECT subject_type, subject_id, resource_type, resource_id, access_level
                 FROM cloud_permissions
                 """
             ).fetchall()
+
+            folder_ids_by_path: Dict[str, str] = {}
+            for batch in _chunks(sorted(path_prefixes)):
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id, path FROM cloud_folders WHERE deleted_at='' AND path IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                folder_ids_by_path.update({self._normalize_path(str(row["path"] or "")): str(row["id"]) for row in rows})
+
+            file_rows_by_id: Dict[str, sqlite3.Row] = {}
+            for batch in _chunks(sorted(clean_file_ids)):
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id, folder_id, path FROM cloud_files WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                file_rows_by_id.update({str(row["id"]): row for row in rows})
+
+            node_paths = sorted({path for path, _file_id in clean_nodes if path})
+            file_rows_by_path: Dict[str, sqlite3.Row] = {}
+            for batch in _chunks(node_paths):
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id, folder_id, path FROM cloud_files WHERE path IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                file_rows_by_path.update({self._normalize_path(str(row["path"] or "")): row for row in rows})
+
+            known_folder_paths = set(folder_ids_by_path)
+            for row in [*file_rows_by_id.values(), *file_rows_by_path.values()]:
+                _add_path_prefixes(self._normalize_path(str(row["path"] or "")))
+            for batch in _chunks(sorted(path_prefixes - known_folder_paths)):
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id, path FROM cloud_folders WHERE deleted_at='' AND path IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                folder_ids_by_path.update({self._normalize_path(str(row["path"] or "")): str(row["id"]) for row in rows})
+
+            home_paths = {
+                self._normalize_path(str(row["folder_path"] or ""))
+                for row in conn.execute("SELECT folder_path FROM cloud_user_folders").fetchall()
+            }
 
         def subject_matches(row: sqlite3.Row) -> bool:
             subject_type = str(row["subject_type"] or "").lower()
@@ -1366,28 +1429,57 @@ class CloudDriveRegistryDB:
                 return True
             return False
 
-        def path_matches(resource_id: str) -> bool:
+        def path_matches(resource_id: str, node_path: str) -> bool:
             clean_resource = self._normalize_path(resource_id)
             if clean_resource in {"", "*"}:
                 return True
-            return clean_path == clean_resource or clean_path.startswith(f"{clean_resource}/")
+            return node_path == clean_resource or node_path.startswith(f"{clean_resource}/")
 
-        for row in rows:
-            if self._access_rank(str(row["access_level"] or "")) < required_rank:
+        applicable_rows = [
+            row for row in permission_rows
+            if self._access_rank(str(row["access_level"] or "")) >= required_rank and subject_matches(row)
+        ]
+        decisions: Dict[tuple[str, str], bool] = {}
+        for node in clean_nodes:
+            clean_path, clean_file_id = node
+            file_row = file_rows_by_id.get(clean_file_id) or file_rows_by_path.get(clean_path)
+            effective_path = clean_path or (
+                self._normalize_path(str(file_row["path"] or "")) if file_row is not None else ""
+            )
+            if not effective_path and required_rank <= self._access_rank("viewer"):
+                decisions[node] = True
                 continue
-            if not subject_matches(row):
+            if required_rank <= self._access_rank("viewer") and effective_path in home_paths:
+                decisions[node] = True
                 continue
-            resource_type = str(row["resource_type"] or "").lower()
-            resource_id = str(row["resource_id"] or "").strip()
-            if resource_type == "global":
-                return True
-            if resource_type == "path" and path_matches(resource_id):
-                return True
-            if resource_type == "folder" and resource_id in folder_ids:
-                return True
-            if resource_type == "file" and resource_id in file_ids:
-                return True
-        return False
+
+            file_ids = {clean_file_id} if clean_file_id else set()
+            if file_row is not None:
+                file_ids.add(str(file_row["id"]))
+            folder_ids = {
+                folder_id
+                for prefix, folder_id in folder_ids_by_path.items()
+                if not prefix or effective_path == prefix or effective_path.startswith(f"{prefix}/")
+            }
+            if file_row is not None and str(file_row["folder_id"] or ""):
+                folder_ids.add(str(file_row["folder_id"]))
+
+            allowed = False
+            for row in applicable_rows:
+                resource_type = str(row["resource_type"] or "").lower()
+                resource_id = str(row["resource_id"] or "").strip()
+                if resource_type == "global":
+                    allowed = True
+                elif resource_type == "path" and path_matches(resource_id, effective_path):
+                    allowed = True
+                elif resource_type == "folder" and resource_id in folder_ids:
+                    allowed = True
+                elif resource_type == "file" and resource_id in file_ids:
+                    allowed = True
+                if allowed:
+                    break
+            decisions[node] = allowed
+        return decisions
 
     def list_changes(self, *, since: str = '', limit: int = 500) -> List[Dict[str, Any]]:
         """Return changed file/folder registry rows ordered by update time."""

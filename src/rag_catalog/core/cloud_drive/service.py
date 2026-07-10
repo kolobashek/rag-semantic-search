@@ -368,6 +368,23 @@ class CloudDriveService:
             required_level=required_level,
         )
 
+    def user_access_map(
+        self,
+        *,
+        username: str,
+        role: str = "",
+        groups: Iterable[str] | None = None,
+        nodes: Iterable[tuple[str, str]] = (),
+        required_level: str = "viewer",
+    ) -> dict[tuple[str, str], bool]:
+        return self.registry.user_access_map(
+            username=username,
+            role=role,
+            groups=groups,
+            nodes=nodes,
+            required_level=required_level,
+        )
+
     def get_storage_health(self) -> CloudDriveStorageHealth:
         result = dict(self.storage.healthcheck())
         return CloudDriveStorageHealth(

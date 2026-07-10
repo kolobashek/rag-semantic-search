@@ -218,6 +218,18 @@ def test_context_menu_avoids_hard_page_reload() -> None:
     assert "closestElement(event.target" in js_source
 
 
+def test_explorer_keeps_recursive_folder_sizes_off_the_event_loop() -> None:
+    from rag_catalog.ui import explorer_view, helpers
+
+    source = inspect.getsource(explorer_view.render_explorer_screen)
+    helper_source = inspect.getsource(helpers._cd_list_children)
+
+    assert "await run.io_bound(svc.registry.folder_size_bytes_map" in source
+    assert "folder_sizes_loaded" in source
+    assert "explorer_folder_size_loading" in source
+    assert "service.user_access_map" in helper_source
+
+
 def test_cloud_drive_settings_exposes_import_sources_ui() -> None:
     source = inspect.getsource(settings_view.render_settings_screen)
 

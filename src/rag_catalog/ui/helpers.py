@@ -1130,12 +1130,44 @@ def _cd_list_children(
         if cfg is not None and user is not None:
             folders = [
                 item for item in folders
-                if _cd_registry_acl_allows(cfg, user, item.path, service=service)
+                if _cd_acl_allows(cfg, user, item.path)
             ]
             files = [
                 item for item in files
-                if _cd_registry_acl_allows(cfg, user, item.path, file_id=item.id, service=service)
+                if _cd_acl_allows(cfg, user, item.path)
             ]
+            nodes = [
+                *((str(item.path or "").strip().strip("/"), "") for item in folders),
+                *((str(item.path or "").strip().strip("/"), str(item.id or "")) for item in files),
+            ]
+            try:
+                access = service.user_access_map(
+                    username=str((user or {}).get("username") or ""),
+                    role=str((user or {}).get("role") or ""),
+                    groups=[str(group_id) for group_id in ((user or {}).get("group_ids") or [])],
+                    nodes=nodes,
+                    required_level="viewer",
+                )
+                folders = [
+                    item for item in folders
+                    if access.get((str(item.path or "").strip().strip("/"), ""), False)
+                ]
+                files = [
+                    item for item in files
+                    if access.get(
+                        (str(item.path or "").strip().strip("/"), str(item.id or "")),
+                        False,
+                    )
+                ]
+            except Exception:
+                folders = [
+                    item for item in folders
+                    if _cd_registry_acl_allows(cfg, user, item.path, service=service)
+                ]
+                files = [
+                    item for item in files
+                    if _cd_registry_acl_allows(cfg, user, item.path, file_id=item.id, service=service)
+                ]
         return folders, files
     except Exception:
         return [], []
@@ -1353,20 +1385,17 @@ def _filter_cloud_drive_search_results(
         except Exception:
             effective_user["group_ids"] = []
             effective_user["groups"] = []
-    service: CloudDriveService | None = None
-    decisions: Dict[tuple[str, str], bool] = {}
+    try:
+        service: CloudDriveService | None = CloudDriveService.from_config(cfg)
+    except Exception:
+        service = None
+    if service is None:
+        return results
+
     filtered: List[Dict[str, Any]] = []
     is_admin = str(effective_user.get("role") or "").strip().lower() == "admin"
+    resolved: List[tuple[Dict[str, Any], str, str]] = []
     for item in results:
-        if service is None:
-            try:
-                service = CloudDriveService.from_config(cfg)
-            except Exception:
-                service = None
-        if service is None:
-            filtered.append(item)
-            continue
-
         node = _cd_registry_node_for_search_item(cfg, service, item)
         if node is None:
             if is_admin:
@@ -1375,11 +1404,26 @@ def _filter_cloud_drive_search_results(
 
         node_path = str(getattr(node, "path", "") or "")
         cloud_file_id = str(getattr(node, "id", "") or "") if hasattr(node, "folder_id") else ""
-        key = (cloud_file_id, node_path)
-        allowed = decisions.get(key)
-        if allowed is None:
-            allowed = _cd_registry_acl_allows(cfg, effective_user, node_path, file_id=cloud_file_id, service=service)
-            decisions[key] = allowed
+        resolved.append((item, node_path, cloud_file_id))
+
+    nodes = [(path.strip().strip("/"), file_id) for _item, path, file_id in resolved]
+    try:
+        decisions = service.user_access_map(
+            username=str(effective_user.get("username") or ""),
+            role=str(effective_user.get("role") or ""),
+            groups=[str(group_id) for group_id in (effective_user.get("group_ids") or [])],
+            nodes=nodes,
+            required_level="viewer",
+        )
+    except Exception:
+        decisions = {}
+
+    for item, node_path, cloud_file_id in resolved:
+        clean_path = node_path.strip().strip("/")
+        allowed = _cd_acl_allows(cfg, effective_user, clean_path) and decisions.get(
+            (clean_path, cloud_file_id),
+            False,
+        )
         if allowed:
             item.setdefault("cloud_path", node_path)
             if cloud_file_id:

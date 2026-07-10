@@ -72,6 +72,9 @@ class PageState:
     explorer_clipboard: Dict[str, Any] = field(default_factory=dict)
     explorer_hidden_paths: List[str] = field(default_factory=list)
     explorer_show_hidden: bool = False
+    explorer_folder_sizes: Dict[str, int] = field(default_factory=dict)
+    explorer_folder_size_cached_at: Dict[str, float] = field(default_factory=dict)
+    explorer_folder_size_loading: bool = False
     cloud_tab: str = "files"
     screen_scroll: Dict[str, int] = field(default_factory=dict)
     screen_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)

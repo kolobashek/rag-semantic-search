@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
+from rag_catalog.core.cloud_drive.registry import CLOUD_DRIVE_SCHEMA_VERSION, CloudDriveRegistryDB
 from rag_catalog.core.cloud_drive.service import CloudDriveJobCancelled, CloudDriveService
 from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter
 
@@ -315,6 +315,87 @@ def test_registry_user_home_folder_is_visible_but_private(tmp_path: Path) -> Non
     assert not registry.user_can_access(username='bob', role='user', path=file_row.path)
     assert registry.user_can_access(username='alice', role='user', path=file_row.path, required_level='editor')
     assert registry.user_can_access(username='alice', role='user', path=file_row.path, required_level='admin')
+
+
+def test_registry_bulk_acl_matches_path_folder_file_and_group_grants(tmp_path: Path, monkeypatch) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен')
+    team = registry.upsert_folder(path='Team', name='Team', parent_id=root.id, depth=1)
+    private = registry.upsert_folder(path='Private', name='Private', parent_id=root.id, depth=1)
+    team_file = registry.upsert_file(
+        folder_id=team.id,
+        path='Team/plan.txt',
+        name='plan.txt',
+        storage_key='objects/plan',
+        mime_type='text/plain',
+        size_bytes=5,
+    )
+    private_file = registry.upsert_file(
+        folder_id=private.id,
+        path='Private/secret.txt',
+        name='secret.txt',
+        storage_key='objects/secret',
+        mime_type='text/plain',
+        size_bytes=7,
+    )
+    registry.grant_permission(
+        subject_type='role',
+        subject_id='user',
+        resource_type='path',
+        resource_id='Team',
+        access_level='viewer',
+    )
+    registry.grant_permission(
+        subject_type='group',
+        subject_id='finance',
+        resource_type='folder',
+        resource_id=private.id,
+        access_level='editor',
+    )
+    registry.grant_permission(
+        subject_type='user',
+        subject_id='bob',
+        resource_type='file',
+        resource_id=private_file.id,
+        access_level='viewer',
+    )
+
+    original_connect = registry._connect
+    connection_calls = 0
+
+    def counted_connect():
+        nonlocal connection_calls
+        connection_calls += 1
+        return original_connect()
+
+    monkeypatch.setattr(registry, '_connect', counted_connect)
+    nodes = [
+        ('Team', ''),
+        (team_file.path, team_file.id),
+        ('Private', ''),
+        (private_file.path, private_file.id),
+    ]
+    viewer = registry.user_access_map(username='carol', role='user', nodes=nodes)
+
+    assert connection_calls == 1
+    assert viewer[('Team', '')]
+    assert viewer[(team_file.path, team_file.id)]
+    assert not viewer[('Private', '')]
+    assert not viewer[(private_file.path, private_file.id)]
+
+    group_editor = registry.user_access_map(
+        username='carol',
+        role='user',
+        groups=['finance'],
+        nodes=nodes,
+        required_level='editor',
+    )
+    assert not group_editor[('Team', '')]
+    assert group_editor[('Private', '')]
+    assert group_editor[(private_file.path, private_file.id)]
+
+    bob = registry.user_access_map(username='bob', role='guest', nodes=[('', private_file.id)])
+    assert bob[('', private_file.id)]
 
 
 def test_registry_user_home_folder_is_restored_after_rename(tmp_path: Path) -> None:
@@ -1333,6 +1414,8 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
         folder_columns = {row[1] for row in conn.execute("PRAGMA table_info(cloud_folders)").fetchall()}
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         version = conn.execute("SELECT schema_version FROM schema_meta WHERE db_kind='cloud_drive'").fetchone()[0]
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(cloud_files)").fetchall()}
+        folder_indexes = {row[1] for row in conn.execute("PRAGMA index_list(cloud_folders)").fetchall()}
     assert 'started_at' in columns
     assert 'finished_at' in columns
     assert 'lease_owner' in columns
@@ -1346,7 +1429,9 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
     assert 'cloud_user_folders' in tables
     assert 'cloud_share_links' in tables
     assert 'cloud_import_sources' in tables
-    assert int(version) == 7
+    assert int(version) == CLOUD_DRIVE_SCHEMA_VERSION
+    assert 'idx_cloud_files_folder_active_size' in indexes
+    assert 'idx_cloud_folders_parent_active_cover' in folder_indexes
 
 
 def test_registry_repairs_current_version_missing_source_mtime_columns(tmp_path: Path) -> None:

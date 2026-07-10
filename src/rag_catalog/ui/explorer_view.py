@@ -1254,10 +1254,20 @@ def render_explorer_screen(
             child_folders = [f for f in child_folders if not _is_hidden("cd", f.path)]
             child_files = [f for f in child_files if not _is_hidden("cd", f.path)]
 
-        try:
-            child_folder_sizes = svc.registry.folder_size_bytes_map([folder.id for folder in child_folders])
-        except Exception:
-            child_folder_sizes = {}
+        folder_size_ids = [str(folder.id) for folder in child_folders]
+        cached_folder_sizes = dict(page_state.explorer_folder_sizes)
+        child_folder_sizes = {
+            folder_id: int(cached_folder_sizes[folder_id])
+            for folder_id in folder_size_ids
+            if folder_id in cached_folder_sizes
+        }
+        folder_size_labels: Dict[str, List[Any]] = {}
+        now_monotonic = time.monotonic()
+        folder_sizes_need_refresh = any(
+            folder_id not in child_folder_sizes
+            or now_monotonic - float(page_state.explorer_folder_size_cached_at.get(folder_id, 0.0)) > 60.0
+            for folder_id in folder_size_ids
+        )
 
         def _cd_can_show_folder_size(folder: CloudDriveFolder) -> bool:
             if _is_admin(page_state):
@@ -1273,6 +1283,8 @@ def render_explorer_screen(
         def _cd_folder_size_label(folder: CloudDriveFolder) -> str:
             if not _cd_can_show_folder_size(folder):
                 return "—"
+            if folder.id not in child_folder_sizes:
+                return "Считается..."
             return _cd_file_size(int(child_folder_sizes.get(folder.id, 0) or 0))
 
         sort_key = page_state.explorer_sort
@@ -1736,7 +1748,8 @@ def render_explorer_screen(
                                         color=None,
                                     ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
                                 ui.label("—").classes("rag-meta text-xs")
-                                ui.label(_cd_folder_size_label(folder)).classes("rag-meta text-xs")
+                                size_label = ui.label(_cd_folder_size_label(folder)).classes("rag-meta text-xs")
+                                folder_size_labels.setdefault(str(folder.id), []).append(size_label)
                                 ui.label("admin").classes("rag-meta text-xs")
                                 ui.label("✓").classes("rag-file-table-index-ok")
                                 with ui.element("div").classes("rag-file-table-actions"):
@@ -1879,6 +1892,58 @@ def render_explorer_screen(
                         auto_upload=True,
                         label="Перетащите файлы сюда для загрузки",
                     ).props("flat bordered").classes("w-full cd-drop-zone")
+
+        if folder_size_ids and folder_sizes_need_refresh and not page_state.explorer_folder_size_loading:
+            requested_path = str(page_state.explorer_cd_path or "")
+            requested_ids = list(folder_size_ids)
+            page_state.explorer_folder_size_loading = True
+
+            async def _load_folder_sizes() -> None:
+                started = time.perf_counter()
+                try:
+                    sizes = await run.io_bound(svc.registry.folder_size_bytes_map, requested_ids)
+                    refreshed_at = time.monotonic()
+                    page_state.explorer_folder_sizes.update({str(key): int(value or 0) for key, value in sizes.items()})
+                    page_state.explorer_folder_size_cached_at.update({str(key): refreshed_at for key in requested_ids})
+                    _log_app_event(
+                        page_state,
+                        "cd_explorer",
+                        "folder_sizes_loaded",
+                        details={
+                            "path": requested_path,
+                            "folders": len(requested_ids),
+                            "duration_ms": round((time.perf_counter() - started) * 1000),
+                        },
+                    )
+                    if str(page_state.explorer_cd_path or "") == requested_path:
+                        for folder_id, labels in folder_size_labels.items():
+                            text = _cd_file_size(int(page_state.explorer_folder_sizes.get(folder_id, 0) or 0))
+                            for label in labels:
+                                try:
+                                    label.set_text(text)
+                                except RuntimeError:
+                                    pass
+                        if page_state.explorer_sort == "По размеру":
+                            render_fn()
+                except Exception as exc:
+                    _log_app_event(
+                        page_state,
+                        "cd_explorer",
+                        "folder_sizes_failed",
+                        ok=False,
+                        details={
+                            "path": requested_path,
+                            "folders": len(requested_ids),
+                            "duration_ms": round((time.perf_counter() - started) * 1000),
+                            "error": str(exc)[:500],
+                        },
+                    )
+                finally:
+                    page_state.explorer_folder_size_loading = False
+                    if page_state.screen == "explorer" and str(page_state.explorer_cd_path or "") != requested_path:
+                        render_fn()
+
+            ui.timer(0.0, _load_folder_sizes, once=True)
 
 
     # ── Explorer screen body ─────────────────────────────────────────────
