@@ -10,7 +10,6 @@ from pathlib import Path
 
 from nicegui import ui
 
-
 _INTERACTION_SCRIPT_CACHE = ""
 INTERACTION_JS_PATH = Path(__file__).with_name("static") / "rag_interactions.js"
 

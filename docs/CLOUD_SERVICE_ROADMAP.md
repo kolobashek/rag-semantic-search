@@ -137,6 +137,7 @@ flowchart LR
 Статус: in progress.
 
 - DONE 2026-07-10: явный `RAG_CONFIG_PATH` изолирует test/pilot config от project `config.json` и покрыт regression-тестом.
+- DONE 2026-07-10: после group ACL stage полный regression gate проходит (`568 passed`), `ruff check src tests scripts` green.
 
 Цель: превратить существующий работающий baseline в воспроизводимый release candidate.
 
