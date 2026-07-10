@@ -358,6 +358,7 @@ Done criteria:
 - DONE 2026-06-17: базовый ACL management UI добавлен в настройки Cloud Drive: выдача доступа пользователю/роли/всем на путь или весь реестр, просмотр применимых правил по фильтру пути и отзыв grants.
 - DONE 2026-07-10: Explorer sharing baseline закрыт для пользователей/ролей: grant/revoke, `who has access`, default-off public-link policy, expiration/list/copy/revoke и защищённые API contracts.
 - IMPLEMENTED 2026-07-10: user groups/membership: immutable IDs, active/archive lifecycle, admin UI/API и group ACL propagation до Explorer/API/search; browser smoke management screen ещё не зафиксирован.
+- IMPLEMENTED 2026-07-10: Explorer registry hot path переведён на bulk ACL, covering indexes и background folder-size calculation; live benchmark снизил ACL root listing с 3.3 с до 11 мс, recursive folder sizes с более минуты до 87 мс; browser reconnect regression остаётся release gate.
 
 Состав:
 
@@ -377,7 +378,7 @@ Done criteria:
 - registry search с ACL и pagination;
 - UI sharing для внутренних пользователей/ролей done; группы/membership implemented, остаются browser smoke и invited guests;
 - import folders and scanner ingestion backend + admin UI done; следующий слой - расписание/политики по отдельным источникам и более подробная диагностика ошибок импорта;
-- search quality v2: eval cases под реальные документы;
+- Retrieval v3 decision spike до pilot: сравнить текущий `legacy`, `release_v2`, multilingual dense и multilingual reranker на versioned shadow collection; сначала исправить eval до document/chunk/page ground truth, no-answer/ACL/faithfulness и hard latency budget;
 - latency profiling and cache tuning;
 - ACL management UI и выдача/отзыв прямо из Explorer/context menu done; group ACL implemented, browser smoke pending;
 - support bundle export;
@@ -413,6 +414,8 @@ Done criteria:
 ### Phase 3. Search/RAG Pro
 
 Цель: сделать поиск и ответы главным конкурентным преимуществом.
+
+Входной gate: результаты Retrieval v3 spike из Phase 1 приняты по качеству, latency и capacity. GraphRAG/RAPTOR/RLM не являются default-архитектурой и запускаются только на подтверждённых whole-corpus или multi-hop провалах обычного hybrid pipeline.
 
 Состав:
 

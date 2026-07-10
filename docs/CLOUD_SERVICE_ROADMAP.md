@@ -137,7 +137,7 @@ flowchart LR
 Статус: in progress.
 
 - DONE 2026-07-10: явный `RAG_CONFIG_PATH` изолирует test/pilot config от project `config.json` и покрыт regression-тестом.
-- DONE 2026-07-10: после group ACL stage полный regression gate проходит (`568 passed`), `ruff check src tests scripts` green.
+- DONE 2026-07-10: после Explorer responsiveness stage полный regression gate проходит (`570 passed`), `ruff check src tests scripts` green.
 
 Цель: превратить существующий работающий baseline в воспроизводимый release candidate.
 
@@ -164,6 +164,7 @@ Exit gate: другой инженер поднимает и проверяет 
 - DONE 2026-07-10: Explorer sharing для пользователей/ролей: grant/revoke и `who has access` без перезагрузки страницы;
 - IMPLEMENTED 2026-07-10: группы и membership management: immutable group ID, active/archive lifecycle, admin UI/API и group ACL в Explorer/API/search; остаётся browser smoke экрана управления группами;
 - DONE 2026-07-10: public links как default-off tenant policy: строгий expiration, active list, copy/revoke, API enforcement и audit без сырого token;
+- IMPLEMENTED 2026-07-10: устранены измеренные Explorer stalls: bulk ACL вместо N+1, Cloud Drive schema v8 с covering indexes, рекурсивные размеры вынесены из event loop; остаётся browser regression на reconnect/hard reload/search state;
 - audit coverage для чувствительных пользовательских и admin actions;
 - admin health view и backup freshness;
 - scripted install/update, preflight и rollback/restore procedure;
@@ -288,6 +289,7 @@ flowchart LR
 | Результат | Плановый Диапазон | Комментарий |
 |---|---:|---|
 | M0 release evidence | 1-2 недели | В основном проверка, фиксация и автоматизация уже существующего baseline |
+| Retrieval v3 decision spike | 5-10 рабочих дней внутри M0/M1 | Сначала representative sample и shadow collection; полный 4M-point reindex только после go/no-go |
 | M1 paid dedicated pilot | еще 4-8 недель | Основной риск - sharing/groups, web stability, audit и repeatable recovery |
 | M2 managed single-tenant | 6-10 недель после M1 | Может идти параллельно с продуктовой работой M3 |
 | M3 productized drive/search | 8-16 недель после M1 | Объем регулируется фактической обратной связью пилота |
@@ -304,11 +306,11 @@ flowchart LR
 
 1. DONE 2026-07-10: Explorer sharing для пользователей/ролей, `who has access`, expiration/revoke и default-off public-link policy.
 2. IMPLEMENTED 2026-07-10: группы/membership и group sharing подключены к session, Explorer, API и search ACL; закрыть browser smoke экрана управления группами.
-3. Устранить hard reload/reconnect/search-reset сценарии и добавить browser regression tests.
+3. IMPLEMENTED 2026-07-10: основной Explorer event-loop stall устранён (`ACL 3.3 с -> 11 мс`, размеры root `>60 с -> 87 мс` на рабочем registry); закрыть browser regression на reconnect/hard reload/search state и проверить остальные экраны.
 4. Довести audit coverage и negative ACL tests до всех read/share/delete flows.
 5. Автоматизировать fresh install, upgrade preflight и restore drill.
 6. Добавить admin health/backup freshness и correlation ids.
-7. Зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
+7. Провести Retrieval v3 decision spike до переключения production: текущий `legacy` против `release_v2`, multilingual dense candidate и multilingual reranker в versioned shadow collection; расширить eval до document/chunk/page relevance, no-answer, ACL, faithfulness и p95; затем зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
 8. Подготовить onboarding, acceptance checklist, support and incident runbooks.
 
 ### P1 - После Запуска Пилота
@@ -340,6 +342,7 @@ flowchart LR
 | Pilot recovery | Internal RPO <= 24 ч, RTO <= 8 ч | Уточнить по restore drills и контракту клиента |
 | Control plane | После повторяемого dedicated pilot | Начать раньше только если второй tenant уже создает operational pain |
 | Billing | Простая лицензия + usage snapshot | Полный billing после подтверждения тарифов и unit economics |
+| Retrieval evolution | Сохранить рабочий индекс как baseline; новые embeddings/reranker проверять на shadow collection и включать только по eval/latency/storage gate | GraphRAG, RAPTOR, RLM/agentic retrieval только при подтверждённых multi-hop/whole-corpus failures |
 
 ## 9. Риски И Revisit Triggers
 
@@ -348,6 +351,7 @@ flowchart LR
 - **Recovery:** backup без успешного restore drill не считается backup; превышение RTO требует пересмотра storage/DB topology.
 - **SQLite ceiling:** повторяемые lock/contention incidents или необходимость нескольких app writers запускают ADR по Postgres.
 - **Search cost/latency:** выход p95 за budget или рост index lag требует профилирования до добавления AI features.
+- **Search migration cost:** текущий `catalog` содержит около 4.04 млн points; переход 384 -> 1024 float32 dimensions увеличивает только сырые vectors примерно с 6.2 до 16.6 GB до HNSW/payload overhead, поэтому полный reindex нельзя начинать без sample benchmark и capacity check.
 - **Support cost:** более двух ручных диагностических сессий на tenant в месяц приоритизируют observability/control-plane work.
 - **Scope:** chat, mail, mobile и agent не вытесняют P0-задачи пилота без подтвержденной сделки.
 
