@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -330,6 +331,37 @@ def test_registry_public_share_link_is_read_only(tmp_path: Path) -> None:
     assert registry.share_link_can_access(token=link['token'], path=file_row.path)
     assert not registry.share_link_can_access(token=link['token'], path=file_row.path, required_level='editor')
     assert not registry.share_link_can_access(token=link['token'], path='alice/other.txt')
+
+
+def test_registry_public_share_link_lifecycle_and_expiry_validation(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    home = registry.ensure_user_home_folder(username='alice')
+    file_row = registry.upsert_file(
+        folder_id=home.id,
+        path='alice/shared.txt',
+        name='shared.txt',
+        storage_key='objects/shared',
+        mime_type='text/plain',
+        size_bytes=6,
+        checksum='abc',
+        source_path='',
+    )
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+
+    link = registry.create_share_link(path=file_row.path, created_by='alice', expires_at=expires_at)
+    active = registry.list_share_links(path=file_row.path)
+
+    assert [item['token'] for item in active] == [link['token']]
+    assert active[0]['expires_at'] == expires_at
+    assert registry.revoke_share_link(link['token']) is True
+    assert registry.list_share_links(path=file_row.path) == []
+    assert registry.list_share_links(path=file_row.path, include_inactive=True)[0]['revoked_at']
+    assert not registry.share_link_can_access(token=link['token'], path=file_row.path)
+
+    with pytest.raises(RuntimeError, match='ISO-формате'):
+        registry.create_share_link(path=file_row.path, expires_at='завтра')
+    with pytest.raises(RuntimeError, match='в будущем'):
+        registry.create_share_link(path=file_row.path, expires_at='2020-01-01T00:00:00+00:00')
 
 
 def test_service_bootstrap_from_catalog(tmp_path: Path) -> None:

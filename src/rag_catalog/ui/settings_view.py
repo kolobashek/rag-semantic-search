@@ -632,6 +632,7 @@ def render_settings_screen(
         with ui.column().classes("rag-card w-full p-4 gap-3"):
             initial_cloud = {
                 "cloud_drive_enabled": bool(state.cfg.get("cloud_drive_enabled")),
+                "cloud_drive_public_links_enabled": bool(state.cfg.get("cloud_drive_public_links_enabled")),
                 "cloud_drive_db_path": str(state.cfg.get("cloud_drive_db_path") or default_db_path).strip(),
                 "cloud_drive_storage": str(state.cfg.get("cloud_drive_storage") or "local").strip() or "local",
                 "cloud_drive_storage_root": str(state.cfg.get("cloud_drive_storage_root") or default_storage_root).strip(),
@@ -653,6 +654,13 @@ def render_settings_screen(
 
             enabled_input = ui.checkbox("Включить Cloud Drive", value=initial_cloud["cloud_drive_enabled"])
             enabled_input.tooltip("Включает реестр файлов и хранилище Cloud Drive.")
+            public_links_input = ui.checkbox(
+                "Разрешить публичные ссылки",
+                value=initial_cloud["cloud_drive_public_links_enabled"],
+            )
+            public_links_input.tooltip(
+                "По умолчанию выключено. Ссылка дает доступ без входа и должна использоваться только по политике компании."
+            )
 
             with ui.row().classes("w-full items-center gap-1"):
                 db_input = ui.input("База реестра Cloud Drive", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("flex-1")
@@ -810,6 +818,7 @@ def render_settings_screen(
             def current_cloud_values() -> Dict[str, Any]:
                 return {
                     "cloud_drive_enabled": bool(enabled_input.value),
+                    "cloud_drive_public_links_enabled": bool(public_links_input.value),
                     "cloud_drive_db_path": str(db_input.value or "").strip(),
                     "cloud_drive_storage": str(storage_kind.value or "local").strip() or "local",
                     "cloud_drive_storage_root": str(storage_root_input.value or "").strip(),
@@ -836,6 +845,7 @@ def render_settings_screen(
 
             def reset_cloud_settings() -> None:
                 enabled_input.set_value(initial_cloud["cloud_drive_enabled"])
+                public_links_input.set_value(initial_cloud["cloud_drive_public_links_enabled"])
                 db_input.set_value(initial_cloud["cloud_drive_db_path"])
                 storage_kind.set_value(initial_cloud["cloud_drive_storage"])
                 storage_root_input.set_value(initial_cloud["cloud_drive_storage_root"])
@@ -1230,7 +1240,11 @@ def render_settings_screen(
                     persist_cloud_values(values)
                     refresh_cloud_visibility()
                     action_row.set_visibility(False)
-                    _log_app_event(state, "settings", "save_cloud_drive", details=values)
+                    audit_values = dict(values)
+                    for secret_key in ("cloud_drive_s3_access_key", "cloud_drive_s3_secret_key"):
+                        if audit_values.get(secret_key):
+                            audit_values[secret_key] = "***"
+                    _log_app_event(state, "settings", "save_cloud_drive", details=audit_values)
                     ui.notify("Настройки Cloud Drive сохранены.", type="positive")
                 except Exception as exc:
                     ui.notify(f"Не удалось сохранить настройки: {exc}", type="negative")
@@ -1592,6 +1606,7 @@ def render_settings_screen(
             _schedule_async(refresh_registry_stats)
 
             enabled_input.on_value_change(lambda _: refresh_cloud_dirty())
+            public_links_input.on_value_change(lambda _: refresh_cloud_dirty())
             db_input.on_value_change(lambda _: refresh_cloud_dirty())
             storage_kind.on_value_change(lambda _: (refresh_cloud_visibility(), refresh_cloud_dirty()))
             storage_root_input.on_value_change(lambda _: refresh_cloud_dirty())

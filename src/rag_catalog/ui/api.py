@@ -9,6 +9,7 @@ Depends on: .state, .system, .helpers, core modules.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import mimetypes
@@ -32,6 +33,16 @@ from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _sa
 AuthHeader = Annotated[str, Header(alias="Authorization")]
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _share_token_fingerprint(token: str) -> str:
+    clean_token = str(token or "").strip()
+    return hashlib.sha256(clean_token.encode("utf-8")).hexdigest()[:12] if clean_token else ""
+
+
+def _require_public_links_enabled(cfg: Dict[str, Any]) -> None:
+    if not bool(cfg.get("cloud_drive_public_links_enabled")):
+        raise HTTPException(status_code=403, detail="Публичные ссылки отключены политикой Cloud Drive.")
 
 # ─────────────────────────── auth helpers (API-only) ───────────────────────
 
@@ -514,6 +525,7 @@ def api_cloud_drive_share_link_create(
 ) -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
+    _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
     _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
     try:
@@ -527,8 +539,63 @@ def api_cloud_drive_share_link_create(
         raise HTTPException(status_code=400, detail=str(exc))
     base = str(request.base_url).rstrip("/")
     link["url"] = f"{base}{link.get('url_path')}"
-    _audit_cloud_drive_api_event(cfg, user, "share_link_create", details={"path": path, "token": link.get("token")})
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "share_link_create",
+        details={"path": path, "token_fingerprint": _share_token_fingerprint(str(link.get("token") or ""))},
+    )
     return link
+
+
+@app.get("/api/cloud-drive/share-links")
+def api_cloud_drive_share_links(
+    path: str = "",
+    include_inactive: bool = False,
+    authorization: AuthHeader = "",
+) -> List[Dict[str, Any]]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    service = CloudDriveService.from_config(cfg)
+    clean_path = str(path or "").strip().replace("\\", "/").strip("/")
+    if str(user.get("role") or "") != "admin":
+        if not clean_path:
+            raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
+        _require_cloud_drive_path_access(cfg, user, clean_path, service=service, required_level="admin")
+    links = service.list_share_links(path=clean_path, include_inactive=bool(include_inactive))
+    _audit_cloud_drive_api_event(cfg, user, "share_links_list", details={"path": clean_path, "count": len(links)})
+    return links
+
+
+@app.delete("/api/cloud-drive/share-links")
+def api_cloud_drive_share_link_revoke(
+    token: str = "",
+    path: str = "",
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
+    service = CloudDriveService.from_config(cfg)
+    clean_path = str(path or "").strip().replace("\\", "/").strip("/")
+    clean_token = str(token or "").strip()
+    if not clean_path:
+        raise HTTPException(status_code=400, detail="Для отзыва публичной ссылки нужен path.")
+    _require_cloud_drive_path_access(cfg, user, clean_path, service=service, required_level="admin")
+    allowed_tokens = {
+        str(item.get("token") or "")
+        for item in service.list_share_links(path=clean_path, include_inactive=True)
+    }
+    if not clean_token or clean_token not in allowed_tokens:
+        raise HTTPException(status_code=404, detail="Публичная ссылка не найдена для указанного пути.")
+    ok = service.revoke_share_link(clean_token)
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "share_link_revoke",
+        ok=ok,
+        details={"path": clean_path, "token_fingerprint": _share_token_fingerprint(clean_token)},
+    )
+    return {"ok": bool(ok), "path": clean_path}
 
 
 def _require_public_share_access(service: CloudDriveService, token: str, path: str = "") -> str:
@@ -544,6 +611,7 @@ def _require_public_share_access(service: CloudDriveService, token: str, path: s
 @app.get("/api/cloud-drive/public/node")
 def api_cloud_drive_public_node(token: str = "", path: str = "") -> Dict[str, Any]:
     cfg = load_config()
+    _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
     effective_path = _require_public_share_access(service, token, path)
     try:
@@ -555,6 +623,7 @@ def api_cloud_drive_public_node(token: str = "", path: str = "") -> Dict[str, An
 @app.get("/api/cloud-drive/public/list")
 def api_cloud_drive_public_list(token: str = "", path: str = "") -> Dict[str, Any]:
     cfg = load_config()
+    _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
     effective_path = _require_public_share_access(service, token, path)
     try:
@@ -575,6 +644,7 @@ def api_cloud_drive_public_list(token: str = "", path: str = "") -> Dict[str, An
 @app.get("/api/cloud-drive/public/download")
 def api_cloud_drive_public_download(token: str = "", path: str = ""):
     cfg = load_config()
+    _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
     effective_path = _require_public_share_access(service, token, path)
     try:

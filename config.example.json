@@ -36,6 +36,7 @@
   "users_db_path": "",
   "telemetry_db_path": "",
   "cloud_drive_enabled": false,
+  "cloud_drive_public_links_enabled": false,
   "cloud_drive_db_path": "",
   "cloud_drive_storage": "local",
   "cloud_drive_storage_root": "",

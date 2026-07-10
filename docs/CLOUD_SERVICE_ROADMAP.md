@@ -136,6 +136,8 @@ flowchart LR
 
 Статус: in progress.
 
+- DONE 2026-07-10: явный `RAG_CONFIG_PATH` изолирует test/pilot config от project `config.json` и покрыт regression-тестом.
+
 Цель: превратить существующий работающий baseline в воспроизводимый release candidate.
 
 Результаты:
@@ -158,9 +160,9 @@ Exit gate: другой инженер поднимает и проверяет 
 
 Результаты:
 
-- Explorer sharing для пользователей/групп, expiration/revoke и `who has access`;
+- DONE 2026-07-10: Explorer sharing для пользователей/ролей: grant/revoke и `who has access` без перезагрузки страницы;
 - группы и membership management;
-- public links как отключаемая tenant policy, не как обязательная функция;
+- DONE 2026-07-10: public links как default-off tenant policy: строгий expiration, active list, copy/revoke, API enforcement и audit без сырого token;
 - audit coverage для чувствительных пользовательских и admin actions;
 - admin health view и backup freshness;
 - scripted install/update, preflight и rollback/restore procedure;
@@ -299,13 +301,14 @@ flowchart LR
 
 ### P0 - До Paid Dedicated Pilot
 
-1. Закрыть Explorer sharing workflow, groups/membership и `who has access`.
-2. Устранить hard reload/reconnect/search-reset сценарии и добавить browser regression tests.
-3. Довести audit coverage и negative ACL tests до всех read/share/delete flows.
-4. Автоматизировать fresh install, upgrade preflight и restore drill.
-5. Добавить admin health/backup freshness и correlation ids.
-6. Зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
-7. Подготовить onboarding, acceptance checklist, support and incident runbooks.
+1. DONE 2026-07-10: Explorer sharing для пользователей/ролей, `who has access`, expiration/revoke и default-off public-link policy.
+2. Добавить группы и membership management; подключить группы к Explorer sharing.
+3. Устранить hard reload/reconnect/search-reset сценарии и добавить browser regression tests.
+4. Довести audit coverage и negative ACL tests до всех read/share/delete flows.
+5. Автоматизировать fresh install, upgrade preflight и restore drill.
+6. Добавить admin health/backup freshness и correlation ids.
+7. Зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
+8. Подготовить onboarding, acceptance checklist, support and incident runbooks.
 
 ### P1 - После Запуска Пилота
 

@@ -12,7 +12,7 @@ import json
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 from nicegui import events, run, ui
@@ -806,9 +806,235 @@ def render_explorer_screen(
                 ui.notify(f"Ошибка вставки: {exc}", type="negative")
 
         def _cd_share_paths(paths: List[str], *, verb: str = "Поделиться") -> None:
-            text = "\n".join(path or "/" for path in paths)
-            ui.run_javascript(f"navigator.clipboard && navigator.clipboard.writeText({json.dumps(text)})")
-            ui.notify(f"{verb}: ссылки/пути скопированы в буфер.", type="positive")
+            clean_paths = [str(path or "").strip().replace("\\", "/").strip("/") for path in paths if str(path or "").strip()]
+            if not clean_paths:
+                ui.notify("Ничего не выбрано.", type="warning")
+                return
+            blocked = [path for path in clean_paths if not _cd_can(path, "admin")]
+            if blocked:
+                ui.notify(f"Нет прав администрирования: {blocked[0]}", type="negative")
+                return
+
+            single_path = clean_paths[0] if len(clean_paths) == 1 else ""
+            public_links_enabled = bool(page_state.cfg.get("cloud_drive_public_links_enabled"))
+
+            with ui.dialog() as dlg, ui.card().classes("p-4 gap-3 w-full max-w-2xl max-h-[90vh] overflow-y-auto"):
+                ui.label(verb).classes("text-lg font-semibold")
+                ui.label(f"Объектов: {len(clean_paths)}").classes("rag-meta")
+                with ui.element("div").classes("w-full max-h-32 overflow-y-auto rounded border border-slate-700/30 p-2"):
+                    for path in clean_paths[:12]:
+                        ui.label(path or "/").classes("rag-path text-xs truncate")
+                    if len(clean_paths) > 12:
+                        ui.label(f"и ещё {len(clean_paths) - 12}").classes("rag-meta text-xs")
+
+                with ui.expansion("Внутренний доступ", icon="person_add", value=True).classes("w-full"):
+                    with ui.row().classes("w-full gap-2 items-center"):
+                        share_subject_type = ui.select(
+                            {"user": "Пользователь", "role": "Роль", "*": "Все"},
+                            value="user",
+                            label="Кому",
+                        ).props("dense outlined").classes("min-w-40")
+                        share_subject_id = ui.input("Логин / роль / *", value="").props("dense outlined").classes("flex-1")
+                    share_access = ui.select(
+                        {"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"},
+                        value="viewer",
+                        label="Уровень доступа",
+                    ).props("dense outlined").classes("w-full max-w-xs")
+                    internal_access_box = ui.column().classes("w-full gap-1")
+
+                    def _render_internal_access() -> None:
+                        internal_access_box.clear()
+                        with internal_access_box:
+                            ui.separator()
+                            ui.label("Кто имеет доступ").classes("text-sm font-medium")
+                            if not single_path:
+                                ui.label("Текущие доступы показываются при выборе одного объекта.").classes("rag-meta text-xs")
+                                return
+                            permissions = svc.list_permissions(path=single_path)
+                            if not permissions:
+                                ui.label("Явных правил доступа нет.").classes("rag-meta text-xs")
+                                return
+                            node = svc.registry.get_node_by_path(single_path)
+                            direct_ids = {single_path, str(getattr(node, "id", "") or "")}
+                            subject_labels = {"user": "Пользователь", "role": "Роль", "*": "Все"}
+                            access_labels = {"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"}
+                            for permission in permissions:
+                                permission_id = str(permission.get("id") or "")
+                                subject_type = str(permission.get("subject_type") or "")
+                                subject_id = str(permission.get("subject_id") or "*")
+                                access_level = str(permission.get("access_level") or "viewer")
+                                resource_type = str(permission.get("resource_type") or "")
+                                resource_id = str(permission.get("resource_id") or "")
+                                if resource_type == "global":
+                                    scope = "Глобально"
+                                elif resource_id in direct_ids:
+                                    scope = "Этот объект"
+                                else:
+                                    scope = "Наследуется"
+                                with ui.row().classes("w-full items-center gap-2 py-1"):
+                                    ui.icon("person" if subject_type == "user" else "group", size="16px").classes("text-slate-400")
+                                    with ui.column().classes("gap-0 min-w-0 flex-1"):
+                                        ui.label(f"{subject_labels.get(subject_type, subject_type)}: {subject_id}").classes("text-sm truncate")
+                                        ui.label(f"{access_labels.get(access_level, access_level)} · {scope}").classes("rag-meta text-xs")
+                                    ui.button(
+                                        icon="person_remove",
+                                        on_click=_make_permission_revoke_handler(permission_id),
+                                    ).props('flat dense round size=sm color=negative aria-label="Отозвать доступ"').tooltip("Отозвать доступ")
+
+                    async def _revoke_internal_share(permission_id: str) -> None:
+                        try:
+                            ok = await run.io_bound(svc.revoke_permission, permission_id)
+                            if not ok:
+                                raise RuntimeError("Правило уже удалено или не найдено.")
+                            _log_app_event(
+                                page_state,
+                                "cd_explorer",
+                                "share_internal_revoke",
+                                details={"path": single_path, "permission_id": permission_id},
+                            )
+                            _render_internal_access()
+                            ui.notify("Доступ отозван.", type="positive")
+                        except Exception as exc:
+                            ui.notify(f"Не удалось отозвать доступ: {exc}", type="negative")
+
+                    def _make_permission_revoke_handler(permission_id: str) -> Callable[[], Any]:
+                        async def _handler() -> None:
+                            await _revoke_internal_share(permission_id)
+
+                        return _handler
+
+                    async def _grant_internal_share() -> None:
+                        try:
+                            subject_type = str(share_subject_type.value or "").strip().lower()
+                            subject_id = str(share_subject_id.value or "").strip()
+                            if subject_type == "*":
+                                subject_id = "*"
+                            elif not subject_id:
+                                ui.notify("Укажите логин пользователя или роль.", type="warning")
+                                return
+                            access_level = str(share_access.value or "viewer").strip().lower()
+                            granted: list[dict[str, str]] = []
+                            for path in clean_paths:
+                                def _grant_path(path: str = path) -> Dict[str, str]:
+                                    return svc.grant_path_permission(
+                                        subject_type=subject_type,
+                                        subject_id=subject_id,
+                                        path=path,
+                                        access_level=access_level,
+                                    )
+                                granted.append(await run.io_bound(_grant_path))
+                            _log_app_event(
+                                page_state,
+                                "cd_explorer",
+                                "share_internal",
+                                details={"count": len(granted), "subject_type": subject_type, "subject_id": subject_id, "access_level": access_level},
+                            )
+                            _render_internal_access()
+                            ui.notify(f"Доступ выдан: {len(granted)}", type="positive")
+                        except Exception as exc:
+                            ui.notify(f"Не удалось выдать доступ: {exc}", type="negative")
+
+                    share_subject_type.on_value_change(lambda _: share_subject_id.set_value("*") if str(share_subject_type.value or "") == "*" else None)
+                    ui.button("Выдать доступ", icon="lock_open", on_click=_grant_internal_share).props("outline dense")
+                    _render_internal_access()
+
+                with ui.expansion("Публичная ссылка", icon="link").classes("w-full"):
+                    if len(clean_paths) != 1:
+                        ui.label("Публичная ссылка создаётся только для одного объекта.").classes("rag-meta text-xs")
+                    else:
+                        if not public_links_enabled:
+                            with ui.row().classes("w-full items-center gap-2 p-2 rounded bg-amber-950/20"):
+                                ui.icon("policy", size="18px").classes("text-amber-500")
+                                ui.label("Публичные ссылки отключены политикой Cloud Drive.").classes("text-sm")
+                        share_expires = ui.input("Истекает после", value="").props("dense outlined type=datetime-local").classes("w-full")
+                        share_expires.tooltip("Пустое значение создаёт ссылку без срока действия.")
+                        create_public_button = ui.button("Создать и скопировать ссылку", icon="link").props("outline dense")
+                        create_public_button.set_enabled(public_links_enabled)
+                        public_links_box = ui.column().classes("w-full gap-1")
+
+                        def _copy_public_link(token: str) -> None:
+                            url_path = f"/api/cloud-drive/public/download?token={quote(token, safe='')}"
+                            ui.run_javascript(
+                                "navigator.clipboard && navigator.clipboard.writeText("
+                                f"window.location.origin + {json.dumps(url_path)}"
+                                ")"
+                            )
+                            ui.notify("Публичная ссылка скопирована.", type="positive")
+
+                        def _render_public_links() -> None:
+                            public_links_box.clear()
+                            with public_links_box:
+                                ui.separator()
+                                ui.label("Активные публичные ссылки").classes("text-sm font-medium")
+                                links = svc.list_share_links(path=single_path)
+                                if not links:
+                                    ui.label("Активных ссылок нет.").classes("rag-meta text-xs")
+                                    return
+                                for link in links:
+                                    token = str(link.get("token") or "")
+                                    expires_at = str(link.get("expires_at") or "")
+                                    created_by = str(link.get("created_by") or "") or "-"
+                                    with ui.row().classes("w-full items-center gap-2 py-1"):
+                                        ui.icon("link", size="16px").classes("text-slate-400")
+                                        with ui.column().classes("gap-0 min-w-0 flex-1"):
+                                            ui.label(f"Создал: {created_by}").classes("text-sm")
+                                            ui.label(
+                                                f"До: {expires_at[:16].replace(chr(84), ' ')}" if expires_at else "Без срока"
+                                            ).classes("rag-meta text-xs")
+                                        ui.button(
+                                            icon="content_copy",
+                                            on_click=lambda _e=None, t=token: _copy_public_link(t),
+                                        ).props('flat dense round size=sm aria-label="Скопировать публичную ссылку"').tooltip("Скопировать ссылку")
+                                        ui.button(
+                                            icon="link_off",
+                                            on_click=_make_link_revoke_handler(token),
+                                        ).props('flat dense round size=sm color=negative aria-label="Отозвать публичную ссылку"').tooltip("Отозвать ссылку")
+
+                        async def _revoke_public_link(token: str) -> None:
+                            try:
+                                ok = await run.io_bound(svc.revoke_share_link, token)
+                                if not ok:
+                                    raise RuntimeError("Ссылка уже отозвана или не найдена.")
+                                _log_app_event(page_state, "cd_explorer", "share_public_link_revoke", details={"path": single_path})
+                                _render_public_links()
+                                ui.notify("Публичная ссылка отозвана.", type="positive")
+                            except Exception as exc:
+                                ui.notify(f"Не удалось отозвать ссылку: {exc}", type="negative")
+
+                        def _make_link_revoke_handler(token: str) -> Callable[[], Any]:
+                            async def _handler() -> None:
+                                await _revoke_public_link(token)
+
+                            return _handler
+
+                        async def _create_public_link() -> None:
+                            try:
+                                path = clean_paths[0]
+                                def _create_link() -> Dict[str, str]:
+                                    return svc.create_share_link(
+                                        path=path,
+                                        created_by=_username(page_state),
+                                        expires_at=str(share_expires.value or "").strip(),
+                                    )
+                                link = await run.io_bound(_create_link)
+                                _copy_public_link(str(link.get("token") or ""))
+                                _log_app_event(page_state, "cd_explorer", "share_public_link", details={"path": path})
+                                _render_public_links()
+                                ui.notify("Публичная ссылка скопирована в буфер.", type="positive")
+                            except Exception as exc:
+                                ui.notify(f"Не удалось создать ссылку: {exc}", type="negative")
+
+                        create_public_button.on_click(_create_public_link)
+                        _render_public_links()
+
+                with ui.row().classes("w-full justify-between gap-2 mt-2"):
+                    ui.button(
+                        "Скопировать пути",
+                        icon="content_copy",
+                        on_click=lambda: ui.run_javascript(f"navigator.clipboard && navigator.clipboard.writeText({json.dumps(chr(10).join(clean_paths))})"),
+                    ).props("flat dense")
+                    ui.button("Закрыть", on_click=dlg.close).props("flat dense")
+            dlg.open()
 
         def _cd_archive_paths(paths: List[str]) -> None:
             export_dir = Path("runtime") / "exports"
@@ -1853,7 +2079,7 @@ def render_explorer_screen(
             class_bits.append("ancestor")
         icon = "folder_open" if is_current or is_ancestor else "folder"
         label = "Обмен" if path == root else path.name
-        btn = ui.button(
+        ui.button(
             label,
             icon=icon,
             on_click=lambda p=path: open_folder(p),

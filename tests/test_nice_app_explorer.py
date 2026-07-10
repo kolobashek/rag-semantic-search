@@ -52,6 +52,8 @@ from rag_catalog.ui.api import (
     api_cloud_drive_restore,
     api_cloud_drive_search,
     api_cloud_drive_share_link_create,
+    api_cloud_drive_share_link_revoke,
+    api_cloud_drive_share_links,
     api_cloud_drive_storage_health,
     api_cloud_drive_sync_client_register,
     api_cloud_drive_sync_clients,
@@ -1818,6 +1820,7 @@ def test_cloud_drive_public_share_link_allows_read_without_auth(monkeypatch, tmp
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
         "cloud_drive_storage": "local",
         "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "cloud_drive_public_links_enabled": True,
     }
     service = CloudDriveService.from_config(cfg)
     home = service.registry.ensure_user_home_folder(username="alice")
@@ -1830,6 +1833,8 @@ def test_cloud_drive_public_share_link_allows_read_without_auth(monkeypatch, tmp
         "_require_cloud_drive_api_user",
         lambda *_args, **_kwargs: {"username": "alice", "role": "user", "status": "active"},
     )
+    events: list[dict] = []
+    monkeypatch.setattr(cloud_api, "_audit_cloud_drive_api_event", lambda *_args, **kwargs: events.append(dict(kwargs)))
 
     class FakeRequest:
         base_url = "http://testserver/"
@@ -1838,6 +1843,7 @@ def test_cloud_drive_public_share_link_allows_read_without_auth(monkeypatch, tmp
     token = link["token"]
 
     assert link["url"].startswith("http://testserver/api/cloud-drive/public/download?token=")
+    assert api_cloud_drive_share_links(path="alice/public.txt")[0]["token"] == token
     assert api_cloud_drive_public_node(token=token)["path"] == "alice/public.txt"
     response = api_cloud_drive_public_download(token=token)
     assert Path(response.path).is_file()
@@ -1845,6 +1851,46 @@ def test_cloud_drive_public_share_link_allows_read_without_auth(monkeypatch, tmp
     with pytest.raises(HTTPException) as exc:
         api_cloud_drive_public_list(token=token, path="alice")
     assert exc.value.status_code == 403
+
+    revoked = api_cloud_drive_share_link_revoke(token=token, path="alice/public.txt")
+    assert revoked["ok"] is True
+    with pytest.raises(HTTPException) as revoked_exc:
+        api_cloud_drive_public_node(token=token)
+    assert revoked_exc.value.status_code == 404
+    assert token not in str(events)
+    assert any("token_fingerprint" in event.get("details", {}) for event in events)
+
+
+def test_cloud_drive_public_links_are_disabled_by_default(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "cloud_drive_public_links_enabled": False,
+    }
+    service = CloudDriveService.from_config(cfg)
+    home = service.registry.ensure_user_home_folder(username="alice")
+    source = tmp_path / "private.txt"
+    source.write_text("private", encoding="utf-8")
+    service.upload_file(parent_path=home.path, filename="private.txt", source_path=str(source), mime_type="text/plain")
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "alice", "role": "user", "status": "active"},
+    )
+
+    class FakeRequest:
+        base_url = "http://testserver/"
+
+    with pytest.raises(HTTPException) as create_exc:
+        api_cloud_drive_share_link_create(FakeRequest(), path="alice/private.txt")
+    assert create_exc.value.status_code == 403
+
+    link = service.create_share_link(path="alice/private.txt", created_by="alice")
+    with pytest.raises(HTTPException) as access_exc:
+        api_cloud_drive_public_node(token=link["token"])
+    assert access_exc.value.status_code == 403
 
 
 def test_cloud_drive_index_coverage_endpoint(monkeypatch, tmp_path) -> None:

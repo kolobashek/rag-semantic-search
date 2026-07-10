@@ -166,6 +166,12 @@ class CloudDriveService:
     def create_share_link(self, *, path: str, created_by: str = '', expires_at: str = '') -> Dict[str, str]:
         return self.registry.create_share_link(path=path, created_by=created_by, expires_at=expires_at)
 
+    def list_share_links(self, *, path: str = '', include_inactive: bool = False) -> list[dict[str, str]]:
+        return self.registry.list_share_links(path=path, include_inactive=include_inactive)
+
+    def revoke_share_link(self, token: str) -> bool:
+        return self.registry.revoke_share_link(token)
+
     @staticmethod
     def _import_source_to_dict(source: CloudDriveImportSource) -> dict:
         return {

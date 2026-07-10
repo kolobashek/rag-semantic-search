@@ -37,6 +37,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _resolve_config_file() -> Path:
+    explicit_path = str(os.environ.get("RAG_CONFIG_PATH") or "").strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser().resolve()
     # Nested .claude/.codex worktrees should reuse the nearest ancestor config.
     for base in [PROJECT_ROOT, *PROJECT_ROOT.parents]:
         candidate = base / "config.json"
@@ -86,6 +89,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "telemetry_db_path": "",
     # ── Cloud drive foundation ──────────────────────────────────────────
     "cloud_drive_enabled": False,
+    "cloud_drive_public_links_enabled": False,
     "cloud_drive_db_path": "",
     "cloud_drive_storage": "local",
     "cloud_drive_storage_root": "",

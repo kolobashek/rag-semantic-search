@@ -30,6 +30,22 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_future_timestamp(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("Срок действия ссылки должен быть датой и временем в ISO-формате.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    if parsed <= datetime.now(timezone.utc):
+        raise RuntimeError("Срок действия публичной ссылки должен быть в будущем.")
+    return parsed.isoformat()
+
+
 class CloudDriveRegistryDB:
     def __init__(self, db_path: str) -> None:
         self.db_path = Path(db_path)
@@ -963,6 +979,7 @@ class CloudDriveRegistryDB:
                     SELECT id, subject_type, subject_id, resource_type, resource_id, access_level, created_at
                     FROM cloud_permissions
                     WHERE resource_id IN ({placeholders})
+                       OR resource_type='global'
                        OR (resource_type='path' AND (?=resource_id OR ? LIKE resource_id || '/%'))
                     ORDER BY created_at DESC
                     """,
@@ -1005,6 +1022,7 @@ class CloudDriveRegistryDB:
         expires_at: str = "",
     ) -> Dict[str, str]:
         clean_path = self._normalize_path(path)
+        clean_expires_at = _normalize_future_timestamp(expires_at)
         node = self.get_node_by_path(clean_path)
         if node is None:
             raise RuntimeError(f'Узел не найден: {clean_path}')
@@ -1028,7 +1046,7 @@ class CloudDriveRegistryDB:
                         clean_path,
                         self._clean_username(created_by),
                         now,
-                        str(expires_at or '').strip(),
+                        clean_expires_at,
                     ),
                 )
         return {
@@ -1039,9 +1057,35 @@ class CloudDriveRegistryDB:
             'access_level': 'viewer',
             'created_by': self._clean_username(created_by),
             'created_at': now,
-            'expires_at': str(expires_at or '').strip(),
+            'expires_at': clean_expires_at,
             'url_path': f'/api/cloud-drive/public/download?token={token}',
         }
+
+    def list_share_links(self, *, path: str = "", include_inactive: bool = False) -> List[Dict[str, str]]:
+        clean_path = self._normalize_path(path)
+        now = _utc_now()
+        clauses: list[str] = []
+        params: list[str] = []
+        if clean_path:
+            clauses.append("path=?")
+            params.append(clean_path)
+        if not include_inactive:
+            clauses.append("revoked_at=''")
+            clauses.append("(expires_at='' OR expires_at>?)")
+            params.append(now)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT token, resource_type, resource_id, path, access_level,
+                       created_by, created_at, expires_at, revoked_at
+                FROM cloud_share_links
+                {where}
+                ORDER BY created_at DESC
+                """,
+                tuple(params),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_share_link(self, token: str) -> Optional[Dict[str, str]]:
         clean_token = str(token or '').strip()

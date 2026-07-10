@@ -356,6 +356,7 @@ Done criteria:
 - DONE 2026-05-27: backend scanner/import ingestion добавлен: `cloud_import_sources`, durable `import` jobs, CLI `import-source-add/list/run`, admin API для import sources, копирование новых/изменённых файлов в storage и постановка `reindex` только для изменившихся версий.
 - DONE 2026-06-16: admin UI для scanner/import sources добавлен в настройки Cloud Drive: список источников, добавление/обновление папки, enable/disable, запуск import job в фоне, лимит пробного запуска и отображение import jobs в общей истории задач.
 - DONE 2026-06-17: базовый ACL management UI добавлен в настройки Cloud Drive: выдача доступа пользователю/роли/всем на путь или весь реестр, просмотр применимых правил по фильтру пути и отзыв grants.
+- DONE 2026-07-10: Explorer sharing baseline закрыт для пользователей/ролей: grant/revoke, `who has access`, default-off public-link policy, expiration/list/copy/revoke и защищённые API contracts.
 
 Состав:
 
@@ -373,11 +374,11 @@ Done criteria:
 Ключевые задачи:
 
 - registry search с ACL и pagination;
-- UI sharing для внутренних пользователей;
+- UI sharing для внутренних пользователей/ролей done; следующий слой - группы/membership и invited guests;
 - import folders and scanner ingestion backend + admin UI done; следующий слой - расписание/политики по отдельным источникам и более подробная диагностика ошибок импорта;
 - search quality v2: eval cases под реальные документы;
 - latency profiling and cache tuning;
-- ACL management UI baseline done; следующий слой - удобная выдача прав прямо из Explorer/context menu и группы;
+- ACL management UI и выдача/отзыв прямо из Explorer/context menu done; следующий слой - группы/membership;
 - support bundle export;
 - backup and restore command;
 - release installer/script.

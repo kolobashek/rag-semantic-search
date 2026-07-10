@@ -247,6 +247,25 @@ def test_cloud_drive_settings_exposes_acl_management_ui() -> None:
     assert "permissions_revoke_ui" in source
 
 
+def test_cloud_drive_explorer_exposes_complete_sharing_workflow() -> None:
+    from rag_catalog.ui import explorer_view
+
+    explorer_source = inspect.getsource(explorer_view.render_explorer_screen)
+    settings_source = inspect.getsource(settings_view.render_settings_screen)
+
+    assert "Кто имеет доступ" in explorer_source
+    assert "Активные публичные ссылки" in explorer_source
+    assert "svc.list_permissions" in explorer_source
+    assert "svc.revoke_permission" in explorer_source
+    assert "svc.create_share_link" in explorer_source
+    assert "svc.list_share_links" in explorer_source
+    assert "svc.revoke_share_link" in explorer_source
+    assert '"token": link.get("token"' not in explorer_source
+    assert "cloud_drive_public_links_enabled" in explorer_source
+    assert "Разрешить публичные ссылки" in settings_source
+    assert 'audit_values[secret_key] = "***"' in settings_source
+
+
 def test_search_recovery_restores_results_after_reload() -> None:
     from rag_catalog.ui.state import PageState
 
