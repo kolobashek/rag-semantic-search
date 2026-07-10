@@ -463,12 +463,6 @@ Cleanup локальных артефактов:
 
 ## Статус Roadmap
 
-Предыдущий Cloud Drive roadmap закрыт. История сохранена в Git. Текущий план доведения до релиза: [docs/RELEASE_ROADMAP.md](docs/RELEASE_ROADMAP.md).
-
-Кандидаты после первого релиза:
-
-- production-hardening sync client;
-- deeper structural chunking for DOCX/PDF/XLSX;
-- Qdrant sparse vector path;
-- stronger RAG verifier for conflicting sources;
-- UI polish after реального использования Cloud Drive.
+- Текущий delivery-план до платного dedicated pilot и полноценного cloud service: [docs/CLOUD_SERVICE_ROADMAP.md](docs/CLOUD_SERVICE_ROADMAP.md).
+- Полный продуктовый горизонт: [docs/PRODUCT_ROADMAP.md](docs/PRODUCT_ROADMAP.md).
+- История и критерии закрытого internal release: [docs/RELEASE_ROADMAP.md](docs/RELEASE_ROADMAP.md).

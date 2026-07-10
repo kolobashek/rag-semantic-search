@@ -1,366 +1,368 @@
 # Cloud Service Roadmap
 
-Дата: 2026-07-04
+Дата последнего пересмотра: 2026-07-10
 
-Статус: стратегический roadmap для перехода от single-tenant корпоративного Cloud Drive к полноценному облачному сервису.
+Статус: основной delivery-roadmap для перехода от внутреннего single-tenant продукта к продаваемому управляемому облачному сервису.
 
-## 1. Цель
+Связанные документы:
 
-Построить коммерческий облачный сервис для компаний:
+- `PRODUCT_ROADMAP.md` описывает полный продуктовый горизонт: Cloud Drive, поиск, sync, RAG, чат, почта и агентные сценарии.
+- `RELEASE_ROADMAP.md` хранит историю и критерии закрытого internal release.
+- этот документ определяет ближайшую коммерческую цель, порядок облачных этапов и обязательные release gates.
 
-- корпоративное хранилище документов;
-- быстрый поиск по файлам, папкам и содержимому;
-- права доступа, группы, sharing и аудит;
-- web, desktop sync, mobile clients;
-- hosted deployment с управляемыми обновлениями, backup, monitoring и поддержкой;
-- позже: RAG, чат, почта, автоматизация документов и агентные сценарии.
+## 1. Ближайшая Цель
 
-Короткая формулировка:
+Ближайшая релизная цель - **Paid Dedicated Pilot**: один клиент работает в отдельном контуре, использует Cloud Drive и поиск в реальных процессах, а команда может безопасно обновить, восстановить и диагностировать его без ручного доступа к документам.
 
-> Управляемое корпоративное облако с поиском по документам, безопасным доступом, синхронизацией и AI-слоем, которое можно продавать как hosted service или выделенный managed tenant.
+Пилот продается как:
 
-## 2. Стратегия Выхода
+> Управляемое корпоративное облако с поиском по документам, безопасным доступом и импортом существующих файлов.
 
-Не прыгать сразу в общий multi-tenant SaaS. Правильная лестница:
+Sync, multi-tenant data plane, полный compliance, чат, почта и агент не входят в критический путь первой продажи.
 
-1. **Single-tenant pilot**: отдельный сервер/контур на клиента.
-2. **Managed single-tenant cloud**: мы хостим отдельный tenant per customer.
-3. **Hybrid SaaS**: общий control plane, но изолированные data planes для клиентов.
-4. **Multi-tenant SaaS**: общий control plane и общий data plane там, где это безопасно и экономически оправдано.
-5. **Enterprise Cloud**: SSO, compliance, retention, legal hold, audit export, SLA.
+## 2. Предпосылки И Ограничения
 
-Причина: документы клиентов - чувствительные данные. Изоляция, backup, incident response и юридическая ответственность важнее ранней экономии на инфраструктуре.
+- Первые клиенты размещаются в выделенном single-tenant data plane: отдельные runtime, DB, object storage и vector index.
+- Начальный профиль - до 100 тыс. файлов и один активный сервер приложения на tenant.
+- Cloud Drive является источником истины; сетевые папки и сканеры остаются каналами импорта.
+- SQLite допустим в выделенном single-host пилоте, пока нет multi-host writes и подтвержденной проблемы с конкурентной нагрузкой.
+- Публичные ссылки выключены по умолчанию; первый безопасный сценарий sharing - внутренние пользователи и приглашенные гости.
+- Для пилота нет внешнего SLA. Используются внутренние SLO, чтобы собрать факты перед коммерческими обещаниями.
+- План рассчитан на последовательную работу небольшой команды. Календарные оценки пересматриваются после первого пилота и измерения фактической нагрузки.
 
-## 3. Текущая База
+## 3. Текущая База И Разрыв
 
-Уже есть или частично готово:
+Подтвержденная база:
 
 - Cloud Drive registry: файлы, папки, версии, корзина, move/rename/delete/restore.
-- Storage backends: local и S3/MinIO contract.
-- Search/RAG foundation: Qdrant, lexical/BM25, eval, RAG citations/fallback.
-- ACL foundation: `viewer/editor/admin`, path/folder/file grants, API/search filtering.
-- Admin UI baseline: Cloud Drive settings, import sources, ACL management.
-- Import/scanner ingestion: sources, durable import jobs, reindex jobs.
-- Backup/restore basics, support bundle, Docker smoke.
-- NiceGUI web UI, CLI, launcher, Telegram integration.
+- Local и S3/MinIO storage contracts.
+- Qdrant + lexical/BM25 search, eval baseline, RAG citations/fallback.
+- Registry ACL: `viewer/editor/admin`, path/folder/file grants, API/search filtering.
+- Admin UI для Cloud Drive, import sources и ACL.
+- Durable import/reindex jobs, index coverage diagnostics и stale-job recovery.
+- Backup/restore basics, redacted support bundle и Docker smoke.
+- Web UI, launcher, CLI и Telegram integration.
 
-Главные gaps до полноценного облачного сервиса:
+Ближайшие release blockers для платного пилота:
 
-- tenant model и изоляция данных;
-- hosted deployment/control plane;
-- groups membership UI и SSO/OIDC;
-- billing/licensing/subscription;
-- production backup/DR и upgrade/migration policy;
-- observability, audit export, admin health dashboard;
-- hardened upload/download: multipart, resumable, streaming, checksum verification;
-- sync clients and device management;
-- commercial-grade sharing UX and external access policy.
+- завершенный sharing workflow в Explorer, группы и понятный `who has access`;
+- стабильность web-сессии: без самопроизвольной полной перезагрузки, потери результатов и ложных reconnect alerts;
+- повторяемый fresh install, upgrade и rollback на чистой среде;
+- автоматический backup и документированный restore drill;
+- audit trail для login, download, share, permission change, delete/restore и admin actions;
+- health/operations view: web, workers, storage, index coverage, jobs и backup freshness;
+- security defaults: secrets, session policy, TLS termination, rate limits и public links off by default;
+- pilot runbook, support boundaries и критерии приемки клиента.
+
+Задачи sync, общего control plane и multi-tenant data plane не являются блокерами первого пилота.
 
 ## 4. Целевая Архитектура
 
 ```mermaid
 flowchart LR
-    Users["Web / Desktop / Mobile"] --> Edge["Edge / App Gateway"]
-    Admins["Service Admin"] --> Control["Control Plane"]
-    Edge --> Auth["Auth / SSO / Sessions"]
-    Edge --> TenantRouter["Tenant Router"]
+    Users["Web / Desktop / Mobile"] --> Edge["TLS Edge / App Gateway"]
+    Edge --> Identity["Auth / Sessions / SSO"]
+    Identity --> Router["Tenant Router"]
+    ServiceAdmin["Service Admin"] --> Control["Control Plane"]
 
-    Control --> Billing["Billing / Licensing"]
-    Control --> Ops["Ops / Monitoring / Support"]
     Control --> TenantRegistry["Tenant Registry"]
-    Control --> Release["Release / Migration Orchestrator"]
+    Control --> Release["Provisioning / Release Orchestrator"]
+    Control --> Metering["Usage / Licensing"]
+    Control --> Ops["Monitoring / Support"]
 
-    TenantRouter --> DataPlaneA["Tenant Data Plane A"]
-    TenantRouter --> DataPlaneB["Tenant Data Plane B"]
+    Router --> TenantAPI["Tenant API"]
 
-    subgraph DataPlaneA["Tenant Data Plane"]
-        API["Tenant API"]
-        Drive["Cloud Drive"]
-        Search["Search / RAG"]
-        Workers["Workers"]
-        DB["Tenant DB"]
-        Objects["Object Storage"]
-        Vector["Vector Index"]
-        Audit["Audit Log"]
+    subgraph TenantPlane["Dedicated Tenant Data Plane"]
+        TenantAPI --> Drive["Cloud Drive"]
+        TenantAPI --> Search["Search / RAG"]
+        TenantAPI --> Audit["Append-only Audit"]
+        Workers["Import / Index / OCR Workers"] --> Drive
+        Workers --> Search
+        Drive --> DB["Tenant DB"]
+        Drive --> Objects["Tenant Object Storage"]
+        Search --> Vector["Tenant Vector Index"]
     end
-
-    API --> Drive
-    API --> Search
-    Workers --> Drive
-    Workers --> Search
-    Drive --> DB
-    Drive --> Objects
-    Search --> Vector
-    API --> Audit
 ```
 
-Принцип: control plane управляет клиентами, лицензиями, rollout и мониторингом. Tenant data plane хранит документы, индексы, права и audit. На ранних этапах data plane лучше держать выделенным для каждого клиента.
+Граница владения данными:
 
-## 5. Roadmap
+- control plane хранит tenant metadata, release state, aggregate usage и health, но не содержимое документов;
+- tenant data plane хранит пользователей/группы, ACL, документы, версии, jobs, search index и audit;
+- support получает диагностические данные через redacted telemetry/support bundle; доступ к содержимому требует явного, ограниченного и аудируемого разрешения клиента.
 
-### Phase 0. Pilot-Ready Single Tenant
+## 5. Сквозные Release Gates
 
-Цель: текущий продукт можно поставить первому клиенту в выделенный контур.
+Эти требования не являются отдельной поздней фазой. Они усиливаются на каждом этапе.
 
-Обязательные результаты:
+### Security And Privacy
 
-- clean install по README;
-- Docker Compose deployment без ручного шаманства;
-- web UI: search, explorer, Cloud Drive, settings, admin center;
-- upload/download/preview/version/trash/restore;
-- import folders для сканеров;
-- ACL UI для пользователей/ролей;
-- sharing внутри компании и базовые public links;
-- backup/restore command проверен на отдельном restore target;
-- support bundle собирает config/logs/status без секретов;
-- release smoke checklist повторяемый.
+- ACL применяется одинаково в list/search/preview/download/share/RAG.
+- Public links выключены по умолчанию, имеют срок действия, revoke и отдельный audit event.
+- Секреты не хранятся в Git, логах, support bundle и browser storage.
+- TLS, secure cookies, session expiration, brute-force/rate-limit policy документированы и проверены.
+- Автоматизированный negative test доказывает отсутствие cross-user и cross-tenant доступа.
 
-Gates:
+### Reliability And Recovery
 
-- `pytest` focused cloud/search/ui green;
-- Docker smoke green;
+- Любая долгая операция имеет job id, видимый progress, retry и диагностируемую ошибку.
+- Перезапуск web/worker не теряет durable jobs и результаты завершенного поиска.
+- Полная перезагрузка страницы не используется как обычный способ обновления UI.
+- Backup считается рабочим только после restore drill на пустом target и проверки выборки файлов, ACL и registry state.
+- Миграция имеет preflight, backup, forward path и проверенный rollback/restore path.
+
+### Observability And Support
+
+- Correlation/request id связывает browser action, API request и background job.
+- Health показывает web, DB, object storage, Qdrant, workers, queue lag, index coverage и backup freshness.
+- Audit отделен от технических логов и отвечает: кто, что, над каким объектом, когда и с каким результатом сделал.
+- Support bundle редактирует secrets и персональные данные по явной политике.
+
+### Performance And UX
+
+- Нажатие дает видимую реакцию не позднее 150 мс; длительная операция показывает progress/skeleton и допускает безопасный retry.
+- Для pilot profile до 100 тыс. файлов warm search p95 не выше 4 с на согласованном hardware profile; exact-name path должен быть заметно быстрее content search.
+- Search eval хранит Recall/MRR/zero-result/p50/p95 по категориям и является required gate для retrieval changes.
+- Responsive smoke покрывает search/explorer/index/settings на 480/900/1280 px без недоступной навигации и горизонтального overflow страницы.
+
+### Operations
+
+- Внутренние pilot SLO: availability 99.5% в месяц, RPO <= 24 ч, RTO <= 8 ч. Это цели эксплуатации, не клиентский SLA.
+- Инциденты имеют severity, owner, timeline и post-incident action list.
+- Cost snapshot учитывает storage, egress, indexed files, OCR pages, embeddings и LLM usage до определения тарифов.
+
+## 6. Delivery Milestones
+
+### M0. Release Evidence
+
+Статус: in progress.
+
+Цель: превратить существующий работающий baseline в воспроизводимый release candidate.
+
+Результаты:
+
+- fresh install и Docker smoke на чистой среде;
+- focused cloud/search/UI tests и full test report;
 - Cloud Drive E2E: upload -> index -> search -> preview/download -> delete/restore;
-- search eval baseline сохранен;
-- `git status --short` clean перед tag.
+- search eval artifact и hardware profile;
+- restore drill с проверкой registry, ACL и случайной выборки content checksums;
+- browser smoke на session reconnect, search state и отсутствие hard reload;
+- versioned release notes и clean tag.
 
-### Phase 1. Managed Single-Tenant Cloud
+Exit gate: другой инженер поднимает и проверяет release по документации без знания локальной машины разработчика.
 
-Цель: мы хостим отдельный tenant per customer и можем поддерживать его удаленно.
+### M1. Paid Dedicated Pilot
 
-Обязательные результаты:
+Статус: next release target.
 
-- tenant provisioning script;
-- per-tenant config, domain, storage bucket, DB, Qdrant collection;
-- automated deployment/update script;
-- migration runner with rollback policy;
-- encrypted secrets storage;
-- scheduled backups with restore drill;
-- health checks and uptime monitoring;
-- admin support bundle download;
-- simple license/subscription flag.
+Цель: первый клиент может ежедневно пользоваться облаком и поиском в выделенном контуре.
 
-Gates:
+Результаты:
 
-- новый tenant поднимается одной командой;
-- backup restore проверяется на пустой среде;
-- update не ломает существующий tenant;
-- storage and DB credentials не попадают в logs/support bundle.
+- Explorer sharing для пользователей/групп, expiration/revoke и `who has access`;
+- группы и membership management;
+- public links как отключаемая tenant policy, не как обязательная функция;
+- audit coverage для чувствительных пользовательских и admin actions;
+- admin health view и backup freshness;
+- scripted install/update, preflight и rollback/restore procedure;
+- pilot onboarding, acceptance checklist, support runbook и data-processing boundaries;
+- простая лицензия без сложного online billing.
 
-### Phase 2. Productized Cloud Drive
+Exit gate: пользователь без помощи администратора загружает, находит, открывает, делится и восстанавливает документ; администратор видит доступы и аудит; команда выполняет update и restore drill.
 
-Цель: сервис ощущается как облако документов, а не как админский инструмент.
+### M2. Managed Single-Tenant Cloud
 
-Обязательные результаты:
+Цель: несколько выделенных tenant можно поддерживать с одинаковым процессом.
 
-- polished Explorer: bulk actions, context menu, drag/drop upload, folder download zip;
-- sharing UX: users/groups/public links, expiration, revoke, copy link;
-- groups and membership UI;
-- external guests with restricted access;
-- favorites/recent/shared-with-me views;
-- document preview for PDF/images/Office where possible;
-- upload progress, retry, failed uploads;
-- quotas per user/folder/tenant;
-- file activity timeline.
+Результаты:
 
-Gates:
+- idempotent tenant provisioning;
+- per-tenant domain, secrets, DB, bucket и Qdrant instance/config;
+- scheduled encrypted backups and automated restore verification;
+- release rings `internal/pilot/stable`;
+- centralized health без содержимого tenant documents;
+- usage snapshot: users, storage, indexed files, OCR pages, embeddings/LLM;
+- suspend/export/delete tenant lifecycle с audit.
 
-- обычный пользователь может загрузить, найти, открыть, поделиться и отозвать доступ без админа;
-- админ видит who has access для файла/папки;
-- sharing respects ACL in search, preview, download and RAG.
+Exit gate: новый tenant поднимается повторяемо, rollout можно остановить, а restore выполняется в целевой RTO без утечки credentials.
 
-### Phase 3. Search Cloud Quality
+### M3. Productized Drive And Search
 
-Цель: поиск становится конкурентным преимуществом сервиса.
+Цель: продукт ощущается как корпоративное облако, а поиск становится измеримым преимуществом.
 
-Обязательные результаты:
+Результаты:
 
-- registry search by name/path/type/date/size/owner;
-- content search with ACL filtering;
-- structural chunking for PDF/DOCX/XLSX;
-- provenance to file version, page, sheet, row, chunk;
-- query suggestions and typo tolerance;
-- explain mode: почему найден результат;
-- eval dashboard and regression gate;
-- latency budgets by deployment size;
-- cache strategy for hot folders and frequent queries.
+- bulk operations, drag/drop upload, folder ZIP, recent/favorites/shared-with-me;
+- upload progress, retry, failed upload list, streaming and resumable transfers;
+- PDF/image/Office preview where safe;
+- registry filters by name/path/type/date/size/owner;
+- structural chunking and provenance to version/page/sheet/row/chunk;
+- typo tolerance, explain mode and eval dashboard;
+- quotas, activity timeline, checksum verification and object GC report.
 
-Gates:
+Exit gate: основные user journeys проходят без admin intervention, search thresholds соблюдаются, move/delete/ACL changes не оставляют stale or leaked results.
 
-- agreed Recall/MRR threshold per category;
-- p95 latency target для 100k/1M/10M files профилей;
-- retrieval changes cannot merge without eval artifact;
-- search never leaks documents outside user's ACL.
+### M4. Sync And Device Management
 
-### Phase 4. Sync And Clients
+Цель: Windows-пользователь работает через привычную локальную папку без потери версий.
 
-Цель: пользователи работают через привычную папку и устройства.
+Результаты:
 
-Обязательные результаты:
+- Windows sync client, selective sync and conflict inbox;
+- resumable transfer, bandwidth policy and offline retry;
+- device identity, revoke and client audit;
+- auto-update, logs and support export;
+- macOS/Linux/mobile только после стабилизации протокола.
 
-- Windows desktop sync client;
-- selective sync;
-- conflict inbox;
-- resumable upload/download;
-- device identity and revoke;
-- client logs/support export;
-- bandwidth limits and retry policy;
-- later: macOS/Linux/mobile.
+Exit gate: sync переживает restart/network loss; конфликт не теряет версии; revoked device перестает получать изменения.
 
-Gates:
+### M5. SaaS Control Plane
 
-- sync survives restart/network loss;
-- conflict resolution does not lose versions;
-- revoked device stops receiving changes;
-- server audit shows client actions.
+Цель: централизовать коммерческое управление, не объединяя tenant data planes преждевременно.
 
-### Phase 5. Hosted SaaS Control Plane
+Результаты:
 
-Цель: единое управление клиентами, тарифами, обновлениями и поддержкой.
+- tenant registry and lifecycle;
+- plan/license/subscription model and billing export;
+- customer admin and service admin portals;
+- release/migration orchestration and incident dashboard;
+- reconciled usage metering and quota enforcement.
 
-Обязательные результаты:
+Exit gate: create/suspend/export/delete и rollout работают из control plane; usage report сходится с tenant source systems.
 
-- tenant registry;
-- plan/license/subscription model;
-- usage metering: users, storage, indexed files, OCR pages, LLM tokens;
-- customer admin portal;
-- service admin portal;
-- release rings: dev/internal/pilot/stable;
-- migration orchestration;
-- incident dashboard;
-- billing export or integration.
+### M6. Enterprise Security And Compliance
 
-Gates:
+Цель: продавать компаниям с корпоративным identity и формальными требованиями к данным.
 
-- можно создать/заморозить/удалить tenant;
-- превышение квот блокирует только нужные операции;
-- usage report сходится с storage/index/user DB;
-- rollout can pause or rollback.
+Результаты:
 
-### Phase 6. Security And Compliance
+- OIDC SSO, MFA policy and AD/LDAP group sync where required;
+- immutable audit export, retention and legal hold;
+- per-tenant encryption keys and secrets rotation;
+- antivirus/DLP hooks and risky-admin-action approval;
+- customer-controlled support access and regional placement policy.
 
-Цель: готовность к компаниям с требованиями безопасности.
+Exit gate: threat model и penetration test закрыты; SSO/groups/ACL согласованы; legal hold блокирует purge; audit export подтвержден клиентом.
 
-Обязательные результаты:
+### M7. AI Layer And Multi-Tenant Optimization
 
-- SSO/OIDC;
-- AD/LDAP group sync where needed;
-- MFA policy;
-- immutable audit export;
-- retention policy;
-- legal hold;
-- encryption at rest and in transit documented;
-- secrets rotation;
-- antivirus/DLP hook points;
-- admin action approval for risky operations.
+Цель: добавлять AI и разделяемую инфраструктуру только после доказанной экономики и изоляции.
 
-Gates:
+AI results:
 
-- audit answers: who accessed/shared/downloaded/deleted a document;
-- SSO users map to groups and ACL;
-- legal hold blocks delete/purge;
-- support cannot access tenant data without explicit customer-controlled path.
+- local/remote model profiles, tenant policy and budgets;
+- permissions-aware RAG with source/version/chunk citations;
+- safe fallback for unsupported/conflicting answers;
+- human approval for agent actions.
 
-### Phase 7. AI/RAG Cloud Layer
+Multi-tenant results:
 
-Цель: добавить AI как управляемый слой, не ломая безопасность.
+- threat model and isolation tests for API, DB, storage, vectors, cache and logs;
+- noisy-neighbor controls, per-tenant keys and regional placement;
+- tenant purge evidence and multi-tenant load tests;
+- RPO/RTO and incident drills per commercial plan.
 
-Обязательные результаты:
+Exit gate: shared data plane lowers measured cost without weakening isolation, latency or recovery. До этого момента остается выделенный tenant data plane.
 
-- model profiles: local, budget remote, premium remote;
-- RAG answer with citations and weak-source fallback;
-- permissions-aware RAG tools;
-- per-tenant LLM policy and budget;
-- prompt/audit logging without leaking secrets;
-- document summarization and comparison;
-- later: agent actions with human approval.
+### Зависимости И Плановые Диапазоны
 
-Gates:
+Milestones не обязаны идти строго последовательно: после M1 операционный поток M2 и продуктовый поток M3 могут выполняться параллельно. M4 зависит от hardened transfer protocol из M3, а M5 имеет смысл после повторяемого M2 и появления нескольких tenant.
 
-- AI sees only documents user can access;
-- answer always cites source/version/chunk;
-- unsupported/conflicting answer falls back safely;
-- tenant admin can disable remote LLM.
+```mermaid
+flowchart LR
+    M0["M0 Release Evidence"] --> M1["M1 Paid Dedicated Pilot"]
+    M1 --> M2["M2 Managed Single-Tenant"]
+    M1 --> M3["M3 Productized Drive and Search"]
+    M3 --> M4["M4 Sync and Devices"]
+    M2 --> M5["M5 SaaS Control Plane"]
+    M3 --> M5
+    M5 --> M6["M6 Enterprise"]
+    M4 --> M7["M7 AI and Multi-Tenant Optimization"]
+    M6 --> M7
+```
 
-### Phase 8. Multi-Tenant Optimization
+Оценка предполагает два параллельных потока - backend/operations и UI/product - без срочной customer-specific интеграции:
 
-Цель: снизить стоимость и масштабировать после доказанного product-market fit.
+| Результат | Плановый Диапазон | Комментарий |
+|---|---:|---|
+| M0 release evidence | 1-2 недели | В основном проверка, фиксация и автоматизация уже существующего baseline |
+| M1 paid dedicated pilot | еще 4-8 недель | Основной риск - sharing/groups, web stability, audit и repeatable recovery |
+| M2 managed single-tenant | 6-10 недель после M1 | Может идти параллельно с продуктовой работой M3 |
+| M3 productized drive/search | 8-16 недель после M1 | Объем регулируется фактической обратной связью пилота |
+| M4 Windows sync | 3-5 месяцев после стабильного transfer protocol | Требует отдельной матрицы restart/network/conflict tests |
+| M5 control plane | 3-6 месяцев после появления 3-5 tenant | Раньше этого вероятна преждевременная автоматизация |
+| M6 enterprise | По контрактному спросу | SSO может быть вынесен раньше, если блокирует конкретную продажу |
+| M7 shared data plane | После доказанной unit economics | Не имеет календарного обязательства до isolation/load evidence |
 
-Обязательные результаты:
+Диапазоны пересматриваются на каждом exit gate. Это planning range, а не обещание клиенту.
 
-- clear tenant isolation model;
-- shared services only where safe: control plane, billing, observability;
-- data-plane sharing only after threat model and load model are proven;
-- per-tenant encryption keys;
-- noisy-neighbor controls;
-- regional placement;
-- disaster recovery targets: RPO/RTO per plan.
+## 7. Ближайший Backlog
 
-Gates:
+### P0 - До Paid Dedicated Pilot
 
-- isolation tests cover API, storage, DB, vector index and logs;
-- tenant deletion purges data by policy;
-- load tests prove p95 under target with multiple active tenants;
-- incident drills documented.
+1. Закрыть Explorer sharing workflow, groups/membership и `who has access`.
+2. Устранить hard reload/reconnect/search-reset сценарии и добавить browser regression tests.
+3. Довести audit coverage и negative ACL tests до всех read/share/delete flows.
+4. Автоматизировать fresh install, upgrade preflight и restore drill.
+5. Добавить admin health/backup freshness и correlation ids.
+6. Зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
+7. Подготовить onboarding, acceptance checklist, support and incident runbooks.
 
-## 6. Ближайшие 30/60/90 Дней
+### P1 - После Запуска Пилота
 
-### 30 дней
+1. Streaming/resumable transfers, checksum verification and object GC.
+2. Usage/cost metering and simple licensing enforcement.
+3. Idempotent tenant provisioning and scheduled backup verification.
+4. Product views: recent, favorites, shared-with-me, activity.
+5. Search provenance, structural chunking and required CI eval gate.
 
-- закрыть Explorer sharing UX поверх ACL/share links;
-- groups membership UI;
-- Cloud Drive product smoke checklist;
-- fresh install + Docker smoke;
-- restore drill на отдельной директории;
-- search eval baseline after latest UX/backend changes;
-- pilot checklist для первого клиента.
+### P2 - После Подтверждения Пилота
 
-### 60 дней
+1. Windows sync client hardening.
+2. Control plane and release rings.
+3. OIDC/AD/compliance according to signed customer requirements.
+4. Shared data-plane feasibility only after cost and threat-model review.
 
-- managed single-tenant provisioning script;
-- installer/release script;
-- license flag and usage snapshot;
-- storage hardening: streaming download, checksum verify, object GC report;
-- upload progress/retry UX;
-- admin health dashboard: jobs, storage, index coverage, backups.
+## 8. Принятые Архитектурные Решения
 
-### 90 дней
+| Вопрос | Решение Сейчас | Условие Пересмотра |
+|---|---|---|
+| Первое размещение | Managed/dedicated single-tenant | Не менее 3-5 похожих tenant и подтвержденная стоимость ручного управления |
+| Основная DB | SQLite для single-host pilot | Multi-host writes, устойчивое lock contention или требования HA |
+| Qdrant isolation | Отдельный instance/config на hosted pilot | Общий cluster только после isolation/load tests |
+| Object storage | Отдельный bucket и credentials на tenant | Shared bucket только при доказанной key/prefix isolation и выгоде |
+| Public links | Feature flag, default off; invited/internal sharing first | Явный customer demand и принятая external-sharing policy |
+| SSO | Не блокирует первый малый pilot | Обязателен до клиента, который не принимает local accounts |
+| OCR execution | Tenant worker/data plane | Shared pool только с encrypted isolation и cost justification |
+| Pilot recovery | Internal RPO <= 24 ч, RTO <= 8 ч | Уточнить по restore drills и контракту клиента |
+| Control plane | После повторяемого dedicated pilot | Начать раньше только если второй tenant уже создает operational pain |
+| Billing | Простая лицензия + usage snapshot | Полный billing после подтверждения тарифов и unit economics |
 
-- first hosted pilot tenant;
-- scheduled backup and restore drill automation;
-- groups/ACL/sharing polished in Explorer;
-- sync client MVP plan and protocol hardening;
-- latency profiling and cache tuning;
-- support playbook and incident checklist.
+## 9. Риски И Revisit Triggers
 
-## 7. Нерешенные Решения
+- **Data leak:** любой ACL bypass или cross-tenant finding останавливает rollout и требует проверки всех access paths.
+- **Web stability:** hard reload, потеря search state или ложный reconnect во время обычного действия являются release blockers M1.
+- **Recovery:** backup без успешного restore drill не считается backup; превышение RTO требует пересмотра storage/DB topology.
+- **SQLite ceiling:** повторяемые lock/contention incidents или необходимость нескольких app writers запускают ADR по Postgres.
+- **Search cost/latency:** выход p95 за budget или рост index lag требует профилирования до добавления AI features.
+- **Support cost:** более двух ручных диагностических сессий на tenant в месяц приоритизируют observability/control-plane work.
+- **Scope:** chat, mail, mobile и agent не вытесняют P0-задачи пилота без подтвержденной сделки.
 
-1. Hosted immediately или сначала только on-prem/single-tenant?
-2. Postgres нужен до hosted phase или SQLite допустим для dedicated tenants?
-3. Qdrant per tenant: collection, database instance or cluster namespace?
-4. Object storage: one bucket per tenant or shared bucket with tenant prefix and per-tenant keys?
-5. Public links нужны первым клиентам или только invited users?
-6. SSO/OIDC нужен для первого paid pilot?
-7. Где будет выполняться OCR: tenant worker, shared worker pool, customer-side worker?
-8. Какие RPO/RTO обещать в первом тарифе?
+## 10. Definition Of Done
 
-## 8. Главные Риски
+### Продаваемый Dedicated Cloud
 
-- **Data leak risk**: ACL must be enforced at API, search, preview, download and AI layers.
-- **Operational risk**: backups and migrations must be boring before hosted customers.
-- **Cost risk**: storage, embeddings, OCR and LLM usage need metering before SaaS pricing.
-- **UX risk**: if sharing/search/import are admin-only, product will feel like internal tool.
-- **Scale risk**: SQLite and single-process workers are fine for pilots, but not for large shared SaaS.
-- **Support risk**: without support bundle, logs, audit and health dashboard, hosted support becomes manual and expensive.
+- tenant provision/update/backup/restore/suspend повторяемы и аудируемы;
+- пользователь выполняет основные file/search/share/recovery workflows без администратора;
+- администратор управляет users/groups/ACL/import/jobs/backups/audit;
+- support диагностирует проблему по health, correlation id и redacted bundle;
+- search quality, latency, index coverage и backup freshness измеряются;
+- release имеет acceptance tests, migration preflight и rollback/restore path.
 
-## 9. Definition Of Done For Full Cloud Service
+### Полноценный Облачный Сервис
 
-Сервис можно считать полноценным облачным сервисом, когда:
-
-- tenant can be provisioned, upgraded, backed up, restored and suspended repeatably;
-- users can upload, sync, search, preview, share and recover documents without admin intervention;
-- admins can manage users, groups, ACL, quotas, import sources, jobs, backups and audit;
-- support can diagnose incidents without direct uncontrolled access to customer documents;
-- search quality and latency are measured and regression-gated;
-- security model covers auth, ACL, sharing, public links, audit, retention and AI access;
-- billing/licensing and usage metering exist;
-- release process has smoke tests, migration checks and rollback plan.
+- control plane управляет tenant lifecycle, releases, usage, plans and incidents;
+- isolation, deletion and recovery доказаны автоматизированными тестами и drills;
+- SSO, audit export, retention and support access соответствуют целевому сегменту;
+- billing/licensing опираются на проверяемый metering;
+- sync или другой клиентский access channel стабилен на поддерживаемых платформах;
+- AI включается tenant policy и никогда не расширяет права пользователя.

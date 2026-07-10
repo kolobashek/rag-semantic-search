@@ -1,10 +1,10 @@
 # Product Roadmap
 
-Дата: 2026-05-27
+Дата: 2026-05-27; роль документа уточнена 2026-07-10
 
-Статус: рабочая стратегическая карта после первого internal release. Этот документ описывает целевой продукт и следующие фазы развития. Детальная история закрытого релизного этапа остается в `docs/RELEASE_ROADMAP.md`.
+Статус: продуктовый горизонт после первого internal release. Документ описывает функциональные направления, но не является текущим delivery-планом облачного релиза. Детальная история закрытого релизного этапа остается в `docs/RELEASE_ROADMAP.md`.
 
-Отдельная карта перехода к hosted/multi-tenant облачному сервису: [CLOUD_SERVICE_ROADMAP.md](CLOUD_SERVICE_ROADMAP.md).
+Текущий порядок коммерческой поставки, release gates и принятые cloud-решения: [CLOUD_SERVICE_ROADMAP.md](CLOUD_SERVICE_ROADMAP.md).
 
 ## 1. Целевой продукт
 
@@ -557,25 +557,17 @@ Done criteria:
 
 ## 7. Ближайший порядок работ
 
-Рекомендуемый порядок после текущего search-quality baseline:
+Текущий исполнимый порядок работ, release gates и плановые диапазоны перенесены в раздел `Ближайший Backlog` документа [CLOUD_SERVICE_ROADMAP.md](CLOUD_SERVICE_ROADMAP.md). Здесь сохраняется только полный функциональный горизонт продукта.
 
-1. Снять повторяемый release smoke: Docker, launcher, Cloud Drive registry/storage/CLI, backup/restore, support bundle.
-2. Спроектировать Commercial MVP backlog: Cloud Drive product UX, groups/ACL UI, registry search, import folders.
-3. Сделать backend MVP sprint: import/watched folders, ACL edge cases, registry search filters, audit trail.
-4. Сделать product UX sprint: explorer, preview, sharing, admin center.
-5. Сделать deployment sprint: installer, backup/restore policy, support bundle, license basics.
-6. Подготовить pilot checklist и отдать первым знакомым на пилот.
+## 8. Открытые продуктовые вопросы
 
-## 8. Открытые вопросы
+Решения о первом размещении, tenant isolation, public links, SSO gate, storage и OCR execution зафиксированы в `Принятых Архитектурных Решениях` документа [CLOUD_SERVICE_ROADMAP.md](CLOUD_SERVICE_ROADMAP.md).
 
-1. Первые продажи будут on-premise/single-tenant или нужен hosted SaaS сразу?
-2. Какие ОС у первых клиентов: только Windows или есть macOS/Linux?
-3. Нужно ли внешнее sharing по публичной ссылке или только приглашенные пользователи?
-4. Какие типы документов самые важные для качества поиска: сканы, PDF, Excel, Word, почта, фото?
-5. Нужна ли интеграция с доменом Windows у первых клиентов?
-6. Нужно ли хранить почту внутри продукта или достаточно индексировать внешние ящики?
-7. Какая 1C-конфигурация первая: Бухгалтерия, УТ, ERP, ЗУП или кастомная?
-8. Где граница автоматических действий агента: только предложить или разрешить изменять данные после подтверждения?
+1. Какие ОС, кроме Windows, подтверждены реальными пользователями sync client?
+2. Какие типы документов важнее для следующего search-quality набора: сканы, PDF, Excel, Word, почта или фото?
+3. Нужно ли хранить почту внутри продукта или достаточно индексировать внешние ящики?
+4. Какая 1C-конфигурация первая: Бухгалтерия, УТ, ERP, ЗУП или кастомная?
+5. Где граница автоматических действий агента: только предложить или разрешить изменять данные после подтверждения?
 
 ## 9. Архитектурные решения на сейчас
 
