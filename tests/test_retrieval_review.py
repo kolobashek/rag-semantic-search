@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from rag_catalog.core.retrieval_review import finalize_review_queue, prepare_review_queue, validate_review_queue
+from rag_catalog.core.retrieval_review import (
+    finalize_review_queue,
+    load_json_object,
+    prepare_review_queue,
+    save_review_queue_atomic,
+    validate_review_queue,
+)
 
 
 def _reviewed_item(query: str, *, no_answer: bool = False, forbidden: bool = False) -> dict:
@@ -82,3 +88,20 @@ def test_pending_or_contradictory_review_cannot_finalize() -> None:
     errors = {item["error"] for item in result["errors"]}
     assert "review_pending" in errors
     assert "no_answer_has_positive_ground_truth" in errors
+
+
+def test_review_queue_save_is_atomic_and_keeps_backup(tmp_path) -> None:
+    path = tmp_path / "review.json"
+    first = {"schema_version": 1, "items": [_reviewed_item("first")]}
+    second = {"schema_version": 1, "items": [_reviewed_item("second")]}
+
+    backup = save_review_queue_atomic(path, first)
+    assert not backup.exists()
+    backup = save_review_queue_atomic(path, second)
+
+    assert load_json_object(path)["items"][0]["query"] == "second"
+    assert load_json_object(backup)["items"][0]["query"] == "first"
+    assert not list(tmp_path.glob("*.tmp"))
+
+    with pytest.raises(ValueError):
+        save_review_queue_atomic(path, {"schema_version": 999, "items": []})

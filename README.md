@@ -337,12 +337,14 @@ python scripts/retrieval_review.py prepare `
   --report runtime/eval/retrieval-v3-legacy.json `
   --output runtime/eval/retrieval-v3-review.json
 
+python scripts/retrieval_review_ui.py runtime/eval/retrieval-v3-review.json --port 8092
+
 python scripts/retrieval_review.py validate runtime/eval/retrieval-v3-review.json
 python scripts/retrieval_review.py finalize runtime/eval/retrieval-v3-review.json `
   --output eval/retrieval_v3_golden.json
 ```
 
-Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация по умолчанию требует минимум три no-answer и три forbidden/ACL cases. Retrieval GO также требует ненулевой `acl_results_checked`; нулевая утечка при отсутствии ACL ground truth больше не считается доказательством безопасности.
+Локальный UI привязан к `127.0.0.1`, сохраняет каждое решение атомарно и держит предыдущую версию рядом в `.bak`. В нём можно отметить relevant/forbidden кандидатов, добавить отсутствующий путь или создать отдельный no-answer запрос. Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация по умолчанию требует минимум три no-answer и три forbidden/ACL cases. Retrieval GO также требует ненулевой `acl_results_checked`; нулевая утечка при отсутствии ACL ground truth больше не считается доказательством безопасности.
 
 ### Paid Pilot Release Gate
 

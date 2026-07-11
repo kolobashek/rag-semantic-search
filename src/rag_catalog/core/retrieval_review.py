@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -20,6 +22,23 @@ def load_json_list(path: str | Path) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         raise ValueError(f"Expected JSON list: {path}")
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def save_review_queue_atomic(path: str | Path, review_queue: Dict[str, Any]) -> Path:
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if int(review_queue.get("schema_version") or 0) != REVIEW_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported review schema: {review_queue.get('schema_version')}")
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    backup = target.with_name(f"{target.name}.bak")
+    temporary.write_text(json.dumps(review_queue, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        if target.exists():
+            shutil.copy2(target, backup)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return backup
 
 
 def prepare_review_queue(
