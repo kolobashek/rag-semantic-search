@@ -21,13 +21,20 @@ services:
     volumes:
       - minio_data:/data
     command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
 
   minio-init:
     image: minio/mc:RELEASE.2025-01-17T23-25-50Z
     profiles:
       - storage
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
