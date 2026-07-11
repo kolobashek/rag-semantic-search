@@ -41,6 +41,11 @@ class GoldenQuery:
     query: str
     expected: List[str]
     category: str = "general"
+    expected_paths: List[str] | None = None
+    expected_chunks: List[str] | None = None
+    expected_pages: List[int] | None = None
+    forbidden: List[str] | None = None
+    expect_no_answer: bool = False
 
 
 def load_golden_queries(path: str | Path) -> List[GoldenQuery]:
@@ -54,8 +59,24 @@ def load_golden_queries(path: str | Path) -> List[GoldenQuery]:
         query = str(item.get("query") or "").strip()
         expected = [str(x).strip() for x in item.get("expected", []) if str(x).strip()]
         category = str(item.get("category") or "general").strip() or "general"
-        if query and expected:
-            out.append(GoldenQuery(query=query, expected=expected, category=category))
+        expected_paths = [str(x).strip() for x in item.get("expected_paths", []) if str(x).strip()]
+        expected_chunks = [str(x).strip() for x in item.get("expected_chunks", []) if str(x).strip()]
+        expected_pages = [int(x) for x in item.get("expected_pages", []) if str(x).strip()]
+        forbidden = [str(x).strip() for x in item.get("forbidden", []) if str(x).strip()]
+        expect_no_answer = bool(item.get("expect_no_answer"))
+        if query and (expected or expected_paths or expected_chunks or expected_pages or forbidden or expect_no_answer):
+            out.append(
+                GoldenQuery(
+                    query=query,
+                    expected=expected,
+                    category=category,
+                    expected_paths=expected_paths,
+                    expected_chunks=expected_chunks,
+                    expected_pages=expected_pages,
+                    forbidden=forbidden,
+                    expect_no_answer=expect_no_answer,
+                )
+            )
     if not out:
         raise ValueError("Golden set is empty.")
     return out
@@ -66,6 +87,34 @@ def _result_text(result: Dict[str, Any]) -> str:
         str(result.get(key) or "")
         for key in ("filename", "path", "full_path", "cloud_path", "text")
     ).lower().replace("ё", "е")
+
+
+def _result_path_text(result: Dict[str, Any]) -> str:
+    return " ".join(
+        str(result.get(key) or "") for key in ("filename", "path", "full_path", "cloud_path")
+    ).lower().replace("ё", "е")
+
+
+def _result_chunk_text(result: Dict[str, Any]) -> str:
+    return " ".join(
+        str(result.get(key) or "") for key in ("text", "chunk_text", "content", "snippet")
+    ).lower().replace("ё", "е")
+
+
+def _result_page(result: Dict[str, Any]) -> int | None:
+    for key in ("page", "page_number", "page_no"):
+        value = result.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _expected_hit(texts: Iterable[str], expected: List[str]) -> bool:
+    return any(_text_matches_expected(text, needle) for text in texts for needle in expected)
 
 
 def _expected_text(value: str) -> str:
@@ -179,6 +228,11 @@ def _percentile(values: List[int], pct: float) -> int:
     return int(ordered[idx])
 
 
+def _mean_defined(rows: List[Dict[str, Any]], key: str) -> float | None:
+    values = [float(row[key]) for row in rows if row.get(key) is not None]
+    return sum(values) / len(values) if values else None
+
+
 def evaluate_search(
     golden: List[GoldenQuery],
     search_fn: Callable[[str, int], List[Dict[str, Any]]],
@@ -190,52 +244,158 @@ def evaluate_search(
         started = time.perf_counter()
         results = search_fn(item.query, limit)
         latency_ms = int((time.perf_counter() - started) * 1000)
+        limited_results = results[: max(1, int(limit))]
+        expected_paths = list(item.expected_paths or [])
+        expected_chunks = list(item.expected_chunks or [])
+        expected_pages = list(item.expected_pages or [])
+        forbidden = list(item.forbidden or [])
+        path_texts = [_result_path_text(result) for result in limited_results]
+        chunk_texts = [_result_chunk_text(result) for result in limited_results]
+        pages = [_result_page(result) for result in limited_results]
+        acl_leaks = sum(1 for result in limited_results if _expected_hit([_result_text(result)], forbidden)) if forbidden else 0
+        relevance_recall = recall_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
+        relevance_mrr = mrr_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
+        relevance_ndcg = ndcg_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
         rows.append(
             {
                 "query": item.query,
                 "expected": item.expected,
                 "category": item.category,
                 "results_count": len(results),
-                "recall_at_k": recall_at_k(results, item.expected, k=limit),
-                "mrr_at_k": mrr_at_k(results, item.expected, k=limit),
-                "ndcg_at_k": ndcg_at_k(results, item.expected, k=limit),
+                "recall_at_k": relevance_recall,
+                "mrr_at_k": relevance_mrr,
+                "ndcg_at_k": relevance_ndcg,
+                "document_hit": 1.0 if expected_paths and _expected_hit(path_texts, expected_paths) else (0.0 if expected_paths else None),
+                "chunk_hit": 1.0 if expected_chunks and _expected_hit(chunk_texts, expected_chunks) else (0.0 if expected_chunks else None),
+                "page_hit": 1.0 if expected_pages and any(page in expected_pages for page in pages) else (0.0 if expected_pages else None),
+                "no_answer_ok": (1.0 if not results else 0.0) if item.expect_no_answer else None,
+                "acl_leaks": acl_leaks,
+                "acl_results_checked": len(limited_results) if forbidden else 0,
                 "latency_ms": latency_ms,
                 "top": [
                     {
                         "filename": str(result.get("filename") or ""),
                         "path": str(result.get("path") or result.get("full_path") or result.get("cloud_path") or ""),
+                        "page": _result_page(result),
                         "score": float(result.get("rank_score", result.get("score") or 0) or 0),
                     }
                     for result in results[:limit]
                 ],
             }
         )
-    count = max(1, len(rows))
+    relevance_rows = [row for row in rows if row.get("recall_at_k") is not None]
+    count = max(1, len(relevance_rows))
     latencies = [int(row["latency_ms"]) for row in rows]
     zero_results = sum(1 for row in rows if int(row["results_count"] or 0) == 0)
     by_category: Dict[str, Dict[str, Any]] = {}
     for category in sorted({str(row.get("category") or "general") for row in rows}):
         cat_rows = [row for row in rows if str(row.get("category") or "general") == category]
-        cat_count = max(1, len(cat_rows))
+        cat_relevance_rows = [row for row in cat_rows if row.get("recall_at_k") is not None]
+        cat_count = max(1, len(cat_relevance_rows))
         cat_latencies = [int(row["latency_ms"]) for row in cat_rows]
         by_category[category] = {
             "queries": len(cat_rows),
-            "recall_at_k": sum(row["recall_at_k"] for row in cat_rows) / cat_count,
-            "mrr_at_k": sum(row["mrr_at_k"] for row in cat_rows) / cat_count,
-            "ndcg_at_k": sum(row["ndcg_at_k"] for row in cat_rows) / cat_count,
-            "zero_result_rate": sum(1 for row in cat_rows if int(row["results_count"] or 0) == 0) / cat_count,
+            "recall_at_k": sum(float(row["recall_at_k"]) for row in cat_relevance_rows) / cat_count,
+            "mrr_at_k": sum(float(row["mrr_at_k"]) for row in cat_relevance_rows) / cat_count,
+            "ndcg_at_k": sum(float(row["ndcg_at_k"]) for row in cat_relevance_rows) / cat_count,
+            "zero_result_rate": sum(1 for row in cat_rows if int(row["results_count"] or 0) == 0) / max(1, len(cat_rows)),
             "latency_p50_ms": _percentile(cat_latencies, 50),
             "latency_p95_ms": _percentile(cat_latencies, 95),
         }
     return {
         "queries": len(rows),
         "limit": int(limit),
-        "recall_at_k": sum(row["recall_at_k"] for row in rows) / count,
-        "mrr_at_k": sum(row["mrr_at_k"] for row in rows) / count,
-        "ndcg_at_k": sum(row["ndcg_at_k"] for row in rows) / count,
-        "zero_result_rate": zero_results / count,
+        "recall_at_k": sum(float(row["recall_at_k"]) for row in relevance_rows) / count,
+        "mrr_at_k": sum(float(row["mrr_at_k"]) for row in relevance_rows) / count,
+        "ndcg_at_k": sum(float(row["ndcg_at_k"]) for row in relevance_rows) / count,
+        "zero_result_rate": zero_results / max(1, len(rows)),
+        "document_hit_rate": _mean_defined(rows, "document_hit"),
+        "chunk_hit_rate": _mean_defined(rows, "chunk_hit"),
+        "page_hit_rate": _mean_defined(rows, "page_hit"),
+        "no_answer_accuracy": _mean_defined(rows, "no_answer_ok"),
+        "acl_leakage_rate": (
+            sum(int(row["acl_leaks"]) for row in rows)
+            / max(1, sum(int(row["acl_results_checked"]) for row in rows))
+        ),
+        "ground_truth_coverage": sum(
+            1
+            for item in golden
+            if item.expected_paths or item.expected_chunks or item.expected_pages or item.forbidden or item.expect_no_answer
+        )
+        / max(1, len(golden)),
+        "faithfulness_evaluated": False,
         "latency_p50_ms": _percentile(latencies, 50),
         "latency_p95_ms": _percentile(latencies, 95),
         "by_category": by_category,
         "rows": rows,
+    }
+
+
+def evaluate_retrieval_decision(
+    candidate: Dict[str, Any],
+    *,
+    baseline: Dict[str, Any] | None = None,
+    min_recall: float = 0.875,
+    max_recall_drop: float = 0.0,
+    max_p95_ms: int = 3000,
+    max_p95_ratio: float = 1.5,
+    max_acl_leakage: float = 0.0,
+    min_no_answer_accuracy: float = 0.8,
+    min_ground_truth_coverage: float = 0.5,
+    require_faithfulness: bool = False,
+) -> Dict[str, Any]:
+    """Produce a deterministic GO/NO_GO gate for a shadow retrieval candidate."""
+    checks: List[Dict[str, Any]] = []
+
+    def add(name: str, ok: bool, actual: Any, expected: str) -> None:
+        checks.append({"name": name, "ok": bool(ok), "actual": actual, "expected": expected})
+
+    recall = float(candidate.get("recall_at_k") or 0.0)
+    p95 = int(candidate.get("latency_p95_ms") or 0)
+    acl_leakage = float(candidate.get("acl_leakage_rate") or 0.0)
+    coverage = float(candidate.get("ground_truth_coverage") or 0.0)
+    add("recall_floor", recall >= min_recall, recall, f">={min_recall}")
+    add("latency_budget", p95 <= int(max_p95_ms), p95, f"<={int(max_p95_ms)} ms")
+    add("acl_leakage", acl_leakage <= max_acl_leakage, acl_leakage, f"<={max_acl_leakage}")
+    add("ground_truth_coverage", coverage >= min_ground_truth_coverage, coverage, f">={min_ground_truth_coverage}")
+
+    no_answer = candidate.get("no_answer_accuracy")
+    add(
+        "no_answer_accuracy",
+        no_answer is not None and float(no_answer) >= min_no_answer_accuracy,
+        no_answer,
+        f">={min_no_answer_accuracy}",
+    )
+    if require_faithfulness:
+        add(
+            "faithfulness_evaluated",
+            bool(candidate.get("faithfulness_evaluated")),
+            bool(candidate.get("faithfulness_evaluated")),
+            "true",
+        )
+    if baseline is not None:
+        baseline_recall = float(baseline.get("recall_at_k") or 0.0)
+        recall_drop = baseline_recall - recall
+        add("recall_regression", recall_drop <= max_recall_drop, recall_drop, f"<={max_recall_drop}")
+        baseline_p95 = int(baseline.get("latency_p95_ms") or 0)
+        p95_ratio = p95 / baseline_p95 if baseline_p95 > 0 else None
+        add(
+            "latency_regression",
+            p95_ratio is not None and p95_ratio <= max_p95_ratio,
+            p95_ratio,
+            f"<={max_p95_ratio}x baseline",
+        )
+    ok = all(bool(check["ok"]) for check in checks)
+    return {
+        "decision": "GO" if ok else "NO_GO",
+        "ok": ok,
+        "checks": checks,
+        "candidate": {
+            "queries": int(candidate.get("queries") or 0),
+            "recall_at_k": recall,
+            "latency_p95_ms": p95,
+            "acl_leakage_rate": acl_leakage,
+            "no_answer_accuracy": no_answer,
+            "ground_truth_coverage": coverage,
+        },
     }

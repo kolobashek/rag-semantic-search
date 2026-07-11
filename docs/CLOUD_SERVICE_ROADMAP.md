@@ -314,7 +314,7 @@ flowchart LR
 4. IMPLEMENTED 2026-07-11: audit coverage и negative ACL tests закрывают login/session, ACL-denied read/write, preview/download, public share, permission/share changes и delete/restore; до DONE провести pilot audit review/export acceptance вместе с correlation IDs.
 5. IMPLEMENTED 2026-07-11: fresh-install/upgrade preflight, consistent local backup, archive verification и restore drill автоматизированы; до DONE добавить scheduler, rollback rehearsal и S3 provider procedure.
 6. IMPLEMENTED 2026-07-11: admin UI/API показывает backup freshness и подтверждение restore drill, HTTP responses/logs/audit получают correlation ID; до DONE объединить web/DB/Qdrant/workers/queue/index coverage в одном health view.
-7. Провести Retrieval v3 decision spike до переключения production: текущий `legacy` против `release_v2`, multilingual dense candidate и multilingual reranker в versioned shadow collection; расширить eval до document/chunk/page relevance, no-answer, ACL, faithfulness и p95; затем зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
+7. IMPLEMENTED 2026-07-11: retrieval eval и GO/NO_GO gate поддерживают versioned profile, document/chunk/page ground truth, no-answer, ACL leakage, coverage, p95 и regression относительно baseline; faithfulness остаётся явным блокером, а не подменяется retrieval metric. До DONE собрать размеченный `retrieval_v3_golden.json`, прогнать `legacy`, `release_v2`, multilingual dense и multilingual reranker в shadow collection, затем зафиксировать победителя, pilot hardware profile и Cloud Drive E2E artifact.
 8. Подготовить onboarding, acceptance checklist, support and incident runbooks.
 
 ### P1 - После Запуска Пилота

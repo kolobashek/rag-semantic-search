@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from rag_catalog.core.search_eval import GoldenQuery, evaluate_search, mrr_at_k, ndcg_at_k, recall_at_k
+from rag_catalog.core.search_eval import (
+    GoldenQuery,
+    evaluate_retrieval_decision,
+    evaluate_search,
+    mrr_at_k,
+    ndcg_at_k,
+    recall_at_k,
+)
 
 
 def test_relevance_metrics() -> None:
@@ -85,3 +92,62 @@ def test_evaluate_search_summary() -> None:
     assert report["by_category"]["folder_or_name"]["queries"] == 1
     assert report["rows"][0]["category"] == "folder_or_name"
     assert report["rows"][0]["top"][0]["filename"] == "Карточка ТСК.docx"
+
+
+def test_retrieval_v3_metrics_cover_document_chunk_page_no_answer_and_acl() -> None:
+    golden = [
+        GoldenQuery(
+            query="условия оплаты",
+            expected=["договор"],
+            expected_paths=["Договор поставки"],
+            expected_chunks=["оплата в течение 10 дней"],
+            expected_pages=[7],
+            forbidden=["Секретный проект"],
+        ),
+        GoldenQuery(query="несуществующий документ", expected=[], expect_no_answer=True),
+    ]
+
+    def search_fn(query: str, _limit: int) -> list[dict]:
+        if query == "несуществующий документ":
+            return []
+        return [
+            {
+                "filename": "Договор поставки.pdf",
+                "path": "Договоры/Договор поставки.pdf",
+                "text": "Оплата в течение 10 дней после поставки.",
+                "page_number": 7,
+            }
+        ]
+
+    report = evaluate_search(golden, search_fn, limit=10)
+
+    assert report["document_hit_rate"] == 1
+    assert report["chunk_hit_rate"] == 1
+    assert report["page_hit_rate"] == 1
+    assert report["no_answer_accuracy"] == 1
+    assert report["acl_leakage_rate"] == 0
+    assert report["ground_truth_coverage"] == 1
+    assert report["rows"][1]["recall_at_k"] is None
+
+
+def test_retrieval_decision_rejects_regression_and_missing_safety_evidence() -> None:
+    baseline = {
+        "recall_at_k": 0.9,
+        "latency_p95_ms": 1000,
+    }
+    candidate = {
+        "queries": 20,
+        "recall_at_k": 0.88,
+        "latency_p95_ms": 1700,
+        "acl_leakage_rate": 0.01,
+        "no_answer_accuracy": None,
+        "ground_truth_coverage": 0.2,
+        "faithfulness_evaluated": False,
+    }
+
+    decision = evaluate_retrieval_decision(candidate, baseline=baseline, require_faithfulness=True)
+
+    assert decision["decision"] == "NO_GO"
+    failed = {check["name"] for check in decision["checks"] if not check["ok"]}
+    assert {"acl_leakage", "no_answer_accuracy", "ground_truth_coverage", "faithfulness_evaluated"} <= failed
+    assert {"recall_regression", "latency_regression"} <= failed

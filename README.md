@@ -307,6 +307,21 @@ Embedding migration without overwriting the old collection:
 4. Run `python scripts/search_eval.py --golden eval/search_golden.json --limit 10 --output runtime/eval/bge_m3.json --markdown-output runtime/eval/bge_m3.md`.
 5. Switch users to the new collection only after quality and latency are accepted.
 
+Retrieval v3 evaluation accepts optional per-query `expected_paths`, `expected_chunks`, `expected_pages`, `forbidden` and `expect_no_answer`. Candidate reports include document/chunk/page hit rate, no-answer accuracy, ACL leakage, ground-truth coverage and the exact retrieval profile. Compare a shadow candidate with the baseline and produce a machine-readable decision:
+
+```powershell
+python scripts/search_eval.py --golden eval/retrieval_v3_golden.json --limit 10 `
+  --config-set collection_name=catalog_shadow_v3 `
+  --baseline-report runtime/eval/legacy.json `
+  --output runtime/eval/shadow-v3.json `
+  --decision-output runtime/eval/shadow-v3-decision.json `
+  --fail-under-recall 0.875 --max-p95-ms 3000 --max-p95-ratio 1.5 `
+  --max-acl-leakage 0 --min-no-answer-accuracy 0.8 `
+  --min-ground-truth-coverage 0.5 --enforce-decision-gate
+```
+
+`--require-faithfulness` остаётся блокирующим gate, пока к eval не подключён answer/citation evaluator; retrieval-only отчёт намеренно не выдаёт текстовую релевантность за faithfulness.
+
 CLI:
 
 ```powershell
