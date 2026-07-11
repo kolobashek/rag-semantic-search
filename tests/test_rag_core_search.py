@@ -271,6 +271,35 @@ def test_search_retrieval_v2_uses_rrf_fusion() -> None:
     assert out[0]["fusion"] == "rrf"
 
 
+def test_rrf_recency_boost_is_relative_and_does_not_displace_exact_match() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {"rank_recency_enabled": True, "rank_recency_max_boost": 0.03}
+    exact = {
+        "type": "folder_metadata",
+        "filename": "1 Фактуры ТСК",
+        "path": "1 Фактуры ТСК",
+        "full_path": r"O:\1 Фактуры ТСК",
+        "score": 0.97,
+        "rank_score": 0.029,
+        "fusion": "rrf",
+    }
+    recent_noise = {
+        "type": "file_metadata",
+        "filename": "fresh.xlsx",
+        "path": "fresh.xlsx",
+        "full_path": r"O:\fresh.xlsx",
+        "modified": datetime.now(timezone.utc).isoformat(),
+        "score": 0.99,
+        "rank_score": 0.016,
+        "fusion": "rrf",
+    }
+
+    out = s._merge_ranked_results([], [recent_noise, exact], limit=2, query="1 Фактуры ТСК")
+
+    assert out[0]["filename"] == "1 Фактуры ТСК"
+    assert float(recent_noise["rank_score"]) < float(exact["rank_score"])
+
+
 def test_bm25_catalog_search_returns_metadata_channel(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog"
     catalog.mkdir()
@@ -292,6 +321,28 @@ def test_bm25_catalog_search_returns_metadata_channel(tmp_path: Path) -> None:
     assert out[0]["filename"] == exact.name
     assert out[0]["type"] == "file_metadata"
     assert out[0]["retrieval_source"] == "bm25"
+
+
+def test_warm_retrieval_cache_builds_metadata_candidate_index(tmp_path: Path) -> None:
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    (catalog / "Паспорт PC300.pdf").write_text("x", encoding="utf-8")
+    (catalog / "Акт сверки.docx").write_text("x", encoding="utf-8")
+    s = _make_searcher(connected=True)
+    s.config = {
+        "catalog_path": str(catalog),
+        "retrieval_bm25_enabled": True,
+        "metadata_needle_cache_size": 16,
+    }
+    s._fs_cache = {"ts": 0.0, "items": []}
+
+    assert s.warm_retrieval_cache() == 2
+    items = s._refresh_fs_cache()
+    candidates = s._metadata_candidates(items, ["pc300"])
+
+    assert [item["filename"] for item in candidates] == ["Паспорт PC300.pdf"]
+    s._metadata_candidates(items, [f"missing{index}" for index in range(20)])
+    assert len(s._metadata_needle_docs) == 16
 
 
 def test_numeric_exact_search_uses_payload_tokens() -> None:

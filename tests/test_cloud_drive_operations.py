@@ -37,3 +37,22 @@ def test_index_state_snapshot_is_constant_query_health(tmp_path) -> None:
     assert health["entries"] == 3
     assert health["failed_paths"] == 1
     assert health["queue"] == {"pending": 1, "running": 1}
+
+
+def test_index_state_snapshot_reads_active_wal_writer(tmp_path) -> None:
+    state_path = tmp_path / "index_state.db"
+    with sqlite3.connect(state_path) as setup:
+        setup.execute("PRAGMA journal_mode=WAL")
+        setup.execute("CREATE TABLE state_entries (id INTEGER PRIMARY KEY)")
+        setup.execute("CREATE TABLE failed_paths (id INTEGER PRIMARY KEY)")
+        setup.execute("CREATE TABLE index_queue (status TEXT NOT NULL)")
+        setup.execute("INSERT INTO state_entries DEFAULT VALUES")
+
+    with sqlite3.connect(state_path) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO state_entries DEFAULT VALUES")
+
+        health = _index_state_snapshot(state_path)
+
+    assert health["ok"] is True
+    assert health["entries"] == 1

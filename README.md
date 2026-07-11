@@ -305,6 +305,7 @@ DELETE /api/cloud-drive/share-links
 - Telegram assistant mode.
 
 Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted.
+Evaluation artifacts record both `retrieval_preset` and the effective `retrieval_pipeline`; CLI `--config-set retrieval_preset=release_v2` reapplies preset defaults unless a pipeline setting is explicitly overridden. Startup warmup prepares the metadata token index and BM25 tokens so the warm-search SLO does not include avoidable per-query scans of the full catalog.
 
 Embedding migration without overwriting the old collection:
 

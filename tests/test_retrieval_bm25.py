@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from rag_catalog.core.retrieval import bm25_rank_items, tokenize
+from rag_catalog.core.retrieval import bm25_rank_items, prepare_bm25_items, tokenize
 
 
 def test_tokenize_normalizes_russian_and_filters_stopwords() -> None:
     assert tokenize("Нужен паспорт техники PC300 для отчёта") == ["паспорт", "техники", "pc300", "отчета"]
+
+
+def test_prepare_bm25_items_reuses_cached_tokens() -> None:
+    items = [{"filename": "Паспорт PC300.pdf", "path": r"Техника\Паспорт PC300.pdf"}]
+
+    assert prepare_bm25_items(items) == 1
+    cached = items[0]["_bm25_tokens"]
+    assert prepare_bm25_items(items) == 0
+    assert items[0]["_bm25_tokens"] is cached
 
 
 def test_bm25_rank_items_prefers_filename_match_over_parent_path_noise() -> None:

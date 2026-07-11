@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-from collections import Counter
 from typing import Any, Dict, Iterable, List, Sequence
 
 _TOKEN_RE = re.compile(r"[a-zа-яё0-9\-]{2,}", flags=re.IGNORECASE)
@@ -34,17 +33,6 @@ def tokenize(text: str) -> List[str]:
     return terms
 
 
-def _matches(token: str, query_term: str) -> bool:
-    for term in _term_variants(query_term):
-        if term in token:
-            return True
-        if len(term) >= 5:
-            stem = term.rstrip("аеиоуыьъйяю")
-            if len(stem) >= 4 and stem in token:
-                return True
-    return False
-
-
 def _term_variants(term: str) -> List[str]:
     clean = str(term or "").lower().replace("ё", "е")
     variants = [clean]
@@ -66,6 +54,31 @@ def _term_variants(term: str) -> List[str]:
     return variants
 
 
+def prepare_bm25_items(items: Iterable[Dict[str, Any]]) -> int:
+    """Tokenize reusable metadata items once, outside the timed search path."""
+    prepared = 0
+    for item in items:
+        if isinstance(item.get("_bm25_tokens"), list):
+            continue
+        filename = str(item.get("filename") or "")
+        path = str(item.get("path") or "")
+        item["_bm25_tokens"] = tokenize(f"{filename} {filename} {path}")
+        prepared += 1
+    return prepared
+
+
+def _needles(term: str) -> tuple[str, ...]:
+    needles: list[str] = []
+    for variant in _term_variants(term):
+        if variant and variant not in needles:
+            needles.append(variant)
+        if len(variant) >= 5:
+            stem = variant.rstrip("аеиоуыьъйяю")
+            if len(stem) >= 4 and stem not in needles:
+                needles.append(stem)
+    return tuple(needles)
+
+
 def bm25_rank_items(
     items: Iterable[Dict[str, Any]],
     query_terms: Sequence[str],
@@ -73,6 +86,8 @@ def bm25_rank_items(
     limit: int = 50,
     k1: float = 1.2,
     b: float = 0.75,
+    corpus_size: int | None = None,
+    average_doc_length: float | None = None,
 ) -> List[Dict[str, Any]]:
     """Rank file/folder metadata items with BM25 over filename and path.
 
@@ -83,8 +98,12 @@ def bm25_rank_items(
     if not query:
         return []
 
-    docs: List[tuple[Dict[str, Any], List[str]]] = []
-    df: Counter[str] = Counter()
+    query_needles = [_needles(term) for term in query]
+    token_matches: Dict[str, tuple[bool, ...]] = {}
+    matched_docs: List[tuple[Dict[str, Any], int, List[int]]] = []
+    df = [0] * len(query)
+    total_docs = 0
+    total_doc_len = 0
     for item in items:
         # Cache tokenization on the reused filesystem-cache dicts. BM25 still computes
         # query-specific IDF each run, but avoids retokenizing tens of thousands of paths.
@@ -103,30 +122,37 @@ def bm25_rank_items(
                 pass
         if not tokens:
             continue
-        docs.append((item, tokens))
-        unique_tokens = set(tokens)
-        for term in query:
-            if any(_matches(token, term) for token in unique_tokens):
-                df[term] += 1
+        total_docs += 1
+        total_doc_len += len(tokens)
+        frequencies = [0] * len(query)
+        for token in tokens:
+            matches = token_matches.get(token)
+            if matches is None:
+                matches = tuple(any(needle in token for needle in needles) for needles in query_needles)
+                token_matches[token] = matches
+            for idx, matched in enumerate(matches):
+                if matched:
+                    frequencies[idx] += 1
+        if any(frequencies):
+            matched_docs.append((item, len(tokens), frequencies))
+            for idx, frequency in enumerate(frequencies):
+                if frequency:
+                    df[idx] += 1
 
-    if not docs:
+    if not total_docs:
         return []
 
-    total_docs = len(docs)
-    avgdl = sum(len(tokens) for _item, tokens in docs) / max(1, total_docs)
+    scoring_total_docs = max(total_docs, int(corpus_size or 0))
+    avgdl = float(average_doc_length or 0.0) or (total_doc_len / total_docs)
     scored: List[Dict[str, Any]] = []
-    for item, tokens in docs:
-        tf = Counter(tokens)
-        doc_len = len(tokens)
+    for item, doc_len, frequencies in matched_docs:
         score = 0.0
         matched_terms = 0
-        for term in query:
-            matching_tokens = [token for token in tf if _matches(token, term)]
-            freq = sum(tf[token] for token in matching_tokens)
+        for idx, freq in enumerate(frequencies):
             if freq <= 0:
                 continue
             matched_terms += 1
-            idf = math.log(1.0 + (total_docs - df[term] + 0.5) / (df[term] + 0.5))
+            idf = math.log(1.0 + (scoring_total_docs - df[idx] + 0.5) / (df[idx] + 0.5))
             denom = freq + k1 * (1.0 - b + b * doc_len / max(avgdl, 1e-9))
             score += idf * (freq * (k1 + 1.0)) / max(denom, 1e-9)
         if score <= 0.0:

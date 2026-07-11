@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,7 +28,7 @@ from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 from .embedding_collections import resolve_collection_name_from_config
 from .exact_tokens import numeric_exact_tokens, query_numeric_tokens, repair_mojibake_text
 from .index_state_db import IndexStateDB
-from .retrieval import bm25_rank_items, rrf_fuse
+from .retrieval import bm25_rank_items, prepare_bm25_items, rrf_fuse
 from .telemetry_db import TelemetryDB
 
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
@@ -78,6 +79,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "qdrant_timeout_sec": 60,
     "qdrant_scroll_limit": 256,
     "search_warmup_enabled": True,
+    "metadata_needle_cache_size": 512,
     # OCR runtime: можно оставить пустым и использовать bundled tools/
     "ocr_tesseract_cmd": "",
     "ocr_poppler_bin": "",
@@ -228,6 +230,11 @@ class RAGSearcher:
         self._embedder: Optional[Any] = None  # SentenceTransformer, загружается лениво
         self._reranker: Optional[Any] = None  # CrossEncoder, загружается лениво
         self._fs_cache: Dict[str, Any] = {"ts": 0.0, "items": []}
+        self._metadata_index_source = 0
+        self._metadata_token_docs: Dict[str, tuple[int, ...]] = {}
+        self._metadata_needle_docs: OrderedDict[str, tuple[int, ...]] = OrderedDict()
+        self._metadata_corpus_size = 0
+        self._metadata_average_doc_length = 0.0
         telemetry_path = (self.config.get("telemetry_db_path") or "").strip()
         if not telemetry_path:
             telemetry_path = str(Path(self.config["qdrant_db_path"]) / "rag_telemetry.db")
@@ -841,6 +848,85 @@ class RAGSearcher:
     def clear_filesystem_cache(self) -> None:
         """Force the next lexical catalog search to rescan the filesystem."""
         self._fs_cache = {"ts": 0.0, "items": []}
+        self._metadata_index_source = 0
+        self._metadata_token_docs = {}
+        self._metadata_needle_docs = OrderedDict()
+        self._metadata_corpus_size = 0
+        self._metadata_average_doc_length = 0.0
+
+    def _prepare_metadata_search_item(self, item: Dict[str, Any]) -> None:
+        if isinstance(item.get("_search_name_terms"), set):
+            return
+        name = str(item.get("filename") or "").lower().replace("ё", "е")
+        path = str(item.get("path") or "").lower().replace("ё", "е")
+        item["_search_name"] = name
+        item["_search_path"] = path
+        item["_search_hay"] = f"{name} {path}"
+        item["_search_path_parts"] = tuple(part for part in re.split(r"[\\/]+", path) if part)
+        item["_search_name_terms"] = set(self._terms_from_text(name))
+
+    def _build_metadata_token_index(self, items: List[Dict[str, Any]]) -> None:
+        if int(getattr(self, "_metadata_index_source", 0) or 0) == id(items):
+            return
+        token_docs: Dict[str, list[int]] = {}
+        total_doc_length = 0
+        corpus_size = 0
+        for index, item in enumerate(items):
+            tokens = item.get("_bm25_tokens") or []
+            if tokens:
+                corpus_size += 1
+                total_doc_length += len(tokens)
+            for token in tokens:
+                token_docs.setdefault(str(token), []).append(index)
+        self._metadata_token_docs = {token: tuple(indices) for token, indices in token_docs.items()}
+        self._metadata_needle_docs = OrderedDict()
+        self._metadata_corpus_size = corpus_size
+        self._metadata_average_doc_length = total_doc_length / max(1, corpus_size)
+        self._metadata_index_source = id(items)
+
+    def _metadata_candidates(self, items: List[Dict[str, Any]], terms: List[str]) -> List[Dict[str, Any]]:
+        if int(getattr(self, "_metadata_index_source", 0) or 0) != id(items):
+            return items
+        token_docs = getattr(self, "_metadata_token_docs", {}) or {}
+        needle_docs = getattr(self, "_metadata_needle_docs", None)
+        if not isinstance(needle_docs, OrderedDict):
+            needle_docs = OrderedDict(needle_docs or {})
+            self._metadata_needle_docs = needle_docs
+        cache_size = max(16, int(self.config.get("metadata_needle_cache_size", 512) or 512))
+        indices: set[int] = set()
+        for term in terms:
+            needles: list[str] = []
+            for variant in self._term_variants(term):
+                if variant and variant not in needles:
+                    needles.append(variant)
+                if len(variant) >= 5:
+                    stem = variant.rstrip("аеиоуыьъйяю")
+                    if len(stem) >= 4 and stem not in needles:
+                        needles.append(stem)
+            for needle in needles:
+                matched = needle_docs.get(needle)
+                if matched is None:
+                    found: set[int] = set()
+                    for token, document_indices in token_docs.items():
+                        if needle in token:
+                            found.update(document_indices)
+                    matched = tuple(found)
+                    needle_docs[needle] = matched
+                    while len(needle_docs) > cache_size:
+                        needle_docs.popitem(last=False)
+                else:
+                    needle_docs.move_to_end(needle)
+                indices.update(matched)
+        return [items[index] for index in sorted(indices)]
+
+    def warm_retrieval_cache(self) -> int:
+        """Prepare reusable metadata structures for warm-search latency."""
+        items = self._refresh_fs_cache()
+        for item in items:
+            self._prepare_metadata_search_item(item)
+        prepare_bm25_items(items)
+        self._build_metadata_token_index(items)
+        return len(items)
 
     def _bm25_catalog_search(
         self,
@@ -859,15 +945,26 @@ class RAGSearcher:
         terms = self._query_terms(query)
         if not terms:
             return []
+        metadata_items = self._refresh_fs_cache()
+        indexed_candidates = self._metadata_candidates(metadata_items, terms) if not file_type else metadata_items
         candidates: List[Dict[str, Any]] = []
-        for item in self._refresh_fs_cache():
+        for item in indexed_candidates:
             if file_type and item.get("kind") == "folder":
                 continue
             if file_type and str(item.get("extension") or "").lower() != file_type.lower():
                 continue
             candidates.append(item)
 
-        ranked = bm25_rank_items(candidates, terms, limit=limit)
+        use_corpus_stats = not file_type and len(indexed_candidates) != len(metadata_items)
+        ranked = bm25_rank_items(
+            candidates,
+            terms,
+            limit=limit,
+            corpus_size=int(getattr(self, "_metadata_corpus_size", 0) or 0) if use_corpus_stats else None,
+            average_doc_length=(
+                float(getattr(self, "_metadata_average_doc_length", 0.0) or 0.0) if use_corpus_stats else None
+            ),
+        )
         out: List[Dict[str, Any]] = []
         for item in ranked:
             is_folder = item.get("kind") == "folder"
@@ -1270,21 +1367,40 @@ class RAGSearcher:
         vin_vehicle_doc_context_terms = [term for term in raw_terms if term not in {"vin", "птс", "стс"}]
         entity_terms = _extract_entities(query)
         query_norm = " ".join(terms)
+        variants: Dict[str, tuple[str, ...]] = {}
+
+        def term_matches(haystack: str, term: str) -> bool:
+            candidates = variants.get(term)
+            if candidates is None:
+                expanded: list[str] = []
+                for candidate in self._term_variants(term):
+                    if candidate not in expanded:
+                        expanded.append(candidate)
+                    if len(candidate) >= 5:
+                        stem = candidate.rstrip("аеиоуыьъйяю")
+                        if len(stem) >= 4 and stem not in expanded:
+                            expanded.append(stem)
+                candidates = tuple(expanded)
+                variants[term] = candidates
+            return any(candidate in haystack for candidate in candidates)
+
         out: List[Dict[str, Any]] = []
-        for item in self._refresh_fs_cache():
+        metadata_items = self._refresh_fs_cache()
+        for item in self._metadata_candidates(metadata_items, terms):
             if file_type and item.get("kind") == "file" and item.get("extension") != file_type.lower():
                 continue
             if file_type and item.get("kind") == "folder":
                 continue
-            name = str(item.get("filename") or "").lower().replace("ё", "е")
-            path = str(item.get("path") or "").lower().replace("ё", "е")
-            hay = f"{name} {path}"
-            path_parts = [p for p in re.split(r"[\\/]+", path) if p]
+            self._prepare_metadata_search_item(item)
+            name = str(item.get("_search_name") or "")
+            path = str(item.get("_search_path") or "")
+            hay = str(item.get("_search_hay") or "")
+            path_parts = item.get("_search_path_parts") or ()
             parent_name = path_parts[-2] if len(path_parts) >= 2 else ""
-            name_terms = set(self._terms_from_text(name))
-            if entity_terms and not any(self._term_matches(hay, e) for e in entity_terms):
+            name_terms = item.get("_search_name_terms") or set()
+            if entity_terms and not any(term_matches(hay, e) for e in entity_terms):
                 continue
-            matched = sum(1 for t in terms if self._term_matches(hay, t))
+            matched = sum(1 for t in terms if term_matches(hay, t))
             if matched == 0:
                 continue
             is_folder = item.get("kind") == "folder"
@@ -1296,15 +1412,15 @@ class RAGSearcher:
                 score = 0.997
             elif query_norm and query_norm in name:
                 score = 0.995
-            elif all(self._term_matches(name, t) for t in terms):
+            elif all(term_matches(name, t) for t in terms):
                 score = 0.975
-            elif all(self._term_matches(path, t) for t in terms):
+            elif all(term_matches(path, t) for t in terms):
                 score = 0.955
             else:
                 score = 0.86 + min(0.08, matched / max(1, len(terms)) * 0.08)
             raw_matched = 0
             if len(raw_terms) > 1:
-                raw_matched = sum(1 for t in raw_terms if self._term_matches(hay, t))
+                raw_matched = sum(1 for t in raw_terms if term_matches(hay, t))
                 if raw_matched < len(raw_terms):
                     score = min(score, 0.91 + min(0.04, raw_matched / max(1, len(raw_terms)) * 0.04))
             if alias_groups:
@@ -1314,7 +1430,7 @@ class RAGSearcher:
                         for t in re.findall(r"[a-zа-яё0-9\-]{2,}", label, flags=re.IGNORECASE)
                         if t not in {"и", "или", "по", "на", "в", "во", "от", "для"}
                     ]
-                    if (not raw_terms or raw_matched > 0) and label_terms and all(self._term_matches(hay, t) for t in label_terms):
+                    if (not raw_terms or raw_matched > 0) and label_terms and all(term_matches(hay, t) for t in label_terms):
                         score = max(score, 0.972)
                         break
             if (not raw_terms or raw_matched > 0) and alias_phrases and any(phrase and phrase in hay for phrase in alias_phrases):
@@ -1323,7 +1439,7 @@ class RAGSearcher:
                 "шильдик" in hay
                 or "табличка" in hay
             ):
-                if vin_context_terms and all(self._term_matches(hay, term) for term in vin_context_terms):
+                if vin_context_terms and all(term_matches(hay, term) for term in vin_context_terms):
                     score = max(score, 0.985)
                 elif not vin_context_terms:
                     score = max(score, 0.965)
@@ -1333,7 +1449,7 @@ class RAGSearcher:
                 or "птс" in hay
                 or "стс" in hay
             ) and vin_vehicle_doc_context_terms and all(
-                self._term_matches(hay, term) for term in vin_vehicle_doc_context_terms
+                term_matches(hay, term) for term in vin_vehicle_doc_context_terms
             ):
                 score = max(score, 0.985)
             if wants_machine_passport and not is_folder and (
@@ -1342,7 +1458,7 @@ class RAGSearcher:
             ):
                 score = max(score, 0.998)
             elif wants_machine_passport and not is_folder and "паспорт" in name and (
-                not entity_terms or any(self._term_matches(hay, e) for e in entity_terms)
+                not entity_terms or any(term_matches(hay, e) for e in entity_terms)
             ):
                 score = max(score, 0.992)
             elif wants_machine_passport and not is_folder and ("псм" in hay or "птс" in hay):
@@ -1363,7 +1479,7 @@ class RAGSearcher:
             elif query_norm and query_norm in path:
                 score += 0.0015
             if raw_terms:
-                exact_terms_in_name = sum(1 for t in raw_terms if t and self._term_matches(name, t))
+                exact_terms_in_name = sum(1 for t in raw_terms if t and term_matches(name, t))
                 score += min(0.002, exact_terms_in_name * 0.0004)
             out.append({
                 "score": round(score, 6),
@@ -1429,6 +1545,8 @@ class RAGSearcher:
             else:
                 adjustment = 0.0
             freshness, recency_adj = self._recency_adjustment(item, now_ts)
+            if str(item.get("fusion") or "") == "rrf":
+                recency_adj *= base_score
             if not signal:
                 item["feedback_score"] = 0
             else:

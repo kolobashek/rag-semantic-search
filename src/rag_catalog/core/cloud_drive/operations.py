@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -180,24 +181,37 @@ def _qdrant_readiness(cfg: Dict[str, Any]) -> Dict[str, Any]:
 def _index_state_snapshot(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {"ok": False, "status": "missing", "path": str(path)}
-    try:
-        uri = f"file:{path.resolve().as_posix()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
-            entries = int(conn.execute("SELECT COUNT(*) FROM state_entries").fetchone()[0])
-            failed = int(conn.execute("SELECT COUNT(*) FROM failed_paths").fetchone()[0])
-            queue_rows = conn.execute("SELECT status, COUNT(*) FROM index_queue GROUP BY status").fetchall()
-        queue = {str(status): int(count) for status, count in queue_rows}
-        return {
-            "ok": True,
-            "status": "ready",
-            "path": str(path.resolve()),
-            "entries": entries,
-            "failed_paths": failed,
-            "queue": queue,
-            "deep_coverage_url": "/api/cloud-drive/index-coverage",
-        }
-    except sqlite3.Error as exc:
-        return {"ok": False, "status": "error", "path": str(path.resolve()), "error": str(exc)}
+    last_error: sqlite3.Error | None = None
+    for attempt in range(3):
+        try:
+            # A normal query-only connection can attach to an active WAL on Windows;
+            # mode=ro intermittently fails when SQLite needs to refresh the SHM mapping.
+            with closing(sqlite3.connect(str(path.resolve()), timeout=2)) as conn:
+                conn.execute("PRAGMA query_only=ON")
+                conn.execute("PRAGMA busy_timeout=2000")
+                entries = int(conn.execute("SELECT COUNT(*) FROM state_entries").fetchone()[0])
+                failed = int(conn.execute("SELECT COUNT(*) FROM failed_paths").fetchone()[0])
+                queue_rows = conn.execute("SELECT status, COUNT(*) FROM index_queue GROUP BY status").fetchall()
+            queue = {str(status): int(count) for status, count in queue_rows}
+            return {
+                "ok": True,
+                "status": "ready",
+                "path": str(path.resolve()),
+                "entries": entries,
+                "failed_paths": failed,
+                "queue": queue,
+                "deep_coverage_url": "/api/cloud-drive/index-coverage",
+            }
+        except sqlite3.Error as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.1 * (attempt + 1))
+    return {
+        "ok": False,
+        "status": "error",
+        "path": str(path.resolve()),
+        "error": str(last_error or "unknown SQLite error"),
+    }
 
 
 def _module_processes(module: str) -> list[int]:

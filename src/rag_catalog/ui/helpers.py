@@ -2020,7 +2020,7 @@ def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
             _SEARCHER_CACHE[key] = searcher
         if searcher.connected:
             searcher.embedder.encode(["warmup"])
-            searcher._refresh_fs_cache()  # noqa: SLF001 - warm shared name/path cache
+            searcher.warm_retrieval_cache()
     except Exception:
         # Warmup is an optimization; search path will report real errors to the user.
         pass

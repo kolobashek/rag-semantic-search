@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from rag_catalog.core.rag_core import RAGSearcher, load_config
+from rag_catalog.core.rag_core import RAGSearcher, apply_retrieval_preset, load_config
 from rag_catalog.core.search_eval import evaluate_retrieval_decision, evaluate_search, load_golden_queries
 
 
@@ -34,6 +34,7 @@ def _parse_config_value(value: str) -> Any:
 
 def _apply_config_overrides(config: Dict[str, Any], items: List[str]) -> Dict[str, Any]:
     out = dict(config)
+    explicit_keys: set[str] = set()
     for item in items:
         if "=" not in str(item):
             raise ValueError(f"Invalid --config-set value: {item!r}. Expected key=value.")
@@ -42,6 +43,9 @@ def _apply_config_overrides(config: Dict[str, Any], items: List[str]) -> Dict[st
         if not clean_key:
             raise ValueError(f"Invalid --config-set value: {item!r}. Empty key.")
         out[clean_key] = _parse_config_value(value)
+        explicit_keys.add(clean_key)
+    if "retrieval_preset" in explicit_keys:
+        return apply_retrieval_preset(out, explicit_keys)
     return out
 
 
@@ -84,8 +88,7 @@ def main() -> int:
     if not args.no_warmup:
         try:
             searcher.embedder.encode(str(args.warmup_query or "warmup"), normalize_embeddings=True)
-            if hasattr(searcher, "_refresh_fs_cache"):
-                searcher._refresh_fs_cache()
+            searcher.warm_retrieval_cache()
         except Exception as exc:
             print(f"warning: search eval warmup failed: {exc}", file=sys.stderr)
 
@@ -95,6 +98,9 @@ def main() -> int:
     report = evaluate_search(golden, _search, limit=max(1, int(args.limit)))
     report["evaluation_profile"] = {
         "retrieval_preset": str(cfg.get("retrieval_preset") or "legacy"),
+        "retrieval_pipeline": str(cfg.get("retrieval_pipeline") or "legacy"),
+        "bm25_enabled": bool(cfg.get("retrieval_bm25_enabled")),
+        "bm25_top_k": int(cfg.get("retrieval_bm25_top_k") or 0),
         "embedding_model": str(cfg.get("embedding_model") or ""),
         "reranker_enabled": bool(cfg.get("retrieval_reranker_enabled")),
         "reranker_model": str(cfg.get("retrieval_reranker_model") or ""),
