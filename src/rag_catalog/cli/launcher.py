@@ -347,7 +347,12 @@ def _start_web(cfg: Dict[str, Any], host: str, port: int) -> str:
         "web.log",
     )
     _write_pid(web_pid_file, new_pid, {"host": host, "port": port, "module": "rag_catalog.ui.nice_app"})
-    for _ in range(40):
+    try:
+        ready_timeout = float(cfg.get("launcher_web_start_timeout_sec") or 30.0)
+    except (TypeError, ValueError):
+        ready_timeout = 30.0
+    ready_timeout = max(10.0, min(120.0, ready_timeout))
+    for _ in range(max(1, int(ready_timeout / 0.25))):
         if _port_open(host, port, timeout=1.0):
             return f"web=started (pid={new_pid}, {host}:{port})"
         time.sleep(0.25)

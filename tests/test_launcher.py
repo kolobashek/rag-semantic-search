@@ -80,6 +80,28 @@ def test_start_bot_reports_recent_log_error_on_failure(monkeypatch, tmp_path: Pa
     assert not launcher._pid_file(cfg, "bot").exists()
 
 
+def test_start_web_waits_longer_than_ten_seconds_under_load(monkeypatch, tmp_path: Path) -> None:
+    cfg = {
+        "telemetry_db_path": str(tmp_path / "shared" / "rag_telemetry.db"),
+        "qdrant_db_path": str(tmp_path / "qdrant"),
+    }
+    probes = {"count": 0}
+
+    def delayed_port(*_args, **_kwargs) -> bool:
+        probes["count"] += 1
+        return probes["count"] >= 45
+
+    monkeypatch.setattr(launcher, "_port_open", delayed_port)
+    monkeypatch.setattr(launcher, "_spawn_python_module", lambda *_args, **_kwargs: 4242)
+    monkeypatch.setattr(launcher, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(launcher.time, "sleep", lambda _seconds: None)
+
+    result = launcher._start_web(cfg, "127.0.0.1", 8080)
+
+    assert "web=started" in result
+    assert probes["count"] == 45
+
+
 def test_restart_waits_for_web_port_to_close_before_start(monkeypatch) -> None:
     events: list[str] = []
 

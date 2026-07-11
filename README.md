@@ -72,6 +72,7 @@ python telegram_bot.py
 - `telegram_enabled`, `telegram_bot_token`, `telegram_bot_link` — если нужен бот.
 - `cloud_drive_enabled`, `cloud_drive_db_path`, `cloud_drive_storage_root` — если нужен Cloud Drive.
 - `ui_reconnect_timeout_sec` — окно восстановления NiceGUI-сессии после транспортного сбоя; рекомендуемое значение `5` секунд.
+- `launcher_web_start_timeout_sec` — readiness budget запуска web под фоновой нагрузкой; default `30`, допустимо `10..120` секунд.
 
 Не коммитить реальные токены, локальные базы, storage, логи и runtime-state.
 
