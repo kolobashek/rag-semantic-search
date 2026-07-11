@@ -8,6 +8,7 @@ import io
 import json
 import os
 import platform
+import re
 import signal
 import socket
 import subprocess
@@ -23,7 +24,7 @@ from urllib.parse import urlparse
 
 import psutil
 
-from rag_catalog.core.log_history import last_error_from_history, open_run_log, read_history_tail
+from rag_catalog.core.log_history import last_error_from_history, open_run_log, read_history_tail, redact_sensitive_text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "logs" / "runtime"
@@ -528,6 +529,39 @@ def _platform_summary() -> str:
         return f"{platform.system()} {platform.release()}".strip()
 
 
+_SUPPORT_JSON_FIELD_RE = re.compile(
+    r'("(?:query|question|excerpt|filename|source_path|catalog_path|path|full_path|cloud_path)"\s*:\s*)"(?:[^"\\]|\\.)*"',
+    re.IGNORECASE,
+)
+
+
+def _redact_support_log(cfg: Dict[str, Any], value: str) -> str:
+    safe_lines: list[str] = []
+    sensitive_values = [
+        str(item or "").strip()
+        for key, item in cfg.items()
+        if any(marker in str(key).lower() for marker in ("token", "password", "secret", "access_key", "api_key"))
+        and str(item or "").strip()
+    ]
+    private_roots = [
+        str(cfg.get(key) or "").strip()
+        for key in ("catalog_path", "cloud_drive_storage_root")
+        if str(cfg.get(key) or "").strip()
+    ]
+    for raw_line in str(value or "").splitlines():
+        if "browser_event action=" in raw_line:
+            continue
+        line = redact_sensitive_text(raw_line)
+        for secret in sensitive_values:
+            line = line.replace(secret, "<redacted>")
+        for root in private_roots:
+            line = line.replace(root, "<private-root>")
+            line = line.replace(root.replace("\\", "/"), "<private-root>")
+        line = _SUPPORT_JSON_FIELD_RE.sub(r'\1"<redacted>"', line)
+        safe_lines.append(line)
+    return "\n".join(safe_lines) + ("\n" if safe_lines else "")
+
+
 def _support_bundle(args: argparse.Namespace) -> int:
     cfg = load_config()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -555,7 +589,9 @@ def _support_bundle(args: argparse.Namespace) -> int:
         for name in ("nice_app.log", "telegram_bot.log", "index_rag.log", "ocr_pdfs.log", "qdrant.log"):
             tail = read_history_tail(name, max_chars=int(args.log_chars or 20000))
             if tail:
-                zf.writestr(f"logs/{Path(name).stem}.tail.log", tail)
+                safe_tail = _redact_support_log(cfg, tail)
+                if safe_tail:
+                    zf.writestr(f"logs/{Path(name).stem}.tail.log", safe_tail)
         if runtime_dir.exists():
             for path in runtime_dir.glob("*"):
                 if path.is_file():

@@ -111,6 +111,7 @@ def test_support_bundle_redacts_config_and_includes_status(monkeypatch, tmp_path
     cfg = {
         "telegram_bot_token": "123456:secret",
         "cloud_drive_s3_secret_key": "secret",
+        "catalog_path": r"O:\Private Catalog",
         "qdrant_db_path": str(tmp_path / "state"),
     }
     runtime_dir = tmp_path / "runtime"
@@ -120,7 +121,18 @@ def test_support_bundle_redacts_config_and_includes_status(monkeypatch, tmp_path
     monkeypatch.setattr(launcher, "load_config", lambda: dict(cfg))
     monkeypatch.setattr(launcher, "_shared_runtime_dir", lambda _cfg: runtime_dir)
     monkeypatch.setattr(launcher, "_status", lambda host, port: print(f"status {host}:{port}"))
-    monkeypatch.setattr(launcher, "read_history_tail", lambda name, max_chars=20000: "ERROR line" if name == "nice_app.log" else "")
+    log_tail = "\n".join(
+        [
+            'browser_event action=page details={"query":"secret query","excerpt":"document text"}',
+            'ERROR failed path={"path":"O:\\\\Private Catalog\\\\Customer\\\\contract.pdf"}',
+            "https://api.telegram.org/bot123456:secret/getUpdates",
+        ]
+    )
+    monkeypatch.setattr(
+        launcher,
+        "read_history_tail",
+        lambda name, max_chars=20000: log_tail if name == "nice_app.log" else "",
+    )
 
     result = launcher.main(["support-bundle", "--output", str(output), "--host", "127.0.0.1", "--port", "8080"])
 
@@ -132,3 +144,9 @@ def test_support_bundle_redacts_config_and_includes_status(monkeypatch, tmp_path
         assert redacted["telegram_bot_token"] == "<redacted>"
         assert redacted["cloud_drive_s3_secret_key"] == "<redacted>"
         assert b"status 127.0.0.1:8080" in zf.read("launcher_status.txt")
+        safe_log = zf.read("logs/nice_app.tail.log").decode("utf-8")
+        assert "browser_event" not in safe_log
+        assert "secret query" not in safe_log
+        assert "document text" not in safe_log
+        assert "123456:secret" not in safe_log
+        assert "contract.pdf" not in safe_log
