@@ -44,7 +44,9 @@ def _require_public_links_enabled(cfg: Dict[str, Any]) -> None:
     if not bool(cfg.get("cloud_drive_public_links_enabled")):
         raise HTTPException(status_code=403, detail="Публичные ссылки отключены политикой Cloud Drive.")
 
+
 # ─────────────────────────── auth helpers (API-only) ───────────────────────
+
 
 def _get_api_auth_db(cfg: Dict[str, Any]) -> UserAuthDB:
     return UserAuthDB(str(_users_db_path(cfg)))
@@ -127,12 +129,23 @@ def _require_cloud_drive_path_access(
     *,
     service: CloudDriveService | None = None,
     required_level: str = "viewer",
+    audit_action: str = "path_access",
+    audit_details: Dict[str, Any] | None = None,
 ) -> None:
     if not _cloud_drive_path_allowed(cfg, user, path, service=service, required_level=required_level):
+        details = {
+            "path": str(path or "").strip(),
+            "required_level": required_level,
+            "error": "acl_denied",
+        }
+        details.update(audit_details or {})
+        _audit_cloud_drive_api_event(cfg, user, audit_action, ok=False, details=details)
         raise HTTPException(status_code=403, detail="Нет доступа к этому пути Cloud Drive.")
 
 
-def _require_sync_client_access(service: CloudDriveService, user: Dict[str, Any], client_id: str, *, admin_ok: bool = True) -> None:
+def _require_sync_client_access(
+    service: CloudDriveService, user: Dict[str, Any], client_id: str, *, admin_ok: bool = True
+) -> None:
     clean_client = str(client_id or "").strip()
     if not clean_client:
         raise HTTPException(status_code=400, detail="Не задан client_id.")
@@ -146,6 +159,7 @@ def _require_sync_client_access(service: CloudDriveService, user: Dict[str, Any]
 
 
 # ─────────────────────────── job serializer ────────────────────────────────
+
 
 def _serialize_cloud_drive_job(job: Any) -> Dict[str, Any]:
     return {
@@ -170,10 +184,12 @@ def _serialize_cloud_drive_job(job: Any) -> Dict[str, Any]:
 
 # ─────────────────────────── Device auth endpoints ───────────────────────────
 
+
 @app.post("/api/auth/device/code")
 def api_device_code(request: Request) -> Dict[str, Any]:
     """Create a device code pair for browser-based auth. No credentials required."""
     from . import device_auth as _da
+
     base = str(request.base_url).rstrip("/")
     return _da.create_code(base)
 
@@ -188,10 +204,7 @@ def _compact_ui_event_value(value: Any, *, depth: int = 0) -> Any:
     if depth > 3:
         return str(value)[:250]
     if isinstance(value, dict):
-        return {
-            str(key)[:80]: _compact_ui_event_value(val, depth=depth + 1)
-            for key, val in list(value.items())[:40]
-        }
+        return {str(key)[:80]: _compact_ui_event_value(val, depth=depth + 1) for key, val in list(value.items())[:40]}
     if isinstance(value, list):
         return [_compact_ui_event_value(item, depth=depth + 1) for item in value[:40]]
     if isinstance(value, str):
@@ -273,6 +286,7 @@ def api_sync_client_version() -> Dict[str, Any]:
 def api_device_token(device_code: str = "") -> Dict[str, Any]:
     """Poll for device auth result. Returns 428 while pending, 200 with token when approved."""
     from . import device_auth as _da
+
     if not str(device_code or "").strip():
         raise HTTPException(status_code=400, detail="Не задан device_code.")
     result = _da.poll_token(device_code)
@@ -292,6 +306,7 @@ def api_device_token(device_code: str = "") -> Dict[str, Any]:
 
 
 # ─────────────────────────── API routes ─────────────────────────────────────
+
 
 @app.get("/api/view-file")
 def api_view_file(path: str, authorization: AuthHeader = "") -> FileResponse:
@@ -382,9 +397,24 @@ def api_cloud_drive_import_source_upsert(
             created_by=str(user.get("username") or ""),
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "import_source_upsert", ok=False, details={"source_path": source_path, "target_path": target_path, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "import_source_upsert",
+            ok=False,
+            details={"source_path": source_path, "target_path": target_path, "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "import_source_upsert", details={"source_id": source.get("id"), "source_path": source.get("source_path"), "target_path": source.get("target_path")})
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "import_source_upsert",
+        details={
+            "source_id": source.get("id"),
+            "source_path": source.get("source_path"),
+            "target_path": source.get("target_path"),
+        },
+    )
     return source
 
 
@@ -400,9 +430,17 @@ def api_cloud_drive_import_source_enable(
     try:
         source = service.set_import_source_enabled(source_id, bool(enabled))
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "import_source_enable", ok=False, details={"source_id": source_id, "enabled": enabled, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "import_source_enable",
+            ok=False,
+            details={"source_id": source_id, "enabled": enabled, "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "import_source_enable", details={"source_id": source.get("id"), "enabled": source.get("enabled")})
+    _audit_cloud_drive_api_event(
+        cfg, user, "import_source_enable", details={"source_id": source.get("id"), "enabled": source.get("enabled")}
+    )
     return source
 
 
@@ -427,9 +465,16 @@ def api_cloud_drive_import_source_run(
                 "stats": stats,
             }
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "import_source_run", ok=False, details={"source_id": source_id, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "import_source_run", ok=False, details={"source_id": source_id, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "import_source_run", details={"source_id": source_id, "job_id": result["job"].get("id"), "run_now": run_now})
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "import_source_run",
+        details={"source_id": source_id, "job_id": result["job"].get("id"), "run_now": run_now},
+    )
     return result
 
 
@@ -468,7 +513,9 @@ def api_user_group_create(
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "group_create", ok=False, details={"name": name, "error": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "group_create", details={"group_id": group.get("id"), "name": group.get("name")})
+    _audit_cloud_drive_api_event(
+        cfg, user, "group_create", details={"group_id": group.get("id"), "name": group.get("name")}
+    )
     return group
 
 
@@ -490,7 +537,9 @@ def api_user_group_update(
             status=status,
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "group_update", ok=False, details={"group_id": group_id, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "group_update", ok=False, details={"group_id": group_id, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
     if group is None:
         raise HTTPException(status_code=404, detail="Группа не найдена.")
@@ -518,9 +567,17 @@ def api_user_group_member_add(
             added_by=str(user.get("username") or ""),
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "group_member_add", ok=False, details={"group_id": group_id, "username": username, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "group_member_add",
+            ok=False,
+            details={"group_id": group_id, "username": username, "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "group_member_add", ok=added, details={"group_id": group_id, "username": username})
+    _audit_cloud_drive_api_event(
+        cfg, user, "group_member_add", ok=added, details={"group_id": group_id, "username": username}
+    )
     return {"ok": bool(added), "group_id": str(group_id or "").strip(), "username": str(username or "").strip().lower()}
 
 
@@ -533,8 +590,14 @@ def api_user_group_member_remove(
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True, admin_only=True)
     removed = _get_api_auth_db(cfg).remove_group_member(group_id=group_id, username=username)
-    _audit_cloud_drive_api_event(cfg, user, "group_member_remove", ok=removed, details={"group_id": group_id, "username": username})
-    return {"ok": bool(removed), "group_id": str(group_id or "").strip(), "username": str(username or "").strip().lower()}
+    _audit_cloud_drive_api_event(
+        cfg, user, "group_member_remove", ok=removed, details={"group_id": group_id, "username": username}
+    )
+    return {
+        "ok": bool(removed),
+        "group_id": str(group_id or "").strip(),
+        "username": str(username or "").strip().lower(),
+    }
 
 
 @app.post("/api/cloud-drive/permissions")
@@ -565,8 +628,12 @@ def api_cloud_drive_permissions(
         if str(access_level or "viewer").strip().lower() not in {"viewer", "read", "editor", "write"}:
             raise HTTPException(status_code=403, detail="Пользователь может выдавать только чтение или редактирование.")
         if clean_subject_type not in {"user", "group", "*"}:
-            raise HTTPException(status_code=403, detail="Пользователь может открыть доступ всем, пользователю или группе.")
-        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
+            raise HTTPException(
+                status_code=403, detail="Пользователь может открыть доступ всем, пользователю или группе."
+            )
+        _require_cloud_drive_path_access(
+            cfg, user, path, service=service, required_level="admin", audit_action="permissions_grant"
+        )
     try:
         if str(path or "").strip() or not str(resource_type or "").strip():
             permission = service.grant_path_permission(
@@ -584,7 +651,13 @@ def api_cloud_drive_permissions(
                 access_level=access_level,
             )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "permissions_grant", ok=False, details={"subject_type": subject_type, "subject_id": subject_id, "path": path, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "permissions_grant",
+            ok=False,
+            details={"subject_type": subject_type, "subject_id": subject_id, "path": path, "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc))
     _audit_cloud_drive_api_event(cfg, user, "permissions_grant", details=permission)
     return permission
@@ -601,7 +674,9 @@ def api_cloud_drive_permissions_list(
     if str(user.get("role") or "") != "admin":
         if not str(path or "").strip():
             raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
-        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
+        _require_cloud_drive_path_access(
+            cfg, user, path, service=service, required_level="admin", audit_action="permissions_list"
+        )
     return service.list_permissions(path=path)
 
 
@@ -617,12 +692,16 @@ def api_cloud_drive_permission_revoke(
     if str(user.get("role") or "") != "admin":
         if not str(path or "").strip():
             raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
-        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
+        _require_cloud_drive_path_access(
+            cfg, user, path, service=service, required_level="admin", audit_action="permissions_revoke"
+        )
         allowed_ids = {str(item.get("id") or "") for item in service.list_permissions(path=path)}
         if str(permission_id or "").strip() not in allowed_ids:
             raise HTTPException(status_code=403, detail="Нет прав на отзыв этого доступа.")
     ok = service.revoke_permission(permission_id)
-    _audit_cloud_drive_api_event(cfg, user, "permissions_revoke", ok=ok, details={"permission_id": permission_id, "path": path})
+    _audit_cloud_drive_api_event(
+        cfg, user, "permissions_revoke", ok=ok, details={"permission_id": permission_id, "path": path}
+    )
     return {"ok": bool(ok), "permission_id": str(permission_id or "").strip()}
 
 
@@ -637,7 +716,9 @@ def api_cloud_drive_share_link_create(
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="admin")
+    _require_cloud_drive_path_access(
+        cfg, user, path, service=service, required_level="admin", audit_action="share_link_create"
+    )
     try:
         link = service.create_share_link(
             path=path,
@@ -645,7 +726,9 @@ def api_cloud_drive_share_link_create(
             expires_at=expires_at,
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "share_link_create", ok=False, details={"path": path, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "share_link_create", ok=False, details={"path": path, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
     base = str(request.base_url).rstrip("/")
     link["url"] = f"{base}{link.get('url_path')}"
@@ -671,7 +754,9 @@ def api_cloud_drive_share_links(
     if str(user.get("role") or "") != "admin":
         if not clean_path:
             raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
-        _require_cloud_drive_path_access(cfg, user, clean_path, service=service, required_level="admin")
+        _require_cloud_drive_path_access(
+            cfg, user, clean_path, service=service, required_level="admin", audit_action="share_links_list"
+        )
     links = service.list_share_links(path=clean_path, include_inactive=bool(include_inactive))
     _audit_cloud_drive_api_event(cfg, user, "share_links_list", details={"path": clean_path, "count": len(links)})
     return links
@@ -690,10 +775,11 @@ def api_cloud_drive_share_link_revoke(
     clean_token = str(token or "").strip()
     if not clean_path:
         raise HTTPException(status_code=400, detail="Для отзыва публичной ссылки нужен path.")
-    _require_cloud_drive_path_access(cfg, user, clean_path, service=service, required_level="admin")
+    _require_cloud_drive_path_access(
+        cfg, user, clean_path, service=service, required_level="admin", audit_action="share_link_revoke"
+    )
     allowed_tokens = {
-        str(item.get("token") or "")
-        for item in service.list_share_links(path=clean_path, include_inactive=True)
+        str(item.get("token") or "") for item in service.list_share_links(path=clean_path, include_inactive=True)
     }
     if not clean_token or clean_token not in allowed_tokens:
         raise HTTPException(status_code=404, detail="Публичная ссылка не найдена для указанного пути.")
@@ -708,12 +794,29 @@ def api_cloud_drive_share_link_revoke(
     return {"ok": bool(ok), "path": clean_path}
 
 
-def _require_public_share_access(service: CloudDriveService, token: str, path: str = "") -> str:
+def _require_public_share_access(
+    cfg: Dict[str, Any], service: CloudDriveService, token: str, path: str = "", *, audit_action: str
+) -> str:
+    audit_user: Dict[str, Any] = {"username": "public-share"}
+    audit_base = {
+        "path": str(path or "").strip(),
+        "token_fingerprint": _share_token_fingerprint(token),
+    }
     link = service.registry.get_share_link(token)
     if link is None:
+        _audit_cloud_drive_api_event(
+            cfg, audit_user, audit_action, ok=False, details={**audit_base, "error": "link_missing_or_expired"}
+        )
         raise HTTPException(status_code=404, detail="Публичная ссылка не найдена или истекла.")
     effective_path = str(path or link.get("path") or "").strip()
     if not service.registry.share_link_can_access(token=token, path=effective_path, required_level="viewer"):
+        _audit_cloud_drive_api_event(
+            cfg,
+            audit_user,
+            audit_action,
+            ok=False,
+            details={**audit_base, "path": effective_path, "error": "acl_denied"},
+        )
         raise HTTPException(status_code=403, detail="Публичная ссылка не даёт доступ к этому пути.")
     return effective_path
 
@@ -723,11 +826,25 @@ def api_cloud_drive_public_node(token: str = "", path: str = "") -> Dict[str, An
     cfg = load_config()
     _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
-    effective_path = _require_public_share_access(service, token, path)
+    effective_path = _require_public_share_access(cfg, service, token, path, audit_action="public_view_node")
     try:
-        return service.get_node(effective_path)
+        result = service.get_node(effective_path)
     except RuntimeError as exc:
+        _audit_cloud_drive_api_event(
+            cfg,
+            {"username": "public-share"},
+            "public_view_node",
+            ok=False,
+            details={"path": effective_path, "token_fingerprint": _share_token_fingerprint(token), "error": str(exc)},
+        )
         raise HTTPException(status_code=404, detail=str(exc))
+    _audit_cloud_drive_api_event(
+        cfg,
+        {"username": "public-share"},
+        "public_view_node",
+        details={"path": effective_path, "token_fingerprint": _share_token_fingerprint(token)},
+    )
+    return result
 
 
 @app.get("/api/cloud-drive/public/list")
@@ -735,19 +852,31 @@ def api_cloud_drive_public_list(token: str = "", path: str = "") -> Dict[str, An
     cfg = load_config()
     _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
-    effective_path = _require_public_share_access(service, token, path)
+    effective_path = _require_public_share_access(cfg, service, token, path, audit_action="public_list_directory")
     try:
         result = service.list_directory(effective_path)
     except RuntimeError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     result["folders"] = [
-        item for item in result.get("folders", [])
-        if service.registry.share_link_can_access(token=token, path=str(item.get("path") or ""), required_level="viewer")
+        item
+        for item in result.get("folders", [])
+        if service.registry.share_link_can_access(
+            token=token, path=str(item.get("path") or ""), required_level="viewer"
+        )
     ]
     result["files"] = [
-        item for item in result.get("files", [])
-        if service.registry.share_link_can_access(token=token, path=str(item.get("path") or ""), required_level="viewer")
+        item
+        for item in result.get("files", [])
+        if service.registry.share_link_can_access(
+            token=token, path=str(item.get("path") or ""), required_level="viewer"
+        )
     ]
+    _audit_cloud_drive_api_event(
+        cfg,
+        {"username": "public-share"},
+        "public_list_directory",
+        details={"path": effective_path, "token_fingerprint": _share_token_fingerprint(token)},
+    )
     return result
 
 
@@ -756,7 +885,7 @@ def api_cloud_drive_public_download(token: str = "", path: str = ""):
     cfg = load_config()
     _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
-    effective_path = _require_public_share_access(service, token, path)
+    effective_path = _require_public_share_access(cfg, service, token, path, audit_action="public_download")
     try:
         descriptor = service.get_download_descriptor(effective_path)
     except RuntimeError as exc:
@@ -765,6 +894,12 @@ def api_cloud_drive_public_download(token: str = "", path: str = ""):
         if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
             return RedirectResponse(str(descriptor["url"]))
         raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает download.")
+    _audit_cloud_drive_api_event(
+        cfg,
+        {"username": "public-share"},
+        "public_download",
+        details={"path": effective_path, "token_fingerprint": _share_token_fingerprint(token)},
+    )
     return FileResponse(
         path=str(descriptor["file_path"]),
         media_type=str(descriptor["mime_type"]),
@@ -803,13 +938,15 @@ def api_cloud_drive_jobs_recover_stale(
 
 
 @app.get("/api/cloud-drive/file-statuses")
-def api_cloud_drive_file_statuses(file_ids: str = "", paths: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_file_statuses(
+    file_ids: str = "", paths: str = "", authorization: AuthHeader = ""
+) -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     ids = [part.strip() for part in str(file_ids or "").split(",") if part.strip()]
     for path in [part.strip() for part in str(paths or "").split(",") if part.strip()]:
-        _require_cloud_drive_path_access(cfg, user, path, service=service)
+        _require_cloud_drive_path_access(cfg, user, path, service=service, audit_action="file_statuses")
         file_row = service.registry.get_file_by_path(path)
         if file_row is not None:
             ids.append(file_row.id)
@@ -943,7 +1080,7 @@ def api_cloud_drive_index_coverage_quarantine_unavailable(
 def api_cloud_drive_node(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
-    _require_cloud_drive_path_access(cfg, user, path)
+    _require_cloud_drive_path_access(cfg, user, path, audit_action="view_node")
     service = CloudDriveService.from_config(cfg)
     try:
         result = service.get_node(path)
@@ -958,16 +1095,18 @@ def api_cloud_drive_node(path: str = "", authorization: AuthHeader = "") -> Dict
 def api_cloud_drive_list(path: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
-    _require_cloud_drive_path_access(cfg, user, path)
+    _require_cloud_drive_path_access(cfg, user, path, audit_action="list_directory")
     service = CloudDriveService.from_config(cfg)
     try:
         result = service.list_directory(path)
         result["folders"] = [
-            item for item in result.get("folders", [])
+            item
+            for item in result.get("folders", [])
             if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
         ]
         result["files"] = [
-            item for item in result.get("files", [])
+            item
+            for item in result.get("files", [])
             if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
         ]
         _audit_cloud_drive_api_event(cfg, user, "list_directory", details={"path": path})
@@ -990,7 +1129,7 @@ def api_cloud_drive_search(
 ) -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
-    _require_cloud_drive_path_access(cfg, user, path)
+    _require_cloud_drive_path_access(cfg, user, path, audit_action="search_nodes")
     clean_query = str(query or "").strip()
     if not clean_query:
         raise HTTPException(status_code=400, detail="Не задан query.")
@@ -1008,7 +1147,9 @@ def api_cloud_drive_search(
             mime_type=mime_type,
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "search_nodes", ok=False, details={"path": path, "query": clean_query, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "search_nodes", ok=False, details={"path": path, "query": clean_query, "error": str(exc)}
+        )
         raise HTTPException(status_code=404, detail=str(exc))
     items = [
         item
@@ -1050,7 +1191,12 @@ def api_cloud_drive_search(
         "extension": str(extension or "").strip().lower().lstrip("."),
         "mime_type": str(mime_type or "").strip().lower(),
     }
-    _audit_cloud_drive_api_event(cfg, user, "search_nodes", details={"path": path, "query": clean_query, "count": result["count"], "offset": clean_offset})
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "search_nodes",
+        details={"path": path, "query": clean_query, "count": result["count"], "offset": clean_offset},
+    )
     return result
 
 
@@ -1061,7 +1207,8 @@ def api_cloud_drive_changes(since: str = "", limit: int = 500, authorization: Au
     service = CloudDriveService.from_config(cfg)
     result = service.list_changes(since=since, limit=max(1, min(int(limit or 500), 5000)))
     changes = [
-        item for item in result.get("changes", [])
+        item
+        for item in result.get("changes", [])
         if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
     ]
     result["changes"] = changes
@@ -1071,7 +1218,9 @@ def api_cloud_drive_changes(since: str = "", limit: int = 500, authorization: Au
 
 
 @app.get("/api/cloud-drive/sync/clients")
-def api_cloud_drive_sync_clients(username: str = "", include_offline: bool = True, limit: int = 100, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_sync_clients(
+    username: str = "", include_offline: bool = True, limit: int = 100, authorization: AuthHeader = ""
+) -> List[Dict[str, Any]]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
@@ -1083,7 +1232,9 @@ def api_cloud_drive_sync_clients(username: str = "", include_offline: bool = Tru
         include_offline=bool(include_offline),
         limit=max(1, min(int(limit or 100), 1000)),
     )
-    _audit_cloud_drive_api_event(cfg, user, "sync_clients", details={"username": requested_username, "count": len(clients)})
+    _audit_cloud_drive_api_event(
+        cfg, user, "sync_clients", details={"username": requested_username, "count": len(clients)}
+    )
     return clients
 
 
@@ -1115,14 +1266,20 @@ def api_cloud_drive_sync_client_register(
             metadata=metadata,
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "sync_client_register", ok=False, details={"device_id": device_id, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "sync_client_register", ok=False, details={"device_id": device_id, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "sync_client_register", details={"client_id": client.get("id"), "device_id": device_id})
+    _audit_cloud_drive_api_event(
+        cfg, user, "sync_client_register", details={"client_id": client.get("id"), "device_id": device_id}
+    )
     return client
 
 
 @app.get("/api/cloud-drive/sync/pairs")
-def api_cloud_drive_sync_pairs(client_id: str = "", enabled_only: bool = False, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_sync_pairs(
+    client_id: str = "", enabled_only: bool = False, authorization: AuthHeader = ""
+) -> List[Dict[str, Any]]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
@@ -1172,7 +1329,9 @@ def api_cloud_drive_sync_client_download(
                 filename=filename,
                 headers={"Content-Disposition": f"attachment; filename={filename}"},
             )
-    raise HTTPException(status_code=404, detail="Sync-клиент не найден. Соберите установщик командой packaging/build.ps1.")
+    raise HTTPException(
+        status_code=404, detail="Sync-клиент не найден. Соберите установщик командой packaging/build.ps1."
+    )
 
 
 @app.post("/api/cloud-drive/sync/heartbeat")
@@ -1205,7 +1364,9 @@ def api_cloud_drive_sync_pair_upsert(
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
-    _require_cloud_drive_path_access(cfg, user, cloud_path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(
+        cfg, user, cloud_path, service=service, required_level="editor", audit_action="sync_pair_upsert"
+    )
     try:
         pair = service.upsert_sync_pair(
             client_id=client_id,
@@ -1215,20 +1376,35 @@ def api_cloud_drive_sync_pair_upsert(
             enabled=bool(enabled),
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "sync_pair_upsert", ok=False, details={"client_id": client_id, "cloud_path": cloud_path, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "sync_pair_upsert",
+            ok=False,
+            details={"client_id": client_id, "cloud_path": cloud_path, "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "sync_pair_upsert", details={"client_id": client_id, "pair_id": pair.get("id"), "cloud_path": cloud_path})
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "sync_pair_upsert",
+        details={"client_id": client_id, "pair_id": pair.get("id"), "cloud_path": cloud_path},
+    )
     return pair
 
 
 @app.post("/api/cloud-drive/sync/pairs/delete")
-def api_cloud_drive_sync_pair_delete(pair_id: str = "", client_id: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_sync_pair_delete(
+    pair_id: str = "", client_id: str = "", authorization: AuthHeader = ""
+) -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     result = service.delete_sync_pair(pair_id, client_id=client_id)
-    _audit_cloud_drive_api_event(cfg, user, "sync_pair_delete", details={"pair_id": pair_id, "client_id": client_id, "ok": result.get("ok")})
+    _audit_cloud_drive_api_event(
+        cfg, user, "sync_pair_delete", details={"pair_id": pair_id, "client_id": client_id, "ok": result.get("ok")}
+    )
     return result
 
 
@@ -1241,7 +1417,9 @@ def api_cloud_drive_sync_selective(client_id: str = "", authorization: AuthHeade
         _require_sync_client_access(service, user, client_id)
     username = "" if str(user.get("role") or "") == "admin" else str(user.get("username") or "")
     result = service.list_selective_sync_paths(username=username, client_id=client_id)
-    _audit_cloud_drive_api_event(cfg, user, "sync_selective", details={"client_id": client_id, "count": result.get("count")})
+    _audit_cloud_drive_api_event(
+        cfg, user, "sync_selective", details={"client_id": client_id, "count": result.get("count")}
+    )
     return result
 
 
@@ -1259,18 +1437,28 @@ def api_cloud_drive_sync_selective_set(
     _require_sync_client_access(service, user, client_id)
     path_values = [part.strip() for part in str(paths or "").split(",") if part.strip()]
     for path in path_values:
-        _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
+        _require_cloud_drive_path_access(
+            cfg, user, path, service=service, required_level="editor", audit_action="sync_selective_set"
+        )
     try:
-        result = service.set_selective_sync_paths(client_id=client_id, paths=path_values, mode=mode, replace=bool(replace))
+        result = service.set_selective_sync_paths(
+            client_id=client_id, paths=path_values, mode=mode, replace=bool(replace)
+        )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "sync_selective_set", ok=False, details={"client_id": client_id, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "sync_selective_set", ok=False, details={"client_id": client_id, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "sync_selective_set", details={"client_id": client_id, "count": result.get("count")})
+    _audit_cloud_drive_api_event(
+        cfg, user, "sync_selective_set", details={"client_id": client_id, "count": result.get("count")}
+    )
     return result
 
 
 @app.get("/api/cloud-drive/sync/conflicts")
-def api_cloud_drive_sync_conflicts(status: str = "open", client_id: str = "", limit: int = 100, authorization: AuthHeader = "") -> List[Dict[str, Any]]:
+def api_cloud_drive_sync_conflicts(
+    status: str = "open", client_id: str = "", limit: int = 100, authorization: AuthHeader = ""
+) -> List[Dict[str, Any]]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
@@ -1283,7 +1471,9 @@ def api_cloud_drive_sync_conflicts(status: str = "open", client_id: str = "", li
         status=status,
         limit=max(1, min(int(limit or 100), 1000)),
     )
-    _audit_cloud_drive_api_event(cfg, user, "sync_conflicts", details={"status": status, "client_id": client_id, "count": len(conflicts)})
+    _audit_cloud_drive_api_event(
+        cfg, user, "sync_conflicts", details={"status": status, "client_id": client_id, "count": len(conflicts)}
+    )
     return conflicts
 
 
@@ -1305,7 +1495,9 @@ def api_cloud_drive_sync_conflict_record(
     service = CloudDriveService.from_config(cfg)
     _require_sync_client_access(service, user, client_id)
     if cloud_path or path:
-        _require_cloud_drive_path_access(cfg, user, cloud_path or path, service=service, required_level="editor")
+        _require_cloud_drive_path_access(
+            cfg, user, cloud_path or path, service=service, required_level="editor", audit_action="sync_conflict_record"
+        )
     try:
         details = json.loads(str(details_json or "{}"))
     except json.JSONDecodeError:
@@ -1325,9 +1517,20 @@ def api_cloud_drive_sync_conflict_record(
             details=details,
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "sync_conflict_record", ok=False, details={"client_id": client_id, "path": path, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "sync_conflict_record",
+            ok=False,
+            details={"client_id": client_id, "path": path, "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "sync_conflict_record", details={"client_id": client_id, "conflict_id": conflict.get("id"), "path": path})
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "sync_conflict_record",
+        details={"client_id": client_id, "conflict_id": conflict.get("id"), "path": path},
+    )
     return conflict
 
 
@@ -1352,24 +1555,36 @@ def api_cloud_drive_sync_conflict_resolve(
             resolved_by=str(user.get("username") or ""),
         )
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "sync_conflict_resolve", ok=False, details={"conflict_id": conflict_id, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "sync_conflict_resolve", ok=False, details={"conflict_id": conflict_id, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "sync_conflict_resolve", details={"conflict_id": conflict_id, "resolution": resolution})
+    _audit_cloud_drive_api_event(
+        cfg, user, "sync_conflict_resolve", details={"conflict_id": conflict_id, "resolution": resolution}
+    )
     return result
 
 
 @app.post("/api/cloud-drive/folders")
-def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_create_folder(
+    parent_path: str = "", name: str = "", authorization: AuthHeader = ""
+) -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, parent_path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(
+        cfg, user, parent_path, service=service, required_level="editor", audit_action="create_folder"
+    )
     try:
         result = service.create_folder(parent_path=parent_path, name=name)
-        _audit_cloud_drive_api_event(cfg, user, "create_folder", details={"parent_path": parent_path, "name": name, "path": result.get("path")})
+        _audit_cloud_drive_api_event(
+            cfg, user, "create_folder", details={"parent_path": parent_path, "name": name, "path": result.get("path")}
+        )
         return result
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "create_folder", ok=False, details={"parent_path": parent_path, "name": name, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "create_folder", ok=False, details={"parent_path": parent_path, "name": name, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1377,7 +1592,7 @@ def api_cloud_drive_create_folder(parent_path: str = "", name: str = "", authori
 def api_cloud_drive_download(path: str, authorization: AuthHeader = ""):
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
-    _require_cloud_drive_path_access(cfg, user, path)
+    _require_cloud_drive_path_access(cfg, user, path, audit_action="download")
     service = CloudDriveService.from_config(cfg)
     try:
         descriptor = service.get_download_descriptor(path)
@@ -1386,9 +1601,16 @@ def api_cloud_drive_download(path: str, authorization: AuthHeader = ""):
         raise HTTPException(status_code=404, detail=str(exc))
     if descriptor.get("mode") != "local_file":
         if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
-            _audit_cloud_drive_api_event(cfg, user, "download", details={"path": path, "filename": descriptor.get("filename"), "mode": "redirect_url"})
+            _audit_cloud_drive_api_event(
+                cfg,
+                user,
+                "download",
+                details={"path": path, "filename": descriptor.get("filename"), "mode": "redirect_url"},
+            )
             return RedirectResponse(str(descriptor["url"]))
-        _audit_cloud_drive_api_event(cfg, user, "download", ok=False, details={"path": path, "mode": descriptor.get("mode")})
+        _audit_cloud_drive_api_event(
+            cfg, user, "download", ok=False, details={"path": path, "mode": descriptor.get("mode")}
+        )
         raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает download.")
     _audit_cloud_drive_api_event(cfg, user, "download", details={"path": path, "filename": descriptor.get("filename")})
     return FileResponse(
@@ -1403,7 +1625,7 @@ def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, path, service=service)
+    _require_cloud_drive_path_access(cfg, user, path, service=service, audit_action="preview")
     try:
         descriptor = service.get_download_descriptor(path)
     except RuntimeError as exc:
@@ -1411,9 +1633,16 @@ def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
         raise HTTPException(status_code=404, detail=str(exc))
     if descriptor.get("mode") != "local_file":
         if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
-            _audit_cloud_drive_api_event(cfg, user, "preview", details={"path": path, "filename": descriptor.get("filename"), "mode": "redirect_url"})
+            _audit_cloud_drive_api_event(
+                cfg,
+                user,
+                "preview",
+                details={"path": path, "filename": descriptor.get("filename"), "mode": "redirect_url"},
+            )
             return RedirectResponse(str(descriptor["url"]))
-        _audit_cloud_drive_api_event(cfg, user, "preview", ok=False, details={"path": path, "mode": descriptor.get("mode")})
+        _audit_cloud_drive_api_event(
+            cfg, user, "preview", ok=False, details={"path": path, "mode": descriptor.get("mode")}
+        )
         raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает preview.")
     _audit_cloud_drive_api_event(cfg, user, "preview", details={"path": path, "filename": descriptor.get("filename")})
     return FileResponse(
@@ -1425,13 +1654,17 @@ def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
 
 
 @app.post("/api/cloud-drive/upload")
-async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(...), authorization: AuthHeader = "") -> Dict[str, Any]:
+async def api_cloud_drive_upload(
+    parent_path: str = "", file: UploadFile = File(...), authorization: AuthHeader = ""
+) -> Dict[str, Any]:
     if file is None or not str(file.filename or "").strip():
         raise HTTPException(status_code=400, detail="Не передан файл для загрузки.")
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, parent_path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(
+        cfg, user, parent_path, service=service, required_level="editor", audit_action="upload"
+    )
     suffix = Path(str(file.filename or "")).suffix
     tmp_path = ""
     try:
@@ -1444,10 +1677,21 @@ async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(
             source_path=tmp_path,
             mime_type=str(file.content_type or "").strip(),
         )
-        _audit_cloud_drive_api_event(cfg, user, "upload", details={"parent_path": parent_path, "filename": result.get("name"), "path": result.get("path")})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "upload",
+            details={"parent_path": parent_path, "filename": result.get("name"), "path": result.get("path")},
+        )
         return result
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "upload", ok=False, details={"parent_path": parent_path, "filename": str(file.filename or ""), "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "upload",
+            ok=False,
+            details={"parent_path": parent_path, "filename": str(file.filename or ""), "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         if tmp_path:
@@ -1461,11 +1705,13 @@ async def api_cloud_drive_upload(parent_path: str = "", file: UploadFile = File(
 def api_cloud_drive_versions(path: str, authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
-    _require_cloud_drive_path_access(cfg, user, path)
+    _require_cloud_drive_path_access(cfg, user, path, audit_action="versions")
     service = CloudDriveService.from_config(cfg)
     try:
         result = service.list_versions(path)
-        _audit_cloud_drive_api_event(cfg, user, "versions", details={"path": path, "count": len(result.get("versions", []))})
+        _audit_cloud_drive_api_event(
+            cfg, user, "versions", details={"path": path, "count": len(result.get("versions", []))}
+        )
         return result
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "versions", ok=False, details={"path": path, "error": str(exc)})
@@ -1473,18 +1719,57 @@ def api_cloud_drive_versions(path: str, authorization: AuthHeader = "") -> Dict[
 
 
 @app.post("/api/cloud-drive/move")
-def api_cloud_drive_move(source_path: str = "", dest_parent_path: str = "", new_name: str = "", authorization: AuthHeader = "") -> Dict[str, Any]:
+def api_cloud_drive_move(
+    source_path: str = "", dest_parent_path: str = "", new_name: str = "", authorization: AuthHeader = ""
+) -> Dict[str, Any]:
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, source_path, service=service, required_level="editor")
-    _require_cloud_drive_path_access(cfg, user, dest_parent_path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(
+        cfg,
+        user,
+        source_path,
+        service=service,
+        required_level="editor",
+        audit_action="move",
+        audit_details={"path_role": "source"},
+    )
+    _require_cloud_drive_path_access(
+        cfg,
+        user,
+        dest_parent_path,
+        service=service,
+        required_level="editor",
+        audit_action="move",
+        audit_details={"path_role": "destination"},
+    )
     try:
         result = service.move_node(source_path=source_path, dest_parent_path=dest_parent_path, new_name=new_name)
-        _audit_cloud_drive_api_event(cfg, user, "move", details={"source_path": source_path, "dest_parent_path": dest_parent_path, "new_name": new_name, "result": result})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "move",
+            details={
+                "source_path": source_path,
+                "dest_parent_path": dest_parent_path,
+                "new_name": new_name,
+                "result": result,
+            },
+        )
         return result
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "move", ok=False, details={"source_path": source_path, "dest_parent_path": dest_parent_path, "new_name": new_name, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "move",
+            ok=False,
+            details={
+                "source_path": source_path,
+                "dest_parent_path": dest_parent_path,
+                "new_name": new_name,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1493,18 +1778,24 @@ def api_cloud_drive_rename(path: str = "", new_name: str = "", authorization: Au
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor", audit_action="rename")
     node = service.registry.get_node_by_path(path)
     if node is None:
-        _audit_cloud_drive_api_event(cfg, user, "rename", ok=False, details={"path": path, "new_name": new_name, "error": "not_found"})
+        _audit_cloud_drive_api_event(
+            cfg, user, "rename", ok=False, details={"path": path, "new_name": new_name, "error": "not_found"}
+        )
         raise HTTPException(status_code=404, detail=f"Узел не найден: {path}")
     parent_path = node.path.rsplit("/", 1)[0] if "/" in node.path else ""
     try:
         result = service.move_node(source_path=path, dest_parent_path=parent_path, new_name=new_name)
-        _audit_cloud_drive_api_event(cfg, user, "rename", details={"path": path, "new_name": new_name, "result": result})
+        _audit_cloud_drive_api_event(
+            cfg, user, "rename", details={"path": path, "new_name": new_name, "result": result}
+        )
         return result
     except RuntimeError as exc:
-        _audit_cloud_drive_api_event(cfg, user, "rename", ok=False, details={"path": path, "new_name": new_name, "error": str(exc)})
+        _audit_cloud_drive_api_event(
+            cfg, user, "rename", ok=False, details={"path": path, "new_name": new_name, "error": str(exc)}
+        )
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1513,7 +1804,7 @@ def api_cloud_drive_delete(path: str = "", authorization: AuthHeader = "") -> Di
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor", audit_action="delete")
     try:
         result = service.delete_node(path)
         _audit_cloud_drive_api_event(cfg, user, "delete", details={"path": path, "result": result})
@@ -1544,7 +1835,7 @@ def api_cloud_drive_restore(path: str = "", authorization: AuthHeader = "") -> D
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor", audit_action="restore")
     try:
         result = service.restore_node(path)
         _audit_cloud_drive_api_event(cfg, user, "restore", details={"path": path, "result": result})
@@ -1559,7 +1850,7 @@ def api_cloud_drive_reindex(path: str = "", authorization: AuthHeader = "") -> D
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor")
+    _require_cloud_drive_path_access(cfg, user, path, service=service, required_level="editor", audit_action="reindex")
     try:
         job = service.enqueue_reindex(path)
     except RuntimeError as exc:
@@ -1579,7 +1870,9 @@ def api_cloud_drive_job_run(job_id: str, authorization: AuthHeader = "") -> Dict
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "job_run", ok=False, details={"job_id": job_id, "error": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "job_run", details={"job_id": job_id, "status": job.status, "job_type": job.job_type})
+    _audit_cloud_drive_api_event(
+        cfg, user, "job_run", details={"job_id": job_id, "status": job.status, "job_type": job.job_type}
+    )
     return _serialize_cloud_drive_job(job)
 
 
@@ -1593,5 +1886,7 @@ def api_cloud_drive_job_retry(job_id: str, authorization: AuthHeader = "") -> Di
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "job_retry", ok=False, details={"job_id": job_id, "error": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc))
-    _audit_cloud_drive_api_event(cfg, user, "job_retry", details={"job_id": job_id, "new_job_id": job.id, "job_type": job.job_type})
+    _audit_cloud_drive_api_event(
+        cfg, user, "job_retry", details={"job_id": job_id, "new_job_id": job.id, "job_type": job.job_type}
+    )
     return _serialize_cloud_drive_job(job)

@@ -422,11 +422,13 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
     db.save_ocr_file_result(str(partial_pdf), 1.0, text="line 3", pages=1, chars=6, status="ok")
     db.save_ocr_file_result(str(error_pdf), 1.0, status="error", error="boom")
 
-    telemetry = _read_index_telemetry({
-        "telemetry_db_path": str(db_path),
-        "qdrant_db_path": str(qdrant_dir),
-        "small_pdf_mb": 0,
-    })
+    telemetry = _read_index_telemetry(
+        {
+            "telemetry_db_path": str(db_path),
+            "qdrant_db_path": str(qdrant_dir),
+            "small_pdf_mb": 0,
+        }
+    )
 
     inventory = telemetry["ocr_inventory"]
     assert inventory["eligible_total"] == 4
@@ -490,7 +492,9 @@ def test_index_telemetry_uses_process_scan_for_headless_ocr(monkeypatch, tmp_pat
     runtime_dir.mkdir()
 
     monkeypatch.setattr(ui_helpers, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(ui_helpers, "_find_module_process_pids", lambda module: [7264] if module == "rag_catalog.core.ocr_pdfs" else [])
+    monkeypatch.setattr(
+        ui_helpers, "_find_module_process_pids", lambda module: [7264] if module == "rag_catalog.core.ocr_pdfs" else []
+    )
 
     telemetry = _read_index_telemetry({"telemetry_db_path": str(db_path)})
 
@@ -739,7 +743,9 @@ def test_recover_background_tasks_does_not_restart_when_process_is_alive(monkeyp
 
     monkeypatch.setattr(ui_system, "_is_process_alive", lambda pid: True)
     monkeypatch.setattr(ui_system, "_process_matches_module", lambda pid, module: True)
-    monkeypatch.setattr(ui_system, "_launch_indexer", lambda cfg, **kwargs: calls.__setitem__("index", calls["index"] + 1) or 1)
+    monkeypatch.setattr(
+        ui_system, "_launch_indexer", lambda cfg, **kwargs: calls.__setitem__("index", calls["index"] + 1) or 1
+    )
     monkeypatch.setattr(ui_system, "_launch_ocr", lambda cfg, **kwargs: calls.__setitem__("ocr", calls["ocr"] + 1) or 1)
 
     _recover_background_tasks({"telemetry_db_path": str(db_path), "qdrant_db_path": str(tmp_path / "qdrant")})
@@ -774,7 +780,9 @@ def test_recover_background_tasks_does_not_restart_index_while_ocr_is_alive(monk
     monkeypatch.setattr(ui_system, "_is_process_alive", lambda pid: int(pid) == 20202)
     monkeypatch.setattr(ui_system, "_find_live_running_index_run", lambda telemetry: None)
     monkeypatch.setattr(ui_system, "_find_live_running_ocr_run", lambda telemetry: {"worker_pid": 20202})
-    monkeypatch.setattr(ui_system, "_launch_indexer", lambda cfg, **kwargs: calls.__setitem__("index", calls["index"] + 1) or 1)
+    monkeypatch.setattr(
+        ui_system, "_launch_indexer", lambda cfg, **kwargs: calls.__setitem__("index", calls["index"] + 1) or 1
+    )
     monkeypatch.setattr(ui_system, "_launch_ocr", lambda cfg, **kwargs: calls.__setitem__("ocr", calls["ocr"] + 1) or 1)
 
     _recover_background_tasks({"telemetry_db_path": str(db_path), "qdrant_db_path": str(tmp_path / "qdrant")})
@@ -822,8 +830,14 @@ def test_cloud_drive_bootstrap_status_api_reads_current_status(monkeypatch) -> N
     expected = {"status": "running", "files_imported": 12}
 
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
-    monkeypatch.setattr(cloud_api, "_read_cloud_bootstrap_status", lambda current_cfg: expected if current_cfg == cfg else {})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+    monkeypatch.setattr(
+        cloud_api, "_read_cloud_bootstrap_status", lambda current_cfg: expected if current_cfg == cfg else {}
+    )
 
     assert api_cloud_drive_bootstrap_status() == expected
 
@@ -835,7 +849,11 @@ def test_cloud_drive_bootstrap_status_returns_idle_without_jobs(monkeypatch, tmp
         "cloud_drive_storage_root": str(tmp_path / "storage"),
     }
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
     monkeypatch.setattr(ui_system, "_RUNTIME_DIR", tmp_path / "runtime")
 
     status = api_cloud_drive_bootstrap_status()
@@ -902,8 +920,14 @@ def test_cloud_drive_bootstrap_recover_api_reports_recovered_state(monkeypatch) 
     events: list[dict[str, object]] = []
 
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
-    monkeypatch.setattr(cloud_api, "_recover_cloud_drive_jobs", lambda current_cfg: expected if current_cfg == cfg else {})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+    monkeypatch.setattr(
+        cloud_api, "_recover_cloud_drive_jobs", lambda current_cfg: expected if current_cfg == cfg else {}
+    )
     monkeypatch.setattr(cloud_api, "_audit_cloud_drive_api_event", lambda *_args, **kwargs: events.append(dict(kwargs)))
 
     result = api_cloud_drive_bootstrap_recover()
@@ -940,7 +964,11 @@ def test_cloud_drive_bootstrap_jobs_api_returns_serialized_jobs(monkeypatch, tmp
         "load_config",
         lambda: dict(cfg),
     )
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
 
     jobs = api_cloud_drive_bootstrap_jobs(limit=1)
 
@@ -959,7 +987,11 @@ def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
         "cloud_drive_storage_root": str(tmp_path / "storage"),
     }
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
 
     health = api_cloud_drive_storage_health()
 
@@ -998,7 +1030,11 @@ def test_cloud_drive_search_api_finds_files_by_name(monkeypatch, tmp_path) -> No
         source_path="",
     )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     result = api_cloud_drive_search(query="Alpha", path="Docs")
 
@@ -1044,7 +1080,11 @@ def test_cloud_drive_search_api_paginates_after_acl_filter(monkeypatch, tmp_path
         access_level="viewer",
     )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "alice", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "alice", "role": "user", "status": "active"},
+    )
 
     result = api_cloud_drive_search(query="Alpha", limit=1, node_type="file", extension="pdf")
 
@@ -1130,7 +1170,11 @@ def test_cloud_drive_jobs_api_returns_serialized_jobs(monkeypatch, tmp_path) -> 
     bootstrap = service.registry.queue_job(job_type="bootstrap", status="running", payload={"progress": {"step": 1}})
     reindex = service.registry.queue_job(job_type="reindex", status="pending", payload={"scope": "file"})
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
 
     jobs = api_cloud_drive_jobs(limit=10)
     latest = api_cloud_drive_job_latest(job_type="bootstrap")
@@ -1154,7 +1198,11 @@ def test_cloud_drive_import_source_api_queues_and_runs_job(monkeypatch, tmp_path
         "telemetry_db_path": str(tmp_path / "telemetry.db"),
     }
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
 
     source = api_cloud_drive_import_source_upsert(
         name="Scanner",
@@ -1180,7 +1228,9 @@ def test_cloud_drive_file_statuses_api_returns_latest_job_by_file(monkeypatch, t
     }
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
-    folder = service.registry.upsert_folder(path="Folder A", name="Folder A", parent_id=root.id, depth=1, source_path="")
+    folder = service.registry.upsert_folder(
+        path="Folder A", name="Folder A", parent_id=root.id, depth=1, source_path=""
+    )
     file_row = service.registry.upsert_file(
         folder_id=folder.id,
         path="Folder A/hello.txt",
@@ -1191,10 +1241,18 @@ def test_cloud_drive_file_statuses_api_returns_latest_job_by_file(monkeypatch, t
         checksum="abc",
         source_path="",
     )
-    service.registry.queue_job(job_type="reindex", status="pending", file_id=file_row.id, payload={"progress": {"status": "pending"}})
-    latest = service.registry.queue_job(job_type="reindex", status="running", file_id=file_row.id, payload={"progress": {"status": "running"}})
+    service.registry.queue_job(
+        job_type="reindex", status="pending", file_id=file_row.id, payload={"progress": {"status": "pending"}}
+    )
+    latest = service.registry.queue_job(
+        job_type="reindex", status="running", file_id=file_row.id, payload={"progress": {"status": "running"}}
+    )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     statuses = api_cloud_drive_file_statuses(paths="Folder A/hello.txt")
 
@@ -1228,7 +1286,11 @@ def test_cloud_drive_node_and_list_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A/hello.txt",
     )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     root_node = api_cloud_drive_node()
     folder_node = api_cloud_drive_node("Folder A")
@@ -1257,7 +1319,11 @@ def test_cloud_drive_create_folder_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A",
     )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     created = api_cloud_drive_create_folder(parent_path="Folder A", name="Nested")
 
@@ -1295,7 +1361,11 @@ def test_cloud_drive_download_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A/hello.txt",
     )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     response = api_cloud_drive_download("Folder A/hello.txt")
 
@@ -1416,7 +1486,12 @@ def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:
     upload = UploadFile(file=buffer, filename="hello.txt", headers={"content-type": "text/plain"})
 
     import asyncio
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
     result = asyncio.run(api_cloud_drive_upload(parent_path="Folder A", file=upload))
 
     assert result["node_type"] == "file"
@@ -1443,10 +1518,18 @@ def test_cloud_drive_versions_api(monkeypatch, tmp_path) -> None:
     source_file.write_text("hello", encoding="utf-8")
     source_file2 = tmp_path / "hello2.txt"
     source_file2.write_text("hello-2", encoding="utf-8")
-    service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain")
-    service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file2), mime_type="text/plain")
+    service.upload_file(
+        parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain"
+    )
+    service.upload_file(
+        parent_path="Folder A", filename="hello.txt", source_path=str(source_file2), mime_type="text/plain"
+    )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     versions = api_cloud_drive_versions("Folder A/hello.txt")
 
@@ -1485,7 +1568,11 @@ def test_cloud_drive_move_rename_delete_api(monkeypatch, tmp_path) -> None:
         source_path="O:/Обмен/Folder A/hello.txt",
     )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     renamed = api_cloud_drive_rename(path="Folder A/hello.txt", new_name="renamed.txt")
     moved = api_cloud_drive_move(source_path="Folder A", dest_parent_path="", new_name="Archive")
@@ -1528,9 +1615,15 @@ def test_cloud_drive_reindex_api_queues_job(monkeypatch, tmp_path) -> None:
     )
     source_file = tmp_path / "hello.txt"
     source_file.write_text("hello", encoding="utf-8")
-    created = service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain")
+    created = service.upload_file(
+        parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain"
+    )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
 
     job = api_cloud_drive_reindex(path="Folder A/hello.txt")
 
@@ -1557,11 +1650,17 @@ def test_cloud_drive_job_run_api_processes_reindex_job(monkeypatch, tmp_path) ->
     )
     source_file = tmp_path / "hello.txt"
     source_file.write_text("hello", encoding="utf-8")
-    service.upload_file(parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain")
+    service.upload_file(
+        parent_path="Folder A", filename="hello.txt", source_path=str(source_file), mime_type="text/plain"
+    )
     job = service.registry.get_latest_job(job_type="reindex")
     assert job is not None
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
 
     result = api_cloud_drive_job_run(job_id=job.id)
 
@@ -1578,7 +1677,9 @@ def test_cloud_drive_job_retry_api_requeues_failed_reindex(monkeypatch, tmp_path
     }
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен", source_path="")
-    folder = service.registry.upsert_folder(path="Folder A", name="Folder A", parent_id=root.id, depth=1, source_path="")
+    folder = service.registry.upsert_folder(
+        path="Folder A", name="Folder A", parent_id=root.id, depth=1, source_path=""
+    )
     file_row = service.registry.upsert_file(
         folder_id=folder.id,
         path="Folder A/hello.txt",
@@ -1597,7 +1698,11 @@ def test_cloud_drive_job_retry_api_requeues_failed_reindex(monkeypatch, tmp_path
         payload={"path": file_row.path, "progress": {"status": "failed"}},
     )
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
-    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"})
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
 
     retried = api_cloud_drive_job_retry(job_id=failed.id)
 
@@ -1630,7 +1735,6 @@ def test_cloud_drive_api_requires_auth(monkeypatch, tmp_path) -> None:
 
     header_user = cloud_api._require_cloud_drive_api_user(cfg, authorization=f"Bearer {token}")
     assert header_user["username"] == "user"
-
 
 
 def test_view_file_requires_auth_and_catalog_path(monkeypatch, tmp_path) -> None:
@@ -1689,11 +1793,24 @@ def test_cloud_drive_api_acl_rejects_forbidden_path(monkeypatch, tmp_path) -> No
         "_require_cloud_drive_api_user",
         lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
     )
+    events: list[dict[str, object]] = []
+
+    def capture_audit(_cfg, _user, action, **kwargs) -> None:
+        events.append({"action": action, **kwargs})
+
+    monkeypatch.setattr(cloud_api, "_audit_cloud_drive_api_event", capture_audit)
 
     with pytest.raises(HTTPException) as exc:
         api_cloud_drive_list("Blocked")
 
     assert exc.value.status_code == 403
+    assert events == [
+        {
+            "action": "list_directory",
+            "ok": False,
+            "details": {"path": "Blocked", "required_level": "viewer", "error": "acl_denied"},
+        }
+    ]
 
 
 def test_cloud_drive_registry_acl_filters_api_and_write_level(monkeypatch, tmp_path) -> None:
@@ -1718,6 +1835,12 @@ def test_cloud_drive_registry_acl_filters_api_and_write_level(monkeypatch, tmp_p
         "_require_cloud_drive_api_user",
         lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
     )
+    events: list[dict[str, object]] = []
+
+    def capture_audit(_cfg, _user, action, **kwargs) -> None:
+        events.append({"action": action, **kwargs})
+
+    monkeypatch.setattr(cloud_api, "_audit_cloud_drive_api_event", capture_audit)
 
     assert api_cloud_drive_list("Allowed")["folder"]["path"] == "Allowed"
     with pytest.raises(HTTPException) as read_exc:
@@ -1726,6 +1849,15 @@ def test_cloud_drive_registry_acl_filters_api_and_write_level(monkeypatch, tmp_p
     with pytest.raises(HTTPException) as write_exc:
         api_cloud_drive_create_folder(parent_path="Allowed", name="Draft")
     assert write_exc.value.status_code == 403
+    assert [event["action"] for event in events if event.get("ok") is False] == [
+        "list_directory",
+        "create_folder",
+    ]
+    assert events[-1]["details"] == {
+        "path": "Allowed",
+        "required_level": "editor",
+        "error": "acl_denied",
+    }
 
     service.grant_path_permission(
         subject_type="user",
@@ -1856,6 +1988,12 @@ def test_cloud_drive_public_share_link_allows_read_without_auth(monkeypatch, tmp
     with pytest.raises(HTTPException) as exc:
         api_cloud_drive_public_list(token=token, path="alice")
     assert exc.value.status_code == 403
+    assert any(
+        event.get("ok") is False
+        and event.get("details", {}).get("error") == "acl_denied"
+        and "token_fingerprint" in event.get("details", {})
+        for event in events
+    )
 
     revoked = api_cloud_drive_share_link_revoke(token=token, path="alice/public.txt")
     assert revoked["ok"] is True
@@ -2174,11 +2312,14 @@ def test_group_membership_controls_api_and_search_acl(monkeypatch, tmp_path) -> 
     alice_after_archive = auth_db.get_user(username="alice")
     assert alice_after_archive is not None
     assert alice_after_archive["group_ids"] == []
-    assert _filter_cloud_drive_search_results(
-        cfg,
-        alice,
-        [{"filename": "report.txt", "cloud_file_id": finance_file.id, "cloud_path": finance_file.path}],
-    ) == []
+    assert (
+        _filter_cloud_drive_search_results(
+            cfg,
+            alice,
+            [{"filename": "report.txt", "cloud_file_id": finance_file.id, "cloud_path": finance_file.path}],
+        )
+        == []
+    )
     assert api_user_group_member_remove(group_id=group["id"], username="alice")["ok"] is True
 
 
@@ -2200,8 +2341,12 @@ def test_cloud_drive_search_filter_maps_filesystem_paths_to_registry_acl(tmp_pat
     }
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен", source_path=str(catalog))
-    allowed = service.registry.upsert_folder(path="Allowed", name="Allowed", parent_id=root.id, depth=1, source_path=str(allowed_dir))
-    blocked = service.registry.upsert_folder(path="Blocked", name="Blocked", parent_id=root.id, depth=1, source_path=str(blocked_dir))
+    allowed = service.registry.upsert_folder(
+        path="Allowed", name="Allowed", parent_id=root.id, depth=1, source_path=str(allowed_dir)
+    )
+    blocked = service.registry.upsert_folder(
+        path="Blocked", name="Blocked", parent_id=root.id, depth=1, source_path=str(blocked_dir)
+    )
     service.registry.upsert_file(
         folder_id=allowed.id,
         path="Allowed/report.txt",

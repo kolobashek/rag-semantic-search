@@ -169,7 +169,7 @@ Exit gate: другой инженер поднимает и проверяет 
 - IMPLEMENTED 2026-07-10: группы и membership management: immutable group ID, active/archive lifecycle, admin UI/API и group ACL в Explorer/API/search; остаётся browser smoke экрана управления группами;
 - DONE 2026-07-10: public links как default-off tenant policy: строгий expiration, active list, copy/revoke, API enforcement и audit без сырого token;
 - IMPLEMENTED 2026-07-11: устранены измеренные Explorer stalls и hard reload при кратком reconnect; остаются authenticated browser smoke сохранения search state, экран групп и responsive smoke остальных экранов;
-- audit coverage для чувствительных пользовательских и admin actions;
+- IMPLEMENTED 2026-07-11: audit coverage для login/session, ACL-denied read/write, preview/download, public share access, permission/share changes, delete/restore и admin actions; остаются pilot audit review/export acceptance и correlation IDs;
 - admin health view и backup freshness;
 - scripted install/update, preflight и rollback/restore procedure;
 - pilot onboarding, acceptance checklist, support runbook и data-processing boundaries;
@@ -311,7 +311,7 @@ flowchart LR
 1. DONE 2026-07-10: Explorer sharing для пользователей/ролей, `who has access`, expiration/revoke и default-off public-link policy.
 2. IMPLEMENTED 2026-07-10: группы/membership и group sharing подключены к session, Explorer, API и search ACL; закрыть browser smoke экрана управления группами.
 3. IMPLEMENTED 2026-07-11: основной Explorer event-loop stall устранён (`ACL 3.3 с -> 11 мс`, размеры root `>60 с -> 87 мс`), а краткий transport reconnect больше не делает hard reload; закрыть authenticated browser smoke search-state и responsive smoke остальных экранов.
-4. Довести audit coverage и negative ACL tests до всех read/share/delete flows.
+4. IMPLEMENTED 2026-07-11: audit coverage и negative ACL tests закрывают login/session, ACL-denied read/write, preview/download, public share, permission/share changes и delete/restore; до DONE провести pilot audit review/export acceptance вместе с correlation IDs.
 5. Автоматизировать fresh install, upgrade preflight и restore drill.
 6. Добавить admin health/backup freshness и correlation ids.
 7. Провести Retrieval v3 decision spike до переключения production: текущий `legacy` против `release_v2`, multilingual dense candidate и multilingual reranker в versioned shadow collection; расширить eval до document/chunk/page relevance, no-answer, ACL, faithfulness и p95; затем зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
