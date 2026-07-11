@@ -315,7 +315,7 @@ flowchart LR
 5. IMPLEMENTED 2026-07-11: fresh-install/upgrade preflight, consistent local backup, archive verification и restore drill автоматизированы; до DONE добавить scheduler, rollback rehearsal и S3 provider procedure.
 6. IMPLEMENTED 2026-07-11: admin UI/API показывает backup freshness и подтверждение restore drill, HTTP responses/logs/audit получают correlation ID; до DONE объединить web/DB/Qdrant/workers/queue/index coverage в одном health view.
 7. IMPLEMENTED 2026-07-11: retrieval eval и GO/NO_GO gate поддерживают versioned profile, document/chunk/page ground truth, no-answer, ACL leakage, coverage, p95 и regression относительно baseline; faithfulness остаётся явным блокером, а не подменяется retrieval metric. До DONE собрать размеченный `retrieval_v3_golden.json`, прогнать `legacy`, `release_v2`, multilingual dense и multilingual reranker в shadow collection, затем зафиксировать победителя, pilot hardware profile и Cloud Drive E2E artifact.
-8. Подготовить onboarding, acceptance checklist, support and incident runbooks.
+8. IMPLEMENTED 2026-07-11: `docs/PILOT_RUNBOOK.md` фиксирует scope/data boundaries, роли, onboarding, user/admin/operator acceptance, release/rollback gate, severity и incident procedure; до DONE выполнить runbook на чистом contour и получить pilot sign-off.
 
 ### P1 - После Запуска Пилота
 

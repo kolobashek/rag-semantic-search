@@ -330,6 +330,8 @@ python rag_search.py --query "паспорт" --type .pdf --limit 5
 python rag_search.py --url http://localhost:6333 --query "PC300"
 ```
 
+Onboarding, acceptance, release/rollback и incident procedure для выделенного клиентского контура: [Paid Dedicated Pilot Runbook](docs/PILOT_RUNBOOK.md).
+
 ## Docker
 
 Подготовка:
