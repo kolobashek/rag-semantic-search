@@ -50,6 +50,19 @@ class _AlreadyWalConnection:
         return _Cursor("")
 
 
+class _JournalModeMigrationConnection:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def execute(self, sql: str):
+        self.calls.append(sql)
+        if sql == "PRAGMA journal_mode;":
+            return _Cursor("wal")
+        if sql == "PRAGMA journal_mode=TRUNCATE;":
+            return _Cursor("truncate")
+        return _Cursor("")
+
+
 def test_prepare_sqlite_connection_falls_back_when_wal_fails() -> None:
     conn = _WalFailsButReadableConnection()
 
@@ -81,3 +94,11 @@ def test_prepare_sqlite_connection_does_not_rewrite_existing_wal_mode() -> None:
         "PRAGMA journal_mode;",
         "PRAGMA synchronous=NORMAL;",
     ]
+
+
+def test_prepare_sqlite_connection_can_require_non_wal_mode() -> None:
+    conn = _JournalModeMigrationConnection()
+
+    prepare_sqlite_connection(conn, journal_mode="truncate", require_journal_mode=True)  # type: ignore[arg-type]
+
+    assert "PRAGMA journal_mode=TRUNCATE;" in conn.calls

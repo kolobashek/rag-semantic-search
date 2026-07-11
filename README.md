@@ -230,6 +230,9 @@ python cloud_drive.py restore runtime/backups/cloud-drive.zip --target-dir runti
 
 Для local storage backup использует online SQLite snapshot, включает object files и SHA-256 manifest, а секреты в `config.snapshot.json` заменяет на `[REDACTED]`. Успешный `restore-drill` создаёт рядом с архивом проверяемый artifact, который учитывается в admin storage health. Для S3/MinIO CLI намеренно требует provider-native object backup; архив только SQLite не считается полноценным backup.
 
+HTTP API принимает или создаёт `X-Correlation-ID`, возвращает его клиенту и добавляет в API logs и Cloud Drive audit events.
+Telemetry SQLite использует rollback journal: web, bot и background indexer могут писать параллельно без общей WAL/SHM пары, которая ранее блокировала reconnect после принудительного перезапуска процесса.
+
 Admin UI:
 
 - `Настройки -> Cloud Drive`

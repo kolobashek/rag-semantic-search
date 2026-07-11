@@ -13,9 +13,11 @@ import hashlib
 import json
 import logging
 import mimetypes
+import re
 import tempfile
-import zipfile
-from datetime import datetime
+import time
+import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Annotated, Any, Dict, List
 
@@ -24,6 +26,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from nicegui import app
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness
 from rag_catalog.core.rag_core import load_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -35,7 +38,46 @@ from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _sa
 AuthHeader = Annotated[str, Header(alias="Authorization")]
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_CORRELATION_ID: ContextVar[str] = ContextVar("rag_correlation_id", default="")
+_CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
+
+
+def _normalise_correlation_id(value: str) -> str:
+    candidate = str(value or "").strip()
+    return candidate if _CORRELATION_ID_PATTERN.fullmatch(candidate) else uuid.uuid4().hex
+
+
+@app.middleware("http")
+async def _correlation_id_middleware(request: Request, call_next):
+    correlation_id = _normalise_correlation_id(request.headers.get("X-Correlation-ID", ""))
+    token = _CORRELATION_ID.set(correlation_id)
+    request.state.correlation_id = correlation_id
+    started = time.perf_counter()
+    path = str(request.url.path)
+    try:
+        response = await call_next(request)
+        response.headers["X-Correlation-ID"] = correlation_id
+        if path.startswith("/api/"):
+            logger.info(
+                "api_request correlation_id=%s method=%s path=%s status=%s duration_ms=%.1f",
+                correlation_id,
+                request.method,
+                path,
+                response.status_code,
+                (time.perf_counter() - started) * 1000.0,
+            )
+        return response
+    except Exception:
+        logger.exception(
+            "api_request_failed correlation_id=%s method=%s path=%s duration_ms=%.1f",
+            correlation_id,
+            request.method,
+            path,
+            (time.perf_counter() - started) * 1000.0,
+        )
+        raise
+    finally:
+        _CORRELATION_ID.reset(token)
 
 
 def _share_token_fingerprint(token: str) -> str:
@@ -102,13 +144,17 @@ def _audit_cloud_drive_api_event(
     try:
         if not str(cfg.get("telemetry_db_path") or cfg.get("qdrant_db_path") or "").strip():
             return
+        event_details = dict(details or {})
+        correlation_id = _CORRELATION_ID.get()
+        if correlation_id:
+            event_details.setdefault("correlation_id", correlation_id)
         TelemetryDB(str(_telemetry_db_path(cfg))).log_app_event(
             username=str(user.get("username") or ""),
             screen="api",
             feature="cloud_drive",
             action=action,
             ok=ok,
-            details=details or {},
+            details=event_details,
         )
     except Exception:
         pass
@@ -979,79 +1025,13 @@ def api_cloud_drive_job_latest(job_type: str, authorization: AuthHeader = "") ->
     return _serialize_cloud_drive_job(job)
 
 
-def _cloud_drive_backup_freshness(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    backup_dir = Path(str(cfg.get("cloud_drive_backup_dir") or PROJECT_ROOT / "runtime" / "backups")).expanduser()
-    max_age_hours = max(1.0, float(cfg.get("cloud_drive_backup_max_age_hours") or 24.0))
-    candidates = sorted(backup_dir.glob("*.zip"), key=lambda item: item.stat().st_mtime, reverse=True) if backup_dir.exists() else []
-    if not candidates:
-        return {
-            "status": "missing",
-            "ok": False,
-            "backup_dir": str(backup_dir.resolve()),
-            "max_age_hours": max_age_hours,
-        }
-    latest = candidates[0]
-    age_hours = max(0.0, (datetime.now().timestamp() - latest.stat().st_mtime) / 3600.0)
-    manifest_ok = False
-    complete = False
-    created_at = ""
-    try:
-        with zipfile.ZipFile(latest, "r") as zf:
-            manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        manifest_ok = manifest.get("kind") == "rag-catalog-cloud-drive-backup"
-        complete = (
-            manifest_ok
-            and int(manifest.get("version") or 1) >= 2
-            and str(manifest.get("storage_backend") or "") == "local"
-        )
-        created_at = str(manifest.get("created_at") or "")
-    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
-        pass
-    drill_ok = False
-    drill_completed_at = ""
-    artifact_path = Path(f"{latest}.restore-drill.json")
-    try:
-        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-        drill_ok = (
-            bool(artifact.get("ok"))
-            and int(artifact.get("backup_size_bytes") or -1) == latest.stat().st_size
-            and int(artifact.get("backup_mtime_ns") or -1) == latest.stat().st_mtime_ns
-        )
-        drill_completed_at = str(artifact.get("completed_at") or "") if drill_ok else ""
-    except (OSError, ValueError):
-        pass
-    fresh = age_hours <= max_age_hours
-    ok = manifest_ok and complete and fresh and drill_ok
-    if not manifest_ok or not complete:
-        status = "invalid"
-    elif not fresh:
-        status = "stale"
-    elif not drill_ok:
-        status = "unverified"
-    else:
-        status = "healthy"
-    return {
-        "status": status,
-        "ok": ok,
-        "backup_dir": str(backup_dir.resolve()),
-        "latest_path": str(latest.resolve()),
-        "created_at": created_at,
-        "age_hours": round(age_hours, 2),
-        "max_age_hours": max_age_hours,
-        "manifest_ok": manifest_ok,
-        "complete": complete,
-        "restore_drill_ok": drill_ok,
-        "restore_drill_completed_at": drill_completed_at,
-    }
-
-
 @app.get("/api/cloud-drive/storage-health")
 def api_cloud_drive_storage_health(authorization: AuthHeader = "") -> Dict[str, Any]:
     cfg = load_config()
     _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
     service = CloudDriveService.from_config(cfg)
     health = service.get_storage_health()
-    backup = _cloud_drive_backup_freshness(cfg)
+    backup = cloud_drive_backup_freshness(cfg)
     return {
         "backend": health.backend,
         "ok": health.ok,

@@ -6,6 +6,29 @@ from concurrent.futures import ThreadPoolExecutor
 from rag_catalog.core.telemetry_db import TelemetryDB
 
 
+def test_telemetry_uses_multi_process_safe_rollback_journal(tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    first = TelemetryDB(str(db_path))
+    second = TelemetryDB(str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+
+    def write_events(db: TelemetryDB, prefix: str) -> None:
+        for index in range(20):
+            db.log_app_event(
+                username=prefix,
+                screen="ops",
+                feature="sqlite",
+                action=f"write_{index}",
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda pair: write_events(*pair), [(first, "web"), (second, "bot")]))
+
+    assert first.fetch_dicts("SELECT COUNT(*) AS count FROM app_events")[0]["count"] == 40
+
+
 def test_search_logs_include_username_and_migrate(tmp_path) -> None:
     db = TelemetryDB(str(tmp_path / "telemetry.db"))
 

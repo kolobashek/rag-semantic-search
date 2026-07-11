@@ -183,7 +183,10 @@ class TelemetryDB:
         return conn
 
     def _prepare_connection(self, conn: sqlite3.Connection) -> None:
-        prepare_sqlite_connection(conn)
+        # Telemetry is written by web, bot and background workers. Rollback
+        # journaling is slower than WAL but survives abrupt Windows process
+        # restarts without leaving a shared WAL/SHM pair that blocks all writers.
+        prepare_sqlite_connection(conn, journal_mode="delete", require_journal_mode=True)
 
     def _init_schema(self) -> None:
         with self._lock:

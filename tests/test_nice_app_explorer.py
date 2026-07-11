@@ -1858,6 +1858,35 @@ def test_cloud_drive_api_acl_rejects_forbidden_path(monkeypatch, tmp_path) -> No
     ]
 
 
+def test_cloud_drive_audit_includes_request_correlation_id(monkeypatch, tmp_path) -> None:
+    events: list[dict[str, object]] = []
+
+    class FakeTelemetryDB:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def log_app_event(self, **kwargs) -> None:
+            events.append(kwargs)
+
+    monkeypatch.setattr(cloud_api, "TelemetryDB", FakeTelemetryDB)
+    token = cloud_api._CORRELATION_ID.set("pilot-request-123")
+    try:
+        cloud_api._audit_cloud_drive_api_event(
+            {"telemetry_db_path": str(tmp_path / "telemetry.db")},
+            {"username": "alice"},
+            "download",
+            details={"path": "Docs/report.pdf"},
+        )
+    finally:
+        cloud_api._CORRELATION_ID.reset(token)
+
+    assert events[0]["details"] == {
+        "path": "Docs/report.pdf",
+        "correlation_id": "pilot-request-123",
+    }
+    assert cloud_api._normalise_correlation_id("bad id") != "bad id"
+
+
 def test_cloud_drive_registry_acl_filters_api_and_write_level(monkeypatch, tmp_path) -> None:
     cfg = {
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),

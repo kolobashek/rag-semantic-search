@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from nicegui import app, run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness
 from rag_catalog.core.cloud_drive.storage import normalize_s3_credential
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -1420,17 +1421,38 @@ def render_settings_screen(
                 except Exception as exc:
                     ui.notify(f"Не удалось сохранить настройки: {exc}", type="negative")
 
-            async def check_cloud_storage() -> None:
+            async def refresh_cloud_operational_health(*, notify: bool = False) -> None:
                 try:
                     cfg = build_cloud_config()
                     service = await run.io_bound(CloudDriveService.from_config, cfg)
                     health = await run.io_bound(service.get_storage_health)
-                    if health.ok:
+                    backup = await run.io_bound(cloud_drive_backup_freshness, cfg)
+                    backup_labels = {
+                        "healthy": "backup проверен",
+                        "unverified": "backup не проверен восстановлением",
+                        "stale": "backup устарел",
+                        "invalid": "backup неполный или повреждён",
+                        "missing": "backup отсутствует",
+                    }
+                    storage_label = "storage доступен" if health.ok else "storage недоступен"
+                    operational_health_label.set_text(
+                        f"Operations: {storage_label}; {backup_labels.get(str(backup.get('status')), 'backup неизвестен')}."
+                    )
+                    operational_health_label.classes(
+                        replace="text-caption text-positive" if health.ok and backup.get("ok") else "text-caption text-warning"
+                    )
+                    if notify and health.ok:
                         ui.notify(f"Хранилище доступно: {health.target}", type="positive")
-                    else:
+                    elif notify:
                         ui.notify(f"Хранилище недоступно: {health.error}", type="negative")
                 except Exception as exc:
-                    ui.notify(f"Не удалось проверить хранилище: {exc}", type="negative")
+                    operational_health_label.set_text(f"Operations: проверка не выполнена: {exc}")
+                    operational_health_label.classes(replace="text-caption text-negative")
+                    if notify:
+                        ui.notify(f"Не удалось проверить хранилище: {exc}", type="negative")
+
+            async def check_cloud_storage() -> None:
+                await refresh_cloud_operational_health(notify=True)
 
             async def recover_cloud_bootstrap() -> None:
                 try:
@@ -1815,6 +1837,8 @@ def render_settings_screen(
                 ui.button("Recovery bootstrap", icon="healing", on_click=recover_cloud_bootstrap).props("outline")
                 ensure_bucket_button = ui.button("Создать bucket", icon="create_new_folder", on_click=ensure_cloud_storage_container).props("outline")
                 ui.button("Добавить новые файлы", icon="cloud_upload", on_click=lambda: bootstrap_registry(import_files=True)).props("unelevated")
+            operational_health_label = ui.label("Operations: проверка...").classes("text-caption text-muted")
+            _schedule_async(refresh_cloud_operational_health)
 
             async def _cloud_drive_tick() -> None:
                 cfg_now = build_cloud_config()
