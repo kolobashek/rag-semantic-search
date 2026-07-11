@@ -146,6 +146,8 @@ flowchart LR
 - DONE 2026-07-11: unified operations health после restart возвращает `pilot_ready=true`: registry, telemetry, MinIO, Qdrant, index state, queue, workers и backup/restore artifact готовы.
 - MEASURED 2026-07-11: controlled legacy retrieval baseline на 32 запросах дал recall@10 `0.96875`, MRR `1.0`, p50 `1.924 с`, p95 `3.998 с`; gate остаётся `NO_GO` из-за p95 выше 3 с и отсутствия размеченных ground-truth/no-answer cases.
 - DONE 2026-07-11: после provider recovery/reconciliation stage полный regression gate проходит (`590 passed`, 4 warnings), `ruff check src tests scripts` green.
+- DONE 2026-07-11: isolated authenticated Chrome smoke прошёл 23 checks: login, сохранение search state, group creation, ACL `200/403`, success/denied audit correlation и 18 route/viewport cells на 480/900/1280 px без page overflow, reconnect overlay, console/page errors.
+- DONE 2026-07-11: machine-readable `pilot_gate` объединяет health/recovery/UI-audit/full-pytest/retrieval/sign-off и не допускает ложный GO; текущий verdict после `592 passed` — `NO_GO` только по retrieval labels и фактическому customer sign-off/update rehearsal.
 
 Цель: превратить существующий работающий baseline в воспроизводимый release candidate.
 
@@ -170,10 +172,10 @@ Exit gate: другой инженер поднимает и проверяет 
 Результаты:
 
 - DONE 2026-07-10: Explorer sharing для пользователей/ролей: grant/revoke и `who has access` без перезагрузки страницы;
-- IMPLEMENTED 2026-07-10: группы и membership management: immutable group ID, active/archive lifecycle, admin UI/API и group ACL в Explorer/API/search; остаётся browser smoke экрана управления группами;
+- DONE 2026-07-11: группы и membership management: immutable group ID, active/archive lifecycle, admin UI/API, group ACL в Explorer/API/search и isolated authenticated browser smoke создания группы;
 - DONE 2026-07-10: public links как default-off tenant policy: строгий expiration, active list, copy/revoke, API enforcement и audit без сырого token;
-- IMPLEMENTED 2026-07-11: устранены измеренные Explorer stalls и hard reload при кратком reconnect; остаются authenticated browser smoke сохранения search state, экран групп и responsive smoke остальных экранов;
-- IMPLEMENTED 2026-07-11: audit coverage для login/session, ACL-denied read/write, preview/download, public share access, permission/share changes, delete/restore и admin actions; остаются pilot audit review/export acceptance и correlation IDs;
+- DONE 2026-07-11: устранены измеренные Explorer stalls и hard reload при кратком reconnect; authenticated Chrome smoke подтвердил сохранение search state и responsive routes на 480/900/1280 px без overflow/reconnect/browser errors;
+- IMPLEMENTED 2026-07-11: audit coverage закрывает login/session, ACL-denied read/write, preview/download, public share access, permission/share changes, delete/restore и admin actions; isolated smoke подтвердил success/denied audit с correlation ID, остаётся фактический pilot audit review/export sign-off;
 - DONE 2026-07-11: admin operations status объединяет registry/telemetry, storage, Qdrant, workers, queue lag, index state и backup freshness; HTTP/API logs и audit связаны correlation ID, текущий contour подтверждён как `pilot_ready`;
 - DONE 2026-07-11 для ручного pilot procedure: local и S3/MinIO backup включают online SQLite snapshots, SHA-256 manifests, redacted config, полную проверку и restore-drill artifact; текущий 54-ГБ contour восстановил выборку через temporary bucket. Scheduled execution и регулярная rollback rehearsal переходят в managed-operations hardening;
 - pilot onboarding, acceptance checklist, support runbook и data-processing boundaries;
@@ -313,9 +315,9 @@ flowchart LR
 ### P0 - До Paid Dedicated Pilot
 
 1. DONE 2026-07-10: Explorer sharing для пользователей/ролей, `who has access`, expiration/revoke и default-off public-link policy.
-2. IMPLEMENTED 2026-07-10: группы/membership и group sharing подключены к session, Explorer, API и search ACL; закрыть browser smoke экрана управления группами.
-3. IMPLEMENTED 2026-07-11: основной Explorer event-loop stall устранён (`ACL 3.3 с -> 11 мс`, размеры root `>60 с -> 87 мс`), краткий transport reconnect больше не делает hard reload, а multi-process telemetry переведена с аварийного WAL на rollback journal (`/api/ui-events` после recovery 34-338 мс вместо 6-18 с); закрыть authenticated browser smoke search-state и responsive smoke остальных экранов.
-4. IMPLEMENTED 2026-07-11: audit coverage и negative ACL tests закрывают login/session, ACL-denied read/write, preview/download, public share, permission/share changes и delete/restore; до DONE провести pilot audit review/export acceptance вместе с correlation IDs.
+2. DONE 2026-07-11: группы/membership и group sharing подключены к session, Explorer, API и search ACL; isolated authenticated Chrome smoke создаёт группу через management screen.
+3. DONE 2026-07-11: Explorer event-loop stalls и hard reload при кратком reconnect устранены; authenticated smoke подтверждает search-state transition и 18 route/viewport cells без overflow, reconnect overlay и browser errors.
+4. IMPLEMENTED 2026-07-11: audit coverage и negative ACL tests закрывают login/session, ACL-denied read/write, preview/download, public share, permission/share changes и delete/restore; automated smoke подтвердил `200/403` и success/denied telemetry с теми же correlation IDs. До DONE требуется pilot audit review/export sign-off.
 5. DONE 2026-07-11 для ручного pilot gate: fresh-install/upgrade preflight, local и S3/MinIO consistent backup, полная SHA-256 verification и restore drill автоматизированы; текущий snapshot подтвердил 48 159 objects / 56 966 615 577 bytes и round-trip 25 объектов. Scheduler и периодическая rollback rehearsal остаются managed-operations hardening, но не блокируют первый сопровождаемый pilot.
 6. IMPLEMENTED 2026-07-11: единый admin UI/API health snapshot за ~0.65 с объединяет registry/telemetry DB, object storage, Qdrant, index state, worker states, pending jobs/oldest queue lag, backup freshness и restore drill; текущий contour после restart вернул `pilot_ready=true`. До DONE подтвердить admin browser smoke и согласовать alert thresholds на pilot load.
 7. NO_GO 2026-07-11: retrieval eval и decision gate реализованы; controlled legacy baseline на 32 запросах дал recall@10 0.96875, MRR 1.0, p50 1.924 с, p95 3.998 с. Текущий индекс остаётся production baseline. До GO собрать размеченный `retrieval_v3_golden.json` с ground-truth/no-answer/ACL cases, прогнать `release_v2`, multilingual dense и multilingual reranker в shadow collection и выбрать профиль только при p95 <= 3 с без regression.

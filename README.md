@@ -329,6 +329,26 @@ python scripts/search_eval.py --golden eval/retrieval_v3_golden.json --limit 10 
 
 `--require-faithfulness` остаётся блокирующим gate, пока к eval не подключён answer/citation evaluator; retrieval-only отчёт намеренно не выдаёт текстовую релевантность за faithfulness.
 
+### Paid Pilot Release Gate
+
+Authenticated UI smoke поднимает отдельный временный contour, не создаёт пользователей в рабочей БД и проверяет login, сохранение search state, groups, ACL success/deny audit с correlation ID, все основные маршруты и responsive layout на 480/900/1280 px:
+
+```powershell
+python scripts/pilot_ui_smoke.py
+```
+
+Runner использует установленный Chrome/Edge либо путь из `--browser-executable`. Python Playwright входит в `dev` dependencies; при отсутствии браузера можно выполнить `playwright install chromium`.
+
+Итоговый gate объединяет operations health, свежий verified restore, UI/ACL/audit smoke, полный pytest, retrieval evidence и подписанный acceptance:
+
+```powershell
+python -m rag_catalog.cli.pilot_gate --write-signoff-template
+python -m rag_catalog.cli.pilot_gate --run-tests `
+  --retrieval-artifact runtime/eval/retrieval-v3-pilot.json
+```
+
+Команда возвращает успешный код только при решении `GO`; полный отчёт сохраняется в `runtime/pilot-gates/`. Заполнять sign-off заранее нельзя: имена ответственных, customer acceptance и update rehearsal фиксируются после фактической приёмки.
+
 CLI:
 
 ```powershell

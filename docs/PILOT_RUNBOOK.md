@@ -94,6 +94,17 @@ Local storage pilot не принимается без `restore-drill` artifact.
 6. Обновить один contour, проверить login/search/preview/download/write/audit.
 7. При ACL leak, hard reload, потере search state, повреждении DB или failed restore остановить rollout.
 
+Исполняемый evidence gate:
+
+```powershell
+python scripts/pilot_ui_smoke.py
+python -m rag_catalog.cli.pilot_gate --write-signoff-template
+python -m rag_catalog.cli.pilot_gate --run-tests `
+  --retrieval-artifact runtime/eval/retrieval-v3-pilot.json
+```
+
+`pilot_gate` обязан вернуть `GO`. `NO_GO` нельзя переопределять устным решением: отсутствующий retrieval ground truth, failed UI/ACL/audit smoke, stale restore или незаполненный sign-off остаются блокерами до появления нового artifact.
+
 Rollback означает возврат предыдущего кода плюс восстановление совместимого state. Простое переключение Git commit не считается rollback procedure для необратимой migration.
 
 ## Инциденты

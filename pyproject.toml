@@ -55,6 +55,7 @@ desktop = [
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.8.0",
+    "playwright>=1.49.0",
     "pyinstaller>=6.0.0",
 ]
 
@@ -67,6 +68,7 @@ rag-ocr          = "rag_catalog.core.ocr_pdfs:main"
 rag-telegram-bot = "rag_catalog.integrations.telegram_bot:main"
 rag-web          = "rag_catalog.ui.nice_app:main"
 rag-launcher     = "rag_catalog.cli.launcher:main"
+rag-pilot-gate   = "rag_catalog.cli.pilot_gate:main"
 
 [project.gui-scripts]
 rag-windows-app = "rag_catalog.ui.windows_app:main"
