@@ -138,6 +138,7 @@ def main() -> int:
             f"- Chunk hit rate: {report['chunk_hit_rate']}",
             f"- Page hit rate: {report['page_hit_rate']}",
             f"- No-answer accuracy: {report['no_answer_accuracy']}",
+            f"- ACL results checked: {report['acl_results_checked']}",
             f"- ACL leakage rate: {report['acl_leakage_rate']:.6f}",
             f"- Ground-truth coverage: {report['ground_truth_coverage']:.3f}",
             f"- Retrieval decision: {decision['decision']}",

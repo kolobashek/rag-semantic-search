@@ -126,6 +126,7 @@ def test_retrieval_v3_metrics_cover_document_chunk_page_no_answer_and_acl() -> N
     assert report["page_hit_rate"] == 1
     assert report["no_answer_accuracy"] == 1
     assert report["acl_leakage_rate"] == 0
+    assert report["acl_results_checked"] == 1
     assert report["ground_truth_coverage"] == 1
     assert report["rows"][1]["recall_at_k"] is None
 
@@ -140,6 +141,7 @@ def test_retrieval_decision_rejects_regression_and_missing_safety_evidence() -> 
         "recall_at_k": 0.88,
         "latency_p95_ms": 1700,
         "acl_leakage_rate": 0.01,
+        "acl_results_checked": 10,
         "no_answer_accuracy": None,
         "ground_truth_coverage": 0.2,
         "faithfulness_evaluated": False,

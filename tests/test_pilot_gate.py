@@ -37,13 +37,17 @@ def _ui_artifact() -> dict:
         "checks_passed": len(checks),
         "console_errors": [],
         "page_errors": [],
+        "source_fingerprint": "test-fingerprint",
     }
 
 
 def _evaluate(tmp_path: Path, *, retrieval: dict, signoff: dict) -> dict:
     ui_path = _write(tmp_path / "ui.json", _ui_artifact())
     retrieval_path = _write(tmp_path / "retrieval.json", retrieval)
-    test_path = _write(tmp_path / "tests.json", {"ok": True, "returncode": 0, "passed": 590, "warnings": 4})
+    test_path = _write(
+        tmp_path / "tests.json",
+        {"ok": True, "returncode": 0, "passed": 590, "warnings": 4, "source_fingerprint": "test-fingerprint"},
+    )
     signoff_path = _write(tmp_path / "signoff.json", signoff) if signoff else tmp_path / "missing-signoff.json"
     health = {
         "pilot_ready": True,
@@ -65,11 +69,18 @@ def _evaluate(tmp_path: Path, *, retrieval: dict, signoff: dict) -> dict:
         retrieval_path=retrieval_path,
         retrieval_artifact=retrieval,
         test_path=test_path,
-        test_artifact={"ok": True, "returncode": 0, "passed": 590, "warnings": 4},
+        test_artifact={
+            "ok": True,
+            "returncode": 0,
+            "passed": 590,
+            "warnings": 4,
+            "source_fingerprint": "test-fingerprint",
+        },
         signoff_path=signoff_path,
         signoff_artifact=signoff,
         cfg={},
         max_age_hours=24,
+        current_source_fingerprint="test-fingerprint",
     )
 
 
@@ -81,6 +92,7 @@ def test_pilot_gate_is_go_only_with_complete_evidence(tmp_path: Path) -> None:
             "recall_at_k": 0.95,
             "latency_p95_ms": 3000,
             "acl_leakage_rate": 0.0,
+            "acl_results_checked": 10,
             "ground_truth_coverage": 0.8,
             "no_answer_accuracy": 0.9,
         },
@@ -110,6 +122,7 @@ def test_pilot_gate_reports_missing_retrieval_labels_and_signoff(tmp_path: Path)
             "recall_at_k": 0.96875,
             "latency_p95_ms": 3998,
             "acl_leakage_rate": 0.0,
+            "acl_results_checked": 0,
             "ground_truth_coverage": 0.0,
             "no_answer_accuracy": None,
         },

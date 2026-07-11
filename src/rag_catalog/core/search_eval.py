@@ -313,6 +313,7 @@ def evaluate_search(
         "chunk_hit_rate": _mean_defined(rows, "chunk_hit"),
         "page_hit_rate": _mean_defined(rows, "page_hit"),
         "no_answer_accuracy": _mean_defined(rows, "no_answer_ok"),
+        "acl_results_checked": sum(int(row["acl_results_checked"]) for row in rows),
         "acl_leakage_rate": (
             sum(int(row["acl_leaks"]) for row in rows)
             / max(1, sum(int(row["acl_results_checked"]) for row in rows))
@@ -353,9 +354,11 @@ def evaluate_retrieval_decision(
     recall = float(candidate.get("recall_at_k") or 0.0)
     p95 = int(candidate.get("latency_p95_ms") or 0)
     acl_leakage = float(candidate.get("acl_leakage_rate") or 0.0)
+    acl_results_checked = int(candidate.get("acl_results_checked") or 0)
     coverage = float(candidate.get("ground_truth_coverage") or 0.0)
     add("recall_floor", recall >= min_recall, recall, f">={min_recall}")
     add("latency_budget", p95 <= int(max_p95_ms), p95, f"<={int(max_p95_ms)} ms")
+    add("acl_evidence", acl_results_checked > 0, acl_results_checked, ">0 checked forbidden results")
     add("acl_leakage", acl_leakage <= max_acl_leakage, acl_leakage, f"<={max_acl_leakage}")
     add("ground_truth_coverage", coverage >= min_ground_truth_coverage, coverage, f">={min_ground_truth_coverage}")
 
@@ -395,6 +398,7 @@ def evaluate_retrieval_decision(
             "recall_at_k": recall,
             "latency_p95_ms": p95,
             "acl_leakage_rate": acl_leakage,
+            "acl_results_checked": acl_results_checked,
             "no_answer_accuracy": no_answer,
             "ground_truth_coverage": coverage,
         },

@@ -329,6 +329,21 @@ python scripts/search_eval.py --golden eval/retrieval_v3_golden.json --limit 10 
 
 `--require-faithfulness` остаётся блокирующим gate, пока к eval не подключён answer/citation evaluator; retrieval-only отчёт намеренно не выдаёт текстовую релевантность за faithfulness.
 
+Ground truth нельзя автоматически выводить из текущего top-k. Для ручной разметки создаётся review queue: кандидаты показаны отдельно, а `expected_paths` остаются пустыми до решения data owner.
+
+```powershell
+python scripts/retrieval_review.py prepare `
+  --golden eval/search_golden.json `
+  --report runtime/eval/retrieval-v3-legacy.json `
+  --output runtime/eval/retrieval-v3-review.json
+
+python scripts/retrieval_review.py validate runtime/eval/retrieval-v3-review.json
+python scripts/retrieval_review.py finalize runtime/eval/retrieval-v3-review.json `
+  --output eval/retrieval_v3_golden.json
+```
+
+Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация по умолчанию требует минимум три no-answer и три forbidden/ACL cases. Retrieval GO также требует ненулевой `acl_results_checked`; нулевая утечка при отсутствии ACL ground truth больше не считается доказательством безопасности.
+
 ### Paid Pilot Release Gate
 
 Authenticated UI smoke поднимает отдельный временный contour, не создаёт пользователей в рабочей БД и проверяет login, сохранение search state, groups, ACL success/deny audit с correlation ID, все основные маршруты и responsive layout на 480/900/1280 px:
@@ -347,7 +362,7 @@ python -m rag_catalog.cli.pilot_gate --run-tests `
   --retrieval-artifact runtime/eval/retrieval-v3-pilot.json
 ```
 
-Команда возвращает успешный код только при решении `GO`; полный отчёт сохраняется в `runtime/pilot-gates/`. Заполнять sign-off заранее нельзя: имена ответственных, customer acceptance и update rehearsal фиксируются после фактической приёмки.
+Команда возвращает успешный код только при решении `GO`; полный отчёт сохраняется в `runtime/pilot-gates/`. UI и pytest artifacts содержат SHA-256 fingerprint файлов `src/tests/scripts/pyproject.toml`, поэтому любое изменение кода автоматически требует повторного smoke/test run. Заполнять sign-off заранее нельзя: имена ответственных, customer acceptance и update rehearsal фиксируются после фактической приёмки.
 
 CLI:
 

@@ -20,6 +20,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from rag_catalog.cli.pilot_gate import source_fingerprint
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -214,6 +215,7 @@ def _run_browser_smoke(
     user_token: str,
     browser_executable: str,
     artifact_dir: Path,
+    current_source_fingerprint: str,
 ) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
@@ -361,6 +363,7 @@ def _run_browser_smoke(
         "checks_passed": len(checks),
         "console_errors": unexpected_console,
         "page_errors": page_errors,
+        "source_fingerprint": current_source_fingerprint,
     }
 
 
@@ -424,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
                 user_token=contour_state["user_token"],
                 browser_executable=_browser_executable(str(args.browser_executable or "")),
                 artifact_dir=output,
+                current_source_fingerprint=source_fingerprint(ROOT),
             )
             report["server_startup_ms"] = startup_ms
             acl_check = next(

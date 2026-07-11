@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -33,6 +34,34 @@ def _load_json(path: Path | None) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def source_fingerprint(root: Path | None = None) -> str:
+    project_root = (root or Path.cwd()).resolve()
+    command = [
+        "git",
+        "ls-files",
+        "-co",
+        "--exclude-standard",
+        "--",
+        "src",
+        "tests",
+        "scripts",
+        "pyproject.toml",
+    ]
+    completed = subprocess.run(command, cwd=project_root, capture_output=True, text=True, encoding="utf-8")
+    if completed.returncode != 0:
+        return ""
+    digest = hashlib.sha256()
+    for relative in sorted({line.strip() for line in completed.stdout.splitlines() if line.strip()}):
+        path = project_root / relative
+        if not path.is_file():
+            continue
+        digest.update(relative.replace("\\", "/").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _latest_json(root: Path, pattern: str, *, predicate: Any = None) -> tuple[Path | None, Dict[str, Any]]:
     candidates = sorted(root.glob(pattern), key=lambda item: item.stat().st_mtime, reverse=True) if root.exists() else []
     for path in candidates:
@@ -57,7 +86,13 @@ def _check(name: str, ok: bool, *, evidence: str = "", details: Dict[str, Any] |
     }
 
 
-def evaluate_ui_smoke(path: Path | None, artifact: Dict[str, Any], *, max_age_hours: float) -> Dict[str, Any]:
+def evaluate_ui_smoke(
+    path: Path | None,
+    artifact: Dict[str, Any],
+    *,
+    max_age_hours: float,
+    current_source_fingerprint: str,
+) -> Dict[str, Any]:
     checks = list(artifact.get("checks") or [])
     names = {str(item.get("name") or "") for item in checks if item.get("ok")}
     responsive = {
@@ -78,6 +113,8 @@ def evaluate_ui_smoke(path: Path | None, artifact: Dict[str, Any], *, max_age_ho
         and not artifact.get("page_errors")
         and age is not None
         and age <= max_age_hours
+        and bool(current_source_fingerprint)
+        and str(artifact.get("source_fingerprint") or "") == current_source_fingerprint
     )
     return _check(
         "authenticated_ui_acl_audit_smoke",
@@ -90,6 +127,8 @@ def evaluate_ui_smoke(path: Path | None, artifact: Dict[str, Any], *, max_age_ho
             "required_checks_present": sorted(REQUIRED_UI_CHECKS.intersection(names)),
             "responsive_cells": len(expected_responsive.intersection(responsive)),
             "responsive_cells_required": len(expected_responsive),
+            "source_fingerprint_match": str(artifact.get("source_fingerprint") or "")
+            == current_source_fingerprint,
         },
     )
 
@@ -103,6 +142,7 @@ def evaluate_retrieval(path: Path | None, artifact: Dict[str, Any], cfg: Dict[st
     recall = float(artifact.get("recall_at_k") or 0.0)
     p95 = int(artifact.get("latency_p95_ms") or 0)
     leakage = float(artifact.get("acl_leakage_rate") or 0.0)
+    acl_results_checked = int(artifact.get("acl_results_checked") or 0)
     coverage = float(artifact.get("ground_truth_coverage") or 0.0)
     no_answer_raw = artifact.get("no_answer_accuracy")
     no_answer = float(no_answer_raw) if no_answer_raw is not None else None
@@ -113,6 +153,7 @@ def evaluate_retrieval(path: Path | None, artifact: Dict[str, Any], cfg: Dict[st
         and recall >= recall_floor
         and 0 < p95 <= p95_budget
         and leakage <= 0.0
+        and acl_results_checked > 0
         and coverage >= ground_truth_floor
         and no_answer is not None
         and no_answer >= no_answer_floor
@@ -130,6 +171,7 @@ def evaluate_retrieval(path: Path | None, artifact: Dict[str, Any], cfg: Dict[st
             "latency_p95_ms": p95,
             "latency_p95_budget_ms": p95_budget,
             "acl_leakage_rate": leakage,
+            "acl_results_checked": acl_results_checked,
             "ground_truth_coverage": coverage,
             "ground_truth_coverage_floor": ground_truth_floor,
             "no_answer_accuracy": no_answer,
@@ -140,7 +182,13 @@ def evaluate_retrieval(path: Path | None, artifact: Dict[str, Any], cfg: Dict[st
     )
 
 
-def evaluate_test_evidence(path: Path | None, artifact: Dict[str, Any], *, max_age_hours: float) -> Dict[str, Any]:
+def evaluate_test_evidence(
+    path: Path | None,
+    artifact: Dict[str, Any],
+    *,
+    max_age_hours: float,
+    current_source_fingerprint: str,
+) -> Dict[str, Any]:
     age = _artifact_age_hours(path)
     ok = bool(
         artifact.get("ok")
@@ -148,6 +196,8 @@ def evaluate_test_evidence(path: Path | None, artifact: Dict[str, Any], *, max_a
         and int(artifact.get("passed") or 0) > 0
         and age is not None
         and age <= max_age_hours
+        and bool(current_source_fingerprint)
+        and str(artifact.get("source_fingerprint") or "") == current_source_fingerprint
     )
     return _check(
         "full_regression_tests",
@@ -159,6 +209,8 @@ def evaluate_test_evidence(path: Path | None, artifact: Dict[str, Any], *, max_a
             "passed": int(artifact.get("passed") or 0),
             "warnings": int(artifact.get("warnings") or 0),
             "duration_seconds": artifact.get("duration_seconds"),
+            "source_fingerprint_match": str(artifact.get("source_fingerprint") or "")
+            == current_source_fingerprint,
         },
     )
 
@@ -196,6 +248,7 @@ def evaluate_pilot_gate(
     signoff_artifact: Dict[str, Any],
     cfg: Dict[str, Any],
     max_age_hours: float,
+    current_source_fingerprint: str,
 ) -> Dict[str, Any]:
     components = dict(health.get("components") or {})
     backup = dict(components.get("backup") or {})
@@ -219,8 +272,18 @@ def evaluate_pilot_gate(
                 "age_hours": backup.get("age_hours"),
             },
         ),
-        evaluate_ui_smoke(ui_path, ui_artifact, max_age_hours=max_age_hours),
-        evaluate_test_evidence(test_path, test_artifact, max_age_hours=max_age_hours),
+        evaluate_ui_smoke(
+            ui_path,
+            ui_artifact,
+            max_age_hours=max_age_hours,
+            current_source_fingerprint=current_source_fingerprint,
+        ),
+        evaluate_test_evidence(
+            test_path,
+            test_artifact,
+            max_age_hours=max_age_hours,
+            current_source_fingerprint=current_source_fingerprint,
+        ),
         evaluate_retrieval(retrieval_path, retrieval_artifact, cfg),
         evaluate_signoff(signoff_path, signoff_artifact),
     ]
@@ -251,6 +314,7 @@ def _run_full_tests(output_dir: Path) -> tuple[Path, Dict[str, Any]]:
         "passed": int(passed_match.group(1)) if passed_match else 0,
         "warnings": int(warning_match.group(1)) if warning_match else 0,
         "duration_seconds": duration,
+        "source_fingerprint": source_fingerprint(),
         "summary_tail": output[-4000:],
     }
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         signoff_artifact=_load_json(signoff_path),
         cfg=cfg,
         max_age_hours=max(0.1, float(args.max_age_hours)),
+        current_source_fingerprint=source_fingerprint(),
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
