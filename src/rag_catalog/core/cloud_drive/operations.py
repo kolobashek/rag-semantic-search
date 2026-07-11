@@ -10,7 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from .service import CloudDriveService
+import psutil
+
+from .storage import resolve_storage_adapter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -128,24 +130,88 @@ def _index_state_snapshot(path: Path) -> Dict[str, Any]:
         return {"ok": False, "status": "error", "path": str(path.resolve()), "error": str(exc)}
 
 
+def _module_processes(module: str) -> list[int]:
+    pids: list[int] = []
+    try:
+        for process in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                command = [str(part) for part in (process.info.get("cmdline") or [])]
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if any(part == module for part in command):
+                pids.append(int(process.info.get("pid") or 0))
+    except (psutil.Error, OSError):
+        return []
+    return [pid for pid in pids if pid > 0]
+
+
+def _queue_health(registry_path: Path, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    threshold = max(30, int(cfg.get("cloud_drive_queue_lag_warn_sec") or 300))
+    lag_seconds = 0
+    pending_count = 0
+    oldest_created_at = ""
+    try:
+        uri = f"file:{registry_path.resolve().as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(MIN(created_at), '') FROM cloud_jobs WHERE status='pending'"
+            ).fetchone()
+        pending_count = int(row[0] or 0) if row else 0
+        oldest_created_at = str(row[1] or "") if row else ""
+    except sqlite3.Error as exc:
+        return {
+            "ok": False,
+            "status": "error",
+            "pending": 0,
+            "oldest_pending_age_sec": 0,
+            "warn_after_sec": threshold,
+            "error": str(exc),
+        }
+    if oldest_created_at:
+        try:
+            created_at = datetime.fromisoformat(oldest_created_at.replace("Z", "+00:00"))
+            now = datetime.now(created_at.tzinfo) if created_at.tzinfo else datetime.now()
+            lag_seconds = max(0, int((now - created_at).total_seconds()))
+        except (TypeError, ValueError):
+            lag_seconds = threshold
+    ok = lag_seconds < threshold
+    return {
+        "ok": ok,
+        "status": "lagging" if not ok else ("pending" if pending_count else "idle"),
+        "pending": pending_count,
+        "oldest_pending_age_sec": lag_seconds,
+        "warn_after_sec": threshold,
+    }
+
+
 def cloud_drive_operations_health(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    service = CloudDriveService.from_config(cfg)
-    storage = service.get_storage_health()
-    registry_path = Path(str(cfg.get("cloud_drive_db_path") or service.registry.db_path))
     qdrant_base = Path(str(cfg.get("qdrant_db_path") or "."))
+    registry_path = Path(str(cfg.get("cloud_drive_db_path") or qdrant_base / "cloud_drive.db"))
+    storage = dict(resolve_storage_adapter(cfg).healthcheck())
     registry = _sqlite_readiness(registry_path)
     telemetry_path = Path(str(cfg.get("telemetry_db_path") or qdrant_base / "rag_telemetry.db"))
     telemetry = _sqlite_readiness(telemetry_path)
     qdrant = _qdrant_readiness(cfg)
     backup = cloud_drive_backup_freshness(cfg)
-    stats = service.registry.stats()
+    jobs = _queue_health(registry_path, cfg)
+    workers = {
+        "indexer": {"status": "running" if _module_processes("rag_catalog.core.index_rag") else "idle"},
+        "ocr": {"status": "running" if _module_processes("rag_catalog.core.ocr_pdfs") else "idle"},
+    }
+    bot_required = bool(cfg.get("telegram_enabled") and str(cfg.get("telegram_bot_token") or "").strip())
+    bot_running = bool(_module_processes("rag_catalog.integrations.telegram_bot"))
+    workers["telegram_bot"] = {
+        "status": "running" if bot_running else ("stopped" if bot_required else "disabled"),
+        "ok": bot_running or not bot_required,
+    }
+    workers["ok"] = bool(workers["telegram_bot"]["ok"])
     index = _index_state_snapshot(qdrant_base / "index_state.db")
     storage_result = {
-        "ok": bool(storage.ok and storage.writable),
-        "status": "ready" if storage.ok and storage.writable else "error",
-        "backend": storage.backend,
-        "target": storage.target,
-        "error": storage.error,
+        "ok": bool(storage.get("ok") and storage.get("writable")),
+        "status": "ready" if storage.get("ok") and storage.get("writable") else "error",
+        "backend": str(storage.get("backend") or ""),
+        "target": str(storage.get("target") or ""),
+        "error": str(storage.get("error") or ""),
     }
     components = {
         "registry": registry,
@@ -154,13 +220,13 @@ def cloud_drive_operations_health(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "qdrant": qdrant,
         "index": index,
         "backup": backup,
-        "jobs": {
-            "ok": True,
-            "status": "pending" if int(stats.pending_jobs) else "idle",
-            "pending": int(stats.pending_jobs),
-        },
+        "jobs": jobs,
+        "workers": workers,
     }
-    service_ok = all(bool(components[name].get("ok")) for name in ("registry", "telemetry", "storage", "qdrant"))
+    service_ok = all(
+        bool(components[name].get("ok"))
+        for name in ("registry", "telemetry", "storage", "qdrant", "jobs", "workers")
+    )
     pilot_ready = service_ok and bool(components["index"].get("ok")) and bool(backup.get("ok"))
     return {
         "ok": service_ok,

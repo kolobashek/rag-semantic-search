@@ -1431,6 +1431,7 @@ def render_settings_screen(
                     index_health = dict(components.get("index") or {})
                     qdrant_health = dict(components.get("qdrant") or {})
                     jobs_health = dict(components.get("jobs") or {})
+                    workers_health = dict(components.get("workers") or {})
                     backup_labels = {
                         "healthy": "backup проверен",
                         "unverified": "backup не проверен восстановлением",
@@ -1442,7 +1443,9 @@ def render_settings_screen(
                     operational_health_label.set_text(
                         f"Operations: {storage_label}; Qdrant {'доступен' if qdrant_health.get('ok') else 'недоступен'}; "
                         f"index {'актуален' if index_health.get('ok') else 'требует внимания'}; "
-                        f"jobs {int(jobs_health.get('pending') or 0)}; "
+                        f"jobs {int(jobs_health.get('pending') or 0)} / lag {int(jobs_health.get('oldest_pending_age_sec') or 0)}с; "
+                        f"indexer {dict(workers_health.get('indexer') or {}).get('status', 'unknown')}; "
+                        f"bot {dict(workers_health.get('telegram_bot') or {}).get('status', 'unknown')}; "
                         f"{backup_labels.get(str(backup.get('status')), 'backup неизвестен')}."
                     )
                     operational_health_label.classes(
