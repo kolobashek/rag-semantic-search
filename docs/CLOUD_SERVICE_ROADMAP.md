@@ -170,8 +170,8 @@ Exit gate: другой инженер поднимает и проверяет 
 - DONE 2026-07-10: public links как default-off tenant policy: строгий expiration, active list, copy/revoke, API enforcement и audit без сырого token;
 - IMPLEMENTED 2026-07-11: устранены измеренные Explorer stalls и hard reload при кратком reconnect; остаются authenticated browser smoke сохранения search state, экран групп и responsive smoke остальных экранов;
 - IMPLEMENTED 2026-07-11: audit coverage для login/session, ACL-denied read/write, preview/download, public share access, permission/share changes, delete/restore и admin actions; остаются pilot audit review/export acceptance и correlation IDs;
-- admin health view и backup freshness;
-- scripted install/update, preflight и rollback/restore procedure;
+- IMPLEMENTED 2026-07-11: storage health API различает missing/stale/unverified/verified backup; вывести этот статус отдельным блоком admin UI и добавить correlation IDs;
+- IMPLEMENTED 2026-07-11: local backup включает online SQLite snapshots, object files, SHA-256 manifest и redacted config; добавлены verify-backup, restore-drill artifact и fresh-install/upgrade preflight; остаются scheduled execution, rollback rehearsal и S3 provider procedure;
 - pilot onboarding, acceptance checklist, support runbook и data-processing boundaries;
 - простая лицензия без сложного online billing.
 
@@ -312,8 +312,8 @@ flowchart LR
 2. IMPLEMENTED 2026-07-10: группы/membership и group sharing подключены к session, Explorer, API и search ACL; закрыть browser smoke экрана управления группами.
 3. IMPLEMENTED 2026-07-11: основной Explorer event-loop stall устранён (`ACL 3.3 с -> 11 мс`, размеры root `>60 с -> 87 мс`), а краткий transport reconnect больше не делает hard reload; закрыть authenticated browser smoke search-state и responsive smoke остальных экранов.
 4. IMPLEMENTED 2026-07-11: audit coverage и negative ACL tests закрывают login/session, ACL-denied read/write, preview/download, public share, permission/share changes и delete/restore; до DONE провести pilot audit review/export acceptance вместе с correlation IDs.
-5. Автоматизировать fresh install, upgrade preflight и restore drill.
-6. Добавить admin health/backup freshness и correlation ids.
+5. IMPLEMENTED 2026-07-11: fresh-install/upgrade preflight, consistent local backup, archive verification и restore drill автоматизированы; до DONE добавить scheduler, rollback rehearsal и S3 provider procedure.
+6. IMPLEMENTED 2026-07-11: storage health API показывает backup freshness и подтверждение restore drill; до DONE вывести единый admin health view и добавить correlation IDs.
 7. Провести Retrieval v3 decision spike до переключения production: текущий `legacy` против `release_v2`, multilingual dense candidate и multilingual reranker в versioned shadow collection; расширить eval до document/chunk/page relevance, no-answer, ACL, faithfulness и p95; затем зафиксировать pilot hardware profile, search thresholds и Cloud Drive E2E artifact.
 8. Подготовить onboarding, acceptance checklist, support and incident runbooks.
 

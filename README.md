@@ -222,8 +222,13 @@ python cloud_drive.py import-source-add --name "Сканер" --source-path "\\s
 python cloud_drive.py import-source-run <source_id> --run-now
 python cloud_drive.py compact-versions
 python cloud_drive.py backup --output runtime/backups/cloud-drive.zip
+python cloud_drive.py verify-backup runtime/backups/cloud-drive.zip
+python cloud_drive.py restore-drill runtime/backups/cloud-drive.zip
+python cloud_drive.py preflight --mode upgrade --backup-dir runtime/backups
 python cloud_drive.py restore runtime/backups/cloud-drive.zip --target-dir runtime/restore-check
 ```
+
+Для local storage backup использует online SQLite snapshot, включает object files и SHA-256 manifest, а секреты в `config.snapshot.json` заменяет на `[REDACTED]`. Успешный `restore-drill` создаёт рядом с архивом проверяемый artifact, который учитывается в admin storage health. Для S3/MinIO CLI намеренно требует provider-native object backup; архив только SQLite не считается полноценным backup.
 
 Admin UI:
 

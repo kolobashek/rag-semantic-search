@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
@@ -985,6 +987,7 @@ def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
         "cloud_drive_storage": "local",
         "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "cloud_drive_backup_dir": str(tmp_path / "backups"),
     }
     monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
     monkeypatch.setattr(
@@ -998,6 +1001,48 @@ def test_cloud_drive_storage_health_api(monkeypatch, tmp_path) -> None:
     assert health["backend"] == "local"
     assert health["ok"] is True
     assert health["writable"] is True
+    assert health["backup"]["status"] == "missing"
+    assert health["backup"]["ok"] is False
+
+
+def test_cloud_drive_storage_health_reports_verified_backup(monkeypatch, tmp_path) -> None:
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    backup_path = backup_dir / "cloud-drive.zip"
+    manifest = {
+        "kind": "rag-catalog-cloud-drive-backup",
+        "version": 2,
+        "storage_backend": "local",
+        "created_at": "2026-07-11T10:00:00+07:00",
+        "files": [],
+        "storage_files": [],
+    }
+    with zipfile.ZipFile(backup_path, "w") as zf:
+        zf.writestr("manifest.json", json.dumps(manifest))
+    artifact = {
+        "ok": True,
+        "completed_at": "2026-07-11T10:05:00+07:00",
+        "backup_size_bytes": backup_path.stat().st_size,
+        "backup_mtime_ns": backup_path.stat().st_mtime_ns,
+    }
+    Path(f"{backup_path}.restore-drill.json").write_text(json.dumps(artifact), encoding="utf-8")
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "cloud_drive_backup_dir": str(backup_dir),
+    }
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+
+    health = api_cloud_drive_storage_health()
+
+    assert health["backup"]["status"] == "healthy"
+    assert health["backup"]["restore_drill_ok"] is True
 
 
 def test_cloud_drive_search_api_finds_files_by_name(monkeypatch, tmp_path) -> None:

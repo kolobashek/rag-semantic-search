@@ -90,6 +90,7 @@ def test_cloud_drive_cli_backup_and_restore_to_target_dir(tmp_path: Path, monkey
     db_path = state_dir / 'cloud_drive.db'
     registry = CloudDriveRegistryDB(str(db_path))
     root = registry.ensure_root_folder(root_name='root')
+    checksum = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
     registry.upsert_file(
         folder_id=root.id,
         path='hello.txt',
@@ -97,13 +98,17 @@ def test_cloud_drive_cli_backup_and_restore_to_target_dir(tmp_path: Path, monkey
         storage_key='objects/sha256/aa/bb/aabb.txt',
         mime_type='text/plain',
         size_bytes=5,
-        checksum='aabb',
+        checksum=checksum,
     )
+    object_path = state_dir / 'storage' / 'objects' / 'sha256' / 'aa' / 'bb' / 'aabb.txt'
+    object_path.parent.mkdir(parents=True)
+    object_path.write_text('hello', encoding='utf-8')
     config = {
         'qdrant_db_path': str(state_dir),
         'cloud_drive_db_path': str(db_path),
         'cloud_drive_storage': 'local',
         'cloud_drive_storage_root': str(state_dir / 'storage'),
+        'telegram_bot_token': 'must-not-leak',
     }
     monkeypatch.setattr(cloud_drive, 'load_config', lambda: dict(config))
     monkeypatch.setattr(cloud_drive, 'save_config', lambda cfg: None)
@@ -117,6 +122,18 @@ def test_cloud_drive_cli_backup_and_restore_to_target_dir(tmp_path: Path, monkey
         assert 'manifest.json' in names
         assert 'config.snapshot.json' in names
         assert 'files/cloud_drive_db.db' in names
+        assert 'storage/objects/sha256/aa/bb/aabb.txt' in names
+        manifest = json.loads(zf.read('manifest.json'))
+        assert manifest['version'] == 2
+        assert manifest['storage_files'][0]['sha256'] == checksum
+        snapshot = json.loads(zf.read('config.snapshot.json'))
+        assert snapshot['telegram_bot_token'] == '[REDACTED]'
+        assert 'must-not-leak' not in str(snapshot)
+
+    assert cloud_drive.main(['verify-backup', str(backup_path)]) == 0
+    assert cloud_drive.main(
+        ['preflight', '--mode', 'upgrade', '--backup-dir', str(tmp_path), '--min-free-gb', '0']
+    ) == 0
 
     restore_dir = tmp_path / 'restore'
     rc = cloud_drive.main(['restore', str(backup_path), '--target-dir', str(restore_dir)])
@@ -124,3 +141,25 @@ def test_cloud_drive_cli_backup_and_restore_to_target_dir(tmp_path: Path, monkey
     assert rc == 0
     restored = CloudDriveRegistryDB(str(restore_dir / 'cloud_drive.db'))
     assert restored.get_file_by_path('hello.txt') is not None
+    assert (restore_dir / 'cloud_storage' / 'objects' / 'sha256' / 'aa' / 'bb' / 'aabb.txt').read_text() == 'hello'
+
+    drill_dir = tmp_path / 'drill'
+    assert cloud_drive.main(['restore-drill', str(backup_path), '--target-dir', str(drill_dir)]) == 0
+    assert (drill_dir / 'cloud_drive.db').is_file()
+    drill_artifact = Path(f'{backup_path}.restore-drill.json')
+    assert json.loads(drill_artifact.read_text(encoding='utf-8'))['ok'] is True
+
+
+def test_cloud_drive_cli_fresh_install_preflight_accepts_empty_target(tmp_path: Path, monkeypatch) -> None:
+    config = {
+        'qdrant_db_path': str(tmp_path / 'new-state'),
+        'cloud_drive_db_path': str(tmp_path / 'new-state' / 'cloud_drive.db'),
+        'cloud_drive_storage': 'local',
+        'cloud_drive_storage_root': str(tmp_path / 'new-state' / 'storage'),
+    }
+    monkeypatch.setattr(cloud_drive, 'load_config', lambda: dict(config))
+
+    rc = cloud_drive.main(['preflight', '--mode', 'fresh-install', '--min-free-gb', '0'])
+
+    assert rc == 0
+    assert not Path(config['cloud_drive_db_path']).exists()
