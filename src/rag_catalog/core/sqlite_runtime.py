@@ -13,7 +13,7 @@ def _try_normal_sync(conn: sqlite3.Connection) -> None:
         pass
 
 
-def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> None:
+def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 8) -> None:
     """Prepare a SQLite connection without failing on redundant WAL setup races.
 
     Several app processes may open the same SQLite database at startup. Re-running
@@ -23,13 +23,27 @@ def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> 
     current/default journal mode instead of failing service startup.
     """
     last_error: sqlite3.OperationalError | None = None
-    for _ in range(max(1, int(retries))):
+    for attempt in range(max(1, int(retries))):
         try:
             conn.execute("PRAGMA busy_timeout=30000;")
+            current_mode = ""
+            try:
+                row = conn.execute("PRAGMA journal_mode;").fetchone()
+                current_mode = str(row[0] or "").strip().lower() if row else ""
+            except sqlite3.OperationalError as exc:
+                last_error = exc
+
+            if current_mode == "wal":
+                _try_normal_sync(conn)
+                return
+
             try:
                 conn.execute("PRAGMA journal_mode=WAL;")
             except sqlite3.OperationalError as exc:
                 last_error = exc
+                if current_mode:
+                    _try_normal_sync(conn)
+                    return
                 try:
                     row = conn.execute("PRAGMA journal_mode;").fetchone()
                     if row and str(row[0] or "").strip():
@@ -37,12 +51,6 @@ def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> 
                         return
                 except sqlite3.OperationalError as journal_exc:
                     last_error = journal_exc
-                try:
-                    conn.execute("PRAGMA journal_mode=DELETE;")
-                    _try_normal_sync(conn)
-                    return
-                except sqlite3.OperationalError as delete_exc:
-                    last_error = delete_exc
                 try:
                     conn.execute("SELECT 1;")
                     _try_normal_sync(conn)
@@ -54,6 +62,6 @@ def prepare_sqlite_connection(conn: sqlite3.Connection, *, retries: int = 3) -> 
             return
         except sqlite3.OperationalError as exc:
             last_error = exc
-            time.sleep(0.25)
+            time.sleep(min(1.0, 0.2 * (attempt + 1)))
     if last_error is not None:
         raise last_error

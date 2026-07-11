@@ -107,6 +107,40 @@
       reason: String(event.reason && (event.reason.stack || event.reason.message || event.reason) || '').slice(0, 1500),
     }));
 
+    let socketAttached = false;
+    let disconnectedAt = 0;
+    const attachSocketDiagnostics = () => {
+      const socket = window.socket;
+      if (socketAttached || !socket || typeof socket.on !== 'function') return false;
+      socketAttached = true;
+      socket.on('disconnect', (reason, details) => {
+        disconnectedAt = Date.now();
+        send('socket_disconnect', {
+          reason: String(reason || '').slice(0, 300),
+          details: String(details && (details.message || details.description || details) || '').slice(0, 600),
+        });
+      });
+      socket.on('connect_error', (error) => send('socket_connect_error', {
+        message: String(error && (error.message || error) || '').slice(0, 600),
+      }));
+      socket.io?.on('reconnect_attempt', (attempt) => send('socket_reconnect_attempt', { attempt: Number(attempt || 0) }));
+      socket.io?.on('reconnect', (attempt) => {
+        send('socket_reconnected', {
+          attempt: Number(attempt || 0),
+          downtime_ms: disconnectedAt ? Date.now() - disconnectedAt : 0,
+        });
+        disconnectedAt = 0;
+      });
+      send('socket_diagnostics_ready', { connected: !!socket.connected });
+      return true;
+    };
+    if (!attachSocketDiagnostics()) {
+      const socketTimer = setInterval(() => {
+        if (attachSocketDiagnostics()) clearInterval(socketTimer);
+      }, 250);
+      setTimeout(() => clearInterval(socketTimer), 15000);
+    }
+
     const wrapHistory = (name) => {
       const original = history[name];
       if (!original || original._ragDiagWrapped) return;

@@ -41,7 +41,10 @@ def _api_url(token: str, method: str) -> str:
 
 
 def tg_call(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    resp = requests.post(_api_url(token, method), json=payload, timeout=API_TIMEOUT)
+    try:
+        resp = requests.post(_api_url(token, method), json=payload, timeout=API_TIMEOUT)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Telegram API {method} unavailable: {type(exc).__name__}") from None
     resp.raise_for_status()
     data = resp.json()
     if not data.get("ok"):

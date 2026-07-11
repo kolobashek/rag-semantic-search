@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import html
 import json
+import logging
 import re
 import socket
 import sys
@@ -99,6 +100,41 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 APP_ICON_PATH = PROJECT_ROOT / "assets" / "brand" / "ico" / "favicon.ico"
 LOGO_PATH = PROJECT_ROOT / "assets" / "brand" / "svg" / "rag-search-mark.svg"
 install_env_log_handler()
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+def _install_nicegui_reconnect_patch() -> None:
+    """Rehydrate the current DOM instead of hard-reloading on a replay gap."""
+    from nicegui.outbox import Outbox  # noqa: PLC0415
+
+    original = Outbox.try_rewind
+    if getattr(original, "_rag_rehydrate_on_gap", False):
+        return
+
+    def try_rewind_or_rehydrate(outbox: Any, target_message_id: int) -> None:
+        if outbox.next_message_id == target_message_id:
+            return
+        if any(message_id == target_message_id for message_id, _ts, _message in outbox.message_history):
+            original(outbox, target_message_id)
+            return
+
+        logger.warning(
+            "nicegui_reconnect replay_gap client_id=%s server_next=%s browser_next=%s action=rehydrate",
+            outbox.client.id,
+            outbox.next_message_id,
+            target_message_id,
+        )
+        outbox.next_message_id = target_message_id
+        for element_id, element in outbox.client.elements.items():
+            outbox.updates[element_id] = element
+        outbox._set_enqueue_event()  # noqa: SLF001
+
+    setattr(try_rewind_or_rehydrate, "_rag_rehydrate_on_gap", True)
+    Outbox.try_rewind = try_rewind_or_rehydrate
+
+
+_install_nicegui_reconnect_patch()
 
 SEARCH_PRESETS = [
     ("Договоры", "договор поставки"),
@@ -111,6 +147,30 @@ SEARCH_PRESETS = [
 _SEARCH_RECOVERY_TTL_SEC = 30 * 60
 _SEARCH_RECOVERY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SEARCH_RECOVERY_LOCK = threading.Lock()
+
+
+def _log_nicegui_client_lifecycle(action: str, client: Any) -> None:
+    try:
+        reconnect_timeout = float(client.page.resolve_reconnect_timeout())
+    except Exception:
+        reconnect_timeout = 0.0
+    try:
+        connections = sum(int(value) for value in client._num_connections.values())  # noqa: SLF001
+    except Exception:
+        connections = 0
+    logger.info(
+        "nicegui_client action=%s client_id=%s connected=%s connections=%s reconnect_timeout_sec=%.1f",
+        action,
+        str(getattr(client, "id", "")),
+        bool(getattr(client, "has_socket_connection", False)),
+        connections,
+        reconnect_timeout,
+    )
+
+
+app.on_connect(lambda client: _log_nicegui_client_lifecycle("connect", client))
+app.on_disconnect(lambda client: _log_nicegui_client_lifecycle("disconnect", client))
+app.on_delete(lambda client: _log_nicegui_client_lifecycle("delete", client))
 
 
 def _search_recovery_key(state: PageState) -> str:
@@ -273,6 +333,15 @@ def _ui_quick_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
     except (TypeError, ValueError):
         raw = 8.0
     return max(1.0, min(10.0, raw))
+
+
+def _ui_reconnect_timeout_seconds(cfg: Dict[str, Any]) -> float:
+    """Keep the server-side client alive across short transport interruptions."""
+    try:
+        raw = float(cfg.get("ui_reconnect_timeout_sec") or 5.0)
+    except (TypeError, ValueError):
+        raw = 5.0
+    return max(3.0, min(30.0, raw))
 
 
 _IO_TIMEOUT = object()
@@ -3149,6 +3218,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         favicon=APP_ICON_PATH if APP_ICON_PATH.exists() else None,
         language="ru",
         reload=False,
+        reconnect_timeout=_ui_reconnect_timeout_seconds(cfg),
         show=not args.no_show,
         dark=False,
         storage_secret="rag-catalog-local-secret",

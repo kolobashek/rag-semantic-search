@@ -32,8 +32,21 @@ class _JournalPragmasFailButReadableConnection:
 
     def execute(self, sql: str):
         self.calls.append(sql)
-        if sql in {"PRAGMA journal_mode=WAL;", "PRAGMA journal_mode;", "PRAGMA journal_mode=DELETE;"}:
+        if sql in {"PRAGMA journal_mode=WAL;", "PRAGMA journal_mode;"}:
             raise sqlite3.OperationalError("disk I/O error")
+        return _Cursor("")
+
+
+class _AlreadyWalConnection:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def execute(self, sql: str):
+        self.calls.append(sql)
+        if sql == "PRAGMA journal_mode;":
+            return _Cursor("wal")
+        if sql == "PRAGMA journal_mode=WAL;":
+            raise AssertionError("journal mode must not be rewritten for every connection")
         return _Cursor("")
 
 
@@ -55,5 +68,16 @@ def test_prepare_sqlite_connection_keeps_readable_connection_when_journal_pragma
 
     assert "PRAGMA journal_mode=WAL;" in conn.calls
     assert "PRAGMA journal_mode;" in conn.calls
-    assert "PRAGMA journal_mode=DELETE;" in conn.calls
     assert "SELECT 1;" in conn.calls
+
+
+def test_prepare_sqlite_connection_does_not_rewrite_existing_wal_mode() -> None:
+    conn = _AlreadyWalConnection()
+
+    prepare_sqlite_connection(conn)  # type: ignore[arg-type]
+
+    assert conn.calls == [
+        "PRAGMA busy_timeout=30000;",
+        "PRAGMA journal_mode;",
+        "PRAGMA synchronous=NORMAL;",
+    ]

@@ -1,6 +1,6 @@
 # Cloud Service Roadmap
 
-Дата последнего пересмотра: 2026-07-10
+Дата последнего пересмотра: 2026-07-11
 
 Статус: основной delivery-roadmap для перехода от внутреннего single-tenant продукта к продаваемому управляемому облачному сервису.
 
@@ -138,6 +138,10 @@ flowchart LR
 
 - DONE 2026-07-10: явный `RAG_CONFIG_PATH` изолирует test/pilot config от project `config.json` и покрыт regression-тестом.
 - DONE 2026-07-10: после Explorer responsiveness stage полный regression gate проходит (`570 passed`), `ruff check src tests scripts` green.
+- DONE 2026-07-11: NiceGUI reconnect gap больше не вызывает hard reload: browser offline smoke восстановил тот же client за 1.3 с без видимого overlay, `beforeunload` и потери DOM; transport lifecycle пишет disconnect/reconnect reason и downtime.
+- DONE 2026-07-11: SQLite startup не переписывает уже активный WAL mode на каждом соединении; launcher restart поднимает web и bot без `disk I/O error`. Повреждённый telemetry WAL из incident сохранён отдельно, основной DB checkpoint проверен на read/write.
+- DONE 2026-07-11: Telegram transport errors и segmented logs редактируют bot/Bearer tokens; существующая локальная история очищена от действующего token.
+- DONE 2026-07-11: полный regression gate после web/recovery hardening проходит (`577 passed`, 4 warnings), `ruff check src tests scripts` green.
 
 Цель: превратить существующий работающий baseline в воспроизводимый release candidate.
 
@@ -164,7 +168,7 @@ Exit gate: другой инженер поднимает и проверяет 
 - DONE 2026-07-10: Explorer sharing для пользователей/ролей: grant/revoke и `who has access` без перезагрузки страницы;
 - IMPLEMENTED 2026-07-10: группы и membership management: immutable group ID, active/archive lifecycle, admin UI/API и group ACL в Explorer/API/search; остаётся browser smoke экрана управления группами;
 - DONE 2026-07-10: public links как default-off tenant policy: строгий expiration, active list, copy/revoke, API enforcement и audit без сырого token;
-- IMPLEMENTED 2026-07-10: устранены измеренные Explorer stalls: bulk ACL вместо N+1, Cloud Drive schema v8 с covering indexes, рекурсивные размеры вынесены из event loop; остаётся browser regression на reconnect/hard reload/search state;
+- IMPLEMENTED 2026-07-11: устранены измеренные Explorer stalls и hard reload при кратком reconnect; остаются authenticated browser smoke сохранения search state, экран групп и responsive smoke остальных экранов;
 - audit coverage для чувствительных пользовательских и admin actions;
 - admin health view и backup freshness;
 - scripted install/update, preflight и rollback/restore procedure;
@@ -306,7 +310,7 @@ flowchart LR
 
 1. DONE 2026-07-10: Explorer sharing для пользователей/ролей, `who has access`, expiration/revoke и default-off public-link policy.
 2. IMPLEMENTED 2026-07-10: группы/membership и group sharing подключены к session, Explorer, API и search ACL; закрыть browser smoke экрана управления группами.
-3. IMPLEMENTED 2026-07-10: основной Explorer event-loop stall устранён (`ACL 3.3 с -> 11 мс`, размеры root `>60 с -> 87 мс` на рабочем registry); закрыть browser regression на reconnect/hard reload/search state и проверить остальные экраны.
+3. IMPLEMENTED 2026-07-11: основной Explorer event-loop stall устранён (`ACL 3.3 с -> 11 мс`, размеры root `>60 с -> 87 мс`), а краткий transport reconnect больше не делает hard reload; закрыть authenticated browser smoke search-state и responsive smoke остальных экранов.
 4. Довести audit coverage и negative ACL tests до всех read/share/delete flows.
 5. Автоматизировать fresh install, upgrade preflight и restore drill.
 6. Добавить admin health/backup freshness и correlation ids.

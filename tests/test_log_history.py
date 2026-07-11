@@ -8,6 +8,21 @@ from rag_catalog.core import log_history
 from rag_catalog.ui import helpers as ui_helpers
 
 
+def test_redact_sensitive_text_removes_authentication_material() -> None:
+    token = "123456789:ABC_def-ghi"
+    text = (
+        f"POST https://api.telegram.org/bot{token}/getUpdates "
+        f"bot{token} Authorization: Bearer secret-value"
+    )
+
+    redacted = log_history.redact_sensitive_text(text)
+
+    assert token not in redacted
+    assert "secret-value" not in redacted
+    assert "api.telegram.org/bot<redacted>/getUpdates" in redacted
+    assert "Authorization: Bearer <redacted>" in redacted
+
+
 def test_open_run_log_creates_dated_segment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(log_history, "PROJECT_ROOT", tmp_path)
 

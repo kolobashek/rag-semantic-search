@@ -130,6 +130,16 @@ def _install_css(initial_theme: str = "light") -> None:
           background-image: none;
           overflow-x: hidden;
         }
+        #popup.nicegui-error-popup[aria-hidden="false"] {
+          animation: rag-reconnect-reveal 0s 1.2s both;
+        }
+        #popup.nicegui-error-popup[aria-hidden="true"] {
+          animation: none;
+        }
+        @keyframes rag-reconnect-reveal {
+          from { visibility: hidden; opacity: 0; }
+          to { visibility: visible; opacity: 1; }
+        }
         .material-icons,
         .q-icon.material-icons,
         i.q-icon.notranslate {

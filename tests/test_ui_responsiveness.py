@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import weakref
+from collections import deque
 
 from rag_catalog.ui import css, nice_app, settings_view
 
@@ -162,6 +164,66 @@ def test_ui_search_timeout_has_safe_bounds() -> None:
     assert nice_app._ui_quick_search_timeout_seconds({"ui_quick_search_timeout_sec": "60"}) == 10.0
 
 
+def test_ui_reconnect_timeout_preserves_short_lived_sessions() -> None:
+    assert nice_app._ui_reconnect_timeout_seconds({}) == 5.0
+    assert nice_app._ui_reconnect_timeout_seconds({"ui_reconnect_timeout_sec": "1"}) == 3.0
+    assert nice_app._ui_reconnect_timeout_seconds({"ui_reconnect_timeout_sec": "30"}) == 30.0
+    assert nice_app._ui_reconnect_timeout_seconds({"ui_reconnect_timeout_sec": "90"}) == 30.0
+    assert nice_app._ui_reconnect_timeout_seconds({"ui_reconnect_timeout_sec": "bad"}) == 5.0
+
+    main_source = inspect.getsource(nice_app.main)
+    assert "reconnect_timeout=_ui_reconnect_timeout_seconds(cfg)" in main_source
+
+
+def test_reconnect_overlay_is_delayed_for_brief_transport_jitter() -> None:
+    source = inspect.getsource(css._install_css)
+
+    assert '#popup.nicegui-error-popup[aria-hidden="false"]' in source
+    assert "rag-reconnect-reveal 0s 1.2s both" in source
+
+
+def test_nicegui_client_lifecycle_is_logged_for_reconnect_diagnostics() -> None:
+    source = inspect.getsource(nice_app._log_nicegui_client_lifecycle)
+
+    assert "nicegui_client action=%s" in source
+    assert "reconnect_timeout_sec=%.1f" in source
+    assert "_num_connections" in source
+
+
+def test_nicegui_reconnect_gap_rehydrates_without_hard_reload() -> None:
+    from nicegui.outbox import Outbox
+
+    class Element:
+        def __init__(self, element_id: int) -> None:
+            self.id = element_id
+
+    class Client:
+        id = "client-1"
+        elements = {7: Element(7)}
+
+    class EnqueueEvent:
+        was_set = False
+
+        def set(self) -> None:
+            self.was_set = True
+
+    client = Client()
+    outbox = object.__new__(Outbox)
+    outbox._client = weakref.ref(client)
+    outbox.next_message_id = 12
+    outbox.message_history = deque()
+    outbox.messages = deque()
+    outbox.updates = weakref.WeakValueDictionary()
+    outbox._enqueue_event = EnqueueEvent()
+
+    outbox.try_rewind(9)
+
+    assert outbox.next_message_id == 9
+    assert outbox.updates[7].id == 7
+    assert outbox._enqueue_event.was_set is True
+    assert getattr(Outbox.try_rewind, "_rag_rehydrate_on_gap", False) is True
+
+
 def test_search_keeps_websocket_responsive_while_semantic_pass_runs() -> None:
     source = inspect.getsource(nice_app._build_page)
 
@@ -199,6 +261,10 @@ def test_browser_diagnostics_are_installed() -> None:
 
     assert "window.ragDiagLog" in js_source
     assert "connection_lost_visible" in js_source
+    assert "socket_disconnect" in js_source
+    assert "socket_connect_error" in js_source
+    assert "socket_reconnected" in js_source
+    assert "downtime_ms" in js_source
     assert "javascript_error" in js_source
     assert "unhandled_rejection_error" in js_source
     assert '@app.post("/api/ui-events")' in api_source

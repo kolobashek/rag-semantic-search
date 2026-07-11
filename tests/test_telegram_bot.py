@@ -1,3 +1,6 @@
+import pytest
+import requests
+
 import telegram_bot
 from telegram_bot import (
     _clean_tg_text,
@@ -14,6 +17,20 @@ from telegram_bot import (
     send_search_results,
     set_bot_commands,
 )
+
+
+def test_tg_call_does_not_expose_token_in_transport_errors(monkeypatch) -> None:
+    token = "123456789:ABC_def-ghi"
+
+    def fail(*_args, **_kwargs):
+        raise requests.ConnectTimeout(f"https://api.telegram.org/bot{token}/getUpdates")
+
+    monkeypatch.setattr(telegram_bot.requests, "post", fail)
+
+    with pytest.raises(RuntimeError, match="Telegram API getUpdates unavailable: ConnectTimeout") as exc_info:
+        telegram_bot.tg_call(token, "getUpdates", {})
+
+    assert token not in str(exc_info.value)
 
 
 class _FakeSearcher:

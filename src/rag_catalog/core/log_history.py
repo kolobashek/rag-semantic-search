@@ -20,6 +20,21 @@ DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _QDRANT_HTTP_OK_RE = re.compile(r'"HTTP/\d(?:\.\d)?\s+2\d\d\b')
+_TELEGRAM_BOT_URL_RE = re.compile(r"(api\.telegram\.org/bot)[^/\s]+", re.IGNORECASE)
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]+\b", re.IGNORECASE)
+_BEARER_TOKEN_RE = re.compile(r"(Authorization\s*[:=]\s*Bearer\s+)[^\s,;]+", re.IGNORECASE)
+
+
+def redact_sensitive_text(value: str) -> str:
+    """Remove authentication material from persisted process and app logs."""
+    text = _TELEGRAM_BOT_URL_RE.sub(r"\1<redacted>", str(value or ""))
+    text = _TELEGRAM_BOT_TOKEN_RE.sub("bot<redacted>", text)
+    return _BEARER_TOKEN_RE.sub(r"\1<redacted>", text)
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_sensitive_text(super().format(record))
 
 
 def _safe_name(value: str) -> str:
@@ -227,7 +242,7 @@ class QdrantHttpNoiseFilter(logging.Filter):
 
 def build_log_handler(path_or_name: str | Path, *, max_bytes: int = DEFAULT_MAX_BYTES, label: str = "") -> logging.Handler:
     handler = SizeDateLogHandler(path_or_name, max_bytes=max_bytes, label=label)
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    handler.setFormatter(RedactingFormatter("%(asctime)s - %(levelname)s - %(message)s"))
     handler.addFilter(QdrantHttpNoiseFilter())
     setattr(handler, "_rag_log_history_name", logical_log_name(path_or_name))
     return handler
@@ -252,9 +267,7 @@ def last_error_from_history(path_or_name: str | Path, *, max_lines: int = 120, i
     patterns: Sequence[str] = ("Traceback", "ERROR", "Error", "Exception", "OperationalError", "ProxyError")
 
     def _safe_line(value: str) -> str:
-        text = re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", value)
-        text = re.sub(r"bot\d{6,}:[A-Za-z0-9_-]+", "bot<redacted>", text)
-        return re.sub(r"\s+", " ", text).strip()[:220]
+        return re.sub(r"\s+", " ", redact_sensitive_text(value)).strip()[:220]
 
     fallback = ""
     for path in reversed(list_log_segments(path_or_name)):
