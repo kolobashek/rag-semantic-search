@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import urllib.error
@@ -17,9 +18,78 @@ from .storage import resolve_storage_adapter
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
+def _provider_backup_freshness(backup_dir: Path, max_age_hours: float) -> Dict[str, Any]:
+    candidates = sorted(
+        [path.parent for path in backup_dir.glob("*/manifest.json") if path.is_file()],
+        key=lambda path: (path / "manifest.json").stat().st_mtime,
+        reverse=True,
+    ) if backup_dir.exists() else []
+    provider_snapshots: list[tuple[Path, Dict[str, Any]]] = []
+    for candidate in candidates:
+        try:
+            manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if manifest.get("kind") == "rag-catalog-s3-provider-backup":
+            provider_snapshots.append((candidate, manifest))
+    if not provider_snapshots:
+        return {
+            "status": "missing",
+            "ok": False,
+            "backup_dir": str(backup_dir.resolve()),
+            "max_age_hours": max_age_hours,
+            "provider": "s3",
+        }
+    latest, manifest = provider_snapshots[0]
+    created_at = str(manifest.get("created_at") or "")
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+        age_hours = max(0.0, (now - created).total_seconds() / 3600.0)
+    except ValueError:
+        age_hours = max_age_hours + 1.0
+    objects = list(manifest.get("objects") or [])
+    state_files = list(manifest.get("state_files") or [])
+    complete = (
+        int(manifest.get("version") or 0) >= 1
+        and int(manifest.get("object_count") or 0) == len(objects)
+        and any(str(entry.get("name") or "") == "cloud_drive_db" for entry in state_files)
+    )
+    manifest_hash = hashlib.sha256((latest / "manifest.json").read_bytes()).hexdigest()
+    drill_ok = False
+    drill_completed_at = ""
+    try:
+        artifact = json.loads((latest / "restore-drill.json").read_text(encoding="utf-8"))
+        drill_ok = bool(artifact.get("ok")) and str(artifact.get("manifest_sha256") or "") == manifest_hash
+        drill_completed_at = str(artifact.get("completed_at") or "") if drill_ok else ""
+    except (OSError, ValueError):
+        pass
+    fresh = age_hours <= max_age_hours
+    ok = complete and fresh and drill_ok
+    status = "healthy" if ok else ("invalid" if not complete else ("stale" if not fresh else "unverified"))
+    return {
+        "status": status,
+        "ok": ok,
+        "backup_dir": str(backup_dir.resolve()),
+        "latest_path": str(latest.resolve()),
+        "created_at": created_at,
+        "age_hours": round(age_hours, 2),
+        "max_age_hours": max_age_hours,
+        "manifest_ok": True,
+        "complete": complete,
+        "restore_drill_ok": drill_ok,
+        "restore_drill_completed_at": drill_completed_at,
+        "provider": "s3",
+        "object_count": len(objects),
+        "total_object_bytes": int(manifest.get("total_object_bytes") or 0),
+    }
+
+
 def cloud_drive_backup_freshness(cfg: Dict[str, Any]) -> Dict[str, Any]:
     backup_dir = Path(str(cfg.get("cloud_drive_backup_dir") or PROJECT_ROOT / "runtime" / "backups")).expanduser()
     max_age_hours = max(1.0, float(cfg.get("cloud_drive_backup_max_age_hours") or 24.0))
+    if str(cfg.get("cloud_drive_storage") or "local").strip().lower() == "s3":
+        return _provider_backup_freshness(backup_dir, max_age_hours)
     candidates = sorted(backup_dir.glob("*.zip"), key=lambda item: item.stat().st_mtime, reverse=True) if backup_dir.exists() else []
     if not candidates:
         return {

@@ -227,9 +227,14 @@ python cloud_drive.py verify-backup runtime/backups/cloud-drive.zip
 python cloud_drive.py restore-drill runtime/backups/cloud-drive.zip
 python cloud_drive.py preflight --mode upgrade --backup-dir runtime/backups
 python cloud_drive.py restore runtime/backups/cloud-drive.zip --target-dir runtime/restore-check
+python cloud_drive.py provider-backup --output-dir runtime/backups/s3-provider-latest --workers 8
+python cloud_drive.py provider-reconcile runtime/backups/s3-provider-latest
+python cloud_drive.py provider-reconcile runtime/backups/s3-provider-latest --apply
+python cloud_drive.py provider-verify runtime/backups/s3-provider-latest
+python cloud_drive.py provider-restore-drill runtime/backups/s3-provider-latest --sample-size 25
 ```
 
-Для local storage backup использует online SQLite snapshot, включает object files и SHA-256 manifest, а секреты в `config.snapshot.json` заменяет на `[REDACTED]`. Успешный `restore-drill` создаёт рядом с архивом проверяемый artifact, который учитывается в admin storage health. Для S3/MinIO CLI намеренно требует provider-native object backup; архив только SQLite не считается полноценным backup.
+Для local storage backup использует online SQLite snapshot, включает object files и SHA-256 manifest, а секреты в `config.snapshot.json` заменяет на `[REDACTED]`. Успешный `restore-drill` создаёт рядом с архивом проверяемый artifact, который учитывается в admin storage health. Для S3/MinIO `provider-backup` сохраняет согласованные SQLite snapshots и полный набор объектов с SHA-256. `provider-reconcile` сначала в dry-run режиме находит старые registry keys и исчезнувшие source-файлы; `--apply` перепривязывает только объекты с совпавшим content SHA-256 и мягко удаляет только записи при доступном source drive. `provider-verify` проверяет все хеши и сохраняет artifact, привязанный к manifest SHA-256. После этого `provider-restore-drill` делает content round-trip выборки через временный bucket и удаляет его, не перечитывая весь snapshot повторно.
 
 HTTP API принимает или создаёт `X-Correlation-ID`, возвращает его клиенту и добавляет в API logs и Cloud Drive audit events.
 Telemetry SQLite использует rollback journal: web, bot и background indexer могут писать параллельно без общей WAL/SHM пары, которая ранее блокировала reconnect после принудительного перезапуска процесса.

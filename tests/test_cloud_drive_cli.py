@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import zipfile
 from pathlib import Path
 
 from rag_catalog.cli import cloud_drive
+from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness
 from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
 
 
@@ -163,3 +165,158 @@ def test_cloud_drive_cli_fresh_install_preflight_accepts_empty_target(tmp_path: 
 
     assert rc == 0
     assert not Path(config['cloud_drive_db_path']).exists()
+
+
+def test_cloud_drive_cli_s3_provider_backup_verify_and_restore_drill(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / 'state'
+    db_path = state_dir / 'cloud_drive.db'
+    registry = CloudDriveRegistryDB(str(db_path))
+    root = registry.ensure_root_folder(root_name='root')
+    storage_key = 'objects/sha256/aa/bb/hello.txt'
+    empty_key = 'objects/sha256/e3/b0/empty'
+    payload = b'hello-provider'
+    registry.upsert_file(
+        folder_id=root.id,
+        path='hello.txt',
+        name='hello.txt',
+        storage_key=storage_key,
+        mime_type='text/plain',
+        size_bytes=len(payload),
+        checksum='',
+    )
+    config = {
+        'qdrant_db_path': str(state_dir),
+        'cloud_drive_db_path': str(db_path),
+        'cloud_drive_storage': 's3',
+        'cloud_drive_bucket': 'source',
+        'cloud_drive_s3_endpoint': 'http://minio:9000',
+    }
+
+    class FakeS3Storage:
+        buckets: dict[str, dict[str, bytes]] = {'source': {storage_key: payload, empty_key: b''}}
+
+        def __init__(self, bucket: str) -> None:
+            self.bucket = bucket
+            self._client = self
+
+        def list_keys(self) -> set[str]:
+            return set(self.buckets.get(self.bucket, {}))
+
+        def download_file(self, key: str, target: Path) -> None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.buckets[self.bucket][key])
+
+        def put_file(self, source: Path, key: str) -> None:
+            self.buckets.setdefault(self.bucket, {})[key] = source.read_bytes()
+
+        def delete(self, key: str) -> None:
+            self.buckets[self.bucket].pop(key, None)
+
+        def ensure_container(self) -> dict:
+            self.buckets.setdefault(self.bucket, {})
+            return {'ok': True}
+
+        def delete_bucket(self, *, Bucket: str) -> None:
+            assert not self.buckets.get(Bucket)
+            self.buckets.pop(Bucket, None)
+
+    monkeypatch.setattr(cloud_drive, 'load_config', lambda: dict(config))
+    monkeypatch.setattr(cloud_drive, 'S3StorageAdapter', FakeS3Storage)
+    monkeypatch.setattr(
+        cloud_drive,
+        'resolve_storage_adapter',
+        lambda cfg: FakeS3Storage(str(cfg.get('cloud_drive_bucket') or '')),
+    )
+    snapshot = tmp_path / 'provider-snapshot'
+
+    assert cloud_drive.main(['provider-backup', '--output-dir', str(snapshot), '--workers', '2']) == 0
+    assert cloud_drive.main(['provider-verify', str(snapshot)]) == 0
+    assert (snapshot / 'provider-verify.json').is_file()
+    monkeypatch.setattr(
+        cloud_drive,
+        '_verify_provider_snapshot',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('fresh verification artifact was ignored')),
+    )
+    assert cloud_drive.main(['provider-restore-drill', str(snapshot), '--sample-size', '1']) == 0
+
+    manifest = json.loads((snapshot / 'manifest.json').read_text(encoding='utf-8'))
+    assert manifest['object_count'] == 2
+    assert {item['storage_key'] for item in manifest['objects']} == {storage_key, empty_key}
+    assert (snapshot / 'objects' / storage_key).read_bytes() == payload
+    artifact = json.loads((snapshot / 'restore-drill.json').read_text(encoding='utf-8'))
+    assert artifact['round_trip_objects_checked'] == 1
+    assert set(FakeS3Storage.buckets) == {'source'}
+    freshness = cloud_drive_backup_freshness({**config, 'cloud_drive_backup_dir': str(tmp_path)})
+    assert freshness['status'] == 'healthy'
+    assert freshness['provider'] == 's3'
+
+
+def test_cloud_drive_cli_provider_reconcile_repairs_keys_and_soft_deletes_stale_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_dir = tmp_path / 'state'
+    db_path = state_dir / 'cloud_drive.db'
+    registry = CloudDriveRegistryDB(str(db_path))
+    root = registry.ensure_root_folder(root_name='root')
+    payload = b'recoverable-provider-object'
+    checksum = hashlib.sha256(payload).hexdigest()
+    canonical_key = f'objects/sha256/{checksum[:2]}/{checksum[2:4]}/{checksum}.txt'
+    recoverable = registry.upsert_file(
+        folder_id=root.id,
+        path='recoverable.txt',
+        name='recoverable.txt',
+        storage_key='legacy/recoverable.txt',
+        mime_type='text/plain',
+        size_bytes=len(payload),
+        checksum=checksum,
+        source_path=str(tmp_path / 'removed-recoverable.txt'),
+    )
+    stale = registry.upsert_file(
+        folder_id=root.id,
+        path='stale.txt',
+        name='stale.txt',
+        storage_key='objects/sha256/ff/ff/missing.txt',
+        mime_type='text/plain',
+        size_bytes=7,
+        checksum='f' * 64,
+        source_path=str(tmp_path / 'removed-stale.txt'),
+    )
+    config = {
+        'qdrant_db_path': str(state_dir),
+        'cloud_drive_db_path': str(db_path),
+        'cloud_drive_storage': 's3',
+        'cloud_drive_bucket': 'source',
+        'cloud_drive_s3_endpoint': 'http://minio:9000',
+    }
+
+    class FakeS3Storage:
+        buckets: dict[str, dict[str, bytes]] = {'source': {canonical_key: payload}}
+
+        def __init__(self, bucket: str) -> None:
+            self.bucket = bucket
+
+        def list_keys(self) -> set[str]:
+            return set(self.buckets[self.bucket])
+
+        def download_file(self, key: str, target: Path) -> None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.buckets[self.bucket][key])
+
+    monkeypatch.setattr(cloud_drive, 'load_config', lambda: dict(config))
+    monkeypatch.setattr(cloud_drive, 'S3StorageAdapter', FakeS3Storage)
+    monkeypatch.setattr(
+        cloud_drive,
+        'resolve_storage_adapter',
+        lambda cfg: FakeS3Storage(str(cfg.get('cloud_drive_bucket') or 'source')),
+    )
+    snapshot = tmp_path / 'provider-snapshot'
+
+    assert cloud_drive.main(['provider-backup', '--output-dir', str(snapshot)]) == 0
+    assert cloud_drive.main(['provider-reconcile', str(snapshot)]) == 0
+    assert registry.get_file_by_id(recoverable.id).storage_key == 'legacy/recoverable.txt'
+    assert registry.get_file_by_id(stale.id).deleted_at == ''
+
+    assert cloud_drive.main(['provider-reconcile', str(snapshot), '--apply']) == 0
+    assert registry.get_file_by_id(recoverable.id).storage_key == canonical_key
+    assert registry.get_file_by_id(stale.id).deleted_at
+    assert cloud_drive.main(['provider-verify', str(snapshot)]) == 0

@@ -5,8 +5,12 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import sys
 import tempfile
+import time
+import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import asdict
 from datetime import datetime
@@ -14,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.cloud_drive.storage import S3StorageAdapter, resolve_storage_adapter
 from rag_catalog.core.rag_core import load_config, save_config
 
 
@@ -72,6 +77,26 @@ def _build_parser() -> argparse.ArgumentParser:
     preflight_cmd.add_argument('--backup-dir', default='runtime/backups', help='Directory containing upgrade backups')
     preflight_cmd.add_argument('--max-backup-age-hours', type=float, default=24.0)
     preflight_cmd.add_argument('--min-free-gb', type=float, default=1.0)
+    provider_backup_cmd = sub.add_parser('provider-backup', help='Create a full S3/MinIO object and SQLite snapshot')
+    provider_backup_cmd.add_argument('--output-dir', default='', help='Snapshot directory')
+    provider_backup_cmd.add_argument('--workers', type=int, default=8, help='Parallel object downloads')
+    provider_verify_cmd = sub.add_parser('provider-verify', help='Verify a provider snapshot and all object hashes')
+    provider_verify_cmd.add_argument('snapshot', help='Provider snapshot directory')
+    provider_verify_cmd.add_argument('--workers', type=int, default=8, help='Parallel hash workers')
+    provider_reconcile_cmd = sub.add_parser(
+        'provider-reconcile',
+        help='Reconcile active registry rows against a verified provider snapshot',
+    )
+    provider_reconcile_cmd.add_argument('snapshot', help='Provider snapshot directory')
+    provider_reconcile_cmd.add_argument(
+        '--apply',
+        action='store_true',
+        help='Apply safe key repairs and soft-delete source files that no longer exist',
+    )
+    provider_drill_cmd = sub.add_parser('provider-restore-drill', help='Verify snapshot and round-trip a sample via a temporary bucket')
+    provider_drill_cmd.add_argument('snapshot', help='Provider snapshot directory')
+    provider_drill_cmd.add_argument('--sample-size', type=int, default=25)
+    provider_drill_cmd.add_argument('--workers', type=int, default=8, help='Parallel snapshot verification workers')
     return parser
 
 
@@ -529,6 +554,424 @@ def _preflight_cloud(cfg: Dict[str, Any], args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
+def _provider_snapshot_path(value: str) -> Path:
+    path = Path(str(value or '')).expanduser().resolve()
+    if not path.exists() or not path.is_dir():
+        raise SystemExit(f'Provider snapshot не найден: {path}')
+    if not (path / 'manifest.json').is_file():
+        raise SystemExit(f'Provider snapshot manifest не найден: {path / "manifest.json"}')
+    return path
+
+
+def _safe_object_relative_path(storage_key: str) -> Path:
+    relative = Path(str(storage_key or '').replace('\\', '/'))
+    if not str(relative) or relative.is_absolute() or '..' in relative.parts:
+        raise RuntimeError(f'Небезопасный storage key: {storage_key}')
+    return relative
+
+
+def _provider_backup(cfg: Dict[str, Any], args: argparse.Namespace) -> int:
+    storage = resolve_storage_adapter(cfg)
+    if not isinstance(storage, S3StorageAdapter):
+        raise SystemExit('provider-backup предназначен для S3/MinIO storage.')
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    output_arg = str(args.output_dir or '').strip()
+    output = (
+        Path(output_arg).expanduser().resolve()
+        if output_arg
+        else (Path('runtime') / 'backups' / f's3-provider-{timestamp}').resolve()
+    )
+    if output.exists():
+        raise SystemExit(f'Provider snapshot target уже существует: {output}')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    workers = max(1, min(int(args.workers or 8), 32))
+    state_files = _configured_state_files(cfg)
+
+    with tempfile.TemporaryDirectory(prefix=f'{output.name}.partial-', dir=output.parent) as temp_value:
+        snapshot = Path(temp_value)
+        state_dir = snapshot / 'state'
+        object_dir = snapshot / 'objects'
+        state_entries: list[Dict[str, Any]] = []
+        skipped_state_files: list[Dict[str, Any]] = []
+        for name, source in state_files.items():
+            target = state_dir / f'{name}{source.suffix}'
+            snapshot_error = ''
+            for attempt in range(3):
+                try:
+                    _snapshot_sqlite(source, target)
+                    snapshot_error = ''
+                    break
+                except sqlite3.Error as exc:
+                    snapshot_error = str(exc)
+                    try:
+                        target.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    time.sleep(0.5 * (attempt + 1))
+            if snapshot_error:
+                if name == 'index_state_db':
+                    skipped_state_files.append(
+                        {
+                            'name': name,
+                            'original_path': str(source),
+                            'reason': 'snapshot_failed_rebuild_from_objects',
+                            'error': snapshot_error,
+                        }
+                    )
+                    continue
+                raise RuntimeError(f'Provider backup state snapshot failed for {name}: {snapshot_error}')
+            entry = _manifest_entry(target, name=name, archive_path=f'state/{target.name}')
+            entry['original_path'] = str(source)
+            state_entries.append(entry)
+
+        keys = sorted(storage.list_keys())
+
+        def download_object(storage_key: str) -> Dict[str, Any]:
+            relative = _safe_object_relative_path(storage_key)
+            target = object_dir / relative
+            storage.download_file(storage_key, target)
+            return {
+                'storage_key': storage_key,
+                'relative_path': relative.as_posix(),
+                'size_bytes': target.stat().st_size,
+                'sha256': _sha256_file(target),
+            }
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='provider-backup') as executor:
+            object_entries = []
+            for index, entry in enumerate(executor.map(download_object, keys), start=1):
+                object_entries.append(entry)
+                if index % 1000 == 0 or index == len(keys):
+                    print(
+                        f'provider-backup progress objects={index}/{len(keys)} '
+                        f'bytes={sum(int(item["size_bytes"]) for item in object_entries)}',
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        manifest = {
+            'kind': 'rag-catalog-s3-provider-backup',
+            'version': 1,
+            'created_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'backend': 's3',
+            'endpoint': str(cfg.get('cloud_drive_s3_endpoint') or ''),
+            'bucket': str(cfg.get('cloud_drive_bucket') or ''),
+            'state_files': state_entries,
+            'skipped_state_files': skipped_state_files,
+            'objects': object_entries,
+            'object_count': len(object_entries),
+            'total_object_bytes': sum(int(entry['size_bytes']) for entry in object_entries),
+        }
+        (snapshot / 'config.snapshot.json').write_text(
+            json.dumps(_redact_config(cfg), ensure_ascii=False, indent=2), encoding='utf-8'
+        )
+        (snapshot / 'manifest.json').write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8'
+        )
+        snapshot.rename(output)
+    print(
+        json.dumps(
+            {
+                'snapshot_path': str(output),
+                'objects': len(object_entries),
+                'total_object_bytes': manifest['total_object_bytes'],
+                'state_files': len(state_entries),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _verify_provider_snapshot(snapshot: Path, *, workers: int = 8) -> Dict[str, Any]:
+    try:
+        manifest = json.loads((snapshot / 'manifest.json').read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f'Некорректный provider snapshot manifest: {exc}') from exc
+    if manifest.get('kind') != 'rag-catalog-s3-provider-backup':
+        raise SystemExit('Это не S3 provider snapshot.')
+    checked_state = 0
+    restored_registry: Path | None = None
+    for entry in manifest.get('state_files', []):
+        target = snapshot / str(entry.get('archive_path') or '')
+        expected_size = int(entry['size_bytes']) if entry.get('size_bytes') is not None else -1
+        if not target.is_file() or target.stat().st_size != expected_size:
+            raise SystemExit(f'Provider state file отсутствует или имеет неверный размер: {target}')
+        if _sha256_file(target) != str(entry.get('sha256') or ''):
+            raise SystemExit(f'Provider state SHA-256 не совпадает: {target}')
+        with closing(sqlite3.connect(str(target))) as conn:
+            integrity = str(conn.execute('PRAGMA integrity_check').fetchone()[0])
+        if integrity.lower() != 'ok':
+            raise SystemExit(f'Provider state SQLite integrity failed: {target}: {integrity}')
+        if str(entry.get('name') or '') == 'cloud_drive_db':
+            restored_registry = target
+        checked_state += 1
+        print(
+            f'provider-verify state={checked_state}/{len(manifest.get("state_files", []))} name={entry.get("name")}',
+            file=sys.stderr,
+            flush=True,
+        )
+
+    object_entries = list(manifest.get('objects', []))
+
+    def verify_object(entry: Dict[str, Any]) -> tuple[str, int]:
+        storage_key = str(entry.get('storage_key') or '')
+        target = snapshot / 'objects' / _safe_object_relative_path(storage_key)
+        expected_size = int(entry['size_bytes']) if entry.get('size_bytes') is not None else -1
+        if not target.is_file() or target.stat().st_size != expected_size:
+            raise SystemExit(f'Provider object отсутствует или имеет неверный размер: {storage_key}')
+        if _sha256_file(target) != str(entry.get('sha256') or ''):
+            raise SystemExit(f'Provider object SHA-256 не совпадает: {storage_key}')
+        return storage_key, target.stat().st_size
+
+    object_keys: set[str] = set()
+    checked_objects = 0
+    checked_bytes = 0
+    worker_count = max(1, min(int(workers or 8), 32))
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix='provider-verify') as executor:
+        for storage_key, size_bytes in executor.map(verify_object, object_entries):
+            object_keys.add(storage_key)
+            checked_objects += 1
+            checked_bytes += size_bytes
+            if checked_objects % 2000 == 0 or checked_objects == len(object_entries):
+                print(
+                    f'provider-verify objects={checked_objects}/{len(object_entries)} bytes={checked_bytes}',
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    registry_keys: set[str] = set()
+    if restored_registry is not None:
+        with closing(sqlite3.connect(str(restored_registry))) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT storage_key FROM cloud_files WHERE deleted_at='' AND storage_key<>''"
+            ).fetchall()
+        registry_keys = {str(row[0]) for row in rows if str(row[0] or '').strip()}
+        missing = sorted(registry_keys - object_keys)
+        if missing:
+            raise SystemExit(f'Provider snapshot не содержит {len(missing)} registry objects; пример: {missing[0]}')
+    return {
+        'ok': True,
+        'snapshot_path': str(snapshot),
+        'manifest_sha256': _sha256_file(snapshot / 'manifest.json'),
+        'state_files_checked': checked_state,
+        'objects_checked': checked_objects,
+        'object_bytes_checked': checked_bytes,
+        'registry_keys_checked': len(registry_keys),
+        'manifest': manifest,
+    }
+
+
+def _provider_verify(args: argparse.Namespace) -> int:
+    snapshot = _provider_snapshot_path(args.snapshot)
+    report = _verify_provider_snapshot(snapshot, workers=int(args.workers or 8))
+    report.pop('manifest', None)
+    artifact = {
+        **report,
+        'completed_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+    }
+    (snapshot / 'provider-verify.json').write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _provider_registry_path(snapshot: Path, manifest: Dict[str, Any]) -> Path:
+    for entry in manifest.get('state_files', []):
+        if str(entry.get('name') or '') == 'cloud_drive_db':
+            return snapshot / str(entry.get('archive_path') or '')
+    raise SystemExit('Provider snapshot не содержит cloud_drive_db.')
+
+
+def _provider_reconcile(cfg: Dict[str, Any], args: argparse.Namespace) -> int:
+    snapshot = _provider_snapshot_path(args.snapshot)
+    manifest_path = snapshot / 'manifest.json'
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if manifest.get('kind') != 'rag-catalog-s3-provider-backup':
+        raise SystemExit('Это не S3 provider snapshot.')
+
+    object_keys = {str(entry.get('storage_key') or '') for entry in manifest.get('objects', [])}
+    objects_by_sha: dict[str, list[Dict[str, Any]]] = {}
+    for entry in manifest.get('objects', []):
+        objects_by_sha.setdefault(str(entry.get('sha256') or ''), []).append(entry)
+
+    snapshot_registry = _provider_registry_path(snapshot, manifest)
+    live_registry = Path(_default_cloud_paths(cfg)[0]).expanduser().resolve()
+    if not live_registry.is_file():
+        raise SystemExit(f'Рабочий Cloud Drive registry не найден: {live_registry}')
+
+    def plan_registry(db_path: Path) -> Dict[str, Any]:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, current_version_id, storage_key, checksum, source_path
+                FROM cloud_files
+                WHERE deleted_at='' AND storage_key<>''
+                ORDER BY id
+                """
+            ).fetchall()
+        repairs: list[Dict[str, str]] = []
+        stale: list[Dict[str, str]] = []
+        unresolved: list[Dict[str, str]] = []
+        for row in rows:
+            storage_key = str(row['storage_key'] or '')
+            if storage_key in object_keys:
+                continue
+            checksum = str(row['checksum'] or '')
+            candidates = sorted(
+                objects_by_sha.get(checksum, []),
+                key=lambda entry: str(entry.get('storage_key') or ''),
+            )
+            if candidates:
+                candidate = candidates[0]
+                candidate_key = str(candidate.get('storage_key') or '')
+                candidate_path = snapshot / 'objects' / _safe_object_relative_path(candidate_key)
+                if _sha256_file(candidate_path) != checksum:
+                    raise SystemExit(f'Нельзя перепривязать повреждённый snapshot object: {candidate_key}')
+                repairs.append(
+                    {
+                        'id': str(row['id']),
+                        'current_version_id': str(row['current_version_id'] or ''),
+                        'old_storage_key': storage_key,
+                        'new_storage_key': candidate_key,
+                    }
+                )
+                continue
+            source_path = str(row['source_path'] or '').strip()
+            source = Path(source_path) if source_path else None
+            source_anchor = Path(source.anchor) if source is not None and source.anchor else None
+            if source is not None and source_anchor is not None and source_anchor.exists() and not source.exists():
+                stale.append({'id': str(row['id']), 'storage_key': storage_key})
+            else:
+                unresolved.append({'id': str(row['id']), 'storage_key': storage_key})
+        return {'repairs': repairs, 'stale': stale, 'unresolved': unresolved}
+
+    live_plan = plan_registry(live_registry)
+    snapshot_plan = plan_registry(snapshot_registry)
+    summary = {
+        'apply': bool(args.apply),
+        'live_registry': str(live_registry),
+        'snapshot_registry': str(snapshot_registry),
+        'rebound_rows': len(live_plan['repairs']),
+        'soft_deleted_rows': len(live_plan['stale']),
+        'unresolved_rows': len(live_plan['unresolved']),
+    }
+    if live_plan != snapshot_plan:
+        raise SystemExit('Рабочий registry и snapshot registry требуют разного reconciliation plan.')
+    if live_plan['unresolved']:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 2
+    if not args.apply:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+
+    changed_at = datetime.now().astimezone().isoformat(timespec='seconds')
+
+    def apply_plan(db_path: Path) -> None:
+        with closing(sqlite3.connect(str(db_path))) as conn, conn:
+            for repair in live_plan['repairs']:
+                conn.execute(
+                    "UPDATE cloud_files SET storage_key=?, updated_at=? WHERE id=? AND deleted_at=''",
+                    (repair['new_storage_key'], changed_at, repair['id']),
+                )
+                if repair['current_version_id']:
+                    conn.execute(
+                        'UPDATE cloud_file_versions SET storage_key=? WHERE id=?',
+                        (repair['new_storage_key'], repair['current_version_id']),
+                    )
+            conn.executemany(
+                "UPDATE cloud_files SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at=''",
+                [(changed_at, changed_at, item['id']) for item in live_plan['stale']],
+            )
+            integrity = str(conn.execute('PRAGMA integrity_check').fetchone()[0])
+            if integrity.lower() != 'ok':
+                raise RuntimeError(f'Registry integrity failed after reconciliation: {db_path}: {integrity}')
+
+    apply_plan(live_registry)
+    apply_plan(snapshot_registry)
+    for entry in manifest.get('state_files', []):
+        if str(entry.get('name') or '') == 'cloud_drive_db':
+            entry['size_bytes'] = snapshot_registry.stat().st_size
+            entry['sha256'] = _sha256_file(snapshot_registry)
+            break
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+    (snapshot / 'provider-verify.json').unlink(missing_ok=True)
+    (snapshot / 'restore-drill.json').unlink(missing_ok=True)
+    artifact = {
+        **summary,
+        'applied_at': changed_at,
+        'manifest_sha256': _sha256_file(manifest_path),
+    }
+    (snapshot / 'provider-reconcile.json').write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    print(json.dumps(artifact, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _provider_restore_drill(cfg: Dict[str, Any], args: argparse.Namespace) -> int:
+    snapshot = _provider_snapshot_path(args.snapshot)
+    manifest = json.loads((snapshot / 'manifest.json').read_text(encoding='utf-8'))
+    manifest_sha256 = _sha256_file(snapshot / 'manifest.json')
+    verification_artifact = snapshot / 'provider-verify.json'
+    verification: Dict[str, Any] | None = None
+    if verification_artifact.is_file():
+        candidate = json.loads(verification_artifact.read_text(encoding='utf-8'))
+        if bool(candidate.get('ok')) and str(candidate.get('manifest_sha256') or '') == manifest_sha256:
+            verification = {**candidate, 'manifest': manifest}
+    if verification is None:
+        verification = _verify_provider_snapshot(snapshot, workers=int(args.workers or 8))
+    entries = list(verification['manifest'].get('objects', []))
+    sample_size = max(1, min(int(args.sample_size or 25), len(entries) or 1))
+    sample = sorted(
+        entries,
+        key=lambda entry: hashlib.sha256(str(entry.get('storage_key') or '').encode('utf-8')).hexdigest(),
+    )[:sample_size]
+    base_bucket = str(cfg.get('cloud_drive_bucket') or 'rag').lower()
+    drill_bucket = f'{base_bucket[:40]}-restore-drill-{uuid.uuid4().hex[:8]}'
+    drill_cfg = dict(cfg)
+    drill_cfg['cloud_drive_bucket'] = drill_bucket
+    storage = resolve_storage_adapter(drill_cfg)
+    if not isinstance(storage, S3StorageAdapter):
+        raise SystemExit('provider-restore-drill предназначен для S3/MinIO storage.')
+    storage.ensure_container()
+    checked = 0
+    try:
+        with tempfile.TemporaryDirectory(prefix='rag-provider-drill-') as temp_value:
+            temp_dir = Path(temp_value)
+            for entry in sample:
+                storage_key = str(entry.get('storage_key') or '')
+                source = snapshot / 'objects' / _safe_object_relative_path(storage_key)
+                storage.put_file(source, storage_key)
+                restored = temp_dir / _safe_object_relative_path(storage_key)
+                storage.download_file(storage_key, restored)
+                if _sha256_file(restored) != str(entry.get('sha256') or ''):
+                    raise RuntimeError(f'Restore round-trip SHA-256 не совпадает: {storage_key}')
+                checked += 1
+    finally:
+        for entry in sample:
+            storage.delete(str(entry.get('storage_key') or ''))
+        storage._client.delete_bucket(Bucket=drill_bucket)
+    artifact = {
+        'ok': True,
+        'completed_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+        'snapshot_path': str(snapshot),
+        'manifest_sha256': verification['manifest_sha256'],
+        'objects_verified': verification['objects_checked'],
+        'object_bytes_verified': verification['object_bytes_checked'],
+        'registry_keys_checked': verification['registry_keys_checked'],
+        'round_trip_objects_checked': checked,
+        'temporary_bucket_removed': True,
+    }
+    artifact_path = snapshot / 'restore-drill.json'
+    artifact_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(json.dumps({**artifact, 'artifact_path': str(artifact_path)}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -557,6 +1000,14 @@ def main(argv: list[str] | None = None) -> int:
         return _restore_drill(cfg, args)
     if args.command == 'preflight':
         return _preflight_cloud(cfg, args)
+    if args.command == 'provider-backup':
+        return _provider_backup(cfg, args)
+    if args.command == 'provider-verify':
+        return _provider_verify(args)
+    if args.command == 'provider-reconcile':
+        return _provider_reconcile(cfg, args)
+    if args.command == 'provider-restore-drill':
+        return _provider_restore_drill(cfg, args)
     parser.error(f'Unknown command: {args.command}')
     return 2
 
