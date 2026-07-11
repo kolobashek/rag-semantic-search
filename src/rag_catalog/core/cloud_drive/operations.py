@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import urllib.error
+import urllib.request
 import zipfile
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
+
+from .service import CloudDriveService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -72,4 +78,93 @@ def cloud_drive_backup_freshness(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "complete": complete,
         "restore_drill_ok": drill_ok,
         "restore_drill_completed_at": drill_completed_at,
+    }
+
+
+def _sqlite_readiness(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {"ok": False, "status": "missing", "path": str(path)}
+    try:
+        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
+            conn.execute("SELECT 1").fetchone()
+        return {"ok": True, "status": "ready", "path": str(path.resolve())}
+    except sqlite3.Error as exc:
+        return {"ok": False, "status": "error", "path": str(path.resolve()), "error": str(exc)}
+
+
+def _qdrant_readiness(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    url = str(cfg.get("qdrant_url") or "").strip().rstrip("/")
+    if not url:
+        return {"ok": False, "status": "not_configured", "url": ""}
+    try:
+        with urllib.request.urlopen(f"{url}/collections", timeout=1.0) as response:
+            status_code = int(response.status)
+        return {"ok": 200 <= status_code < 500, "status": "ready", "url": url, "status_code": status_code}
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+        return {"ok": False, "status": "error", "url": url, "error": str(exc)}
+
+
+def _index_state_snapshot(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {"ok": False, "status": "missing", "path": str(path)}
+    try:
+        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
+            entries = int(conn.execute("SELECT COUNT(*) FROM state_entries").fetchone()[0])
+            failed = int(conn.execute("SELECT COUNT(*) FROM failed_paths").fetchone()[0])
+            queue_rows = conn.execute("SELECT status, COUNT(*) FROM index_queue GROUP BY status").fetchall()
+        queue = {str(status): int(count) for status, count in queue_rows}
+        return {
+            "ok": True,
+            "status": "ready",
+            "path": str(path.resolve()),
+            "entries": entries,
+            "failed_paths": failed,
+            "queue": queue,
+            "deep_coverage_url": "/api/cloud-drive/index-coverage",
+        }
+    except sqlite3.Error as exc:
+        return {"ok": False, "status": "error", "path": str(path.resolve()), "error": str(exc)}
+
+
+def cloud_drive_operations_health(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    service = CloudDriveService.from_config(cfg)
+    storage = service.get_storage_health()
+    registry_path = Path(str(cfg.get("cloud_drive_db_path") or service.registry.db_path))
+    qdrant_base = Path(str(cfg.get("qdrant_db_path") or "."))
+    registry = _sqlite_readiness(registry_path)
+    telemetry_path = Path(str(cfg.get("telemetry_db_path") or qdrant_base / "rag_telemetry.db"))
+    telemetry = _sqlite_readiness(telemetry_path)
+    qdrant = _qdrant_readiness(cfg)
+    backup = cloud_drive_backup_freshness(cfg)
+    stats = service.registry.stats()
+    index = _index_state_snapshot(qdrant_base / "index_state.db")
+    storage_result = {
+        "ok": bool(storage.ok and storage.writable),
+        "status": "ready" if storage.ok and storage.writable else "error",
+        "backend": storage.backend,
+        "target": storage.target,
+        "error": storage.error,
+    }
+    components = {
+        "registry": registry,
+        "telemetry": telemetry,
+        "storage": storage_result,
+        "qdrant": qdrant,
+        "index": index,
+        "backup": backup,
+        "jobs": {
+            "ok": True,
+            "status": "pending" if int(stats.pending_jobs) else "idle",
+            "pending": int(stats.pending_jobs),
+        },
+    }
+    service_ok = all(bool(components[name].get("ok")) for name in ("registry", "telemetry", "storage", "qdrant"))
+    pilot_ready = service_ok and bool(components["index"].get("ok")) and bool(backup.get("ok"))
+    return {
+        "ok": service_ok,
+        "pilot_ready": pilot_ready,
+        "status": "ready" if pilot_ready else ("degraded" if service_ok else "error"),
+        "components": components,
     }

@@ -70,6 +70,7 @@ from rag_catalog.ui.api import (
     api_cloud_drive_trash,
     api_cloud_drive_upload,
     api_cloud_drive_versions,
+    api_operations_health,
     api_user_group_create,
     api_user_group_member_add,
     api_user_group_member_remove,
@@ -1043,6 +1044,32 @@ def test_cloud_drive_storage_health_reports_verified_backup(monkeypatch, tmp_pat
 
     assert health["backup"]["status"] == "healthy"
     assert health["backup"]["restore_drill_ok"] is True
+
+
+def test_operations_health_api_requires_admin_and_audits_snapshot(monkeypatch, tmp_path) -> None:
+    cfg = {"telemetry_db_path": str(tmp_path / "telemetry.db")}
+    user = {"username": "admin", "role": "admin", "status": "active"}
+    expected = {"ok": True, "pilot_ready": False, "status": "degraded", "components": {}}
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *_args, **_kwargs: user)
+    monkeypatch.setattr(cloud_api, "cloud_drive_operations_health", lambda _cfg: dict(expected))
+
+    def capture_audit(_cfg, _user, action, **kwargs) -> None:
+        events.append({"action": action, **kwargs})
+
+    monkeypatch.setattr(cloud_api, "_audit_cloud_drive_api_event", capture_audit)
+
+    result = api_operations_health()
+
+    assert result == expected
+    assert events == [
+        {
+            "action": "operations_health",
+            "ok": True,
+            "details": {"status": "degraded", "pilot_ready": False},
+        }
+    ]
 
 
 def test_cloud_drive_search_api_finds_files_by_name(monkeypatch, tmp_path) -> None:

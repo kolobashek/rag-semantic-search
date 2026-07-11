@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from nicegui import app, run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
-from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness
+from rag_catalog.core.cloud_drive.operations import cloud_drive_operations_health
 from rag_catalog.core.cloud_drive.storage import normalize_s3_credential
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -1424,9 +1424,13 @@ def render_settings_screen(
             async def refresh_cloud_operational_health(*, notify: bool = False) -> None:
                 try:
                     cfg = build_cloud_config()
-                    service = await run.io_bound(CloudDriveService.from_config, cfg)
-                    health = await run.io_bound(service.get_storage_health)
-                    backup = await run.io_bound(cloud_drive_backup_freshness, cfg)
+                    health = await run.io_bound(cloud_drive_operations_health, cfg)
+                    components = dict(health.get("components") or {})
+                    storage = dict(components.get("storage") or {})
+                    backup = dict(components.get("backup") or {})
+                    index_health = dict(components.get("index") or {})
+                    qdrant_health = dict(components.get("qdrant") or {})
+                    jobs_health = dict(components.get("jobs") or {})
                     backup_labels = {
                         "healthy": "backup проверен",
                         "unverified": "backup не проверен восстановлением",
@@ -1434,17 +1438,20 @@ def render_settings_screen(
                         "invalid": "backup неполный или повреждён",
                         "missing": "backup отсутствует",
                     }
-                    storage_label = "storage доступен" if health.ok else "storage недоступен"
+                    storage_label = "storage доступен" if storage.get("ok") else "storage недоступен"
                     operational_health_label.set_text(
-                        f"Operations: {storage_label}; {backup_labels.get(str(backup.get('status')), 'backup неизвестен')}."
+                        f"Operations: {storage_label}; Qdrant {'доступен' if qdrant_health.get('ok') else 'недоступен'}; "
+                        f"index {'актуален' if index_health.get('ok') else 'требует внимания'}; "
+                        f"jobs {int(jobs_health.get('pending') or 0)}; "
+                        f"{backup_labels.get(str(backup.get('status')), 'backup неизвестен')}."
                     )
                     operational_health_label.classes(
-                        replace="text-caption text-positive" if health.ok and backup.get("ok") else "text-caption text-warning"
+                        replace="text-caption text-positive" if health.get("pilot_ready") else "text-caption text-warning"
                     )
-                    if notify and health.ok:
-                        ui.notify(f"Хранилище доступно: {health.target}", type="positive")
+                    if notify and storage.get("ok"):
+                        ui.notify(f"Хранилище доступно: {storage.get('target')}", type="positive")
                     elif notify:
-                        ui.notify(f"Хранилище недоступно: {health.error}", type="negative")
+                        ui.notify(f"Хранилище недоступно: {storage.get('error')}", type="negative")
                 except Exception as exc:
                     operational_health_label.set_text(f"Operations: проверка не выполнена: {exc}")
                     operational_health_label.classes(replace="text-caption text-negative")

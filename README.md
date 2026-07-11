@@ -262,6 +262,7 @@ POST /api/cloud-drive/import-sources
 POST /api/cloud-drive/import-sources/run
 GET  /api/cloud-drive/changes
 GET  /api/cloud-drive/storage-health
+GET  /api/operations/health
 GET  /api/cloud-drive/index-coverage
 GET  /api/user-groups
 POST /api/user-groups

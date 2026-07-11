@@ -108,6 +108,7 @@ class S3StorageAdapter:
     def __init__(self, *, bucket: str, endpoint_url: str = '', region: str = '', access_key: str = '', secret_key: str = '') -> None:
         try:
             import boto3  # type: ignore
+            from botocore.config import Config  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
             raise RuntimeError('Для S3 storage нужен boto3.') from exc
         self.bucket = bucket
@@ -119,6 +120,14 @@ class S3StorageAdapter:
             region_name=self.region,
             aws_access_key_id=access_key or None,
             aws_secret_access_key=secret_key or None,
+        )
+        self._health_client = boto3.client(
+            's3',
+            endpoint_url=self.endpoint_url,
+            region_name=self.region,
+            aws_access_key_id=access_key or None,
+            aws_secret_access_key=secret_key or None,
+            config=Config(connect_timeout=1, read_timeout=1, retries={'max_attempts': 0}),
         )
 
     def put_file(self, source_path: Path, storage_key: str) -> None:
@@ -174,8 +183,8 @@ class S3StorageAdapter:
     def healthcheck(self) -> dict:
         probe_key = f".healthcheck/{uuid.uuid4().hex}"
         try:
-            self._client.put_object(Bucket=self.bucket, Key=probe_key, Body=b"ok")
-            self._client.delete_object(Bucket=self.bucket, Key=probe_key)
+            self._health_client.put_object(Bucket=self.bucket, Key=probe_key, Body=b"ok")
+            self._health_client.delete_object(Bucket=self.bucket, Key=probe_key)
             return {
                 "backend": "s3",
                 "ok": True,

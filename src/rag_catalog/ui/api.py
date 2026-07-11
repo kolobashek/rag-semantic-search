@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from nicegui import app
 
 from rag_catalog.core.cloud_drive import CloudDriveService
-from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness
+from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness, cloud_drive_operations_health
 from rag_catalog.core.rag_core import load_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
@@ -1040,6 +1040,21 @@ def api_cloud_drive_storage_health(authorization: AuthHeader = "") -> Dict[str, 
         "error": health.error,
         "backup": backup,
     }
+
+
+@app.get("/api/operations/health")
+def api_operations_health(authorization: AuthHeader = "") -> Dict[str, Any]:
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=True)
+    result = cloud_drive_operations_health(cfg)
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "operations_health",
+        ok=bool(result.get("ok")),
+        details={"status": result.get("status"), "pilot_ready": result.get("pilot_ready")},
+    )
+    return result
 
 
 @app.get("/api/cloud-drive/index-coverage")
