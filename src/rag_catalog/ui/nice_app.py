@@ -109,6 +109,7 @@ LOGO_PATH = PROJECT_ROOT / "assets" / "brand" / "svg" / "rag-search-mark.svg"
 install_env_log_handler()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+IMPLICIT_RESULT_USE_FEEDBACK = 0
 
 
 def _install_nicegui_reconnect_patch() -> None:
@@ -1905,7 +1906,7 @@ def _build_page(initial_screen: str = "search") -> None:
                     query=state.searched_query,
                     result_path=result_path,
                     result_title=str(result.get("filename") or result_path),
-                    feedback=2,
+                    feedback=IMPLICIT_RESULT_USE_FEEDBACK,
                     result_rank=index,
                     result_score=float(result.get("score") or 0),
                     details=telemetry_details,
