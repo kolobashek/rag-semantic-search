@@ -58,6 +58,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "log_file": r"O:\rag_automation.log",
     "collection_name": "catalog",
     "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_backend": "",
+    "embedding_onnx_provider": "",
+    "embedding_onnx_file_name": "",
+    "index_embedding_backend": "",
+    "index_embedding_onnx_provider": "",
+    "index_embedding_onnx_file_name": "",
     "embedding_collection_versioning": False,
     "embedding_collection_suffix": "",
     "retrieval_preset": "release_v2",  # legacy|release_v2
@@ -293,8 +299,31 @@ class RAGSearcher:
                 self._embedder = OllamaEmbedder(model=ollama_model, ollama_url=ollama_url)
             else:
                 from sentence_transformers import SentenceTransformer  # noqa: PLC0415
-                logger.info("Загрузка модели эмбеддинга: %s", model_name)
-                self._embedder = SentenceTransformer(model_name, local_files_only=True)
+                backend = str(self.config.get("embedding_backend") or "").strip().lower()
+                if backend == "onnx":
+                    model_kwargs = {
+                        key: value
+                        for key, value in {
+                            "provider": str(self.config.get("embedding_onnx_provider") or "").strip(),
+                            "file_name": str(self.config.get("embedding_onnx_file_name") or "").strip(),
+                        }.items()
+                        if value
+                    }
+                    logger.info(
+                        "Загрузка модели эмбеддинга: %s (backend=onnx, provider=%s, file=%s)",
+                        model_name,
+                        model_kwargs.get("provider") or "auto",
+                        model_kwargs.get("file_name") or "auto",
+                    )
+                    self._embedder = SentenceTransformer(
+                        model_name,
+                        backend="onnx",
+                        model_kwargs=model_kwargs,
+                        local_files_only=True,
+                    )
+                else:
+                    logger.info("Загрузка модели эмбеддинга: %s", model_name)
+                    self._embedder = SentenceTransformer(model_name, local_files_only=True)
         return self._embedder
 
     @property

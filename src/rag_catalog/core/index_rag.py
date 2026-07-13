@@ -415,6 +415,9 @@ class RAGIndexer:
         catalog_wait_seconds: int = 60,
         min_chunk_chars: int = 120,
         fulltext_enabled: bool = False,
+        embedding_backend: str = "",
+        embedding_onnx_provider: str = "",
+        embedding_onnx_file_name: str = "",
     ) -> None:
         # current_stage выставляется при каждом запуске index_directory(stage=...)
         # и определяет поведение skip-логики и экстракции содержимого.
@@ -513,14 +516,32 @@ class RAGIndexer:
             ollama_model_name = embedding_model[len("ollama:") :]
             logger.info("Загрузка OllamaEmbedder: %s (%s)", ollama_model_name, ollama_url)
             self.embedder = OllamaEmbedder(model=ollama_model_name, ollama_url=ollama_url)
-        elif use_onnx:
-            logger.info("Загрузка модели эмбеддинга: %s (backend=onnx)", embedding_model)
+        elif use_onnx or str(embedding_backend or "").strip().lower() == "onnx":
+            model_kwargs = {
+                key: value
+                for key, value in {
+                    "provider": str(embedding_onnx_provider or "").strip(),
+                    "file_name": str(embedding_onnx_file_name or "").strip(),
+                }.items()
+                if value
+            }
+            logger.info(
+                "Загрузка модели эмбеддинга: %s (backend=onnx, provider=%s, file=%s)",
+                embedding_model,
+                model_kwargs.get("provider") or "auto",
+                model_kwargs.get("file_name") or "auto",
+            )
             try:
-                self.embedder = SentenceTransformer(embedding_model, backend="onnx")
+                self.embedder = SentenceTransformer(
+                    embedding_model,
+                    backend="onnx",
+                    model_kwargs=model_kwargs,
+                    local_files_only=True,
+                )
                 logger.info("ONNX backend загружен успешно")
             except Exception as exc:
                 logger.warning("ONNX backend недоступен (%s), использую PyTorch", exc)
-                self.embedder = SentenceTransformer(embedding_model)
+                self.embedder = SentenceTransformer(embedding_model, local_files_only=True)
         else:
             logger.info("Загрузка модели эмбеддинга: %s", embedding_model)
             self.embedder = SentenceTransformer(embedding_model)
@@ -1761,6 +1782,13 @@ def main() -> None:
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
         min_chunk_chars=int(cfg.get("index_min_chunk_chars", 120) or 120),
         fulltext_enabled=bool(cfg.get("retrieval_fulltext_enabled", False)),
+        embedding_backend=str(cfg.get("index_embedding_backend") or cfg.get("embedding_backend") or ""),
+        embedding_onnx_provider=str(
+            cfg.get("index_embedding_onnx_provider") or cfg.get("embedding_onnx_provider") or ""
+        ),
+        embedding_onnx_file_name=str(
+            cfg.get("index_embedding_onnx_file_name") or cfg.get("embedding_onnx_file_name") or ""
+        ),
         exclude_patterns=list(cfg.get("index_exclude_patterns") or []),
         only_paths=only_paths,
         ocr_max_image_pages=int(cfg.get("ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
