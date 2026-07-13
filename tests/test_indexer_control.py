@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from rag_catalog.core import index_rag as index_rag_module
 from rag_catalog.core import indexer_control as ic
 from rag_catalog.core.index_rag import IndexerCancelled, RAGIndexer
 
@@ -57,6 +58,35 @@ def test_check_control_running_no_op(tmp_path, monkeypatch):
     idx.run_id = ""
     # Должно вернуться без исключения
     idx._check_indexer_control(stage="metadata", stage_stats={})
+
+
+def test_check_control_aborts_when_catalog_stays_unavailable(tmp_path, monkeypatch):
+    _set_control_path(monkeypatch, tmp_path)
+    ic.write_indexer_control("running")
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.run_id = ""
+    idx.catalog_path = tmp_path / "missing"
+    idx.catalog_wait_attempts = 0
+    idx.catalog_wait_seconds = 1
+
+    with pytest.raises(RuntimeError, match="Папка каталога недоступна"):
+        idx._check_indexer_control(stage="metadata", stage_stats={})
+
+
+def test_check_control_resumes_when_catalog_returns(tmp_path, monkeypatch):
+    _set_control_path(monkeypatch, tmp_path)
+    ic.write_indexer_control("running")
+    catalog = tmp_path / "catalog"
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.run_id = ""
+    idx.catalog_path = catalog
+    idx.catalog_wait_attempts = 1
+    idx.catalog_wait_seconds = 1
+
+    monkeypatch.setattr(index_rag_module.time, "sleep", lambda _seconds: catalog.mkdir())
+
+    idx._check_indexer_control(stage="small", stage_stats={})
+    assert catalog.is_dir()
 
 
 def test_check_control_pause_then_resume(tmp_path, monkeypatch):

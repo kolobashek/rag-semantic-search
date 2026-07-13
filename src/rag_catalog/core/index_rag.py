@@ -422,25 +422,12 @@ class RAGIndexer:
         # и определяет поведение skip-логики и экстракции содержимого.
         self.current_stage: str = "content"  # legacy-совместимый дефолт
         self.catalog_path = Path(catalog_path)
-        if not self.catalog_path.exists():
-            import time as _time
-
-            wait_seconds = max(1, int(catalog_wait_seconds or 60))
-            attempts = max(0, int(catalog_wait_attempts if catalog_wait_attempts is not None else 10))
-            logger.warning(
-                "Папка каталога недоступна: %s — жду появления (%d попыток, каждые %ds)…",
-                catalog_path,
-                attempts,
-                wait_seconds,
-            )
-            for attempt in range(1, attempts + 1):
-                _time.sleep(wait_seconds)
-                if self.catalog_path.exists():
-                    break
-                logger.warning("Каталог всё ещё недоступен: %s (попытка %d/%d)", catalog_path, attempt, attempts)
-            if not self.catalog_path.exists():
-                raise RuntimeError(f"Папка каталога недоступна после {attempts} попыток: {catalog_path}")
-            logger.info("Каталог доступен: %s", catalog_path)
+        self.catalog_wait_seconds = max(1, int(catalog_wait_seconds or 60))
+        self.catalog_wait_attempts = max(
+            0,
+            int(catalog_wait_attempts if catalog_wait_attempts is not None else 10),
+        )
+        self._ensure_catalog_available()
 
         self.qdrant_db_path = Path(qdrant_db_path)
         self.collection_name = collection_name
@@ -574,12 +561,49 @@ class RAGIndexer:
     def set_run_id(self, run_id: str) -> None:
         self.run_id = run_id or ""
 
+    def _ensure_catalog_available(self) -> None:
+        """Wait briefly for a disconnected catalog before aborting the run."""
+        catalog_path = getattr(self, "catalog_path", None)
+        if catalog_path is None:
+            return
+
+        def is_available() -> bool:
+            try:
+                return bool(catalog_path.exists())
+            except OSError:
+                return False
+
+        if is_available():
+            return
+
+        attempts = max(0, int(getattr(self, "catalog_wait_attempts", 0) or 0))
+        wait_seconds = max(1, int(getattr(self, "catalog_wait_seconds", 60) or 60))
+        logger.warning(
+            "Папка каталога недоступна: %s — жду появления (%d попыток, каждые %ds)…",
+            catalog_path,
+            attempts,
+            wait_seconds,
+        )
+        for attempt in range(1, attempts + 1):
+            time.sleep(wait_seconds)
+            if is_available():
+                logger.info("Каталог снова доступен: %s", catalog_path)
+                return
+            logger.warning(
+                "Каталог всё ещё недоступен: %s (попытка %d/%d)",
+                catalog_path,
+                attempt,
+                attempts,
+            )
+        raise RuntimeError(f"Папка каталога недоступна после {attempts} попыток: {catalog_path}")
+
     def _check_indexer_control(self, *, stage: str, stage_stats: Dict[str, int]) -> None:
         """Apply cooperative pause/cancel commands written by the UI."""
         command = str(read_indexer_control().get("command") or "running").lower()
         if command == "cancel":
             raise IndexerCancelled("Индексация отменена пользователем.")
         if command != "pause":
+            self._ensure_catalog_available()
             return
 
         logger.info("Индексация поставлена на паузу пользователем.")
@@ -618,6 +642,7 @@ class RAGIndexer:
                 )
             except Exception:
                 logger.debug("Не удалось обновить telemetry stage status=running", exc_info=True)
+        self._ensure_catalog_available()
 
     # ── collection setup ───────────────────────────────────────────────
 
