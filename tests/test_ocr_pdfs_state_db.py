@@ -8,6 +8,7 @@ import pytest
 from rag_catalog.core import ocr_pdfs
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.ocr_pdfs import (
+    _effective_ocr_workers,
     ensure_ocr_payload_indexes,
     find_pending_ocr_candidates_from_runtime,
     find_state_db_ocr_candidates,
@@ -34,6 +35,11 @@ def test_remove_from_state_db_deletes_matching_paths(tmp_path: Path) -> None:
 def test_remove_from_state_db_raises_when_db_missing(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         remove_from_state_db(tmp_path / "missing_index_state.db", [r"O:\a.pdf"])
+
+
+def test_rapidocr_uses_single_index_worker() -> None:
+    assert _effective_ocr_workers(8, "rapidocr") == 1
+    assert _effective_ocr_workers(3, "tesseract") == 3
 
 
 def test_find_state_db_ocr_candidates_returns_large_unprocessed_pdfs(tmp_path: Path) -> None:

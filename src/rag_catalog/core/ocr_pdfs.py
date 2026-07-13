@@ -90,6 +90,14 @@ def _effective_workers(requested: int) -> int:
     return max(1, min(4, max(1, cpu // 2)))
 
 
+def _effective_ocr_workers(requested: int, engine: str) -> int:
+    # RapidOCR owns one shared ONNX/DirectML engine and serializes calls with a
+    # semaphore. Extra index workers only wait inside the outer file timeout.
+    if str(engine or "").strip().lower() == "rapidocr":
+        return 1
+    return _effective_workers(requested)
+
+
 # ─────────────────────────── Qdrant helpers ──────────────────────────────────
 
 def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) -> List[str]:
@@ -479,7 +487,7 @@ def main() -> int:
         enabled=bool(cfg.get("embedding_collection_versioning", False)),
         suffix=str(cfg.get("embedding_collection_suffix") or ""),
     )
-    workers_effective = _effective_workers(int(args.workers or 0))
+    workers_effective = _effective_ocr_workers(int(args.workers or 0), str(args.ocr_engine or "tesseract"))
 
     # ── Инициализация телеметрии ─────────────────────────────────────────────
     telemetry_path = (cfg.get("telemetry_db_path") or "").strip()
