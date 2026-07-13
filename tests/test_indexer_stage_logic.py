@@ -224,12 +224,14 @@ def test_small_stage_upgrades_unchanged_metadata_without_delete(tmp_path: Path) 
     p.write_text("Содержательный текст документа " * 10, encoding="utf-8")
     idx = _make_indexer(tmp_path, extracted_text="")
     idx.index_directory(stage="metadata")
+    metadata_points = idx.qdrant.points_count
     deleted: list[Path] = []
     idx._delete_file_vectors = lambda path: deleted.append(path)
 
     idx.index_directory(stage="small")
 
     assert deleted == []
+    assert idx.qdrant.points_count == metadata_points + 1
     assert idx.state_db.get_entry(str(p))["stage"] == "content"
 
 

@@ -1154,7 +1154,7 @@ class IndexStageRunner:
                     stage_stats["added_files"] += 1
 
                 # Добавить метаданные и контентные чанки в буфер
-                if not result.get("append_only"):
+                if not result.get("append_only") and not metadata_only_upgrade:
                     pending_texts.append(result["meta_text"])
                     pending_payloads.append(result["meta_payload"])
                 for cpayload in result["content_payloads"]:
