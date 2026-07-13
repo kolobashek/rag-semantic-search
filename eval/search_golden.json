@@ -5,6 +5,10 @@
       "карточка",
       "тск"
     ],
+    "expected_paths": [
+      "ТСК учредит\\!!!Карточка_предприятия_ООО_ТСК.doc",
+      "Света\\!!!Карточка предприятия ООО ТСК.doc"
+    ],
     "category": "folder_or_name"
   },
   {
@@ -12,6 +16,10 @@
     "expected": [
       "карточка",
       "спецмаш"
+    ],
+    "expected_paths": [
+      "реквизиты ООО Спецмаш Райффайзенбанк.docx",
+      "Реквизиты  ООО Спецмаш.docx"
     ],
     "category": "folder_or_name"
   },
@@ -21,6 +29,9 @@
       "галиулин",
       "карта"
     ],
+    "expected_paths": [
+      "карта предприятия ИП Галиулин.docx"
+    ],
     "category": "folder_or_name"
   },
   {
@@ -28,6 +39,10 @@
     "expected": [
       "тск",
       "карточка"
+    ],
+    "expected_paths": [
+      "ТСК учредит\\!!!Карточка_предприятия_ООО_ТСК.doc",
+      "Света\\!!!Карточка предприятия ООО ТСК.doc"
     ],
     "category": "folder_or_name"
   },
@@ -52,6 +67,9 @@
       "6357",
       "псм"
     ],
+    "expected_paths": [
+      "Экскаватор 6357\\Выписка из электронного паспорта 6357.pdf"
+    ],
     "category": "exact_number_or_vehicle"
   },
   {
@@ -60,6 +78,9 @@
       "touareg",
       "vin"
     ],
+    "expected_paths": [
+      "Док-ты легковые автомобили\\VOLKSWAGEN TOUAREG 050"
+    ],
     "category": "exact_number_or_vehicle"
   },
   {
@@ -67,6 +88,10 @@
     "expected": [
       "lovol",
       "vin"
+    ],
+    "expected_paths": [
+      "Шильдик Foton Lovol FL966H.jpg",
+      "Погрузчик Lovol FL966H.jpg"
     ],
     "category": "exact_number_or_vehicle"
   },
@@ -124,6 +149,10 @@
       "цыбусов",
       "паспорт"
     ],
+    "expected_paths": [
+      "Цыбусов новый паспорт.pdf",
+      "Учередительные документы\\Цыбусов паспорт.pdf"
+    ],
     "category": "ocr_or_scan"
   },
   {
@@ -132,6 +161,11 @@
       "цыбусов",
       "права"
     ],
+    "expected_paths": [
+      "цыбусов права.jpg",
+      "права Цыбусов.docx",
+      "водительское , права Цыбусов.jpeg"
+    ],
     "category": "ocr_or_scan"
   },
   {
@@ -139,6 +173,9 @@
     "expected": [
       "колозин",
       "утм"
+    ],
+    "expected_paths": [
+      "Документы водителей СКАНЫ\\УТМ Колозин К.А.jpeg"
     ],
     "category": "ocr_or_scan"
   },
@@ -164,6 +201,9 @@
       "карбон",
       "2024"
     ],
+    "expected_paths": [
+      "Требование по 4 контрагентам\\2024 Карбон реализации.pdf"
+    ],
     "category": "semantic_business"
   },
   {
@@ -172,6 +212,10 @@
       "энергия",
       "реализации"
     ],
+    "expected_paths": [
+      "Требование по 4 контрагентам\\2024 Энергия НК Реализации.pdf",
+      "Требование по 4 контрагентам\\2023 Энергия НК реализации.pdf"
+    ],
     "category": "semantic_business"
   },
   {
@@ -179,6 +223,9 @@
     "expected": [
       "водителей",
       "сканы"
+    ],
+    "expected_paths": [
+      "Документы водителей СКАНЫ"
     ],
     "category": "folder_or_name"
   },
@@ -204,6 +251,9 @@
       "фактуры",
       "тск"
     ],
+    "expected_paths": [
+      "1 Фактуры ТСК"
+    ],
     "category": "folder_or_name"
   },
   {
@@ -211,6 +261,9 @@
     "expected": [
       "выписка",
       "нск"
+    ],
+    "expected_paths": [
+      "Выписки из банка НСК"
     ],
     "category": "folder_or_name"
   },
@@ -220,6 +273,9 @@
       "бланки",
       "путевок"
     ],
+    "expected_paths": [
+      "Бланки путевок"
+    ],
     "category": "folder_or_name"
   },
   {
@@ -227,6 +283,9 @@
     "expected": [
       "грузовые",
       "автомобили"
+    ],
+    "expected_paths": [
+      "Грузовые автомобили"
     ],
     "category": "folder_or_name"
   },
@@ -236,6 +295,9 @@
       "документы",
       "водителей"
     ],
+    "expected_paths": [
+      "Документы водителей СКАНЫ"
+    ],
     "category": "folder_or_name"
   },
   {
@@ -243,6 +305,9 @@
     "expected": [
       "налоговая",
       "дзержинка"
+    ],
+    "expected_paths": [
+      "налоговая Дзержинка"
     ],
     "category": "folder_or_name"
   },
@@ -252,6 +317,34 @@
       "тендер",
       "2022"
     ],
+    "expected_paths": [
+      "Тендер 2022"
+    ],
     "category": "folder_or_name"
+  },
+  {
+    "query": "спецмайнинг",
+    "expected": [
+      "спецмайнинг"
+    ],
+    "category": "ocr_or_scan"
+  },
+  {
+    "query": "абракадабраxyz",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "корпорация марсианский кедр 847291",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "qzxv-несуществующий-документ-999999",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
   }
 ]

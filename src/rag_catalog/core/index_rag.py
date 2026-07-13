@@ -1585,7 +1585,7 @@ def main() -> None:
     parser.add_argument("--db", default=cfg["qdrant_db_path"], help="Путь к локальной базе Qdrant (SQLite режим)")
     parser.add_argument(
         "--url",
-        default="",
+        default=str(cfg.get("qdrant_url") or ""),
         dest="qdrant_url",
         help="URL Qdrant-сервера (например http://localhost:6333). Если указан — используется вместо --db",
     )

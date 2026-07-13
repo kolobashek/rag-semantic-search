@@ -307,7 +307,7 @@ class RAGSearcher:
             from sentence_transformers import CrossEncoder  # noqa: PLC0415
 
             logger.info("Загрузка reranker-модели: %s", model_name)
-            self._reranker = CrossEncoder(model_name)
+            self._reranker = CrossEncoder(model_name, local_files_only=True)
         return self._reranker
 
     # ── search ────────────────────────────────────────────────────────
