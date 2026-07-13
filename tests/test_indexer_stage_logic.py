@@ -233,6 +233,27 @@ def test_small_stage_upgrades_unchanged_metadata_without_delete(tmp_path: Path) 
     assert idx.state_db.get_entry(str(p))["stage"] == "content"
 
 
+def test_stage_scan_skips_file_removed_between_walk_and_stat(tmp_path: Path) -> None:
+    vanished = tmp_path / "vanished.txt"
+    kept = tmp_path / "kept.txt"
+    vanished.write_text("gone", encoding="utf-8")
+    kept.write_text("kept", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    original_fingerprint = idx._get_file_fingerprint
+
+    def _fingerprint(path: Path):
+        if path == vanished:
+            raise FileNotFoundError(path)
+        return original_fingerprint(path)
+
+    idx._get_file_fingerprint = _fingerprint
+
+    stats = idx.index_directory(stage="metadata")
+
+    assert stats["total_files"] == 1
+    assert idx.state_db.get_entry(str(kept)) is not None
+
+
 def test_no_ocr_pdf_without_cached_text_is_deferred_and_not_retried_by_quick_pass(tmp_path: Path) -> None:
     p = tmp_path / "scan.pdf"
     p.write_bytes(b"%PDF-1.4\n")

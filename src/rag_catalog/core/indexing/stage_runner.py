@@ -287,8 +287,13 @@ class IndexStageRunner:
         ]
         self._logger.info("Найдено файлов на диске: %d (поддерживаемые расширения)", len(all_files))
 
-        def _normal_task(filepath: Path) -> Dict[str, Any]:
-            fingerprint, mtime = indexer._get_file_fingerprint(filepath)
+        def _normal_task(filepath: Path) -> Dict[str, Any] | None:
+            try:
+                fingerprint, mtime = indexer._get_file_fingerprint(filepath)
+                size_bytes = int(filepath.stat().st_size)
+            except OSError:
+                self._logger.debug("Файл исчез во время сканирования, пропуск: %s", filepath)
+                return None
             return {
                 "filepath": filepath,
                 "source_path": filepath,
@@ -296,7 +301,7 @@ class IndexStageRunner:
                 "state_key": str(filepath),
                 "fingerprint": fingerprint,
                 "mtime": mtime,
-                "size_bytes": int(filepath.stat().st_size),
+                "size_bytes": size_bytes,
                 "sort_mtime": float(mtime),
                 "archive_path": None,
                 "archive_member": "",
@@ -499,7 +504,9 @@ class IndexStageRunner:
             elif archive_type == "command":
                 all_tasks.extend(_command_archive_tasks(filepath))
             else:
-                all_tasks.append(_normal_task(filepath))
+                task = _normal_task(filepath)
+                if task is not None:
+                    all_tasks.append(task)
 
         if hasattr(indexer, "state_db"):
             for archive_path, current_keys in archive_member_keys.items():
