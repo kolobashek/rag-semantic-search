@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from rag_catalog.core.extractors.files import (
+    _antiword_environment,
     _resolve_soffice,
     extract_doc,
     extract_pptx,
@@ -94,6 +95,19 @@ def test_extract_doc_uses_env_antiword_before_path(tmp_path: Path, monkeypatch) 
     assert extract_doc(path) == "bundled text"
 
 
+def test_antiword_environment_finds_bundled_share(tmp_path: Path, monkeypatch) -> None:
+    binary = tmp_path / "doc2txt" / "bin" / "win-amd64" / "antiword.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"fake")
+    share = tmp_path / "doc2txt" / "antiword_share"
+    share.mkdir()
+    monkeypatch.delenv("RAG_ANTIWORD_HOME", raising=False)
+
+    env = _antiword_environment(str(binary))
+
+    assert env["ANTIWORDHOME"] == str(share)
+
+
 def test_resolve_soffice_finds_standard_windows_install(tmp_path: Path, monkeypatch) -> None:
     program_files = tmp_path / "Program Files"
     soffice = program_files / "LibreOffice" / "program" / "soffice.exe"
@@ -116,12 +130,16 @@ def test_extract_doc_uses_isolated_libreoffice_profile(tmp_path: Path, monkeypat
     soffice = tmp_path / "soffice.exe"
     soffice.write_bytes(b"fake")
     captured_args: list[str] = []
+    local_source_was_used = False
 
     monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_antiword", lambda: "")
     monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_soffice", lambda: str(soffice))
 
     def _run(args, **_kwargs):
+        nonlocal local_source_was_used
         captured_args.extend(str(item) for item in args)
+        local_source = Path(args[-1])
+        local_source_was_used = local_source.parent != path.parent and local_source.read_bytes() == b"dummy"
         out_dir = Path(args[args.index("--outdir") + 1])
         (out_dir / "legacy.txt").write_text("converted text", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -130,6 +148,7 @@ def test_extract_doc_uses_isolated_libreoffice_profile(tmp_path: Path, monkeypat
 
     assert extract_doc(path) == "converted text"
     assert any(arg.startswith("-env:UserInstallation=file:") for arg in captured_args)
+    assert local_source_was_used
 
 
 def test_extract_doc_binary_fallback_reads_text_runs(tmp_path: Path, monkeypatch) -> None:
@@ -139,6 +158,7 @@ def test_extract_doc_binary_fallback_reads_text_runs(tmp_path: Path, monkeypatch
     monkeypatch.delenv("RAG_ANTIWORD_CMD", raising=False)
     monkeypatch.delenv("RAG_SOFFICE_CMD", raising=False)
     monkeypatch.setattr("rag_catalog.core.extractors.files.shutil.which", lambda _name: None)
+    monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_antiword", lambda: "")
     monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_soffice", lambda: "")
 
     text = extract_doc(path)

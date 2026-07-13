@@ -228,7 +228,7 @@ def _resolve_env_tool(*env_names: str) -> str:
 
 
 def _resolve_antiword() -> str:
-    return (
+    resolved = (
         _resolve_env_tool("RAG_ANTIWORD_CMD", "ANTIWORD")
         or _first_existing_tool(
             _TOOLS_ROOT / "antiword" / "antiword.exe",
@@ -239,6 +239,30 @@ def _resolve_antiword() -> str:
         or shutil.which("antiword")
         or ""
     )
+    if resolved:
+        return resolved
+    try:
+        from doc2txt.antiword_wrapper import get_antiword_binary
+
+        return str(get_antiword_binary())
+    except (ImportError, RuntimeError):
+        return ""
+
+
+def _antiword_environment(antiword: str) -> dict[str, str]:
+    env = os.environ.copy()
+    configured_home = str(os.environ.get("RAG_ANTIWORD_HOME") or "").strip()
+    if configured_home and Path(configured_home).is_dir():
+        env["ANTIWORDHOME"] = configured_home
+        return env
+
+    binary_path = Path(antiword).resolve()
+    for parent in binary_path.parents:
+        bundled_home = parent / "antiword_share"
+        if bundled_home.is_dir():
+            env["ANTIWORDHOME"] = str(bundled_home)
+            break
+    return env
 
 
 def _resolve_soffice() -> str:
@@ -344,9 +368,10 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
                 [antiword, str(filepath)],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=30,
                 encoding="utf-8",
                 errors="replace",
+                env=_antiword_environment(antiword),
                 **_windows_hidden_popen_kwargs(),
             )
             if proc.returncode == 0 and proc.stdout.strip():
@@ -359,26 +384,32 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
     if soffice:
         try:
             with tempfile.TemporaryDirectory(prefix="rag_doc_") as tmp:
-                profile_uri = (Path(tmp) / "profile").resolve().as_uri()
+                temp_root = Path(tmp)
+                local_source = temp_root / filepath.name
+                shutil.copy2(filepath, local_source)
+                profile_uri = (temp_root / "profile").resolve().as_uri()
                 proc = subprocess.run(
                     [
                         soffice,
                         f"-env:UserInstallation={profile_uri}",
                         "--headless",
+                        "--nologo",
+                        "--nodefault",
+                        "--nofirststartwizard",
                         "--convert-to",
                         "txt:Text",
                         "--outdir",
                         tmp,
-                        str(filepath),
+                        str(local_source),
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=180,
+                    timeout=40,
                     encoding="utf-8",
                     errors="replace",
                     **_windows_hidden_popen_kwargs(),
                 )
-                out_path = Path(tmp) / (filepath.stem + ".txt")
+                out_path = temp_root / (filepath.stem + ".txt")
                 if proc.returncode == 0 and out_path.exists():
                     text = _read_text_file(out_path, max_chars=max_chars)
                     if text.strip():

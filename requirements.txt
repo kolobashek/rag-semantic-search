@@ -15,6 +15,7 @@ python-docx>=1.1.0
 openpyxl>=3.1.2
 xlrd>=2.0.1          # чтение старого формата .xls
 pdfplumber>=0.10.0
+doc2txt==1.0.4       # bundled antiword для быстрого чтения legacy .doc
 
 # Утилиты
 tqdm>=4.66.0
