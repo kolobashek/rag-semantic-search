@@ -71,6 +71,26 @@ def test_find_state_db_ocr_candidates_returns_large_unprocessed_pdfs(tmp_path: P
                 "extension": ".pdf",
             },
             {
+                "full_path": r"O:\small-deferred.pdf",
+                "fingerprint": "3b",
+                "mtime": 1.0,
+                "stage": "metadata",
+                "indexed_stage": "small",
+                "status": "deferred_ocr",
+                "size_bytes": 512_000,
+                "extension": ".pdf",
+            },
+            {
+                "full_path": r"O:\scan.jpg",
+                "fingerprint": "3c",
+                "mtime": 1.0,
+                "stage": "metadata",
+                "indexed_stage": "metadata",
+                "status": "ok",
+                "size_bytes": 256_000,
+                "extension": ".jpg",
+            },
+            {
                 "full_path": r"O:\large-content.pdf",
                 "fingerprint": "4",
                 "mtime": 1.0,
@@ -83,7 +103,12 @@ def test_find_state_db_ocr_candidates_returns_large_unprocessed_pdfs(tmp_path: P
         ]
     )
 
-    assert find_state_db_ocr_candidates(tmp_path, small_pdf_mb=2.0) == [r"O:\large-empty.pdf", r"O:\large-metadata.pdf"]
+    assert find_state_db_ocr_candidates(tmp_path, small_pdf_mb=2.0) == [
+        r"O:\large-empty.pdf",
+        r"O:\large-metadata.pdf",
+        r"O:\small-deferred.pdf",
+        r"O:\scan.jpg",
+    ]
 
 
 def test_find_pending_ocr_candidates_from_runtime_skips_completed_state_entries(tmp_path: Path) -> None:

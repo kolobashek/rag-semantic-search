@@ -442,6 +442,50 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
     assert inventory["recognized_lines"] == 3
 
 
+def test_ocr_inventory_counts_small_deferred_pdf_as_candidate(tmp_path) -> None:
+    qdrant_dir = tmp_path / "qdrant"
+    state_db = IndexStateDB(str(qdrant_dir / "index_state.db"))
+    state_db.upsert_many(
+        [
+            {
+                "full_path": str(tmp_path / "deferred.pdf"),
+                "fingerprint": "1",
+                "mtime": 1.0,
+                "stage": "metadata",
+                "indexed_stage": "small",
+                "status": "deferred_ocr",
+                "size_bytes": 1000,
+                "extension": ".pdf",
+            },
+            {
+                "full_path": str(tmp_path / "metadata.pdf"),
+                "fingerprint": "2",
+                "mtime": 1.0,
+                "stage": "metadata",
+                "indexed_stage": "metadata",
+                "status": "ok",
+                "size_bytes": 1000,
+                "extension": ".pdf",
+            },
+        ]
+    )
+    telemetry_path = tmp_path / "telemetry.db"
+    TelemetryDB(str(telemetry_path))
+    ui_helpers._OCR_INVENTORY_CACHE.clear()
+
+    inventory = ui_helpers._read_ocr_inventory(
+        {
+            "qdrant_db_path": str(qdrant_dir),
+            "telemetry_db_path": str(telemetry_path),
+            "small_pdf_mb": 2,
+        }
+    )
+
+    assert inventory["ocr_capable_total"] == 2
+    assert inventory["eligible_total"] == 1
+    assert inventory["pending_candidates"] == 1
+
+
 def test_index_telemetry_uses_runtime_marker_before_run_row_exists(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "telemetry.db"
     TelemetryDB(str(db_path))

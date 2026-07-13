@@ -57,6 +57,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # PDF с текстом короче этого порога считается сканом (нет полезного текста)
 DEFAULT_MIN_TEXT_LEN = 50
+OCR_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff", ".tif", ".webp"})
+OCR_CAPABLE_EXTENSIONS = frozenset({".pdf", *OCR_IMAGE_EXTENSIONS})
 
 
 def _windows_detached_creationflags() -> int:
@@ -91,7 +93,7 @@ def _effective_workers(requested: int) -> int:
 # ─────────────────────────── Qdrant helpers ──────────────────────────────────
 
 def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) -> List[str]:
-    """Return large PDF paths that state DB still has without indexed content."""
+    """Return OCR-capable paths that still need recognition or content indexing."""
     db_path = Path(state_dir) / "index_state.db"
     if not db_path.exists():
         return []
@@ -99,20 +101,15 @@ def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) 
     try:
         with sqlite3.connect(str(db_path), timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
+            placeholders = ",".join("?" for _ in OCR_CAPABLE_EXTENSIONS)
             rows = conn.execute(
-                """
-                SELECT full_path
+                f"""
+                SELECT full_path, extension, size_bytes, stage, status, indexed_stage
                 FROM state_entries
-                WHERE lower(extension)=?
-                  AND COALESCE(size_bytes, 0) >= ?
-                  AND (
-                        stage != 'content'
-                     OR status IN ('empty', 'error')
-                     OR indexed_stage IN ('', 'metadata', 'small')
-                  )
+                WHERE lower(extension) IN ({placeholders})
                 ORDER BY size_bytes DESC, updated_at DESC, full_path
                 """,
-                (".pdf", min_size),
+                tuple(sorted(OCR_CAPABLE_EXTENSIONS)),
             ).fetchall()
     except sqlite3.Error as exc:
         logger.warning("Не удалось прочитать OCR-кандидатов из state DB: %s", exc)
@@ -121,7 +118,17 @@ def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) 
     seen: set[str] = set()
     for row in rows:
         path = str(row["full_path"] or "").strip()
-        if path and path not in seen:
+        ext = str(row["extension"] or "").lower()
+        status = str(row["status"] or "")
+        needs_content = (
+            str(row["stage"] or "") != "content"
+            or status in {"empty", "error", "deferred_ocr"}
+            or str(row["indexed_stage"] or "") in {"", "metadata", "small"}
+        )
+        explicitly_deferred = status == "deferred_ocr"
+        eligible_pdf = ext == ".pdf" and int(row["size_bytes"] or 0) >= min_size and needs_content
+        eligible_image = ext in OCR_IMAGE_EXTENSIONS and needs_content
+        if path and path not in seen and (explicitly_deferred or eligible_pdf or eligible_image):
             seen.add(path)
             paths.append(path)
     return paths
@@ -519,7 +526,7 @@ def main() -> int:
         logger.info("Восстановлено OCR-кандидатов из runtime: %d", len(recovered))
     if scanned:
         logger.info(
-            "Быстрый список OCR-кандидатов из state DB (PDF >= %g МБ, без content): %d",
+            "Быстрый список OCR-кандидатов из state DB (deferred PDF/images и PDF >= %g МБ без content): %d",
             float(cfg.get("small_pdf_mb") or 2.0),
             len(scanned),
         )
@@ -534,7 +541,7 @@ def main() -> int:
         )
 
     if not scanned:
-        logger.info("Сканированные PDF не найдены — OCR не требуется.")
+        logger.info("Файлы, требующие OCR, не найдены.")
         telemetry.finish_ocr_run(
             ocr_run_id=ocr_run_id,
             status="completed",

@@ -1703,7 +1703,7 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 }
                 needs_content = stage != "content" or status in {"empty", "error", "deferred_ocr"} or indexed_stage in {"", "metadata", "small"}
                 if ext == ".pdf":
-                    if int(row["size_bytes"] or 0) >= min_pdf_size and needs_content:
+                    if status == "deferred_ocr" or (int(row["size_bytes"] or 0) >= min_pdf_size and needs_content):
                         candidate_paths.add(path)
                 elif ext in OCR_IMAGE_EXTENSIONS and needs_content:
                     candidate_paths.add(path)
