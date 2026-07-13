@@ -64,6 +64,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "index_embedding_backend": "",
     "index_embedding_onnx_provider": "",
     "index_embedding_onnx_file_name": "",
+    "index_defer_fulltext": False,
     "embedding_collection_versioning": False,
     "embedding_collection_suffix": "",
     "retrieval_preset": "release_v2",  # legacy|release_v2

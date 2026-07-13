@@ -1788,7 +1788,10 @@ def main() -> None:
         ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
         min_chunk_chars=int(cfg.get("index_min_chunk_chars", 120) or 120),
-        fulltext_enabled=bool(cfg.get("retrieval_fulltext_enabled", False)),
+        fulltext_enabled=(
+            bool(cfg.get("retrieval_fulltext_enabled", False))
+            and not bool(cfg.get("index_defer_fulltext", False))
+        ),
         embedding_backend=str(cfg.get("index_embedding_backend") or cfg.get("embedding_backend") or ""),
         embedding_onnx_provider=str(
             cfg.get("index_embedding_onnx_provider") or cfg.get("embedding_onnx_provider") or ""
