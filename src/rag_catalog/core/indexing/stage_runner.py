@@ -1023,7 +1023,11 @@ class IndexStageRunner:
                 "fingerprint": fingerprint,
                 "mtime": mtime,
                 "size_bytes": size_bytes,
-                "was_indexed": indexer._get_state_entry(file_key) is not None,
+                "was_indexed": existing_entry is not None,
+                "had_failure": bool(
+                    existing_entry
+                    and str(existing_entry.get("status") or existing_entry.get("stage") or "") == "error"
+                ),
                 "meta_text": meta_text,
                 "meta_payload": meta_payload,
                 "chunks": chunks,
@@ -1129,7 +1133,7 @@ class IndexStageRunner:
                         except (TypeError, ValueError):
                             next_retry_at = 0.0
                 else:
-                    if hasattr(indexer, "state_db"):
+                    if hasattr(indexer, "state_db") and result.get("had_failure"):
                         indexer.state_db.clear_failed_path(str(result["file_key"]))
                     indexed_chunks = int(result.get("indexed_chunks") or 0)
                     total_chunks = int(result.get("total_chunks") or 0)
