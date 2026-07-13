@@ -540,6 +540,11 @@ class IndexStageRunner:
             key=lambda item: float(item.get("sort_mtime") or 0.0),
             reverse=True,
         )
+        state_snapshot = (
+            indexer.state_db.entries_snapshot()
+            if hasattr(indexer, "state_db") and hasattr(indexer.state_db, "entries_snapshot")
+            else {}
+        )
 
         stage_stats: Dict[str, int] = {
             "total_files": len(scope_files),
@@ -707,7 +712,7 @@ class IndexStageRunner:
             mtime = float(item["mtime"])
             size_bytes = int(item.get("size_bytes") or 0)
 
-            existing_entry = indexer._get_state_entry(file_key)
+            existing_entry = state_snapshot.get(file_key)
             if (
                 existing_entry
                 and str(existing_entry.get("status") or existing_entry.get("stage") or "") == "error"
@@ -719,7 +724,12 @@ class IndexStageRunner:
             # Stage-aware skip:
             #  - на этапе metadata пропускаем любой уже проиндексированный файл;
             #  - на этапах small/large пропускаем только те, что уже дошли до "content".
-            if indexer._should_skip_for_stage(file_key, fingerprint):
+            if indexer._should_skip_for_stage(
+                file_key,
+                fingerprint,
+                existing_entry=existing_entry,
+                entry_loaded=True,
+            ):
                 return {"skipped": True}
 
             ext = relative_path.suffix.lower()

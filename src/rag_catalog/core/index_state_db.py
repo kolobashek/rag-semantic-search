@@ -301,6 +301,14 @@ class IndexStateDB:
                 ).fetchone()
                 return dict(row) if row else None
 
+    def entries_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Load current entries once for a full catalog stage."""
+        with self._lock:
+            with self._connect() as conn:
+                self._prepare_connection(conn)
+                rows = conn.execute("SELECT * FROM state_entries").fetchall()
+                return {str(row["full_path"]): dict(row) for row in rows}
+
     def get_failed_path(self, full_path: str) -> Optional[Dict[str, Any]]:
         key = str(full_path or "").strip()
         if not key:

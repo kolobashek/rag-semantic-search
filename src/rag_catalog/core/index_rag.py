@@ -691,7 +691,14 @@ class RAGIndexer:
 
     # ── stage helpers ──────────────────────────────────────────────────
 
-    def _should_skip_for_stage(self, file_key: str, fingerprint: str) -> bool:
+    def _should_skip_for_stage(
+        self,
+        file_key: str,
+        fingerprint: str,
+        *,
+        existing_entry: Optional[Dict[str, Any]] = None,
+        entry_loaded: bool = False,
+    ) -> bool:
         """
         True если файл уже покрыт текущим или более полным этапом.
 
@@ -699,7 +706,7 @@ class RAGIndexer:
         только если файл УЖЕ имеет полное содержимое (т.е. state.stage == content).
         Если state.stage == metadata и мы сейчас на small/large — нужно ПРОАПГРЕЙДИТЬ.
         """
-        existing = self._get_state_entry(file_key)
+        existing = existing_entry if entry_loaded else self._get_state_entry(file_key)
         if not existing:
             return False
         if str(existing.get("fingerprint") or "") != fingerprint:

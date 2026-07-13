@@ -58,6 +58,9 @@ class _FakeStateDB:
         row = self.entries.get(full_path)
         return dict(row) if row else None
 
+    def entries_snapshot(self):
+        return {key: dict(value) for key, value in self.entries.items()}
+
     def upsert_many(self, entries):
         for entry in entries:
             key = str(entry.get("full_path") or "")
