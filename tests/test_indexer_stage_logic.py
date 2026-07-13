@@ -186,6 +186,22 @@ def test_small_stage_file_without_content_is_marked_empty_for_retry(tmp_path: Pa
     assert stats["processed_files"] >= 1
 
 
+def test_metadata_stage_does_not_open_files_for_document_properties(tmp_path: Path, monkeypatch) -> None:
+    p = tmp_path / "metadata-only.docx"
+    p.write_text("not a real office document", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="must not be read")
+
+    def _unexpected_extract(_path: Path):
+        raise AssertionError("metadata stage must not read document properties")
+
+    monkeypatch.setattr(stage_runner, "extract_doc_meta", _unexpected_extract)
+
+    stats = idx.index_directory(stage="metadata")
+
+    assert stats["error_files"] == 0
+    assert idx.state_db.get_entry(str(p))["stage"] == "metadata"
+
+
 def test_no_ocr_pdf_without_cached_text_is_deferred_and_not_retried_by_quick_pass(tmp_path: Path) -> None:
     p = tmp_path / "scan.pdf"
     p.write_bytes(b"%PDF-1.4\n")

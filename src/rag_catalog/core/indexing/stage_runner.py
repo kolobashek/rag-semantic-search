@@ -933,7 +933,9 @@ class IndexStageRunner:
 
             stat = source_path.stat()
             logical_path_text = relative_path.as_posix()
-            if item.get("archive_path") and item.get("archive_member"):
+            if stage == "metadata":
+                doc_meta = {}
+            elif item.get("archive_path") and item.get("archive_member"):
                 with tempfile.TemporaryDirectory(prefix="rag_zip_meta_") as tmp:
                     temp_path = Path(tmp) / Path(str(item.get("archive_member_display") or item["archive_member"])).name
                     temp_path.write_bytes(_archive_member_bytes())
