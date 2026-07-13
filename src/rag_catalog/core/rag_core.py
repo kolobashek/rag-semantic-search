@@ -630,8 +630,10 @@ class RAGSearcher:
             channels = [numeric_exact_results, lexical_results, bm25_results, fulltext_results, results]
             fused = rrf_fuse(channels, limit=max(limit * 4, 40))
             results = self._merge_ranked_results([], fused, limit=rerank_top_n, query=query_used)
-            results = self._apply_relevance_gate(lexical_query, results)
-            results = self._rerank_results(query_used, results, limit=limit)
+            if bool(self.config.get("retrieval_reranker_enabled", False)):
+                results = self._rerank_results(query_used, results, limit=rerank_top_n)
+            else:
+                results = self._apply_relevance_gate(lexical_query, results)
         else:
             results = self._merge_ranked_results(
                 [*numeric_exact_results, *lexical_results, *fulltext_results],
@@ -640,6 +642,7 @@ class RAGSearcher:
                 query=query_used,
             )
         results = self._apply_relevance_gate(lexical_query, results)
+        results = results[:limit]
         results = [self._repair_result_display_fields(item) for item in results]
 
         self.telemetry.log_search(
@@ -1780,11 +1783,14 @@ class RAGSearcher:
             raw_reranker = item.get("reranker_score")
             if raw_reranker is not None and not strong_lexical and float(raw_reranker) < reranker_floor:
                 continue
+            reranker_pass = raw_reranker is not None and float(raw_reranker) >= reranker_floor
             dense_score = float(item.get("dense_score") or (item.get("score") if sources == {"dense"} else 0) or 0)
-            if not strong_lexical and dense_score < dense_floor:
+            if not strong_lexical and not reranker_pass and dense_score < dense_floor:
                 continue
             updated = dict(item)
-            updated["relevance_evidence"] = "lexical" if strong_lexical else "dense"
+            updated["relevance_evidence"] = (
+                "lexical" if strong_lexical else "reranker" if reranker_pass else "dense"
+            )
             updated["relevance_floor"] = dense_floor
             gated.append(updated)
         return gated

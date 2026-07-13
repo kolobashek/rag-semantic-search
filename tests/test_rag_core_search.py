@@ -338,6 +338,30 @@ def test_relevance_gate_rejects_weak_dense_noise_and_microchunks() -> None:
     ]
 
 
+def test_relevance_gate_accepts_weak_dense_candidate_confirmed_by_reranker() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.84,
+        "retrieval_single_term_min_dense_score": 0.86,
+        "retrieval_min_content_chars": 120,
+        "retrieval_reranker_min_score": -2.0,
+    }
+    candidate = {
+        "type": "pdf_content",
+        "filename": "relevant.pdf",
+        "text": "Содержательно релевантный фрагмент документа. " * 5,
+        "score": 0.81,
+        "dense_score": 0.81,
+        "retrieval_source": "dense",
+        "reranker_score": 1.25,
+    }
+
+    assert s._apply_relevance_gate("запрос", [candidate]) == [
+        {**candidate, "relevance_evidence": "reranker", "relevance_floor": 0.86}
+    ]
+
+
 def test_rrf_recency_boost_is_relative_and_does_not_displace_exact_match() -> None:
     s = _make_searcher(connected=True)
     s.config = {"rank_recency_enabled": True, "rank_recency_max_boost": 0.03}
