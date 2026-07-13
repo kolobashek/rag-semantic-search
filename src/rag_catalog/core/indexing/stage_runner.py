@@ -1037,6 +1037,11 @@ class IndexStageRunner:
                 "mtime": mtime,
                 "size_bytes": size_bytes,
                 "was_indexed": existing_entry is not None,
+                "existing_stage": str((existing_entry or {}).get("stage") or ""),
+                "same_fingerprint": bool(
+                    existing_entry
+                    and str(existing_entry.get("fingerprint") or "") == fingerprint
+                ),
                 "had_failure": bool(
                     existing_entry
                     and str(existing_entry.get("status") or existing_entry.get("stage") or "") == "error"
@@ -1114,7 +1119,12 @@ class IndexStageRunner:
 
                 # При full-проходе после quick не трогаем уже записанные первые чанки,
                 # а добавляем только хвост. В остальных случаях старые векторы заменяются.
-                if result["was_indexed"] and not result.get("append_only"):
+                metadata_only_upgrade = bool(
+                    result.get("same_fingerprint")
+                    and str(result.get("existing_stage") or "") in {"metadata", "empty"}
+                    and stage in {"small", "large"}
+                )
+                if result["was_indexed"] and not result.get("append_only") and not metadata_only_upgrade:
                     indexer._delete_file_vectors(Path(result["file_key"]))
                     stage_stats["updated_files"] += 1
                 elif result["was_indexed"]:

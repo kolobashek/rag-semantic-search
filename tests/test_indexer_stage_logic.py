@@ -219,6 +219,20 @@ def test_stage_runner_uses_configured_write_batch(tmp_path: Path) -> None:
     assert idx.qdrant.upsert_calls == 1
 
 
+def test_small_stage_upgrades_unchanged_metadata_without_delete(tmp_path: Path) -> None:
+    p = tmp_path / "upgrade.txt"
+    p.write_text("Содержательный текст документа " * 10, encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.index_directory(stage="metadata")
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda path: deleted.append(path)
+
+    idx.index_directory(stage="small")
+
+    assert deleted == []
+    assert idx.state_db.get_entry(str(p))["stage"] == "content"
+
+
 def test_no_ocr_pdf_without_cached_text_is_deferred_and_not_retried_by_quick_pass(tmp_path: Path) -> None:
     p = tmp_path / "scan.pdf"
     p.write_bytes(b"%PDF-1.4\n")
