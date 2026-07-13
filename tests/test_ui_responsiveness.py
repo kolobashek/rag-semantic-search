@@ -185,6 +185,16 @@ def test_login_io_does_not_block_nicegui_event_loop() -> None:
     assert 'login_button.props("loading")' in source
 
 
+def test_forced_password_change_does_not_block_or_reload_page() -> None:
+    source = inspect.getsource(nice_app._build_page)
+
+    assert "async def force_change()" in source
+    assert "await run.io_bound(change_and_reload_user)" in source
+    assert "state.current_user = fresh_user" in source
+    assert 'change_button.props("loading")' in source
+    assert "ui.navigate.reload()" not in source[source.index("async def force_change()"):source.index("def render_login_screen()")]
+
+
 def test_reconnect_overlay_is_delayed_for_brief_transport_jitter() -> None:
     source = inspect.getsource(css._install_css)
 

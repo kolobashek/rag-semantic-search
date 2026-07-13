@@ -2498,7 +2498,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 old_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
                 new_pw.on("keyup.enter", lambda _: ui.run_javascript(_focus_next_js))
 
-                def force_change() -> None:
+                async def force_change() -> None:
                     new_password = str(new_pw.value or "")
                     if str(new_pw2.value or "") != new_password:
                         ui.notify("Пароли не совпадают.", type="warning")
@@ -2506,22 +2506,51 @@ def _build_page(initial_screen: str = "search") -> None:
                     if len(new_password) < 6:
                         ui.notify("Пароль должен быть не менее 6 символов.", type="warning")
                         return
-                    ok = auth_db.change_password(
-                        username=username,
-                        old_password=str(old_pw.value or ""),
-                        new_password=new_password,
-                    )
-                    if ok:
-                        _refresh_current_user(state)
-                        auth_db.log_auth_event(username=username, event_type="password_changed_forced", ok=True)
+                    change_button.props("loading")
+                    change_button.disable()
+                    completed = False
+                    started = _time.perf_counter()
+
+                    def change_and_reload_user() -> Optional[Dict[str, Any]]:
+                        ok = auth_db.change_password(
+                            username=username,
+                            old_password=str(old_pw.value or ""),
+                            new_password=new_password,
+                        )
+                        if not ok:
+                            return None
+                        fresh_user = auth_db.get_user(username=username)
+                        auth_db.log_auth_event(
+                            username=username,
+                            event_type="password_changed_forced",
+                            ok=True,
+                        )
+                        return fresh_user
+
+                    try:
+                        fresh_user = await run.io_bound(change_and_reload_user)
+                        logger.info(
+                            "auth_password_change action=complete username=%s ok=%s duration_ms=%.1f",
+                            username,
+                            bool(fresh_user),
+                            (_time.perf_counter() - started) * 1000,
+                        )
+                        if not fresh_user:
+                            ui.notify("Не удалось изменить пароль. Проверьте текущий пароль.", type="negative")
+                            return
+                        state.current_user = fresh_user
+                        await run.io_bound(_load_user_state, state)
+                        completed = True
                         ui.notify("Пароль успешно изменён.", type="positive")
                         render()
-                    else:
-                        ui.notify("Не удалось изменить пароль. Проверьте текущий пароль.", type="negative")
+                    finally:
+                        if not completed and _client_alive():
+                            change_button.props(remove="loading")
+                            change_button.enable()
 
-                new_pw2.on("keyup.enter", lambda _: force_change())
+                new_pw2.on("keyup.enter", force_change)
                 with ui.row().classes("gap-2"):
-                    ui.button("Сменить пароль", icon="key", on_click=force_change).props("unelevated")
+                    change_button = ui.button("Сменить пароль", icon="key", on_click=force_change).props("unelevated")
                     ui.button("Выйти", icon="logout", on_click=do_logout).props("flat")
 
     def render_login_screen() -> None:
