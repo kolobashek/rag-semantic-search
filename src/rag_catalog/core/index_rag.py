@@ -203,10 +203,10 @@ _TAG_STOPWORDS: Set[str] = {
 #
 #   1. metadata — индексируется ТОЛЬКО имя/путь/размер/mtime всех файлов.
 #      58 тыс. файлов за ~5 минут. Поиск по именам работает сразу.
-#   2. small    — быстрый проход по всем файлам: первые N чанков на файл.
-#      Даёт ранний поиск по содержимому без ожидания полного корпуса.
-#   3. large    — полный проход по всем файлам: догружает чанки, оставшиеся
-#      после small, и закрывает файл как fully indexed.
+#   2. small    — быстрый проход по небольшим файлам: первые N чанков на файл.
+#      Даёт ранний поиск по содержимому без повторного чтения тяжёлых документов.
+#   3. large    — полный проход: обрабатывает тяжёлые файлы и догружает чанки,
+#      оставшиеся после small, затем закрывает файл как fully indexed.
 #
 # Порядок важен: чем меньше число, тем «старше» этап (больше информации).
 STAGES = ("metadata", "small", "large")
@@ -219,8 +219,7 @@ DEFAULT_SMALL_PDF_MB = 2.0
 
 def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) -> str:
     """
-    Legacy-категория размера файла.
-    Этапы small/large больше не делят файлы по этой категории.
+    Категория размера для прогрессивных этапов small/large.
 
     Изображения всегда в категории «large» — OCR CPU-intensive.
     """
@@ -231,7 +230,7 @@ def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) 
     ext = filepath.suffix.lower()
     if ext in (".txt", ".csv", ".rtf", ".pptx"):
         return "small"
-    if ext in (".docx", ".xlsx", ".xls") and size_mb < small_office_mb:
+    if ext in (".doc", ".docx", ".xlsx", ".xls", ".xlsm") and size_mb < small_office_mb:
         return "small"
     if ext == ".pdf" and size_mb < small_pdf_mb:
         return "small"

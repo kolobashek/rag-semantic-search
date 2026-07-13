@@ -342,6 +342,25 @@ def test_small_stage_truncates_all_files_and_large_appends_remainder(tmp_path: P
     assert len(idx.qdrant.points) > quick_points
 
 
+def test_small_stage_defers_large_pdf_to_large_stage(tmp_path: Path) -> None:
+    small = tmp_path / "small.txt"
+    large = tmp_path / "large.pdf"
+    small.write_text("small content", encoding="utf-8")
+    large.write_bytes(b"x" * (3 * 1_048_576))
+    idx = _make_indexer(tmp_path, extracted_text="large pdf content")
+    idx.small_pdf_mb = 2.0
+
+    small_stats = idx.index_directory(stage="small")
+
+    assert small_stats["total_files"] == 1
+    assert idx.state_db.get_entry(str(small)) is not None
+    assert idx.state_db.get_entry(str(large)) is None
+
+    idx.index_directory(stage="large")
+
+    assert idx.state_db.get_entry(str(large))["stage"] == "content"
+
+
 def test_text_and_csv_files_are_indexed_as_content(tmp_path: Path) -> None:
     txt = tmp_path / "note.txt"
     csv = tmp_path / "table.csv"

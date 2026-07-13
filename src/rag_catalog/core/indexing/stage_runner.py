@@ -245,7 +245,7 @@ class IndexStageRunner:
         Pipeline-индексирование на указанном этапе.
 
           stage="metadata" — только имя/путь/размер/mtime (не читает файлы);
-          stage="small"    — быстрый проход по всем файлам, ограниченный max_chunks;
+          stage="small"    — быстрый проход по небольшим файлам, ограниченный max_chunks;
           stage="large"    — полный проход/догрузка оставшихся чанков;
           stage="content"  — legacy: полное содержимое для всех файлов за один проход.
 
@@ -529,12 +529,26 @@ class IndexStageRunner:
             all_tasks = [item for item in all_tasks if _task_matches_only_paths(item, only_paths)]
             self._logger.info("Ограничение списка файлов: %d → %d по --only-paths-file", before, len(all_tasks))
 
-        # metadata/small/large видят все файлы. Разница не в типе файла, а в глубине:
-        # small пишет первые N чанков, large догружает хвост и закрывает content.
+        # small не читает тяжёлые файлы дважды: они сразу переходят в large.
+        # large видит весь корпус, пропускает уже полные small-файлы и догружает partial.
         if stage == "small":
-            scope_files = all_tasks
+            scope_files = [
+                item
+                for item in all_tasks
+                if (
+                    str(item.get("archive_category") or "") == "small"
+                    if item.get("archive_path")
+                    else self._file_category(
+                        Path(item["source_path"]),
+                        indexer.small_office_mb,
+                        indexer.small_pdf_mb,
+                    ) == "small"
+                )
+            ]
             self._logger.info(
-                "Этап 'small': быстрый проход по всем файлам, лимит %d чанков/файл",
+                "Этап 'small': %d небольших файлов из %d, лимит %d чанков/файл",
+                len(scope_files),
+                len(all_tasks),
                 int(getattr(indexer, "max_chunks_per_file", 0) or 0),
             )
         elif stage == "large":
