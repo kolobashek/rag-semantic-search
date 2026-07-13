@@ -1768,9 +1768,14 @@ class RAGSearcher:
                 if len(clean_text) < min_content_chars and "fulltext" not in sources:
                     continue
 
-            strong_lexical = bool(
-                sources & {"numeric_exact", "numeric_fs_exact", "spreadsheet_numeric_exact", "fulltext"}
+            strong_lexical = "fulltext" in sources
+            numeric_sources = {"numeric_exact", "numeric_fs_exact", "spreadsheet_numeric_exact"}
+            numeric_context_terms = [term for term in query_terms if not any(char.isdigit() for char in term)]
+            numeric_context_only = not numeric_context_terms or all(
+                term in {"vin", "птс", "стс", "псм", "утм"} for term in numeric_context_terms
             )
+            if sources & numeric_sources and numeric_context_only:
+                strong_lexical = True
             lexical_matched = int(item.get("lexical_matched_terms") or 0)
             lexical_total = int(item.get("lexical_query_terms") or len(query_terms) or 0)
             bm25_matched = int(item.get("bm25_matched_terms") or 0)

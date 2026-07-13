@@ -362,6 +362,26 @@ def test_relevance_gate_accepts_weak_dense_candidate_confirmed_by_reranker() -> 
     ]
 
 
+def test_relevance_gate_requires_text_evidence_for_mixed_numeric_query() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.84,
+        "retrieval_single_term_min_dense_score": 0.86,
+        "retrieval_min_content_chars": 120,
+    }
+    numeric_only = {
+        "type": "file_metadata",
+        "filename": "unrelated.jpg",
+        "text": "Файл с совпавшим номером",
+        "score": 0.999,
+        "retrieval_source": "numeric_exact",
+    }
+
+    assert s._apply_relevance_gate("несуществующая организация 847291", [numeric_only]) == []
+    assert s._apply_relevance_gate("СТС 847291", [numeric_only])[0]["relevance_evidence"] == "lexical"
+
+
 def test_rrf_recency_boost_is_relative_and_does_not_displace_exact_match() -> None:
     s = _make_searcher(connected=True)
     s.config = {"rank_recency_enabled": True, "rank_recency_max_boost": 0.03}
