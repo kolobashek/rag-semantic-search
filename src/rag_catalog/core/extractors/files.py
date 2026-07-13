@@ -242,6 +242,10 @@ def _resolve_antiword() -> str:
 
 
 def _resolve_soffice() -> str:
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    program_files_x86 = Path(
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    )
     return (
         _resolve_env_tool("RAG_SOFFICE_CMD", "RAG_LIBREOFFICE_CMD", "SOFFICE")
         or _first_existing_tool(
@@ -251,6 +255,8 @@ def _resolve_soffice() -> str:
             _TOOLS_ROOT / "LibreOfficePortable" / "App" / "LibreOffice" / "program" / "soffice.exe",
             _TOOLS_ROOT / "libreoffice" / "program" / "soffice",
             _TOOLS_ROOT / "LibreOffice" / "program" / "soffice",
+            program_files / "LibreOffice" / "program" / "soffice.exe",
+            program_files_x86 / "LibreOffice" / "program" / "soffice.exe",
         )
         or shutil.which("soffice")
         or shutil.which("libreoffice")

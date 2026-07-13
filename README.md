@@ -143,6 +143,8 @@ python index_rag.py --recreate --stage all
 
 Поддерживаемые форматы: `.doc`, `.docx`, `.xls`, `.xlsx`, `.xlsm`, `.pdf`, `.pptx`, `.rtf`, `.txt`, `.csv`, `.html`, `.htm`, изображения с OCR и архивы `.zip`, `.7z`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz`, `.tbz2`, `.tar.xz`, `.txz`, `.rar` с такими файлами внутри.
 
+Для качественного извлечения старых бинарных `.doc` на Windows установите LibreOffice. Индексатор автоматически находит стандартную установку в `Program Files`; для нестандартного пути задайте `RAG_SOFFICE_CMD`. Без LibreOffice или `antiword` применяется только аварийный бинарный fallback, который не гарантирует полноту текста.
+
 ## OCR
 
 Рекомендуемый вариант — portable binaries внутри проекта:

@@ -4,7 +4,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from rag_catalog.core.extractors.files import extract_doc, extract_pptx, extract_pptx_document, extract_rtf
+from rag_catalog.core.extractors.files import (
+    _resolve_soffice,
+    extract_doc,
+    extract_pptx,
+    extract_pptx_document,
+    extract_rtf,
+)
 
 
 def test_extract_rtf_without_optional_dependency(tmp_path: Path) -> None:
@@ -86,6 +92,22 @@ def test_extract_doc_uses_env_antiword_before_path(tmp_path: Path, monkeypatch) 
     )
 
     assert extract_doc(path) == "bundled text"
+
+
+def test_resolve_soffice_finds_standard_windows_install(tmp_path: Path, monkeypatch) -> None:
+    program_files = tmp_path / "Program Files"
+    soffice = program_files / "LibreOffice" / "program" / "soffice.exe"
+    soffice.parent.mkdir(parents=True)
+    soffice.write_bytes(b"fake")
+
+    monkeypatch.delenv("RAG_SOFFICE_CMD", raising=False)
+    monkeypatch.delenv("RAG_LIBREOFFICE_CMD", raising=False)
+    monkeypatch.delenv("SOFFICE", raising=False)
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "Program Files (x86)"))
+    monkeypatch.setattr("rag_catalog.core.extractors.files.shutil.which", lambda _name: None)
+
+    assert _resolve_soffice() == str(soffice)
 
 
 def test_extract_doc_binary_fallback_reads_text_runs(tmp_path: Path, monkeypatch) -> None:
