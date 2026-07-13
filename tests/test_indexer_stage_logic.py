@@ -40,8 +40,10 @@ class _FakeQdrant:
     def __init__(self) -> None:
         self.points_count = 0
         self.points = []
+        self.upsert_calls = 0
 
     def upsert(self, collection_name, points):
+        self.upsert_calls += 1
         self.points_count += len(points)
         self.points.extend(points)
 
@@ -203,6 +205,18 @@ def test_metadata_stage_does_not_open_files_for_document_properties(tmp_path: Pa
 
     assert stats["error_files"] == 0
     assert idx.state_db.get_entry(str(p))["stage"] == "metadata"
+
+
+def test_stage_runner_uses_configured_write_batch(tmp_path: Path) -> None:
+    for index in range(300):
+        (tmp_path / f"file-{index:03d}.txt").write_text("metadata", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.batch_size = 300
+
+    idx.index_directory(stage="metadata")
+
+    assert idx.qdrant.points_count == 300
+    assert idx.qdrant.upsert_calls == 1
 
 
 def test_no_ocr_pdf_without_cached_text_is_deferred_and_not_retried_by_quick_pass(tmp_path: Path) -> None:

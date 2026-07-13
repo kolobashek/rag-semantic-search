@@ -264,6 +264,7 @@ class IndexStageRunner:
 
         ENCODE_BATCH = 256  # сколько чанков накапливать перед одним вызовом encode()
                             # 256 оптимально для CPU (OpenBLAS матричные операции)
+        WRITE_BATCH = max(ENCODE_BATCH, min(2048, int(getattr(indexer, "batch_size", 1000) or 1000)))
 
         # Семафор ограничивает число одновременно «зависших» daemon-потоков.
         # При массовых SMB-таймаутах без ограничения они накапливаются до OOM.
@@ -662,7 +663,9 @@ class IndexStageRunner:
                             indexer._upsert_state_entry(row)
                     pending_states.clear()
                 return
-            # Нарезаем на мини-батчи — encode каждого занимает < ~1 сек
+            encoded_points: List[PointStruct] = []
+            # Нарезаем encode на мини-батчи, затем пишем весь накопленный блок
+            # одним запросом, чтобы не платить сетевой/fsync overhead каждые 256 точек.
             for i in range(0, len(pending_texts), ENCODE_BATCH):
                 chunk_texts    = pending_texts[i : i + ENCODE_BATCH]
                 chunk_payloads = pending_payloads[i : i + ENCODE_BATCH]
@@ -674,18 +677,18 @@ class IndexStageRunner:
                     normalize_embeddings=True,
                     batch_size=256, show_progress_bar=False,
                 )
-                points = [
+                encoded_points.extend(
                     PointStruct(id=_point_id(p), vector=v.tolist(), payload=p)
                     for v, p in zip(vectors, chunk_payloads)
-                ]
-                written = upsert_points(
-                    indexer.qdrant,
-                    collection_name=indexer.collection_name,
-                    points=points,
-                    timeout_sec=int(getattr(indexer, "qdrant_timeout_sec", 60) or 60),
                 )
-                indexer.point_count += written
-                stage_stats["points_added"] += written
+            written = upsert_points(
+                indexer.qdrant,
+                collection_name=indexer.collection_name,
+                points=encoded_points,
+                timeout_sec=int(getattr(indexer, "qdrant_timeout_sec", 60) or 60),
+            )
+            indexer.point_count += written
+            stage_stats["points_added"] += written
             self._logger.info(
                 "Записан батч: %d точек (итого %d)", len(pending_texts), indexer.point_count
             )
@@ -1192,7 +1195,7 @@ class IndexStageRunner:
                 )
 
                 # Достигли порога — кодируем и пишем в Qdrant
-                if len(pending_texts) >= ENCODE_BATCH:
+                if len(pending_texts) >= WRITE_BATCH:
                     flush()
 
                 if indexer.run_id and (
