@@ -110,6 +110,28 @@ def test_resolve_soffice_finds_standard_windows_install(tmp_path: Path, monkeypa
     assert _resolve_soffice() == str(soffice)
 
 
+def test_extract_doc_uses_isolated_libreoffice_profile(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "legacy.doc"
+    path.write_bytes(b"dummy")
+    soffice = tmp_path / "soffice.exe"
+    soffice.write_bytes(b"fake")
+    captured_args: list[str] = []
+
+    monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_antiword", lambda: "")
+    monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_soffice", lambda: str(soffice))
+
+    def _run(args, **_kwargs):
+        captured_args.extend(str(item) for item in args)
+        out_dir = Path(args[args.index("--outdir") + 1])
+        (out_dir / "legacy.txt").write_text("converted text", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("rag_catalog.core.extractors.files.subprocess.run", _run)
+
+    assert extract_doc(path) == "converted text"
+    assert any(arg.startswith("-env:UserInstallation=file:") for arg in captured_args)
+
+
 def test_extract_doc_binary_fallback_reads_text_runs(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "legacy.doc"
     path.write_bytes(b"\xd0\xcf\x11\xe0" + "Договор аренды спецтехники 8905".encode("utf-16le") + b"\x00" * 32)
@@ -117,6 +139,7 @@ def test_extract_doc_binary_fallback_reads_text_runs(tmp_path: Path, monkeypatch
     monkeypatch.delenv("RAG_ANTIWORD_CMD", raising=False)
     monkeypatch.delenv("RAG_SOFFICE_CMD", raising=False)
     monkeypatch.setattr("rag_catalog.core.extractors.files.shutil.which", lambda _name: None)
+    monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_soffice", lambda: "")
 
     text = extract_doc(path)
 

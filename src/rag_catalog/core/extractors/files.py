@@ -359,9 +359,11 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
     if soffice:
         try:
             with tempfile.TemporaryDirectory(prefix="rag_doc_") as tmp:
+                profile_uri = (Path(tmp) / "profile").resolve().as_uri()
                 proc = subprocess.run(
                     [
                         soffice,
+                        f"-env:UserInstallation={profile_uri}",
                         "--headless",
                         "--convert-to",
                         "txt:Text",
