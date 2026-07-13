@@ -175,6 +175,16 @@ def test_ui_reconnect_timeout_preserves_short_lived_sessions() -> None:
     assert "reconnect_timeout=_ui_reconnect_timeout_seconds(cfg)" in main_source
 
 
+def test_login_io_does_not_block_nicegui_event_loop() -> None:
+    source = inspect.getsource(nice_app._build_page)
+
+    assert "async def login()" in source
+    assert "auth_db.login_with_reason" in source
+    assert "await run.io_bound(prepare_login_session" in source
+    assert "await run.io_bound(_load_user_state, state)" in source
+    assert 'login_button.props("loading")' in source
+
+
 def test_reconnect_overlay_is_delayed_for_brief_transport_jitter() -> None:
     source = inspect.getsource(css._install_css)
 

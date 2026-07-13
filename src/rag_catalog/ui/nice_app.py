@@ -28,7 +28,14 @@ from . import index_view as _index_view
 from . import jobs_view as _jobs_view
 from . import settings_view as _settings_view
 from . import stats_view as _stats_view
-from .auth_session import complete_login_session, logout_session, restore_session, touch_session
+from .auth_session import (
+    apply_login_session,
+    complete_login_session,
+    logout_session,
+    prepare_login_session,
+    restore_session,
+    touch_session,
+)
 from .css import INTERACTION_JS_PATH, _install_css, _install_interaction_javascript
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
@@ -2521,30 +2528,75 @@ def _build_page(initial_screen: str = "search") -> None:
         auth_db = _get_auth_db(state)
         tg_login_token = {"value": ""}
 
-        def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
-            complete_login_session(state, user, event_type=event_type)
-            _load_user_state(state)
+        async def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
+            started = _time.perf_counter()
+            token = await run.io_bound(prepare_login_session, state, user, event_type=event_type)
+            apply_login_session(state, user, token)
+            await run.io_bound(_load_user_state, state)
+            logger.info(
+                "auth_login action=complete username=%s duration_ms=%.1f",
+                str(user.get("username") or ""),
+                (_time.perf_counter() - started) * 1000,
+            )
             ui.notify("Вход выполнен.", type="positive")
             render()
 
-        def login() -> None:
+        async def login() -> None:
+            login_button.props("loading")
+            login_button.disable()
+            completed = False
+            started = _time.perf_counter()
             username = str(username_input.value or "")
-            result = auth_db.login_with_reason(username=username, password=str(password_input.value or ""))
-            reason = str(result.get("reason") or "")
-            user = result.get("user")
-            if reason == "pending":
-                auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="pending")
-                ui.notify("Ваша заявка ещё не активирована администратором.", type="warning", timeout=6000)
-                return
-            if reason == "blocked":
-                auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="blocked")
-                ui.notify("Аккаунт заблокирован. Обратитесь к администратору.", type="negative")
-                return
-            if not user:
-                auth_db.log_auth_event(username=username, event_type="login_failed", ok=False, error="bad_credentials")
-                ui.notify("Неверный логин или пароль.", type="negative")
-                return
-            _complete_login(user, event_type="login")
+            try:
+                result = await run.io_bound(
+                    auth_db.login_with_reason,
+                    username=username,
+                    password=str(password_input.value or ""),
+                )
+                reason = str(result.get("reason") or "")
+                user = result.get("user")
+                logger.info(
+                    "auth_login action=credentials username=%s reason=%s duration_ms=%.1f",
+                    username,
+                    reason,
+                    (_time.perf_counter() - started) * 1000,
+                )
+                if reason == "pending":
+                    await run.io_bound(
+                        auth_db.log_auth_event,
+                        username=username,
+                        event_type="login_failed",
+                        ok=False,
+                        error="pending",
+                    )
+                    ui.notify("Ваша заявка ещё не активирована администратором.", type="warning", timeout=6000)
+                    return
+                if reason == "blocked":
+                    await run.io_bound(
+                        auth_db.log_auth_event,
+                        username=username,
+                        event_type="login_failed",
+                        ok=False,
+                        error="blocked",
+                    )
+                    ui.notify("Аккаунт заблокирован. Обратитесь к администратору.", type="negative")
+                    return
+                if not user:
+                    await run.io_bound(
+                        auth_db.log_auth_event,
+                        username=username,
+                        event_type="login_failed",
+                        ok=False,
+                        error="bad_credentials",
+                    )
+                    ui.notify("Неверный логин или пароль.", type="negative")
+                    return
+                await _complete_login(user, event_type="login")
+                completed = True
+            finally:
+                if not completed and _client_alive():
+                    login_button.props(remove="loading")
+                    login_button.enable()
 
         def request_tg_login() -> None:
             bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
@@ -2731,8 +2783,8 @@ def _build_page(initial_screen: str = "search") -> None:
                                 "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
                                 "if(i>=0&&ins[i+1])ins[i+1].focus();"
                             ))
-                            password_input.on("keyup.enter", lambda _: login())
-                            ui.button("Войти", icon="login", on_click=login).props("unelevated").classes("w-full").style(
+                            password_input.on("keyup.enter", login)
+                            login_button = ui.button("Войти", icon="login", on_click=login).props("unelevated").classes("w-full").style(
                                 "height:48px;font-family:var(--rag-font-display);font-size:15px;font-weight:600;letter-spacing:-0.01em"
                             )
                             with ui.element("div").classes("rag-divider-text"):

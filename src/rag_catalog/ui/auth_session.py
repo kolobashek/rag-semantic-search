@@ -59,11 +59,24 @@ def touch_session(state: PageState, *, min_interval_minutes: int = 60) -> None:
 
 def complete_login_session(state: PageState, user: Dict[str, Any], *, event_type: str) -> None:
     """Set the current user, create a persistent session token, and audit login."""
+    token = prepare_login_session(state, user, event_type=event_type)
+    apply_login_session(state, user, token)
+
+
+def prepare_login_session(state: PageState, user: Dict[str, Any], *, event_type: str) -> str:
+    """Perform the blocking persistence work required for a login."""
     auth_db = _get_auth_db(state)
-    state.current_user = user
-    state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
+    username = str(user.get("username") or "").strip().lower()
+    token = auth_db.create_session(username=username)
     ensure_cloud_drive_user_home(state, user)
-    auth_db.log_auth_event(username=_username(state), event_type=event_type, ok=True)
+    auth_db.log_auth_event(username=username, event_type=event_type, ok=True)
+    return token
+
+
+def apply_login_session(state: PageState, user: Dict[str, Any], token: str) -> None:
+    """Apply a prepared login to UI-owned state and browser storage."""
+    state.current_user = user
+    state.auth_token = token
     state.session_expired = False
     try:
         app.storage.user["auth_token"] = state.auth_token
