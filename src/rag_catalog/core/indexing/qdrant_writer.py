@@ -20,6 +20,12 @@ from qdrant_client.models import (
     MatchValue,
     PayloadSchemaType,
     PointStruct,
+    Snowball,
+    SnowballLanguage,
+    SnowballParams,
+    TextIndexParams,
+    TextIndexType,
+    TokenizerType,
     VectorParams,
 )
 
@@ -32,6 +38,7 @@ def ensure_collection(
     collection_name: str,
     vector_size: int,
     recreate: bool = False,
+    fulltext_enabled: bool = False,
 ) -> bool:
     """Ensure the target collection exists.
 
@@ -43,38 +50,94 @@ def ensure_collection(
         if recreate:
             logger.info("Пересоздание коллекции %s…", collection_name)
             client.delete_collection(collection_name)
-            create_collection(client, collection_name=collection_name, vector_size=vector_size)
+            create_collection(
+                client,
+                collection_name=collection_name,
+                vector_size=vector_size,
+                fulltext_enabled=fulltext_enabled,
+            )
             return True
         logger.info("Коллекция %s уже существует.", collection_name)
-        ensure_payload_indexes(client, collection_name=collection_name)
+        ensure_payload_indexes(
+            client,
+            collection_name=collection_name,
+            fulltext_enabled=fulltext_enabled,
+        )
         return False
 
-    create_collection(client, collection_name=collection_name, vector_size=vector_size)
+    create_collection(
+        client,
+        collection_name=collection_name,
+        vector_size=vector_size,
+        fulltext_enabled=fulltext_enabled,
+    )
     return False
 
 
-def create_collection(client: Any, *, collection_name: str, vector_size: int) -> None:
+def create_collection(
+    client: Any,
+    *,
+    collection_name: str,
+    vector_size: int,
+    fulltext_enabled: bool = False,
+) -> None:
     logger.info("Создание коллекции %s…", collection_name)
     client.create_collection(
         collection_name=collection_name,
         vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
     )
-    ensure_payload_indexes(client, collection_name=collection_name)
+    ensure_payload_indexes(
+        client,
+        collection_name=collection_name,
+        fulltext_enabled=fulltext_enabled,
+    )
 
 
-def ensure_payload_indexes(client: Any, *, collection_name: str) -> None:
-    """Best-effort payload indexes for exact filters used by search."""
+def ensure_payload_indexes(
+    client: Any,
+    *,
+    collection_name: str,
+    fulltext_enabled: bool = False,
+) -> None:
+    """Best-effort payload indexes for filters and Russian full-text retrieval."""
+    for field_name in ("numeric_tokens", "type", "extension", "full_path"):
+        try:
+            client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field_name,
+                field_schema=PayloadSchemaType.KEYWORD,
+                wait=False,
+            )
+        except Exception as exc:
+            message = str(exc).lower()
+            if "already exists" not in message and "exists" not in message:
+                logger.debug("Не удалось создать payload index %s: %s", field_name, exc)
+
+    if not fulltext_enabled:
+        return
     try:
         client.create_payload_index(
             collection_name=collection_name,
-            field_name="numeric_tokens",
-            field_schema=PayloadSchemaType.KEYWORD,
+            field_name="text",
+            field_schema=TextIndexParams(
+                type=TextIndexType.TEXT,
+                tokenizer=TokenizerType.WORD,
+                min_token_len=2,
+                max_token_len=64,
+                lowercase=True,
+                phrase_matching=True,
+                on_disk=True,
+                stemmer=SnowballParams(
+                    type=Snowball.SNOWBALL,
+                    language=SnowballLanguage.RUSSIAN,
+                ),
+            ),
             wait=False,
         )
     except Exception as exc:
         message = str(exc).lower()
         if "already exists" not in message and "exists" not in message:
-            logger.debug("Не удалось создать payload index numeric_tokens: %s", exc)
+            logger.warning("Не удалось создать полнотекстовый index text: %s", exc)
 
 
 def delete_file_vectors(

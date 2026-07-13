@@ -2314,6 +2314,8 @@ class CloudDriveService:
             ocr_poppler_bin=str(index_config.get('ocr_poppler_bin') or ''),
             qdrant_timeout_sec=int(index_config.get('qdrant_timeout_sec') or 60),
             ocr_max_image_pages=int(index_config.get('ocr_max_image_pages') or 50),
+            min_chunk_chars=int(index_config.get('index_min_chunk_chars') or 120),
+            fulltext_enabled=bool(index_config.get('retrieval_fulltext_enabled') or False),
         )
 
     def _delete_index_vectors(self, *, index_config: Dict[str, object], payload_match: Dict[str, Any]) -> int:

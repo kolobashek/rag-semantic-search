@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
 from ..extractors import ExtractedDocument, extract_doc_meta
+from ..retrieval import prepare_passage_texts
 from .qdrant_writer import upsert_points
 
 _TAR_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz")
@@ -661,7 +662,11 @@ class IndexStageRunner:
                 chunk_texts    = pending_texts[i : i + ENCODE_BATCH]
                 chunk_payloads = pending_payloads[i : i + ENCODE_BATCH]
                 vectors = indexer.embedder.encode(
-                    chunk_texts, normalize_embeddings=True,
+                    prepare_passage_texts(
+                        str(getattr(indexer, "embedding_model", "") or ""),
+                        chunk_texts,
+                    ),
+                    normalize_embeddings=True,
                     batch_size=256, show_progress_bar=False,
                 )
                 points = [

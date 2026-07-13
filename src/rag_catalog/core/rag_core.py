@@ -23,12 +23,12 @@ from ._platform_compat import apply_windows_platform_workarounds
 apply_windows_platform_workarounds()
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchText, MatchValue
 
 from .embedding_collections import resolve_collection_name_from_config
 from .exact_tokens import numeric_exact_tokens, query_numeric_tokens, repair_mojibake_text
 from .index_state_db import IndexStateDB
-from .retrieval import bm25_rank_items, prepare_bm25_items, rrf_fuse
+from .retrieval import bm25_rank_items, prepare_bm25_items, prepare_query_text, rrf_fuse, tokenize
 from .telemetry_db import TelemetryDB
 
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
@@ -57,13 +57,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "qdrant_url": "http://localhost:6333",   # Docker-сервер (приоритет над db_path)
     "log_file": r"O:\rag_automation.log",
     "collection_name": "catalog",
-    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "embedding_model": "intfloat/multilingual-e5-small",
     "embedding_collection_versioning": False,
     "embedding_collection_suffix": "",
-    "retrieval_preset": "legacy",  # legacy|release_v2
+    "retrieval_preset": "release_v2",  # legacy|release_v2
     "vector_size": 384,
     "chunk_size": 500,
     "chunk_overlap": 100,
+    "index_min_chunk_chars": 120,
     "chunk_group_size": 4,
     "batch_size": 1000,
     "index_read_workers": 0,
@@ -114,16 +115,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rank_recency_half_life_days": 180.0,  # через сколько дней буст в 2 раза меньше
     "rank_recency_max_boost": 0.03,  # максимум буста за самый свежий документ
     "rank_max_chunks_per_document": 3,
-    "retrieval_pipeline": "legacy",  # legacy|v2
+    "retrieval_pipeline": "v2",  # legacy|v2
     "retrieval_dense_top_k": 50,
     "retrieval_lexical_top_k": 50,
     "retrieval_bm25_enabled": True,
     "retrieval_bm25_top_k": 50,
+    "retrieval_fulltext_enabled": True,
+    "retrieval_fulltext_top_k": 100,
     "retrieval_final_top_k": 10,
+    "retrieval_relevance_gate_enabled": True,
+    "retrieval_min_dense_score": 0.78,
+    "retrieval_single_term_min_dense_score": 0.80,
+    "retrieval_min_content_chars": 120,
     "retrieval_reranker_enabled": False,
     "retrieval_reranker_model": "",
     "retrieval_reranker_top_n": 30,
     "retrieval_reranker_weight": 0.65,
+    "retrieval_reranker_min_score": -4.0,
 }
 
 logger = logging.getLogger(__name__)
@@ -161,8 +169,14 @@ RETRIEVAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "retrieval_bm25_enabled": True,
         "retrieval_dense_top_k": 50,
         "retrieval_bm25_top_k": 50,
+        "retrieval_fulltext_enabled": True,
+        "retrieval_fulltext_top_k": 100,
         "retrieval_lexical_top_k": 50,
         "retrieval_final_top_k": 10,
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.78,
+        "retrieval_single_term_min_dense_score": 0.80,
+        "retrieval_min_content_chars": 120,
         # Reranker stays opt-in until latency and eval thresholds are agreed.
         "retrieval_reranker_enabled": False,
         "retrieval_reranker_top_n": 30,
@@ -225,8 +239,10 @@ class RAGSearcher:
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = apply_retrieval_preset(dict(config), set(config.keys()))
+        self.embedding_model_name = str(self.config.get("embedding_model") or "")
         self.collection_name = resolve_collection_name_from_config(self.config)
         self.connected = False
+        self._fulltext_available = False
         self._embedder: Optional[Any] = None  # SentenceTransformer, загружается лениво
         self._reranker: Optional[Any] = None  # CrossEncoder, загружается лениво
         self._fs_cache: Dict[str, Any] = {"ts": 0.0, "items": []}
@@ -251,7 +267,9 @@ class RAGSearcher:
             else:
                 self.qdrant = QdrantClient(path=str(qdrant_path), timeout=qdrant_timeout)
                 logger.info("Подключено к Qdrant локально: %s", qdrant_path)
-            self.qdrant.get_collection(self.collection_name)
+            collection_info = self.qdrant.get_collection(self.collection_name)
+            schema = getattr(collection_info, "payload_schema", None) or {}
+            self._fulltext_available = "text" in schema
             self.connected = True
         except Exception as exc:
             logger.error("Не удалось подключиться к Qdrant: %s", exc)
@@ -413,7 +431,11 @@ class RAGSearcher:
 
         try:
             query_vector = self.embedder.encode(
-                query_used, normalize_embeddings=True
+                prepare_query_text(
+                    str(getattr(self, "embedding_model_name", "") or self.config.get("embedding_model") or ""),
+                    query_used,
+                ),
+                normalize_embeddings=True,
             ).tolist()
         except Exception as exc:
             logger.error("Не удалось построить эмбеддинг запроса: %s", exc)
@@ -539,6 +561,8 @@ class RAGSearcher:
                     "row_start": payload.get("row_start"),
                     "row_end": payload.get("row_end"),
                     "provenance": payload.get("provenance") or {},
+                    "dense_score": round(hit.score, 6),
+                    "retrieval_source": "dense",
                 }
             )
         if title_only:
@@ -558,6 +582,13 @@ class RAGSearcher:
             content_only=content_only,
             title_only=title_only,
         )
+        fulltext_results = self._fulltext_content_search(
+            query=lexical_query,
+            limit=int(self.config.get("retrieval_fulltext_top_k", max(limit * 4, 40)) or max(limit * 4, 40)),
+            file_type=file_type,
+            content_only=content_only,
+            title_only=title_only,
+        )
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
             rerank_top_n = max(limit, int(self.config.get("retrieval_reranker_top_n", max(limit * 3, 30)) or limit))
             bm25_results = self._bm25_catalog_search(
@@ -567,12 +598,19 @@ class RAGSearcher:
                 content_only=content_only,
                 title_only=title_only,
             )
-            channels = [numeric_exact_results, lexical_results, bm25_results, results]
+            channels = [numeric_exact_results, lexical_results, bm25_results, fulltext_results, results]
             fused = rrf_fuse(channels, limit=max(limit * 4, 40))
             results = self._merge_ranked_results([], fused, limit=rerank_top_n, query=query_used)
+            results = self._apply_relevance_gate(lexical_query, results)
             results = self._rerank_results(query_used, results, limit=limit)
         else:
-            results = self._merge_ranked_results([*numeric_exact_results, *lexical_results], results, limit=limit, query=query_used)
+            results = self._merge_ranked_results(
+                [*numeric_exact_results, *lexical_results, *fulltext_results],
+                results,
+                limit=limit,
+                query=query_used,
+            )
+        results = self._apply_relevance_gate(lexical_query, results)
         results = [self._repair_result_display_fields(item) for item in results]
 
         self.telemetry.log_search(
@@ -928,6 +966,73 @@ class RAGSearcher:
         self._build_metadata_token_index(items)
         return len(items)
 
+    def _fulltext_content_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        file_type: Optional[str],
+        content_only: bool,
+        title_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve exact/stemmed content matches from the Qdrant text index."""
+        if title_only or not bool(self.config.get("retrieval_fulltext_enabled", False)):
+            return []
+        if not bool(getattr(self, "_fulltext_available", False)):
+            return []
+        terms = tokenize(query)
+        if not terms:
+            return []
+        must: List[Any] = [FieldCondition(key="text", match=MatchText(text=" ".join(terms)))]
+        if file_type:
+            must.append(FieldCondition(key="extension", match=MatchValue(value=file_type.lower())))
+        must_not = [
+            FieldCondition(
+                key="type",
+                match=MatchAny(any=["file_metadata", "folder_metadata"]),
+            )
+        ]
+        try:
+            points, _offset = self.qdrant.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=Filter(must=must, must_not=must_not),
+                limit=max(1, int(limit)),
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Полнотекстовый канал недоступен: %s", exc)
+            return []
+
+        query_norm = " ".join(terms)
+        ranked: List[Dict[str, Any]] = []
+        for point in points:
+            payload = dict(getattr(point, "payload", None) or {})
+            text = str(payload.get("text") or "")
+            normalized = " ".join(tokenize(text))
+            occurrences = sum(max(1, normalized.count(term)) for term in terms)
+            exact_phrase = bool(query_norm and query_norm in normalized)
+            score = min(0.999, 0.96 + (0.025 if exact_phrase else 0.0) + min(0.014, occurrences * 0.002))
+            result = self._result_from_payload(
+                payload,
+                score=score,
+                rank_reason="точное совпадение в содержимом",
+                retrieval_source="fulltext",
+            )
+            result["fulltext_matched_terms"] = len(terms)
+            result["fulltext_query_terms"] = len(terms)
+            result["fulltext_occurrences"] = occurrences
+            ranked.append(result)
+        ranked.sort(
+            key=lambda item: (
+                float(item.get("score") or 0),
+                int(item.get("fulltext_occurrences") or 0),
+                -len(str(item.get("text") or "")),
+            ),
+            reverse=True,
+        )
+        return ranked[: max(1, int(limit))]
+
     def _bm25_catalog_search(
         self,
         *,
@@ -986,6 +1091,8 @@ class RAGSearcher:
                     "chunk_index": None,
                     "rank_reason": item.get("rank_reason", "BM25 совпадение в имени/пути"),
                     "retrieval_source": "bm25",
+                    "bm25_matched_terms": item.get("bm25_matched_terms", 0),
+                    "bm25_query_terms": len(terms),
                 }
             )
         return out
@@ -1497,6 +1604,9 @@ class RAGSearcher:
                 "extension": item.get("extension", ""),
                 "chunk_index": None,
                 "rank_reason": "совпадение в имени/пути",
+                "retrieval_source": "lexical",
+                "lexical_matched_terms": matched,
+                "lexical_query_terms": len(terms),
             })
         out.sort(
             key=lambda x: (
@@ -1591,6 +1701,64 @@ class RAGSearcher:
             deferred = [*deferred_folders, *deferred_chunks]
             balanced.extend(deferred[: limit - len(balanced)])
         return balanced[:limit]
+
+    def _apply_relevance_gate(
+        self,
+        query: str,
+        results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Drop weak dense-only candidates and malformed content fragments."""
+        if not bool(self.config.get("retrieval_relevance_gate_enabled", False)):
+            return results
+        query_terms = tokenize(query)
+        dense_floor = float(self.config.get("retrieval_min_dense_score", 0.78) or 0.78)
+        if len(query_terms) == 1:
+            dense_floor = max(
+                dense_floor,
+                float(self.config.get("retrieval_single_term_min_dense_score", 0.80) or 0.80),
+            )
+        min_content_chars = max(20, int(self.config.get("retrieval_min_content_chars", 120) or 120))
+        reranker_floor = float(self.config.get("retrieval_reranker_min_score", -4.0) or -4.0)
+        gated: List[Dict[str, Any]] = []
+        for item in results:
+            item_type = str(item.get("type") or "")
+            sources = {
+                str(source)
+                for source in (item.get("retrieval_sources") or [])
+                if str(source).strip()
+            }
+            source = str(item.get("retrieval_source") or "").strip()
+            if source:
+                sources.add(source)
+
+            if item_type not in {"file_metadata", "folder_metadata"}:
+                clean_text = " ".join(str(item.get("text") or "").split())
+                if len(clean_text) < min_content_chars and "fulltext" not in sources:
+                    continue
+
+            strong_lexical = bool(
+                sources & {"numeric_exact", "numeric_fs_exact", "spreadsheet_numeric_exact", "fulltext"}
+            )
+            lexical_matched = int(item.get("lexical_matched_terms") or 0)
+            lexical_total = int(item.get("lexical_query_terms") or len(query_terms) or 0)
+            bm25_matched = int(item.get("bm25_matched_terms") or 0)
+            bm25_total = int(item.get("bm25_query_terms") or len(query_terms) or 0)
+            if lexical_total and lexical_matched >= lexical_total:
+                strong_lexical = True
+            if bm25_total and bm25_matched >= bm25_total:
+                strong_lexical = True
+
+            raw_reranker = item.get("reranker_score")
+            if raw_reranker is not None and not strong_lexical and float(raw_reranker) < reranker_floor:
+                continue
+            dense_score = float(item.get("dense_score") or (item.get("score") if sources == {"dense"} else 0) or 0)
+            if not strong_lexical and dense_score < dense_floor:
+                continue
+            updated = dict(item)
+            updated["relevance_evidence"] = "lexical" if strong_lexical else "dense"
+            updated["relevance_floor"] = dense_floor
+            gated.append(updated)
+        return gated
 
     def _rerank_results(self, query: str, results: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
         if not results:

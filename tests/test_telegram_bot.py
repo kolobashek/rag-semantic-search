@@ -3,6 +3,7 @@ import requests
 
 import telegram_bot
 from telegram_bot import (
+    OPEN_FILE_FEEDBACK,
     _clean_tg_text,
     _file_uri,
     _main_menu,
@@ -17,6 +18,10 @@ from telegram_bot import (
     send_search_results,
     set_bot_commands,
 )
+
+
+def test_opening_file_is_neutral_feedback() -> None:
+    assert OPEN_FILE_FEEDBACK == 0
 
 
 def test_tg_call_does_not_expose_token_in_transport_errors(monkeypatch) -> None:

@@ -15,6 +15,7 @@ class _FakeClient:
         self.created: list[tuple[str, object]] = []
         self.deleted_points: list[dict] = []
         self.upserted: list[tuple[str, int]] = []
+        self.payload_indexes: list[dict] = []
         self.delete_failures = 0
 
     def get_collections(self):
@@ -28,6 +29,9 @@ class _FakeClient:
     def create_collection(self, *, collection_name: str, vectors_config) -> None:
         self.created.append((collection_name, vectors_config))
         self.collections.append(collection_name)
+
+    def create_payload_index(self, **kwargs) -> None:
+        self.payload_indexes.append(kwargs)
 
     def delete(self, **kwargs) -> None:
         if self.delete_failures > 0:
@@ -56,6 +60,22 @@ def test_ensure_collection_recreates_existing_collection() -> None:
     assert recreated is True
     assert client.deleted_collections == ["catalog"]
     assert client.created[0][0] == "catalog"
+
+
+def test_ensure_collection_builds_russian_fulltext_index_when_enabled() -> None:
+    client = _FakeClient()
+
+    ensure_collection(
+        client,
+        collection_name="catalog_v2",
+        vector_size=384,
+        fulltext_enabled=True,
+    )
+
+    text_index = next(item for item in client.payload_indexes if item["field_name"] == "text")
+    assert text_index["field_schema"].lowercase is True
+    assert text_index["field_schema"].phrase_matching is True
+    assert text_index["field_schema"].stemmer.language.value == "russian"
 
 
 def test_delete_file_vectors_uses_payload_identity_when_present() -> None:

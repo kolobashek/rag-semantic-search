@@ -60,6 +60,7 @@ from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .log_history import build_log_handler, install_env_log_handler
 from .ocr_runtime import resolve_ocr_runtime
 from .rag_core import load_config
+from .retrieval import prepare_passage_texts
 from .telemetry_db import TelemetryDB
 
 # ─────────────────────────── logging ───────────────────────────────────
@@ -122,7 +123,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".
 # Максимум страниц/кадров при OCR многостраничного изображения (TIFF, GIF).
 # Защита от случайных файлов с тысячами кадров, которые зависнут индексатор.
 MAX_IMAGE_PAGES: int = 50
-PAYLOAD_SCHEMA_VERSION: int = 2
+PAYLOAD_SCHEMA_VERSION: int = 3
 
 
 class IndexerCancelled(RuntimeError):
@@ -412,6 +413,8 @@ class RAGIndexer:
         ocr_max_image_pages: int = MAX_IMAGE_PAGES,
         catalog_wait_attempts: int = 10,
         catalog_wait_seconds: int = 60,
+        min_chunk_chars: int = 120,
+        fulltext_enabled: bool = False,
     ) -> None:
         # current_stage выставляется при каждом запуске index_directory(stage=...)
         # и определяет поведение skip-логики и экстракции содержимого.
@@ -439,9 +442,12 @@ class RAGIndexer:
 
         self.qdrant_db_path = Path(qdrant_db_path)
         self.collection_name = collection_name
+        self.embedding_model = str(embedding_model or "")
         self.vector_size = vector_size
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.min_chunk_chars = max(20, min(int(chunk_size or 500), int(min_chunk_chars or 120)))
+        self.fulltext_enabled = bool(fulltext_enabled)
         self.chunk_group_size = max(1, int(chunk_group_size or 4))
         self.batch_size = batch_size
         self.recreate = recreate_collection
@@ -601,6 +607,7 @@ class RAGIndexer:
             collection_name=self.collection_name,
             vector_size=self.vector_size,
             recreate=self.recreate,
+            fulltext_enabled=self.fulltext_enabled,
         )
         if recreated:
             self.state_db.clear()
@@ -897,12 +904,75 @@ class RAGIndexer:
         return chunk_text(text, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
 
     def _chunk_text_with_provenance(self, text: str | ExtractedDocument) -> List[Dict[str, Any]]:
-        """Chunk legacy extractor text through structured TextBlock metadata."""
+        """Chunk structured blocks while coalescing rows and rejecting fragments."""
         items: List[Dict[str, Any]] = []
         blocks = list(text.blocks) if isinstance(text, ExtractedDocument) else blocks_from_legacy_text(str(text or ""))
+        min_chunk_chars = max(20, int(getattr(self, "min_chunk_chars", 20) or 20))
+        total_document_chars = sum(len(str(block.text or "").strip()) for block in blocks)
+        allow_short_document = 0 < total_document_chars < min_chunk_chars
+        pending: List[TextBlock] = []
+        pending_chars = 0
+
+        def group_key(block: TextBlock) -> tuple[Any, ...]:
+            if block.sheet:
+                return ("sheet", block.sheet)
+            if block.page is not None:
+                return ("page", block.page)
+            if block.slide is not None:
+                return ("slide", block.slide)
+            if block.section:
+                return ("section", block.section)
+            return ("document",)
+
+        def flush() -> None:
+            nonlocal pending, pending_chars
+            if not pending:
+                return
+            combined = "\n".join(
+                str(block.text or "").strip()
+                for block in pending
+                if str(block.text or "").strip()
+            ).strip()
+            first = pending[0]
+            last = pending[-1]
+            row_values = [
+                value
+                for block in pending
+                for value in (block.row_start, block.row_end)
+                if value is not None
+            ]
+            merged_block = TextBlock(
+                text=combined,
+                page=first.page,
+                sheet=first.sheet,
+                row_start=min(row_values) if row_values else first.row_start,
+                row_end=max(row_values) if row_values else last.row_end,
+                slide=first.slide,
+                section=first.section,
+                metadata=dict(first.metadata or {}),
+            )
+            for chunk in self._chunk_text(combined):
+                clean = str(chunk or "").strip()
+                if len(clean) < min_chunk_chars and not allow_short_document:
+                    continue
+                items.append({"text": clean, "block": merged_block})
+            pending = []
+            pending_chars = 0
+
         for block in blocks:
-            for chunk in self._chunk_text(block.text):
-                items.append({"text": chunk, "block": block})
+            clean = str(block.text or "").strip()
+            if not clean:
+                continue
+            same_group = not pending or group_key(pending[-1]) == group_key(block)
+            projected = pending_chars + (1 if pending else 0) + len(clean)
+            if pending and (
+                not same_group
+                or (projected > self.chunk_size and pending_chars >= self.min_chunk_chars)
+            ):
+                flush()
+            pending.append(block)
+            pending_chars += (1 if len(pending) > 1 else 0) + len(clean)
+        flush()
         return items
 
     def _content_hash(self, text: str) -> str:
@@ -1201,7 +1271,7 @@ class RAGIndexer:
             add_numeric_tokens(chunk_payload, clean_chunk, filepath.name, str(relative_path))
             payloads.append(chunk_payload)
         vectors = self.embedder.encode(
-            texts,
+            prepare_passage_texts(str(getattr(self, "embedding_model", "") or ""), texts),
             normalize_embeddings=True,
             batch_size=max(1, min(256, int(self.batch_size or 64))),
             show_progress_bar=False,
@@ -1689,6 +1759,8 @@ def main() -> None:
         ocr_poppler_bin=str(cfg.get("ocr_poppler_bin") or ""),
         ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
+        min_chunk_chars=int(cfg.get("index_min_chunk_chars", 120) or 120),
+        fulltext_enabled=bool(cfg.get("retrieval_fulltext_enabled", False)),
         exclude_patterns=list(cfg.get("index_exclude_patterns") or []),
         only_paths=only_paths,
         ocr_max_image_pages=int(cfg.get("ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),

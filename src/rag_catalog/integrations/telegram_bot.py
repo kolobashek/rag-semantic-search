@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 API_TIMEOUT = 40
 POLL_SLEEP_SEC = 1.0
 SEARCH_PAGE_SIZE = 5
+OPEN_FILE_FEEDBACK = 0
 SEARCH_SESSION_TTL_SEC = 30 * 60
 CHAT_ACTION_INTERVAL_SEC = 4.0
 SEARCH_SESSIONS: Dict[str, Dict[str, Any]] = {}
@@ -1198,7 +1199,7 @@ def handle_callback_query(
             result=result,
             username=str(user.get("username") or ""),
             chat_id=chat_id,
-            value=2,
+            value=OPEN_FILE_FEEDBACK,
             rank=index + 1,
             reason="open_file",
         )

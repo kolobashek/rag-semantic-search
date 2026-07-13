@@ -567,6 +567,7 @@ class TelemetryDB:
                     SELECT result_path, SUM(feedback) AS score
                     FROM search_feedback
                     WHERE lower(query)=? AND result_path IN ({placeholders})
+                      AND details_json NOT LIKE '%"reason": "open_file"%'
                     GROUP BY result_path
                     """,
                     params,
@@ -733,6 +734,7 @@ class TelemetryDB:
             SELECT query, result_title, result_path, SUM(feedback) AS score, COUNT(*) AS hits
             FROM search_feedback
             WHERE feedback > 0 AND query <> '' AND result_path <> ''
+              AND details_json NOT LIKE '%"reason": "open_file"%'
             GROUP BY lower(query), result_path
             ORDER BY score DESC, hits DESC, MAX(ts) DESC
             LIMIT 200

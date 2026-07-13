@@ -9,6 +9,7 @@ from qdrant_client.models import Filter
 
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.rag_core import apply_retrieval_preset
+from rag_catalog.core.retrieval import prepare_passage_text, prepare_query_text
 from rag_core import MAX_QUERY_LEN, RAGSearcher
 
 
@@ -26,6 +27,14 @@ def test_apply_retrieval_release_preset_preserves_explicit_overrides() -> None:
     assert cfg["retrieval_bm25_enabled"] is True
     assert cfg["retrieval_final_top_k"] == 25
     assert cfg["retrieval_reranker_enabled"] is True
+
+
+def test_multilingual_e5_inputs_use_asymmetric_prefixes() -> None:
+    model = "intfloat/multilingual-e5-small"
+
+    assert prepare_query_text(model, "спецмайнинг") == "query: спецмайнинг"
+    assert prepare_passage_text(model, "устав компании") == "passage: устав компании"
+    assert prepare_query_text("sentence-transformers/all-MiniLM-L6-v2", "query") == "query"
 
 
 class _FakeTelemetry:
@@ -269,6 +278,64 @@ def test_search_retrieval_v2_uses_rrf_fusion() -> None:
 
     assert out[0]["filename"] == "both.docx"
     assert out[0]["fusion"] == "rrf"
+
+
+def test_fulltext_content_channel_returns_exact_russian_match() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {"retrieval_fulltext_enabled": True}
+    s._fulltext_available = True
+    s.qdrant = _FakeQdrantScroll([
+        {
+            "type": "pdf_content",
+            "filename": "Устав.pdf",
+            "path": "Компании/Устав.pdf",
+            "full_path": r"O:\Компании\Устав.pdf",
+            "extension": ".pdf",
+            "text": "Устав общества Спецмайнинг утвержден решением участников",
+        }
+    ])
+
+    out = s._fulltext_content_search(
+        query="спецмайнинг устав",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert [item["filename"] for item in out] == ["Устав.pdf"]
+    assert out[0]["retrieval_source"] == "fulltext"
+    assert out[0]["fulltext_matched_terms"] == 2
+
+
+def test_relevance_gate_rejects_weak_dense_noise_and_microchunks() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.78,
+        "retrieval_single_term_min_dense_score": 0.80,
+        "retrieval_min_content_chars": 120,
+    }
+    noise = {
+        "type": "pdf_content",
+        "filename": "random.pdf",
+        "text": "смотренных.",
+        "score": 0.749,
+        "dense_score": 0.749,
+        "retrieval_source": "dense",
+    }
+    exact = {
+        "type": "pdf_content",
+        "filename": "Устав.pdf",
+        "text": "Спецмайнинг " * 20,
+        "score": 0.99,
+        "retrieval_source": "fulltext",
+        "fulltext_matched_terms": 1,
+        "fulltext_query_terms": 1,
+    }
+
+    assert s._apply_relevance_gate("спецмайнинг", [noise, exact]) == [
+        {**exact, "relevance_evidence": "lexical", "relevance_floor": 0.8}
+    ]
 
 
 def test_rrf_recency_boost_is_relative_and_does_not_displace_exact_match() -> None:

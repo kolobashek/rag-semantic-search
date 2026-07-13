@@ -10,7 +10,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
-from rag_catalog.core.extractors import document_from_legacy_text
+from rag_catalog.core.extractors import ExtractedDocument, TextBlock, document_from_legacy_text
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing import stage_runner
 from rag_catalog.core.indexing.stage_runner import _normalize_only_path_key, _task_matches_only_paths
@@ -138,6 +138,39 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx._extract_csv = lambda p: p.read_text(encoding="utf-8")
     idx._extract_html = lambda p: p.read_text(encoding="utf-8")
     return idx
+
+
+def test_structured_chunking_coalesces_rows_and_drops_isolated_fragments(tmp_path: Path) -> None:
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.min_chunk_chars = 120
+    rows = tuple(
+        TextBlock(text=f"Строка {number}: Спецмайнинг реквизиты и данные документа", sheet="Лист1", row_start=number, row_end=number)
+        for number in range(1, 5)
+    )
+    document = ExtractedDocument(
+        blocks=(
+            TextBlock(text="смотренных.", page=1),
+            TextBlock(text="Полный содержательный абзац " * 8, page=2),
+            *rows,
+        )
+    )
+
+    chunks = idx._chunk_text_with_provenance(document)
+
+    assert all(len(item["text"]) >= 120 for item in chunks)
+    assert all("смотренных" not in item["text"] for item in chunks)
+    sheet_chunk = next(item for item in chunks if item["block"].sheet == "Лист1")
+    assert sheet_chunk["block"].row_start == 1
+    assert sheet_chunk["block"].row_end == 4
+
+
+def test_short_whole_document_is_not_discarded(tmp_path: Path) -> None:
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.min_chunk_chars = 120
+
+    chunks = idx._chunk_text_with_provenance(ExtractedDocument(blocks=(TextBlock(text="Краткая записка"),)))
+
+    assert [item["text"] for item in chunks] == ["Краткая записка"]
 
 
 def test_small_stage_file_without_content_is_marked_empty_for_retry(tmp_path: Path) -> None:
