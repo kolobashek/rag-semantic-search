@@ -135,6 +135,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retrieval_min_content_chars": 120,
     "retrieval_reranker_enabled": False,
     "retrieval_reranker_model": "",
+    "retrieval_reranker_backend": "",
+    "retrieval_reranker_onnx_provider": "",
+    "retrieval_reranker_onnx_file_name": "",
     "retrieval_reranker_top_n": 30,
     "retrieval_reranker_weight": 0.65,
     "retrieval_reranker_min_score": -4.0,
@@ -335,8 +338,31 @@ class RAGSearcher:
         if getattr(self, "_reranker", None) is None:
             from sentence_transformers import CrossEncoder  # noqa: PLC0415
 
-            logger.info("Загрузка reranker-модели: %s", model_name)
-            self._reranker = CrossEncoder(model_name, local_files_only=True)
+            backend = str(self.config.get("retrieval_reranker_backend") or "").strip().lower()
+            if backend == "onnx":
+                model_kwargs = {
+                    key: value
+                    for key, value in {
+                        "provider": str(self.config.get("retrieval_reranker_onnx_provider") or "").strip(),
+                        "file_name": str(self.config.get("retrieval_reranker_onnx_file_name") or "").strip(),
+                    }.items()
+                    if value
+                }
+                logger.info(
+                    "Загрузка reranker-модели: %s (backend=onnx, provider=%s, file=%s)",
+                    model_name,
+                    model_kwargs.get("provider") or "auto",
+                    model_kwargs.get("file_name") or "auto",
+                )
+                self._reranker = CrossEncoder(
+                    model_name,
+                    backend="onnx",
+                    model_kwargs=model_kwargs,
+                    local_files_only=True,
+                )
+            else:
+                logger.info("Загрузка reranker-модели: %s", model_name)
+                self._reranker = CrossEncoder(model_name, local_files_only=True)
         return self._reranker
 
     # ── search ────────────────────────────────────────────────────────
