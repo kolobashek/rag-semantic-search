@@ -9,10 +9,10 @@ import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple
 from zipfile import ZipFile
 
 from qdrant_client.models import PointStruct
@@ -31,6 +31,37 @@ _WINDOWS_7Z_PATHS = (
     Path("C:/Program Files/7-Zip/7z.exe"),
     Path("C:/Program Files (x86)/7-Zip/7z.exe"),
 )
+
+
+def _bounded_executor_results(
+    pool: ThreadPoolExecutor,
+    worker: Callable[[Dict[str, Any]], Any],
+    items: Iterable[Dict[str, Any]],
+    *,
+    max_in_flight: int,
+) -> Iterator[Tuple[Future[Any], Dict[str, Any]]]:
+    """Yield completed work without retaining results for the whole corpus."""
+    source_iter = iter(items)
+    futures: Dict[Future[Any], Dict[str, Any]] = {}
+
+    def submit_next() -> bool:
+        try:
+            item = next(source_iter)
+        except StopIteration:
+            return False
+        futures[pool.submit(worker, item)] = item
+        return True
+
+    for _ in range(max(1, int(max_in_flight))):
+        if not submit_next():
+            break
+
+    while futures:
+        completed, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+        for future in completed:
+            source_item = futures.pop(future)
+            submit_next()
+            yield future, source_item
 
 
 def _hidden_subprocess_kwargs() -> Dict[str, Any]:
@@ -262,8 +293,10 @@ class IndexStageRunner:
         indexer = self._indexer
         indexer.current_stage = stage
 
-        ENCODE_BATCH = 256  # сколько чанков накапливать перед одним вызовом encode()
-                            # 256 оптимально для CPU (OpenBLAS матричные операции)
+        # ONNX Runtime резервирует arena под максимальный inference batch и не
+        # всегда возвращает её ОС. Batch 256 занимал почти 10 ГБ на 32-ГБ хосте;
+        # 64 сохраняет векторизацию пакетами без вытеснения web/bot из памяти.
+        ENCODE_BATCH = 64
         WRITE_BATCH = max(ENCODE_BATCH, min(2048, int(getattr(indexer, "batch_size", 1000) or 1000)))
 
         # Семафор ограничивает число одновременно «зависших» daemon-потоков.
@@ -696,7 +729,7 @@ class IndexStageRunner:
                         chunk_texts,
                     ),
                     normalize_embeddings=True,
-                    batch_size=256, show_progress_bar=False,
+                    batch_size=ENCODE_BATCH, show_progress_bar=False,
                 )
                 encoded_points.extend(
                     PointStruct(id=_point_id(p), vector=v.tolist(), payload=p)
@@ -1083,13 +1116,25 @@ class IndexStageRunner:
 
         # ── основной pipeline ────────────────────────────────────────
         with ThreadPoolExecutor(max_workers=indexer.read_workers) as pool:
-            futures = {pool.submit(extract_one, item): item for item in scope_files}
-            for future in tqdm(as_completed(futures), total=len(scope_files),
-                                desc=f"Этап {stage}"):
+            # Не отправляем весь корпус в executor сразу: завершённый Future
+            # удерживает результат extract_one вместе с полным текстом файла.
+            # На большом каталоге это превращалось в многогигабайтную очередь,
+            # пока главный поток был занят batch-encode.
+            max_in_flight = max(1, int(indexer.read_workers) * 2)
+            for future, source_item in tqdm(
+                _bounded_executor_results(
+                    pool,
+                    extract_one,
+                    scope_files,
+                    max_in_flight=max_in_flight,
+                ),
+                total=len(scope_files),
+                desc=f"Этап {stage}",
+            ):
                 try:
                     result = future.result()
                 except Exception as exc:
-                    fp = futures[future].get("relative_path") or futures[future].get("filepath")
+                    fp = source_item.get("relative_path") or source_item.get("filepath")
                     self._logger.error("Ошибка обработки %s: %s", fp, exc, exc_info=True)
                     stage_stats["error_files"] += 1
                     stage_stats["processed_files"] += 1

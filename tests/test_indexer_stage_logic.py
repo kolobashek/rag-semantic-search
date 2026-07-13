@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -34,6 +35,34 @@ def test_only_path_filter_matches_windows_and_posix_forms() -> None:
     allowed = {_normalize_only_path_key(r"O:\Обмен\docs\a.pdf")}
     assert _task_matches_only_paths({"state_key": "O:/Обмен/docs/a.pdf"}, allowed)
     assert not _task_matches_only_paths({"state_key": r"O:\Обмен\docs\b.pdf"}, allowed)
+
+
+def test_stage_pipeline_keeps_only_bounded_work_in_flight() -> None:
+    consumed = 0
+    total = 100
+    max_in_flight = 4
+
+    def items():
+        nonlocal consumed
+        for item_id in range(total):
+            consumed += 1
+            yield {"id": item_id}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        completed = stage_runner._bounded_executor_results(
+            pool,
+            lambda item: int(item["id"]),
+            items(),
+            max_in_flight=max_in_flight,
+        )
+        yielded = 0
+        for future, source_item in completed:
+            assert future.result() == int(source_item["id"])
+            yielded += 1
+            assert consumed - yielded <= max_in_flight
+
+    assert yielded == total
+    assert consumed == total
 
 
 class _FakeQdrant:
