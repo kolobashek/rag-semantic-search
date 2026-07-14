@@ -1134,6 +1134,7 @@ class IndexStageRunner:
                     "duplicate_of": duplicate_of,
                     **doc_meta,
                     **base_provenance,
+                    **indexer._spreadsheet_payload_fields(file_type),
                     **indexer._chunk_provenance(
                         chunk=chunk,
                         chunk_index=idx,

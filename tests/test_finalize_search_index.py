@@ -157,6 +157,12 @@ def test_finalize_collection_can_require_full_spreadsheet_audit(monkeypatch) -> 
     assert result["spreadsheet_integrity"]["scanned_all"] is True
     assert full_audit_calls[0]["batch_size"] == 2_000
     assert isinstance(full_audit_calls[0]["query_filter"], Filter)
+    assert full_audit_calls[0]["required_content_fields"] == (
+        "sheet",
+        "row_start",
+        "row_end",
+        "spreadsheet_payload_schema_version",
+    )
 
 
 def test_payload_integrity_rejects_missing_content_contract_fields() -> None:
@@ -231,6 +237,7 @@ def test_payload_integrity_forwards_filter_and_requires_spreadsheet_provenance()
                             "sheet": "Прайс",
                             "row_start": 1,
                             "row_end": 2,
+                            "spreadsheet_payload_schema_version": 2,
                         }
                     )
                 ]
@@ -243,7 +250,12 @@ def test_payload_integrity_forwards_filter_and_requires_spreadsheet_provenance()
         collection_name="catalog_v2",
         sample_size=100,
         query_filter=query_filter,
-        required_content_fields=("sheet", "row_start", "row_end"),
+        required_content_fields=(
+            "sheet",
+            "row_start",
+            "row_end",
+            "spreadsheet_payload_schema_version",
+        ),
     )
 
     assert result["ok"] is True
@@ -265,6 +277,7 @@ def test_full_payload_integrity_scrolls_every_page() -> None:
                 "sheet": "Прайс",
                 "row_start": 1,
                 "row_end": 2,
+                "spreadsheet_payload_schema_version": 2,
             }
             if kwargs.get("offset") is None:
                 return [SimpleNamespace(payload={**base, "chunk_index": 0})], "page-2"
@@ -277,7 +290,12 @@ def test_full_payload_integrity_scrolls_every_page() -> None:
         batch_size=100,
         min_content_chars=120,
         query_filter=Filter(),
-        required_content_fields=("sheet", "row_start", "row_end"),
+        required_content_fields=(
+            "sheet",
+            "row_start",
+            "row_end",
+            "spreadsheet_payload_schema_version",
+        ),
     )
 
     assert client.offsets == [None, "page-2"]
@@ -340,6 +358,7 @@ def test_finalize_collection_blocks_on_spreadsheet_integrity_failure() -> None:
         "content.row_end": 1,
         "content.row_start": 1,
         "content.sheet": 1,
+        "content.spreadsheet_payload_schema_version": 1,
     }
     assert result["spreadsheet_integrity"]["quality_violations"] == {
         "content.short_noninitial": 1,

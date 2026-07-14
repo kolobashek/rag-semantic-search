@@ -239,6 +239,10 @@ def test_structured_chunking_coalesces_rows_and_drops_isolated_fragments(tmp_pat
     assert provenance["row_start"] == 1
     assert provenance["row_end"] == 4
     assert provenance["provenance"]["row_end"] == 4
+    assert idx._spreadsheet_payload_fields("xlsx") == {
+        "spreadsheet_payload_schema_version": 2
+    }
+    assert idx._spreadsheet_payload_fields("pdf") == {}
 
 
 def test_short_whole_document_is_not_discarded(tmp_path: Path) -> None:

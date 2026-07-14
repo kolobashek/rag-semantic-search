@@ -378,7 +378,12 @@ def finalize_collection(
                             )
                         ]
                     ),
-                    required_content_fields=("sheet", "row_start", "row_end"),
+                    required_content_fields=(
+                        "sheet",
+                        "row_start",
+                        "row_end",
+                        "spreadsheet_payload_schema_version",
+                    ),
                 )
                 snapshot["spreadsheet_integrity"] = spreadsheet_integrity
                 if not spreadsheet_integrity["ok"]:

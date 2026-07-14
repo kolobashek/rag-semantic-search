@@ -125,6 +125,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".
 # Защита от случайных файлов с тысячами кадров, которые зависнут индексатор.
 MAX_IMAGE_PAGES: int = 50
 PAYLOAD_SCHEMA_VERSION: int = 3
+SPREADSHEET_PAYLOAD_SCHEMA_VERSION: int = 2
 
 
 class IndexerCancelled(RuntimeError):
@@ -1189,6 +1190,12 @@ class RAGIndexer:
         }
 
     @staticmethod
+    def _spreadsheet_payload_fields(file_type: str) -> Dict[str, int]:
+        if str(file_type or "").lower() != "xlsx":
+            return {}
+        return {"spreadsheet_payload_schema_version": SPREADSHEET_PAYLOAD_SCHEMA_VERSION}
+
+    @staticmethod
     def _extract_marker_int(text: str, pattern: str) -> Optional[int]:
         match = re.search(pattern, text or "", flags=re.IGNORECASE)
         if not match:
@@ -1384,6 +1391,7 @@ class RAGIndexer:
                     "duplicate_of": duplicate_of,
                     **doc_meta,
                     **base_provenance,
+                    **self._spreadsheet_payload_fields(file_type),
                     **self._chunk_provenance(
                         chunk=chunk,
                         chunk_index=idx,
