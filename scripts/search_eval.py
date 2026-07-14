@@ -85,6 +85,8 @@ def _apply_config_overrides(config: Dict[str, Any], items: List[str]) -> Dict[st
 def _enforce_eval_runtime_contracts(config: Dict[str, Any]) -> Dict[str, Any]:
     """Keep optional retrieval stages observable instead of silently falling back."""
     out = dict(config)
+    if bool(out.get("retrieval_fulltext_enabled", False)):
+        out["retrieval_fulltext_fail_open"] = False
     if bool(out.get("retrieval_reranker_enabled", False)):
         out["retrieval_reranker_fail_open"] = False
     return out
@@ -328,6 +330,7 @@ def main() -> int:
             f"- Evaluated results: {report['evaluated_results_count']}",
             f"- Reranked results: {report['reranked_results_count']}",
             f"- Reranker coverage: {_format_metric(report['reranker_coverage'])}",
+            f"- Retrieval source counts: {json.dumps(report['retrieval_source_counts'], ensure_ascii=False, sort_keys=True)}",
             f"- Retrieval decision: {decision['decision']}",
             "",
             "## By Category",

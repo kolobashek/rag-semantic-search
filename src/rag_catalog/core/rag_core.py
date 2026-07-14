@@ -1076,8 +1076,18 @@ class RAGSearcher:
         """Retrieve exact/stemmed content matches from the Qdrant text index."""
         if title_only or not bool(self.config.get("retrieval_fulltext_enabled", False)):
             return []
+        fail_open = bool(self.config.get("retrieval_fulltext_fail_open", True))
+
+        def fail_or_empty(message: str, exc: Exception | None = None) -> List[Dict[str, Any]]:
+            if fail_open:
+                logger.warning(message)
+                return []
+            if exc is not None:
+                raise RuntimeError(message) from exc
+            raise RuntimeError(message)
+
         if not bool(getattr(self, "_fulltext_available", False)):
-            return []
+            return fail_or_empty("Full-text retrieval is enabled but its text index is unavailable")
         terms = tokenize(query)
         if not terms:
             return []
@@ -1099,8 +1109,7 @@ class RAGSearcher:
                 with_vectors=False,
             )
         except Exception as exc:
-            logger.warning("Полнотекстовый канал недоступен: %s", exc)
-            return []
+            return fail_or_empty(f"Full-text retrieval failed: {exc}", exc)
 
         query_norm = " ".join(terms)
         ranked: List[Dict[str, Any]] = []

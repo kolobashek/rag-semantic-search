@@ -233,6 +233,19 @@ def _mean_defined(rows: List[Dict[str, Any]], key: str) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _result_retrieval_sources(result: Dict[str, Any]) -> set[str]:
+    sources: set[str] = set()
+    raw_sources = result.get("retrieval_sources")
+    if isinstance(raw_sources, (list, tuple, set)):
+        sources.update(str(source).strip() for source in raw_sources if str(source).strip())
+    elif raw_sources:
+        sources.add(str(raw_sources).strip())
+    source = str(result.get("retrieval_source") or "").strip()
+    if source:
+        sources.add(source)
+    return sources
+
+
 def evaluate_search(
     golden: List[GoldenQuery],
     search_fn: Callable[[str, int], List[Dict[str, Any]]],
@@ -255,6 +268,10 @@ def evaluate_search(
         reranked_results = sum(
             1 for result in limited_results if result.get("retrieval_reranked") is True
         )
+        retrieval_source_counts: Dict[str, int] = {}
+        for result in limited_results:
+            for source in _result_retrieval_sources(result):
+                retrieval_source_counts[source] = retrieval_source_counts.get(source, 0) + 1
         acl_leaks = sum(1 for result in limited_results if _expected_hit([_result_text(result)], forbidden)) if forbidden else 0
         relevance_recall = recall_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
         relevance_precision = (
@@ -277,6 +294,7 @@ def evaluate_search(
                 "results_count": len(results),
                 "evaluated_results_count": len(limited_results),
                 "reranked_results_count": reranked_results,
+                "retrieval_source_counts": dict(sorted(retrieval_source_counts.items())),
                 "recall_at_k": relevance_recall,
                 "precision_at_k": relevance_precision,
                 "irrelevant_rate_at_k": (1.0 - relevance_precision) if relevance_precision is not None else None,
@@ -302,6 +320,7 @@ def evaluate_search(
                             else None
                         ),
                         "retrieval_reranked": result.get("retrieval_reranked") is True,
+                        "retrieval_sources": sorted(_result_retrieval_sources(result)),
                         "excerpt": re.sub(r"\s+", " ", _result_chunk_source(result)).strip()[:500],
                     }
                     for result in results[:limit]
@@ -314,6 +333,12 @@ def evaluate_search(
     zero_results = sum(1 for row in rows if int(row["results_count"] or 0) == 0)
     evaluated_results_count = sum(int(row["evaluated_results_count"]) for row in rows)
     reranked_results_count = sum(int(row["reranked_results_count"]) for row in rows)
+    retrieval_source_counts: Dict[str, int] = {}
+    for row in rows:
+        for source, source_count in row["retrieval_source_counts"].items():
+            retrieval_source_counts[source] = (
+                retrieval_source_counts.get(source, 0) + int(source_count)
+            )
     by_category: Dict[str, Dict[str, Any]] = {}
     for category in sorted({str(row.get("category") or "general") for row in rows}):
         cat_rows = [row for row in rows if str(row.get("category") or "general") == category]
@@ -352,6 +377,7 @@ def evaluate_search(
             if evaluated_results_count > 0
             else None
         ),
+        "retrieval_source_counts": dict(sorted(retrieval_source_counts.items())),
         "limit": int(limit),
         "recall_at_k": sum(float(row["recall_at_k"]) for row in relevance_rows) / count,
         "precision_at_k": sum(float(row["precision_at_k"]) for row in relevance_rows) / count,
@@ -479,6 +505,16 @@ def evaluate_retrieval_decision(
     )
     evaluation_profile = candidate.get("evaluation_profile")
     profile = evaluation_profile if isinstance(evaluation_profile, dict) else {}
+    source_counts_raw = candidate.get("retrieval_source_counts")
+    source_counts = source_counts_raw if isinstance(source_counts_raw, dict) else {}
+    if profile.get("fulltext_enabled") is True:
+        fulltext_results_count = int(source_counts.get("fulltext") or 0)
+        add(
+            "fulltext_execution",
+            fulltext_results_count > 0,
+            fulltext_results_count,
+            ">0 evaluated results attributed to fulltext",
+        )
     if profile.get("reranker_enabled") is True:
         reranker_coverage = (
             reranked_results_count / evaluated_results_count
@@ -565,6 +601,7 @@ def evaluate_retrieval_decision(
             "content_grounded_cases": content_grounded_cases,
             "evaluated_results_count": evaluated_results_count,
             "reranked_results_count": reranked_results_count,
+            "retrieval_source_counts": dict(sorted(source_counts.items())),
             "recall_at_k": recall,
             "precision_at_k": precision,
             "irrelevant_rate_at_k": irrelevant_rate,

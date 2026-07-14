@@ -31,6 +31,14 @@ def test_reranker_eval_is_always_fail_closed() -> None:
     assert result["retrieval_reranker_fail_open"] is False
 
 
+def test_fulltext_eval_is_always_fail_closed() -> None:
+    result = _enforce_eval_runtime_contracts(
+        {"retrieval_fulltext_enabled": True, "retrieval_fulltext_fail_open": True}
+    )
+
+    assert result["retrieval_fulltext_fail_open"] is False
+
+
 def test_config_override_preserves_explicit_candidate_setting() -> None:
     config = {"retrieval_preset": "legacy", "retrieval_pipeline": "legacy"}
 

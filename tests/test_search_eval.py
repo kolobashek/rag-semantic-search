@@ -98,6 +98,7 @@ def test_evaluate_search_summary() -> None:
                 "score": 0.9,
                 "reranker_score": 2.5,
                 "retrieval_reranked": True,
+                "retrieval_sources": ["dense", "fulltext"],
                 "text": "Карточка   предприятия\nООО ТСК",
             }
         ]
@@ -116,6 +117,7 @@ def test_evaluate_search_summary() -> None:
     assert report["reranked_results_count"] == 1
     assert report["reranked_queries_count"] == 1
     assert report["reranker_coverage"] == 1
+    assert report["retrieval_source_counts"] == {"dense": 1, "fulltext": 1}
     assert report["latency_p50_ms"] >= 0
     assert report["latency_p95_ms"] >= report["latency_p50_ms"]
     assert report["by_category"]["folder_or_name"]["queries"] == 1
@@ -123,6 +125,7 @@ def test_evaluate_search_summary() -> None:
     assert report["rows"][0]["top"][0]["filename"] == "Карточка ТСК.docx"
     assert report["rows"][0]["top"][0]["retrieval_reranked"] is True
     assert report["rows"][0]["top"][0]["reranker_score"] == 2.5
+    assert report["rows"][0]["top"][0]["retrieval_sources"] == ["dense", "fulltext"]
     assert report["rows"][0]["top"][0]["excerpt"] == "Карточка предприятия ООО ТСК"
 
 
@@ -264,6 +267,43 @@ def test_retrieval_decision_requires_complete_reranker_execution() -> None:
 
     assert complete["decision"] == "GO"
     assert complete["candidate"]["reranked_results_count"] == 100
+
+
+def test_retrieval_decision_requires_fulltext_execution_evidence() -> None:
+    candidate = {
+        "queries": 60,
+        "categories_count": 8,
+        "no_answer_cases": 12,
+        "document_grounded_cases": 30,
+        "content_grounded_cases": 15,
+        "recall_at_k": 0.95,
+        "precision_at_k": 0.8,
+        "irrelevant_rate_at_k": 0.2,
+        "top1_accuracy": 0.9,
+        "latency_p95_ms": 1500,
+        "acl_leakage_rate": 0.0,
+        "acl_results_checked": 25,
+        "no_answer_accuracy": 0.95,
+        "ground_truth_coverage": 0.8,
+        "evaluation_profile": {"fulltext_enabled": True},
+        "retrieval_source_counts": {"dense": 100},
+        "index_readiness": {
+            "ready": True,
+            "collection_name": "catalog_v2_e5",
+            "reasons": [],
+        },
+    }
+
+    missing = evaluate_retrieval_decision(candidate)
+
+    check = next(
+        item for item in missing["checks"] if item["name"] == "fulltext_execution"
+    )
+    assert check["ok"] is False
+    assert missing["decision"] == "NO_GO"
+
+    candidate["retrieval_source_counts"]["fulltext"] = 1
+    assert evaluate_retrieval_decision(candidate)["decision"] == "GO"
 
 
 def test_retrieval_decision_rejects_regression_and_missing_safety_evidence() -> None:

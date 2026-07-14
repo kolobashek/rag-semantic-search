@@ -350,6 +350,33 @@ def test_fulltext_content_channel_returns_exact_russian_match() -> None:
     assert out[0]["fulltext_matched_terms"] == 2
 
 
+def test_fulltext_content_channel_fails_closed_for_eval() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_fulltext_enabled": True,
+        "retrieval_fulltext_fail_open": False,
+    }
+    s._fulltext_available = False
+
+    with pytest.raises(RuntimeError, match="text index is unavailable"):
+        s._fulltext_content_search(
+            query="условия оплаты",
+            limit=10,
+            file_type=None,
+            content_only=True,
+        )
+
+    s._fulltext_available = True
+    s.qdrant = _FakeQdrant(mode="raise")
+    with pytest.raises(RuntimeError, match="Full-text retrieval failed"):
+        s._fulltext_content_search(
+            query="условия оплаты",
+            limit=10,
+            file_type=None,
+            content_only=True,
+        )
+
+
 def test_relevance_gate_rejects_partial_fulltext_evidence() -> None:
     s = _make_searcher(connected=True)
     s.config = {
