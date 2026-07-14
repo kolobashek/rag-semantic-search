@@ -325,6 +325,9 @@ def main() -> int:
             f"- ACL results checked: {report['acl_results_checked']}",
             f"- ACL leakage rate: {report['acl_leakage_rate']:.6f}",
             f"- Ground-truth coverage: {report['ground_truth_coverage']:.3f}",
+            f"- Evaluated results: {report['evaluated_results_count']}",
+            f"- Reranked results: {report['reranked_results_count']}",
+            f"- Reranker coverage: {_format_metric(report['reranker_coverage'])}",
             f"- Retrieval decision: {decision['decision']}",
             "",
             "## By Category",
@@ -344,8 +347,8 @@ def main() -> int:
             "",
             "## Queries",
             "",
-            "| Category | Query | Recall | Precision | Top-1 | MRR | nDCG | Results | Latency ms |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| Category | Query | Recall | Precision | Top-1 | MRR | nDCG | Results | Reranked | Latency ms |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
         ])
         for row in report["rows"]:
             category = str(row.get("category") or "general").replace("|", r"\|")
@@ -354,7 +357,7 @@ def main() -> int:
                 f"| {category} | {query} | {_format_metric(row['recall_at_k'])} | "
                 f"{_format_metric(row['precision_at_k'])} | {_format_metric(row['top1_relevant'])} | "
                 f"{_format_metric(row['mrr_at_k'])} | {_format_metric(row['ndcg_at_k'])} | "
-                f"{row['results_count']} | {row['latency_ms']} |"
+                f"{row['results_count']} | {row['reranked_results_count']} | {row['latency_ms']} |"
             )
         md_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     if args.decision_output:

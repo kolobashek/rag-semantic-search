@@ -252,6 +252,9 @@ def evaluate_search(
         path_texts = [_result_path_text(result) for result in limited_results]
         chunk_texts = [_result_chunk_text(result) for result in limited_results]
         pages = [_result_page(result) for result in limited_results]
+        reranked_results = sum(
+            1 for result in limited_results if result.get("retrieval_reranked") is True
+        )
         acl_leaks = sum(1 for result in limited_results if _expected_hit([_result_text(result)], forbidden)) if forbidden else 0
         relevance_recall = recall_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
         relevance_precision = (
@@ -272,6 +275,8 @@ def evaluate_search(
                 "expected": item.expected,
                 "category": item.category,
                 "results_count": len(results),
+                "evaluated_results_count": len(limited_results),
+                "reranked_results_count": reranked_results,
                 "recall_at_k": relevance_recall,
                 "precision_at_k": relevance_precision,
                 "irrelevant_rate_at_k": (1.0 - relevance_precision) if relevance_precision is not None else None,
@@ -291,6 +296,12 @@ def evaluate_search(
                         "path": str(result.get("path") or result.get("full_path") or result.get("cloud_path") or ""),
                         "page": _result_page(result),
                         "score": float(result.get("rank_score", result.get("score") or 0) or 0),
+                        "reranker_score": (
+                            float(result["reranker_score"])
+                            if result.get("reranker_score") is not None
+                            else None
+                        ),
+                        "retrieval_reranked": result.get("retrieval_reranked") is True,
                         "excerpt": re.sub(r"\s+", " ", _result_chunk_source(result)).strip()[:500],
                     }
                     for result in results[:limit]
@@ -301,6 +312,8 @@ def evaluate_search(
     count = max(1, len(relevance_rows))
     latencies = [int(row["latency_ms"]) for row in rows]
     zero_results = sum(1 for row in rows if int(row["results_count"] or 0) == 0)
+    evaluated_results_count = sum(int(row["evaluated_results_count"]) for row in rows)
+    reranked_results_count = sum(int(row["reranked_results_count"]) for row in rows)
     by_category: Dict[str, Dict[str, Any]] = {}
     for category in sorted({str(row.get("category") or "general") for row in rows}):
         cat_rows = [row for row in rows if str(row.get("category") or "general") == category]
@@ -329,6 +342,16 @@ def evaluate_search(
             1 for item in golden if item.expected_chunks or item.expected_pages
         ),
         "acl_cases": sum(1 for item in golden if item.forbidden),
+        "evaluated_results_count": evaluated_results_count,
+        "reranked_results_count": reranked_results_count,
+        "reranked_queries_count": sum(
+            1 for row in rows if int(row["reranked_results_count"]) > 0
+        ),
+        "reranker_coverage": (
+            reranked_results_count / evaluated_results_count
+            if evaluated_results_count > 0
+            else None
+        ),
         "limit": int(limit),
         "recall_at_k": sum(float(row["recall_at_k"]) for row in relevance_rows) / count,
         "precision_at_k": sum(float(row["precision_at_k"]) for row in relevance_rows) / count,
@@ -402,6 +425,8 @@ def evaluate_retrieval_decision(
     document_grounded_cases = int(candidate.get("document_grounded_cases") or 0)
     content_grounded_cases = int(candidate.get("content_grounded_cases") or 0)
     categories_count = int(candidate.get("categories_count") or 0)
+    evaluated_results_count = int(candidate.get("evaluated_results_count") or 0)
+    reranked_results_count = int(candidate.get("reranked_results_count") or 0)
     add("eval_query_breadth", queries >= min_eval_queries, queries, f">={min_eval_queries}")
     add(
         "no_answer_case_breadth",
@@ -452,6 +477,25 @@ def evaluate_retrieval_decision(
         },
         "ready=true",
     )
+    evaluation_profile = candidate.get("evaluation_profile")
+    profile = evaluation_profile if isinstance(evaluation_profile, dict) else {}
+    if profile.get("reranker_enabled") is True:
+        reranker_coverage = (
+            reranked_results_count / evaluated_results_count
+            if evaluated_results_count > 0
+            else None
+        )
+        add(
+            "reranker_execution",
+            evaluated_results_count > 0
+            and reranked_results_count == evaluated_results_count,
+            {
+                "evaluated_results_count": evaluated_results_count,
+                "reranked_results_count": reranked_results_count,
+                "coverage": reranker_coverage,
+            },
+            ">0 evaluated results and 100% reranked coverage",
+        )
 
     no_answer = candidate.get("no_answer_accuracy")
     add(
@@ -519,6 +563,8 @@ def evaluate_retrieval_decision(
             "no_answer_cases": no_answer_cases,
             "document_grounded_cases": document_grounded_cases,
             "content_grounded_cases": content_grounded_cases,
+            "evaluated_results_count": evaluated_results_count,
+            "reranked_results_count": reranked_results_count,
             "recall_at_k": recall,
             "precision_at_k": precision,
             "irrelevant_rate_at_k": irrelevant_rate,
