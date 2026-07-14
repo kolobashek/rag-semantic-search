@@ -43,6 +43,19 @@ class _FakeClient:
         self.upserted.append((collection_name, len(points), kwargs))
 
 
+class _PayloadLimitedClient(_FakeClient):
+    def __init__(self, max_points: int) -> None:
+        super().__init__(["catalog"])
+        self.max_points = max_points
+
+    def upsert(self, collection_name: str, points, **kwargs) -> None:
+        self.upserted.append((collection_name, len(points), kwargs))
+        if len(points) > self.max_points:
+            raise RuntimeError(
+                'Payload error: JSON payload is larger than allowed (limit: 33554432 bytes).'
+            )
+
+
 def test_ensure_collection_creates_missing_collection() -> None:
     client = _FakeClient()
 
@@ -128,3 +141,23 @@ def test_upsert_points_passes_timeout_and_retries() -> None:
 
     assert upsert_points(client, collection_name="catalog", points=points, timeout_sec=300, retries=1) == 1
     assert client.upserted == [("catalog", 1, {"wait": False, "timeout": 300})]
+
+
+def test_upsert_points_splits_payload_limited_batch() -> None:
+    client = _PayloadLimitedClient(max_points=2)
+    points = [PointStruct(id=f"p{i}", vector=[0.1, 0.2], payload={"x": i}) for i in range(5)]
+
+    assert upsert_points(client, collection_name="catalog", points=points) == 5
+    assert [call[1] for call in client.upserted] == [5, 2, 3, 1, 2]
+
+
+def test_upsert_points_reports_single_oversized_point() -> None:
+    client = _PayloadLimitedClient(max_points=0)
+    point = PointStruct(id="p1", vector=[0.1, 0.2], payload={"text": "oversized"})
+
+    try:
+        upsert_points(client, collection_name="catalog", points=[point])
+    except RuntimeError as exc:
+        assert "Одна точка Qdrant превышает" in str(exc)
+    else:
+        raise AssertionError("single oversized point must fail with an actionable error")

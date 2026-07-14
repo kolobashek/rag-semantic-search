@@ -32,6 +32,17 @@ from qdrant_client.models import (
 logger = logging.getLogger(__name__)
 
 
+def _is_payload_too_large_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "larger than allowed" in message
+        or "payload too large" in message
+        or "request entity too large" in message
+        or "status code 413" in message
+        or "413 (payload too large)" in message
+    )
+
+
 def ensure_collection(
     client: Any,
     *,
@@ -193,33 +204,56 @@ def upsert_points(
     timeout_sec: int = 60,
     retries: int = 2,
 ) -> int:
-    """Upsert a non-empty point sequence and return the number of points written."""
+    """Upsert points, splitting batches that exceed Qdrant's HTTP body limit."""
     if not points:
         return 0
-    prepared = list(points)
-    last_error: Exception | None = None
-    for attempt in range(max(1, int(retries) + 1)):
-        try:
+    timeout = max(5, int(timeout_sec or 60))
+
+    def write_batch(prepared: list[PointStruct]) -> int:
+        last_error: Exception | None = None
+        for attempt in range(max(1, int(retries) + 1)):
             try:
-                client.upsert(collection_name, points=prepared, wait=False, timeout=max(5, int(timeout_sec or 60)))
-            except TypeError as type_error:
-                if "unexpected keyword" not in str(type_error):
-                    raise
-                client.upsert(collection_name, points=prepared)
-            return len(prepared)
-        except Exception as exc:
-            last_error = exc
-            if attempt >= int(retries):
-                break
-            delay = min(5.0, 0.75 * (attempt + 1))
-            logger.warning(
-                "Qdrant upsert timeout/error, retry %d/%d in %.1fs: %s",
-                attempt + 1,
-                int(retries),
-                delay,
-                exc,
-            )
-            time.sleep(delay)
-    if last_error is not None:
-        raise last_error
-    return len(points)
+                try:
+                    client.upsert(
+                        collection_name,
+                        points=prepared,
+                        wait=False,
+                        timeout=timeout,
+                    )
+                except TypeError as type_error:
+                    if "unexpected keyword" not in str(type_error):
+                        raise
+                    client.upsert(collection_name, points=prepared)
+                return len(prepared)
+            except Exception as exc:
+                last_error = exc
+                if _is_payload_too_large_error(exc):
+                    if len(prepared) <= 1:
+                        raise RuntimeError(
+                            "Одна точка Qdrant превышает допустимый размер payload; "
+                            "содержимое документа нужно сократить перед индексацией."
+                        ) from exc
+                    midpoint = len(prepared) // 2
+                    logger.warning(
+                        "Qdrant batch из %d точек превышает лимит payload; делю на %d + %d",
+                        len(prepared),
+                        midpoint,
+                        len(prepared) - midpoint,
+                    )
+                    return write_batch(prepared[:midpoint]) + write_batch(prepared[midpoint:])
+                if attempt >= int(retries):
+                    break
+                delay = min(5.0, 0.75 * (attempt + 1))
+                logger.warning(
+                    "Qdrant upsert timeout/error, retry %d/%d in %.1fs: %s",
+                    attempt + 1,
+                    int(retries),
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+        if last_error is not None:
+            raise last_error
+        return len(prepared)
+
+    return write_batch(list(points))
