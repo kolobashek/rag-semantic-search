@@ -118,6 +118,39 @@ def test_payload_integrity_rejects_missing_content_contract_fields() -> None:
         "full_path": 1,
         "payload_schema_version": 1,
     }
+    assert result["sampling_strategy"] == "scroll_fallback"
+
+
+def test_payload_integrity_uses_random_qdrant_sampling_when_available() -> None:
+    class _RandomClient:
+        query = None
+
+        def query_points(self, **kwargs):
+            self.query = kwargs["query"]
+            return SimpleNamespace(
+                points=[
+                    SimpleNamespace(
+                        payload={
+                            "type": "pdf_content",
+                            "text": "условия договора",
+                            "full_path": r"O:\Договор.pdf",
+                            "doc_id": "doc-1",
+                            "payload_schema_version": 3,
+                            "chunk_index": 0,
+                        }
+                    )
+                ]
+            )
+
+        def scroll(self, **_kwargs):
+            raise AssertionError("scroll fallback must not be used")
+
+    client = _RandomClient()
+    result = sample_payload_integrity(client, collection_name="catalog_v2", sample_size=100)
+
+    assert result["ok"] is True
+    assert result["sampling_strategy"] == "random"
+    assert client.query.sample.value == "random"
 
 
 def test_payload_integrity_rejects_separator_only_content() -> None:

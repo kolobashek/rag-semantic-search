@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import OptimizersConfigDiff, PayloadSelectorInclude
+from qdrant_client.http.exceptions import UnexpectedResponse
+from qdrant_client.models import OptimizersConfigDiff, PayloadSelectorInclude, Sample, SampleQuery
 
 from rag_catalog.core.embedding_collections import resolve_embedding_collection_name
 from rag_catalog.core.indexing import ensure_payload_indexes
@@ -73,6 +74,7 @@ def sample_payload_integrity(
     if limit == 0:
         return {
             "ok": True,
+            "sampling_strategy": "none",
             "sample_size": 0,
             "missing_fields": {},
             "quality_violations": {},
@@ -81,12 +83,26 @@ def sample_payload_integrity(
             "schema_versions": {},
         }
     fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index"]
-    points, _offset = client.scroll(
-        collection_name=collection_name,
-        limit=limit,
-        with_payload=PayloadSelectorInclude(include=fields),
-        with_vectors=False,
-    )
+    payload_selector = PayloadSelectorInclude(include=fields)
+    sampling_strategy = "random"
+    try:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=SampleQuery(sample=Sample.RANDOM),
+            limit=limit,
+            with_payload=payload_selector,
+            with_vectors=False,
+        )
+        points = list(response.points)
+    except (AttributeError, TypeError, NotImplementedError, UnexpectedResponse) as exc:
+        logger.warning("Qdrant random payload sampling недоступен, использую scroll: %s", exc)
+        points, _offset = client.scroll(
+            collection_name=collection_name,
+            limit=limit,
+            with_payload=payload_selector,
+            with_vectors=False,
+        )
+        sampling_strategy = "scroll_fallback"
     missing: Counter[str] = Counter()
     quality_violations: Counter[str] = Counter()
     content_quality: Counter[str] = Counter()
@@ -121,6 +137,7 @@ def sample_payload_integrity(
         missing["sample"] = 1
     return {
         "ok": not missing and not quality_violations,
+        "sampling_strategy": sampling_strategy,
         "sample_size": len(points),
         "requested_sample_size": limit,
         "missing_fields": dict(sorted(missing.items())),
