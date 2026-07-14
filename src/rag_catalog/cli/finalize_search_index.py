@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -66,10 +67,19 @@ def sample_payload_integrity(
     *,
     collection_name: str,
     sample_size: int,
+    min_content_chars: int = 0,
 ) -> Dict[str, Any]:
     limit = min(10_000, max(0, int(sample_size)))
     if limit == 0:
-        return {"ok": True, "sample_size": 0, "missing_fields": {}, "types": {}, "schema_versions": {}}
+        return {
+            "ok": True,
+            "sample_size": 0,
+            "missing_fields": {},
+            "quality_violations": {},
+            "content_quality": {},
+            "types": {},
+            "schema_versions": {},
+        }
     fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index"]
     points, _offset = client.scroll(
         collection_name=collection_name,
@@ -78,6 +88,8 @@ def sample_payload_integrity(
         with_vectors=False,
     )
     missing: Counter[str] = Counter()
+    quality_violations: Counter[str] = Counter()
+    content_quality: Counter[str] = Counter()
     types: Counter[str] = Counter()
     versions: Counter[str] = Counter()
     for point in points:
@@ -88,15 +100,32 @@ def sample_payload_integrity(
         for field_name in _REQUIRED_PAYLOAD_FIELDS:
             if payload.get(field_name) in (None, "", []):
                 missing[field_name] += 1
-        if point_type not in {"file_metadata", "folder_metadata"} and payload.get("chunk_index") is None:
+        is_content = point_type not in {"file_metadata", "folder_metadata"}
+        if is_content and payload.get("chunk_index") is None:
             missing["content.chunk_index"] += 1
+        if is_content:
+            content_quality["sampled"] += 1
+            text = str(payload.get("text") or "").strip()
+            if text and not re.sub(r"[\W_]+", "", text, flags=re.UNICODE):
+                quality_violations["content.separator_only"] += 1
+            minimum = max(0, int(min_content_chars or 0))
+            if minimum and 0 < len(text) < minimum:
+                content_quality["short_under_min"] += 1
+                try:
+                    chunk_index = int(payload.get("chunk_index") or 0)
+                except (TypeError, ValueError):
+                    chunk_index = 0
+                if chunk_index > 0:
+                    quality_violations["content.short_noninitial"] += 1
     if not points:
         missing["sample"] = 1
     return {
-        "ok": not missing,
+        "ok": not missing and not quality_violations,
         "sample_size": len(points),
         "requested_sample_size": limit,
         "missing_fields": dict(sorted(missing.items())),
+        "quality_violations": dict(sorted(quality_violations.items())),
+        "content_quality": dict(sorted(content_quality.items())),
         "types": dict(sorted(types.items())),
         "schema_versions": dict(sorted(versions.items())),
     }
@@ -112,6 +141,7 @@ def finalize_collection(
     poll_seconds: float,
     max_unindexed_vectors: int,
     payload_sample_size: int,
+    min_content_chars: int = 0,
 ) -> Dict[str, Any]:
     timeout = max(30, int(timeout_sec or 30))
     ensure_payload_indexes(
@@ -146,6 +176,7 @@ def finalize_collection(
                 client,
                 collection_name=collection_name,
                 sample_size=payload_sample_size,
+                min_content_chars=min_content_chars,
             )
             snapshot["payload_integrity"] = payload_integrity
             if not payload_integrity["ok"]:
@@ -215,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         poll_seconds=float(args.poll_sec),
         max_unindexed_vectors=int(args.max_unindexed_vectors),
         payload_sample_size=int(args.payload_sample_size),
+        min_content_chars=int(cfg.get("index_min_chunk_chars") or 120),
     )
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if str(args.output or "").strip():

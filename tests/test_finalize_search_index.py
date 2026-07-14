@@ -118,3 +118,57 @@ def test_payload_integrity_rejects_missing_content_contract_fields() -> None:
         "full_path": 1,
         "payload_schema_version": 1,
     }
+
+
+def test_payload_integrity_rejects_separator_only_content() -> None:
+    class _BrokenClient:
+        def scroll(self, **_kwargs):
+            return (
+                [
+                    SimpleNamespace(
+                        payload={
+                            "type": "xlsx_content",
+                            "text": "|  |  |  |",
+                            "full_path": r"O:\noise.xlsx",
+                            "doc_id": "doc-1",
+                            "payload_schema_version": 3,
+                            "chunk_index": 0,
+                        }
+                    )
+                ],
+                None,
+            )
+
+    result = sample_payload_integrity(_BrokenClient(), collection_name="catalog_v2", sample_size=100)
+
+    assert result["ok"] is False
+    assert result["quality_violations"] == {"content.separator_only": 1}
+
+
+def test_payload_integrity_rejects_short_tail_but_allows_short_whole_document() -> None:
+    class _ClientWithShortContent:
+        def scroll(self, **_kwargs):
+            base = {
+                "type": "txt_content",
+                "full_path": r"O:\note.txt",
+                "doc_id": "doc-1",
+                "payload_schema_version": 3,
+            }
+            return (
+                [
+                    SimpleNamespace(payload={**base, "text": "Краткая записка", "chunk_index": 0}),
+                    SimpleNamespace(payload={**base, "text": "обрывок", "chunk_index": 2}),
+                ],
+                None,
+            )
+
+    result = sample_payload_integrity(
+        _ClientWithShortContent(),
+        collection_name="catalog_v2",
+        sample_size=100,
+        min_content_chars=120,
+    )
+
+    assert result["ok"] is False
+    assert result["content_quality"]["short_under_min"] == 2
+    assert result["quality_violations"] == {"content.short_noninitial": 1}
