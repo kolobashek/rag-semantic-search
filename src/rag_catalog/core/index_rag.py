@@ -971,6 +971,8 @@ class RAGIndexer:
             logger.info("OCR из кэша: %s", filepath.name)
             return str(cached.get("extracted_text") or "")
 
+        diagnostics: Dict[str, Any] = {}
+        started = time.perf_counter()
         try:
             text = extract_image(
                 filepath,
@@ -978,28 +980,40 @@ class RAGIndexer:
                 max_pages=int(getattr(self, "ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
                 use_rapid=getattr(self, "_use_rapid_ocr", False),
                 raise_on_failure=True,
+                rapid_fallback_enabled=getattr(self, "ocr_rapid_fallback_enabled", True),
+                diagnostics=diagnostics,
             )
         except Exception as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
             try:
                 self.telemetry.save_ocr_file_result(
                     logical_path,
                     logical_mtime,
                     status="error",
                     error=str(exc),
+                    requested_engine=str(diagnostics.get("requested_engine") or getattr(self, "ocr_engine", "")),
+                    engine=str(diagnostics.get("engine") or getattr(self, "ocr_engine", "")),
+                    fallback_used=bool(diagnostics.get("fallback_used")),
+                    duration_ms=duration_ms,
                 )
             except Exception:
                 pass
             raise
 
+        duration_ms = int((time.perf_counter() - started) * 1000)
         try:
             chars = len(text.strip())
             self.telemetry.save_ocr_file_result(
                 logical_path,
                 logical_mtime,
                 text=text,
-                pages=1 if chars > 0 else 0,
+                pages=max(0, int(diagnostics.get("pages") or (1 if chars > 0 else 0))),
                 chars=chars,
                 status="ok" if chars > 0 else "empty",
+                requested_engine=str(diagnostics.get("requested_engine") or getattr(self, "ocr_engine", "")),
+                engine=str(diagnostics.get("engine") or getattr(self, "ocr_engine", "")),
+                fallback_used=bool(diagnostics.get("fallback_used")),
+                duration_ms=duration_ms,
             )
         except Exception:
             pass

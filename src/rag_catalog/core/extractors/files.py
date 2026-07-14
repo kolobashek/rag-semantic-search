@@ -949,18 +949,38 @@ def extract_image(
     max_pages: int = 50,
     use_rapid: bool = False,
     raise_on_failure: bool = False,
+    rapid_fallback_enabled: bool = True,
+    diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """Extract text from an image.
 
     use_rapid=True  → RapidOCR + DirectML/GPU
     use_rapid=False → Tesseract (default, CPU)
     """
+    requested_engine = "rapidocr" if use_rapid else "tesseract"
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "requested_engine": requested_engine,
+                "engine": requested_engine,
+                "fallback_used": False,
+                "fallback_reason": "",
+                "pages": 0,
+            }
+        )
     if use_rapid:
         try:
             from rag_catalog.core.extractors.ocr_rapid import ocr_image_rapid  # noqa: PLC0415
-            return ocr_image_rapid(filepath)
+            return ocr_image_rapid(filepath, max_pages=max_pages, diagnostics=diagnostics)
         except Exception as exc:
+            if diagnostics is not None:
+                diagnostics["fallback_reason"] = str(exc)
+            if not rapid_fallback_enabled:
+                raise RuntimeError(f"RapidOCR image failed for {filepath}: {exc}") from exc
             logger.warning("RapidOCR image не удался, fallback на Tesseract: %s", exc)
+            if diagnostics is not None:
+                diagnostics["engine"] = "tesseract"
+                diagnostics["fallback_used"] = True
     try:
         import pytesseract  # type: ignore
     except ImportError as exc:
@@ -995,6 +1015,8 @@ def extract_image(
                     max_pages,
                 )
                 n_frames = max_pages
+            if diagnostics is not None:
+                diagnostics["pages"] = n_frames
             for frame_idx in range(n_frames):
                 if n_frames > 1:
                     img.seek(frame_idx)

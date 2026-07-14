@@ -383,6 +383,34 @@ class TestExtractImage:
         assert saved.kwargs["status"] == "error"
         assert "cannot identify image file" in saved.kwargs["error"]
 
+    def test_records_image_pages_actual_engine_and_duration(self, tmp_path):
+        indexer = self._make_indexer(tmp_path)
+        indexer.telemetry = MagicMock()
+        indexer.telemetry.get_ocr_file_result.return_value = None
+        indexer.ocr_engine = "rapidocr"
+        indexer._use_rapid_ocr = True
+        f = tmp_path / "multipage.tiff"
+        f.write_bytes(b"II\x2a\x00")
+
+        def recognize(*_args, **kwargs):
+            kwargs["diagnostics"].update(
+                requested_engine="rapidocr",
+                engine="rapidocr",
+                fallback_used=False,
+                pages=3,
+            )
+            return "three pages"
+
+        with patch("rag_catalog.core.index_rag.extract_image", side_effect=recognize):
+            assert indexer._extract_image(f) == "three pages"
+
+        saved = indexer.telemetry.save_ocr_file_result.call_args.kwargs
+        assert saved["pages"] == 3
+        assert saved["requested_engine"] == "rapidocr"
+        assert saved["engine"] == "rapidocr"
+        assert saved["fallback_used"] is False
+        assert saved["duration_ms"] >= 0
+
     def test_converts_non_rgb_mode(self, tmp_path):
         """Изображения не в RGB/L/RGBA конвертируются в RGB перед OCR."""
         indexer = self._make_indexer(tmp_path)

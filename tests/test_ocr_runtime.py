@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from rag_catalog.core import ocr_runtime
-from rag_catalog.core.extractors.files import _iter_pdf_pages, ocr_pdf
+from rag_catalog.core.extractors.files import _iter_pdf_pages, extract_image, ocr_pdf
 from rag_catalog.core.extractors.ocr_rapid import _ocr_pdf_rapid_impl
 
 
@@ -108,3 +108,24 @@ def test_rapidocr_failure_does_not_fallback_when_disabled(monkeypatch, tmp_path:
         "fallback_used": False,
         "fallback_reason": "directml failed",
     }
+
+
+def test_rapidocr_image_failure_does_not_fallback_when_disabled(monkeypatch, tmp_path: Path) -> None:
+    def fail_rapid(*_args, **_kwargs):
+        raise RuntimeError("directml image failed")
+
+    monkeypatch.setattr("rag_catalog.core.extractors.ocr_rapid.ocr_image_rapid", fail_rapid)
+    diagnostics: dict[str, object] = {}
+
+    with pytest.raises(RuntimeError, match="RapidOCR image failed"):
+        extract_image(
+            tmp_path / "scan.tiff",
+            use_rapid=True,
+            rapid_fallback_enabled=False,
+            diagnostics=diagnostics,
+        )
+
+    assert diagnostics["requested_engine"] == "rapidocr"
+    assert diagnostics["engine"] == "rapidocr"
+    assert diagnostics["fallback_used"] is False
+    assert diagnostics["fallback_reason"] == "directml image failed"

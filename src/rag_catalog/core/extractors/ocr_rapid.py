@@ -150,19 +150,32 @@ def _img_to_text(img_array: np.ndarray) -> str:
     return "\n".join(lines)
 
 
-def ocr_image_rapid(filepath: Path) -> str:
+def ocr_image_rapid(
+    filepath: Path,
+    *,
+    max_pages: int = 50,
+    diagnostics: dict[str, Any] | None = None,
+) -> str:
     """OCR одного изображения через RapidOCR."""
     with _ocr_semaphore:
-        return _ocr_image_rapid_impl(filepath)
+        return _ocr_image_rapid_impl(filepath, max_pages=max_pages, diagnostics=diagnostics)
 
 
-def _ocr_image_rapid_impl(filepath: Path) -> str:
+def _ocr_image_rapid_impl(
+    filepath: Path,
+    *,
+    max_pages: int = 50,
+    diagnostics: dict[str, Any] | None = None,
+) -> str:
     try:
         from PIL import Image  # noqa: PLC0415
         with Image.open(filepath) as img:
             n_frames: int = getattr(img, "n_frames", 1)
             parts: list[str] = []
-            for frame_idx in range(min(n_frames, 50)):
+            pages = min(n_frames, max(1, int(max_pages or 50)))
+            if diagnostics is not None:
+                diagnostics["pages"] = pages
+            for frame_idx in range(pages):
                 try:
                     img.seek(frame_idx)
                 except EOFError:
