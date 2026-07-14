@@ -192,7 +192,7 @@ def relevance_vector(results: Iterable[Dict[str, Any]], expected: List[str], *, 
     vector: List[int] = []
     for result in list(results)[: max(1, int(limit))]:
         haystack = _result_text(result)
-        vector.append(1 if any(_result_matches_expected(haystack, needle, needles) for needle in needles) else 0)
+        vector.append(1 if needles and all(_result_matches_expected(haystack, needle, needles) for needle in needles) else 0)
     return vector
 
 
@@ -203,6 +203,12 @@ def recall_at_k(results: List[Dict[str, Any]], expected: List[str], *, k: int) -
     top_texts = [_result_text(item) for item in results[: max(1, int(k))]]
     matched = sum(1 for needle in needles if any(_result_matches_expected(text, needle, needles) for text in top_texts))
     return matched / len(needles)
+
+
+def precision_at_k(results: List[Dict[str, Any]], expected: List[str], *, k: int) -> float:
+    """Return the share of returned top-k results matching the complete intent."""
+    rels = relevance_vector(results, expected, limit=k)
+    return sum(rels) / len(rels) if rels else 0.0
 
 
 def mrr_at_k(results: List[Dict[str, Any]], expected: List[str], *, k: int) -> float:
@@ -254,8 +260,18 @@ def evaluate_search(
         pages = [_result_page(result) for result in limited_results]
         acl_leaks = sum(1 for result in limited_results if _expected_hit([_result_text(result)], forbidden)) if forbidden else 0
         relevance_recall = recall_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
+        relevance_precision = (
+            precision_at_k(results, item.expected, k=limit)
+            if item.expected and not item.expect_no_answer
+            else None
+        )
         relevance_mrr = mrr_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
         relevance_ndcg = ndcg_at_k(results, item.expected, k=limit) if item.expected and not item.expect_no_answer else None
+        top1_relevant = (
+            float(bool(relevance_vector(results, item.expected, limit=1)[0]))
+            if item.expected and not item.expect_no_answer and limited_results
+            else (0.0 if item.expected and not item.expect_no_answer else None)
+        )
         rows.append(
             {
                 "query": item.query,
@@ -263,6 +279,9 @@ def evaluate_search(
                 "category": item.category,
                 "results_count": len(results),
                 "recall_at_k": relevance_recall,
+                "precision_at_k": relevance_precision,
+                "irrelevant_rate_at_k": (1.0 - relevance_precision) if relevance_precision is not None else None,
+                "top1_relevant": top1_relevant,
                 "mrr_at_k": relevance_mrr,
                 "ndcg_at_k": relevance_ndcg,
                 "document_hit": 1.0 if expected_paths and _expected_hit(path_texts, expected_paths) else (0.0 if expected_paths else None),
@@ -296,6 +315,10 @@ def evaluate_search(
         by_category[category] = {
             "queries": len(cat_rows),
             "recall_at_k": sum(float(row["recall_at_k"]) for row in cat_relevance_rows) / cat_count,
+            "precision_at_k": sum(float(row["precision_at_k"]) for row in cat_relevance_rows) / cat_count,
+            "irrelevant_rate_at_k": sum(float(row["irrelevant_rate_at_k"]) for row in cat_relevance_rows)
+            / cat_count,
+            "top1_accuracy": sum(float(row["top1_relevant"]) for row in cat_relevance_rows) / cat_count,
             "mrr_at_k": sum(float(row["mrr_at_k"]) for row in cat_relevance_rows) / cat_count,
             "ndcg_at_k": sum(float(row["ndcg_at_k"]) for row in cat_relevance_rows) / cat_count,
             "zero_result_rate": sum(1 for row in cat_rows if int(row["results_count"] or 0) == 0) / max(1, len(cat_rows)),
@@ -306,6 +329,9 @@ def evaluate_search(
         "queries": len(rows),
         "limit": int(limit),
         "recall_at_k": sum(float(row["recall_at_k"]) for row in relevance_rows) / count,
+        "precision_at_k": sum(float(row["precision_at_k"]) for row in relevance_rows) / count,
+        "irrelevant_rate_at_k": sum(float(row["irrelevant_rate_at_k"]) for row in relevance_rows) / count,
+        "top1_accuracy": sum(float(row["top1_relevant"]) for row in relevance_rows) / count,
         "mrr_at_k": sum(float(row["mrr_at_k"]) for row in relevance_rows) / count,
         "ndcg_at_k": sum(float(row["ndcg_at_k"]) for row in relevance_rows) / count,
         "zero_result_rate": zero_results / max(1, len(rows)),
@@ -337,7 +363,12 @@ def evaluate_retrieval_decision(
     *,
     baseline: Dict[str, Any] | None = None,
     min_recall: float = 0.875,
+    min_precision: float = 0.5,
+    min_top1_accuracy: float = 0.8,
+    max_irrelevant_rate: float = 0.5,
     max_recall_drop: float = 0.0,
+    max_precision_drop: float = 0.0,
+    max_top1_drop: float = 0.0,
     max_p95_ms: int = 3000,
     max_p95_ratio: float = 1.5,
     max_acl_leakage: float = 0.0,
@@ -352,11 +383,22 @@ def evaluate_retrieval_decision(
         checks.append({"name": name, "ok": bool(ok), "actual": actual, "expected": expected})
 
     recall = float(candidate.get("recall_at_k") or 0.0)
+    precision = float(candidate.get("precision_at_k") or 0.0)
+    top1_accuracy = float(candidate.get("top1_accuracy") or 0.0)
+    irrelevant_rate = float(candidate.get("irrelevant_rate_at_k") or 0.0)
     p95 = int(candidate.get("latency_p95_ms") or 0)
     acl_leakage = float(candidate.get("acl_leakage_rate") or 0.0)
     acl_results_checked = int(candidate.get("acl_results_checked") or 0)
     coverage = float(candidate.get("ground_truth_coverage") or 0.0)
     add("recall_floor", recall >= min_recall, recall, f">={min_recall}")
+    add("precision_floor", precision >= min_precision, precision, f">={min_precision}")
+    add("top1_accuracy", top1_accuracy >= min_top1_accuracy, top1_accuracy, f">={min_top1_accuracy}")
+    add(
+        "irrelevant_result_rate",
+        irrelevant_rate <= max_irrelevant_rate,
+        irrelevant_rate,
+        f"<={max_irrelevant_rate}",
+    )
     add("latency_budget", p95 <= int(max_p95_ms), p95, f"<={int(max_p95_ms)} ms")
     add("acl_evidence", acl_results_checked > 0, acl_results_checked, ">0 checked forbidden results")
     add("acl_leakage", acl_leakage <= max_acl_leakage, acl_leakage, f"<={max_acl_leakage}")
@@ -380,6 +422,24 @@ def evaluate_retrieval_decision(
         baseline_recall = float(baseline.get("recall_at_k") or 0.0)
         recall_drop = baseline_recall - recall
         add("recall_regression", recall_drop <= max_recall_drop, recall_drop, f"<={max_recall_drop}")
+        baseline_precision_raw = baseline.get("precision_at_k")
+        baseline_precision = float(baseline_precision_raw) if baseline_precision_raw is not None else None
+        precision_drop = baseline_precision - precision if baseline_precision is not None else None
+        add(
+            "precision_regression",
+            precision_drop is not None and precision_drop <= max_precision_drop,
+            precision_drop,
+            f"<={max_precision_drop}",
+        )
+        baseline_top1_raw = baseline.get("top1_accuracy")
+        baseline_top1 = float(baseline_top1_raw) if baseline_top1_raw is not None else None
+        top1_drop = baseline_top1 - top1_accuracy if baseline_top1 is not None else None
+        add(
+            "top1_regression",
+            top1_drop is not None and top1_drop <= max_top1_drop,
+            top1_drop,
+            f"<={max_top1_drop}",
+        )
         baseline_p95 = int(baseline.get("latency_p95_ms") or 0)
         p95_ratio = p95 / baseline_p95 if baseline_p95 > 0 else None
         add(
@@ -396,6 +456,9 @@ def evaluate_retrieval_decision(
         "candidate": {
             "queries": int(candidate.get("queries") or 0),
             "recall_at_k": recall,
+            "precision_at_k": precision,
+            "irrelevant_rate_at_k": irrelevant_rate,
+            "top1_accuracy": top1_accuracy,
             "latency_p95_ms": p95,
             "acl_leakage_rate": acl_leakage,
             "acl_results_checked": acl_results_checked,

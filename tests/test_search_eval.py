@@ -6,6 +6,7 @@ from rag_catalog.core.search_eval import (
     evaluate_search,
     mrr_at_k,
     ndcg_at_k,
+    precision_at_k,
     recall_at_k,
 )
 
@@ -19,7 +20,19 @@ def test_relevance_metrics() -> None:
     assert recall_at_k(results, ["карточка предприятия"], k=1) == 0
     assert recall_at_k(results, ["карточка предприятия"], k=2) == 1
     assert mrr_at_k(results, ["карточка предприятия"], k=2) == 0.5
+    assert precision_at_k(results, ["карточка предприятия"], k=2) == 0.5
     assert 0 < ndcg_at_k(results, ["карточка предприятия"], k=2) < 1
+
+
+def test_precision_requires_complete_query_intent() -> None:
+    results = [
+        {"filename": "Договор аренды.pdf", "path": "Договоры/Договор аренды.pdf"},
+        {"filename": "Договор поставки.pdf", "path": "Договоры/Договор поставки.pdf"},
+        {"filename": "Счет на оплату.pdf", "path": "Счета/Счет на оплату.pdf"},
+    ]
+
+    assert precision_at_k(results, ["договор", "поставки"], k=3) == 1 / 3
+    assert mrr_at_k(results, ["договор", "поставки"], k=3) == 0.5
 
 
 def test_relevance_metrics_use_morphology_and_domain_aliases() -> None:
@@ -84,6 +97,9 @@ def test_evaluate_search_summary() -> None:
 
     assert report["queries"] == 1
     assert report["recall_at_k"] == 1
+    assert report["precision_at_k"] == 1
+    assert report["irrelevant_rate_at_k"] == 0
+    assert report["top1_accuracy"] == 1
     assert report["mrr_at_k"] == 1
     assert report["ndcg_at_k"] == 1
     assert report["zero_result_rate"] == 0
@@ -134,11 +150,16 @@ def test_retrieval_v3_metrics_cover_document_chunk_page_no_answer_and_acl() -> N
 def test_retrieval_decision_rejects_regression_and_missing_safety_evidence() -> None:
     baseline = {
         "recall_at_k": 0.9,
+        "precision_at_k": 0.7,
+        "top1_accuracy": 0.9,
         "latency_p95_ms": 1000,
     }
     candidate = {
         "queries": 20,
         "recall_at_k": 0.88,
+        "precision_at_k": 0.4,
+        "irrelevant_rate_at_k": 0.6,
+        "top1_accuracy": 0.75,
         "latency_p95_ms": 1700,
         "acl_leakage_rate": 0.01,
         "acl_results_checked": 10,
@@ -151,5 +172,36 @@ def test_retrieval_decision_rejects_regression_and_missing_safety_evidence() -> 
 
     assert decision["decision"] == "NO_GO"
     failed = {check["name"] for check in decision["checks"] if not check["ok"]}
-    assert {"acl_leakage", "no_answer_accuracy", "ground_truth_coverage", "faithfulness_evaluated"} <= failed
-    assert {"recall_regression", "latency_regression"} <= failed
+    assert {
+        "precision_floor",
+        "top1_accuracy",
+        "irrelevant_result_rate",
+        "acl_leakage",
+        "no_answer_accuracy",
+        "ground_truth_coverage",
+        "faithfulness_evaluated",
+    } <= failed
+    assert {"recall_regression", "precision_regression", "top1_regression", "latency_regression"} <= failed
+
+
+def test_retrieval_decision_requires_comparable_precision_baseline() -> None:
+    candidate = {
+        "queries": 20,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "irrelevant_rate_at_k": 0.0,
+        "top1_accuracy": 1.0,
+        "latency_p95_ms": 100,
+        "acl_leakage_rate": 0.0,
+        "acl_results_checked": 10,
+        "no_answer_accuracy": 1.0,
+        "ground_truth_coverage": 1.0,
+    }
+
+    decision = evaluate_retrieval_decision(
+        candidate,
+        baseline={"recall_at_k": 1.0, "latency_p95_ms": 100},
+    )
+
+    failed = {check["name"] for check in decision["checks"] if not check["ok"]}
+    assert {"precision_regression", "top1_regression"} <= failed

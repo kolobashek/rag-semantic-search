@@ -67,6 +67,11 @@ def main() -> int:
     parser.add_argument("--max-p95-ms", type=int, default=3000)
     parser.add_argument("--max-p95-ratio", type=float, default=1.5)
     parser.add_argument("--max-recall-drop", type=float, default=0.0)
+    parser.add_argument("--min-precision-at-k", type=float, default=0.5)
+    parser.add_argument("--min-top1-accuracy", type=float, default=0.8)
+    parser.add_argument("--max-irrelevant-rate", type=float, default=0.5)
+    parser.add_argument("--max-precision-drop", type=float, default=0.0)
+    parser.add_argument("--max-top1-drop", type=float, default=0.0)
     parser.add_argument("--max-acl-leakage", type=float, default=0.0)
     parser.add_argument("--min-no-answer-accuracy", type=float, default=0.8)
     parser.add_argument("--min-ground-truth-coverage", type=float, default=0.5)
@@ -101,9 +106,16 @@ def main() -> int:
         "retrieval_pipeline": str(cfg.get("retrieval_pipeline") or "legacy"),
         "bm25_enabled": bool(cfg.get("retrieval_bm25_enabled")),
         "bm25_top_k": int(cfg.get("retrieval_bm25_top_k") or 0),
+        "fulltext_enabled": bool(cfg.get("retrieval_fulltext_enabled")),
+        "fulltext_top_k": int(cfg.get("retrieval_fulltext_top_k") or 0),
         "embedding_model": str(cfg.get("embedding_model") or ""),
+        "embedding_backend": str(cfg.get("embedding_backend") or ""),
+        "relevance_gate_enabled": bool(cfg.get("retrieval_relevance_gate_enabled")),
+        "min_dense_score": float(cfg.get("retrieval_min_dense_score") or 0.0),
+        "single_term_min_dense_score": float(cfg.get("retrieval_single_term_min_dense_score") or 0.0),
         "reranker_enabled": bool(cfg.get("retrieval_reranker_enabled")),
         "reranker_model": str(cfg.get("retrieval_reranker_model") or ""),
+        "reranker_backend": str(cfg.get("retrieval_reranker_backend") or ""),
         "collection_name": str(cfg.get("collection_name") or ""),
     }
     baseline = None
@@ -113,7 +125,12 @@ def main() -> int:
         report,
         baseline=baseline,
         min_recall=max(0.0, float(args.fail_under_recall or 0.875)),
+        min_precision=max(0.0, float(args.min_precision_at_k)),
+        min_top1_accuracy=max(0.0, float(args.min_top1_accuracy)),
+        max_irrelevant_rate=max(0.0, float(args.max_irrelevant_rate)),
         max_recall_drop=max(0.0, float(args.max_recall_drop)),
+        max_precision_drop=max(0.0, float(args.max_precision_drop)),
+        max_top1_drop=max(0.0, float(args.max_top1_drop)),
         max_p95_ms=max(1, int(args.max_p95_ms)),
         max_p95_ratio=max(1.0, float(args.max_p95_ratio)),
         max_acl_leakage=max(0.0, float(args.max_acl_leakage)),
@@ -135,6 +152,9 @@ def main() -> int:
             f"- Queries: {report['queries']}",
             f"- Limit: {report['limit']}",
             f"- Recall@k: {report['recall_at_k']:.3f}",
+            f"- Precision@k: {report['precision_at_k']:.3f}",
+            f"- Irrelevant result rate: {report['irrelevant_rate_at_k']:.3f}",
+            f"- Top-1 accuracy: {report['top1_accuracy']:.3f}",
             f"- MRR@k: {report['mrr_at_k']:.3f}",
             f"- nDCG@k: {report['ndcg_at_k']:.3f}",
             f"- Zero-result rate: {report['zero_result_rate']:.3f}",
@@ -151,13 +171,14 @@ def main() -> int:
             "",
             "## By Category",
             "",
-            "| Category | Queries | Recall | MRR | nDCG | Zero-result | p50 ms | p95 ms |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| Category | Queries | Recall | Precision | Top-1 | MRR | nDCG | Zero-result | p50 ms | p95 ms |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
         for category, metrics in sorted(report.get("by_category", {}).items()):
             safe_category = str(category).replace("|", r"\|")
             rows.append(
                 f"| {safe_category} | {metrics['queries']} | {metrics['recall_at_k']:.3f} | "
+                f"{metrics['precision_at_k']:.3f} | {metrics['top1_accuracy']:.3f} | "
                 f"{metrics['mrr_at_k']:.3f} | {metrics['ndcg_at_k']:.3f} | "
                 f"{metrics['zero_result_rate']:.3f} | {metrics['latency_p50_ms']} | {metrics['latency_p95_ms']} |"
             )
@@ -165,14 +186,15 @@ def main() -> int:
             "",
             "## Queries",
             "",
-            "| Category | Query | Recall | MRR | nDCG | Results | Latency ms |",
-            "|---|---|---:|---:|---:|---:|---:|",
+            "| Category | Query | Recall | Precision | Top-1 | MRR | nDCG | Results | Latency ms |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ])
         for row in report["rows"]:
             category = str(row.get("category") or "general").replace("|", r"\|")
             query = str(row["query"]).replace("|", r"\|")
             rows.append(
                 f"| {category} | {query} | {_format_metric(row['recall_at_k'])} | "
+                f"{_format_metric(row['precision_at_k'])} | {_format_metric(row['top1_relevant'])} | "
                 f"{_format_metric(row['mrr_at_k'])} | {_format_metric(row['ndcg_at_k'])} | "
                 f"{row['results_count']} | {row['latency_ms']} |"
             )
