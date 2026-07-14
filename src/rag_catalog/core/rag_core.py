@@ -1588,13 +1588,24 @@ class RAGSearcher:
             hay = str(item.get("_search_hay") or "")
             path_parts = item.get("_search_path_parts") or ()
             parent_name = path_parts[-2] if len(path_parts) >= 2 else ""
-            name_terms = item.get("_search_name_terms") or set()
             if entity_terms and not any(term_matches(hay, e) for e in entity_terms):
                 continue
             matched = sum(1 for t in terms if term_matches(hay, t))
             if matched == 0:
                 continue
             is_folder = item.get("kind") == "folder"
+            has_machine_passport_evidence = any(
+                marker in hay
+                for marker in (
+                    "паспорт",
+                    "псм",
+                    "птс",
+                    "стс",
+                    "свидетельство о регистрации",
+                )
+            )
+            if wants_machine_passport and not is_folder and not has_machine_passport_evidence:
+                continue
             first_term = terms[0] if terms else ""
             first_stem = first_term.rstrip("аеиоуыьъйяю") if len(first_term) >= 5 else first_term
             if is_folder and first_stem and name.startswith(first_stem):
@@ -1653,15 +1664,6 @@ class RAGSearcher:
                 score = max(score, 0.992)
             elif wants_machine_passport and not is_folder and ("псм" in hay or "птс" in hay):
                 score = max(score, 0.996)
-            elif (
-                wants_machine_passport
-                and not is_folder
-                and str(item.get("extension") or "").lower() == ".pdf"
-                and not any(noisy in hay for noisy in ("осаго", "страхов", "полис"))
-                and entity_terms
-                and any(any(variant in name_terms for variant in self._term_variants(e)) for e in entity_terms)
-            ):
-                score = max(score, 0.9996)
             elif not is_folder and ("документы на технику" in hay or "док-ты техника" in hay):
                 score = min(0.94, score + 0.04)
             if query_norm and query_norm in name:

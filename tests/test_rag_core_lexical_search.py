@@ -29,7 +29,7 @@ def test_lexical_search_returns_parent_folder_pdf_for_passport_query(tmp_path: P
     assert "Паспорт Габидуллина Р.Р\\2-3.pdf" in paths or "Паспорт Габидуллина Р.Р/2-3.pdf" in paths
 
 
-def test_lexical_search_requires_entity_match_when_query_has_entity(tmp_path: Path) -> None:
+def test_lexical_search_requires_entity_and_document_intent_match(tmp_path: Path) -> None:
     (tmp_path / "ПСМ.pdf").write_bytes(b"%PDF")
     (tmp_path / "PC300.pdf").write_bytes(b"%PDF")
 
@@ -41,13 +41,14 @@ def test_lexical_search_requires_entity_match_when_query_has_entity(tmp_path: Pa
         content_only=False,
     )
 
-    assert [x["filename"] for x in out] == ["PC300.pdf"]
+    assert out == []
 
 
-def test_lexical_search_boosts_model_pdf_for_machine_passport_query(tmp_path: Path) -> None:
+def test_lexical_search_rejects_generic_model_pdf_for_machine_passport_query(tmp_path: Path) -> None:
     (tmp_path / "Шильдик ДВС Komatsu PC300.jpg").write_bytes(b"jpg")
     (tmp_path / "Экскаватор KOMATSU PC300-8 калькуляция 2024.xlsx").write_bytes(b"xlsx")
     (tmp_path / "PC300.pdf").write_bytes(b"%PDF")
+    (tmp_path / "Паспорт PC300.pdf").write_bytes(b"%PDF")
 
     s = _searcher_with_catalog(tmp_path)
     out = s._lexical_catalog_search(
@@ -57,11 +58,11 @@ def test_lexical_search_boosts_model_pdf_for_machine_passport_query(tmp_path: Pa
         content_only=False,
     )
 
-    assert out[0]["filename"] == "PC300.pdf"
-    assert out[0]["score"] >= 0.9996
+    assert out[0]["filename"] == "Паспорт PC300.pdf"
+    assert "PC300.pdf" not in [item["filename"] for item in out]
 
 
-def test_lexical_search_keeps_numbered_scans_below_vehicle_docs(tmp_path: Path) -> None:
+def test_lexical_search_excludes_numbered_scans_without_vehicle_doc_evidence(tmp_path: Path) -> None:
     folder = tmp_path / "VOLKSWAGEN TOUAREG 050"
     folder.mkdir()
     (folder / "doc050225.pdf").write_bytes(b"%PDF")
@@ -77,8 +78,9 @@ def test_lexical_search_keeps_numbered_scans_below_vehicle_docs(tmp_path: Path) 
     )
 
     filenames = [x["filename"] for x in out]
-    assert filenames.index("ПТС 050.pdf") < filenames.index("doc050225.pdf")
-    assert filenames.index("ПТС 050.pdf") < filenames.index("Осаго 050 туарег.pdf")
+    assert "ПТС 050.pdf" in filenames
+    assert "doc050225.pdf" not in filenames
+    assert "Осаго 050 туарег.pdf" not in filenames
 
 
 def test_lexical_search_treats_vehicle_plate_as_vin_candidate(tmp_path: Path) -> None:

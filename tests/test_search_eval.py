@@ -77,14 +77,14 @@ def test_ndcg_is_bounded_when_many_results_match_same_expected_token() -> None:
     assert ndcg_at_k(results, ["счет", "оплата"], k=3) == 1
 
 
-def test_relevance_metrics_treat_model_pdf_as_passport_when_entity_matches() -> None:
+def test_relevance_metrics_require_actual_passport_evidence() -> None:
     results = [
         {"filename": "PC300.pdf", "path": r"Почта\PC300.pdf"},
-        {"filename": "Погрузчик PC300.jpg", "path": r"Фото\Погрузчик PC300.jpg"},
+        {"filename": "Паспорт PC300.pdf", "path": r"Документы\Паспорт PC300.pdf"},
     ]
 
-    assert recall_at_k(results[:1], ["pc300", "паспорт"], k=1) == 1
-    assert recall_at_k(results[1:2], ["pc300", "паспорт"], k=1) == 0.5
+    assert recall_at_k(results[:1], ["pc300", "паспорт"], k=1) == 0.5
+    assert recall_at_k(results[1:2], ["pc300", "паспорт"], k=1) == 1
 
 
 def test_evaluate_search_summary() -> None:
@@ -138,7 +138,7 @@ def test_retrieval_v3_metrics_cover_document_chunk_page_no_answer_and_acl() -> N
             {
                 "filename": "Договор поставки.pdf",
                 "path": "Договоры/Договор поставки.pdf",
-                "text": "Оплата в течение 10 дней после поставки.",
+                "text": "Оплата\n  в течение 10 дней после поставки.",
                 "page_number": 7,
             }
         ]
