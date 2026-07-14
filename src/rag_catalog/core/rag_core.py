@@ -63,7 +63,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "qdrant_url": "http://localhost:6333",   # Docker-сервер (приоритет над db_path)
     "log_file": r"O:\rag_automation.log",
     "collection_name": "catalog",
-    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     "embedding_backend": "",
     "embedding_onnx_provider": "",
     "embedding_onnx_file_name": "",
@@ -73,7 +73,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "index_defer_fulltext": False,
     "embedding_collection_versioning": False,
     "embedding_collection_suffix": "",
-    "retrieval_preset": "release_v2",  # legacy|release_v2
+    "retrieval_preset": "legacy",  # legacy|release_v2
     "vector_size": 384,
     "chunk_size": 500,
     "chunk_overlap": 100,
@@ -131,7 +131,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rank_recency_half_life_days": 180.0,  # через сколько дней буст в 2 раза меньше
     "rank_recency_max_boost": 0.03,  # максимум буста за самый свежий документ
     "rank_max_chunks_per_document": 3,
-    "retrieval_pipeline": "v2",  # legacy|v2
+    "retrieval_pipeline": "legacy",  # legacy|v2
     "retrieval_dense_top_k": 50,
     "retrieval_lexical_top_k": 50,
     "retrieval_bm25_enabled": True,
