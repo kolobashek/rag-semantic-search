@@ -5,11 +5,49 @@ import pytest
 from scripts.search_eval import (
     _apply_acl_evidence,
     _apply_config_overrides,
+    _build_evaluation_profile,
     _enforce_eval_runtime_contracts,
     _evaluation_fingerprints,
     _parse_named_values,
     _validate_index_readiness_evidence,
 )
+
+
+def test_evaluation_profile_records_query_and_index_embedding_runtime() -> None:
+    profile = _build_evaluation_profile(
+        {
+            "embedding_model": "intfloat/multilingual-e5-small",
+            "embedding_backend": "onnx",
+            "embedding_onnx_provider": "DmlExecutionProvider",
+            "embedding_onnx_file_name": "onnx/model.onnx",
+            "index_embedding_backend": "onnx",
+            "index_embedding_onnx_provider": "DmlExecutionProvider",
+            "index_embedding_onnx_file_name": "onnx/model.onnx",
+        },
+        collection_name="catalog_v2_e5",
+    )
+
+    assert profile["embedding_onnx_provider"] == "DmlExecutionProvider"
+    assert profile["embedding_onnx_file_name"] == "onnx/model.onnx"
+    assert profile["index_embedding_backend"] == "onnx"
+    assert profile["index_embedding_onnx_provider"] == "DmlExecutionProvider"
+    assert profile["index_embedding_onnx_file_name"] == "onnx/model.onnx"
+    assert profile["collection_name"] == "catalog_v2_e5"
+
+
+def test_evaluation_profile_inherits_index_runtime_from_query_runtime() -> None:
+    profile = _build_evaluation_profile(
+        {
+            "embedding_backend": "onnx",
+            "embedding_onnx_provider": "CPUExecutionProvider",
+            "embedding_onnx_file_name": "onnx/model_qint8.onnx",
+        },
+        collection_name="catalog",
+    )
+
+    assert profile["index_embedding_backend"] == "onnx"
+    assert profile["index_embedding_onnx_provider"] == "CPUExecutionProvider"
+    assert profile["index_embedding_onnx_file_name"] == "onnx/model_qint8.onnx"
 
 
 def test_config_override_applies_named_retrieval_preset() -> None:

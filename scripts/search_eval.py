@@ -98,6 +98,44 @@ def _enforce_eval_runtime_contracts(config: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _build_evaluation_profile(config: Dict[str, Any], *, collection_name: str) -> Dict[str, Any]:
+    """Capture the exact retrieval and embedding runtime used by the evaluation."""
+    return {
+        "retrieval_preset": str(config.get("retrieval_preset") or "legacy"),
+        "retrieval_pipeline": str(config.get("retrieval_pipeline") or "legacy"),
+        "bm25_enabled": bool(config.get("retrieval_bm25_enabled")),
+        "bm25_top_k": int(config.get("retrieval_bm25_top_k") or 0),
+        "fulltext_enabled": bool(config.get("retrieval_fulltext_enabled")),
+        "fulltext_top_k": int(config.get("retrieval_fulltext_top_k") or 0),
+        "embedding_model": str(config.get("embedding_model") or ""),
+        "embedding_backend": str(config.get("embedding_backend") or ""),
+        "embedding_onnx_provider": str(config.get("embedding_onnx_provider") or ""),
+        "embedding_onnx_file_name": str(config.get("embedding_onnx_file_name") or ""),
+        "index_embedding_backend": str(
+            config.get("index_embedding_backend") or config.get("embedding_backend") or ""
+        ),
+        "index_embedding_onnx_provider": str(
+            config.get("index_embedding_onnx_provider")
+            or config.get("embedding_onnx_provider")
+            or ""
+        ),
+        "index_embedding_onnx_file_name": str(
+            config.get("index_embedding_onnx_file_name")
+            or config.get("embedding_onnx_file_name")
+            or ""
+        ),
+        "relevance_gate_enabled": bool(config.get("retrieval_relevance_gate_enabled")),
+        "min_dense_score": float(config.get("retrieval_min_dense_score") or 0.0),
+        "single_term_min_dense_score": float(
+            config.get("retrieval_single_term_min_dense_score") or 0.0
+        ),
+        "reranker_enabled": bool(config.get("retrieval_reranker_enabled")),
+        "reranker_model": str(config.get("retrieval_reranker_model") or ""),
+        "reranker_backend": str(config.get("retrieval_reranker_backend") or ""),
+        "collection_name": str(collection_name or ""),
+    }
+
+
 def _format_metric(value: Any) -> str:
     return "n/a" if value is None else f"{float(value):.3f}"
 
@@ -350,23 +388,10 @@ def main() -> int:
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             print(f"invalid ACL evidence: {exc}", file=sys.stderr)
             return 2
-    report["evaluation_profile"] = {
-        "retrieval_preset": str(cfg.get("retrieval_preset") or "legacy"),
-        "retrieval_pipeline": str(cfg.get("retrieval_pipeline") or "legacy"),
-        "bm25_enabled": bool(cfg.get("retrieval_bm25_enabled")),
-        "bm25_top_k": int(cfg.get("retrieval_bm25_top_k") or 0),
-        "fulltext_enabled": bool(cfg.get("retrieval_fulltext_enabled")),
-        "fulltext_top_k": int(cfg.get("retrieval_fulltext_top_k") or 0),
-        "embedding_model": str(cfg.get("embedding_model") or ""),
-        "embedding_backend": str(cfg.get("embedding_backend") or ""),
-        "relevance_gate_enabled": bool(cfg.get("retrieval_relevance_gate_enabled")),
-        "min_dense_score": float(cfg.get("retrieval_min_dense_score") or 0.0),
-        "single_term_min_dense_score": float(cfg.get("retrieval_single_term_min_dense_score") or 0.0),
-        "reranker_enabled": bool(cfg.get("retrieval_reranker_enabled")),
-        "reranker_model": str(cfg.get("retrieval_reranker_model") or ""),
-        "reranker_backend": str(cfg.get("retrieval_reranker_backend") or ""),
-        "collection_name": searcher.collection_name,
-    }
+    report["evaluation_profile"] = _build_evaluation_profile(
+        cfg,
+        collection_name=searcher.collection_name,
+    )
     report["index_readiness"] = live_index_readiness
     report["index_quality_evidence"] = index_quality_evidence
     baseline = None
