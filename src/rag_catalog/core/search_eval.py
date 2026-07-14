@@ -327,6 +327,13 @@ def evaluate_search(
         }
     return {
         "queries": len(rows),
+        "categories_count": len(by_category),
+        "no_answer_cases": sum(1 for item in golden if item.expect_no_answer),
+        "document_grounded_cases": sum(1 for item in golden if item.expected_paths),
+        "content_grounded_cases": sum(
+            1 for item in golden if item.expected_chunks or item.expected_pages
+        ),
+        "acl_cases": sum(1 for item in golden if item.forbidden),
         "limit": int(limit),
         "recall_at_k": sum(float(row["recall_at_k"]) for row in relevance_rows) / count,
         "precision_at_k": sum(float(row["precision_at_k"]) for row in relevance_rows) / count,
@@ -374,6 +381,11 @@ def evaluate_retrieval_decision(
     max_acl_leakage: float = 0.0,
     min_no_answer_accuracy: float = 0.8,
     min_ground_truth_coverage: float = 0.5,
+    min_eval_queries: int = 50,
+    min_no_answer_cases: int = 10,
+    min_document_grounded_cases: int = 20,
+    min_content_grounded_cases: int = 10,
+    min_categories: int = 6,
     require_faithfulness: bool = False,
 ) -> Dict[str, Any]:
     """Produce a deterministic GO/NO_GO gate for a shadow retrieval candidate."""
@@ -390,6 +402,36 @@ def evaluate_retrieval_decision(
     acl_leakage = float(candidate.get("acl_leakage_rate") or 0.0)
     acl_results_checked = int(candidate.get("acl_results_checked") or 0)
     coverage = float(candidate.get("ground_truth_coverage") or 0.0)
+    queries = int(candidate.get("queries") or 0)
+    no_answer_cases = int(candidate.get("no_answer_cases") or 0)
+    document_grounded_cases = int(candidate.get("document_grounded_cases") or 0)
+    content_grounded_cases = int(candidate.get("content_grounded_cases") or 0)
+    categories_count = int(candidate.get("categories_count") or 0)
+    add("eval_query_breadth", queries >= min_eval_queries, queries, f">={min_eval_queries}")
+    add(
+        "no_answer_case_breadth",
+        no_answer_cases >= min_no_answer_cases,
+        no_answer_cases,
+        f">={min_no_answer_cases}",
+    )
+    add(
+        "document_grounded_breadth",
+        document_grounded_cases >= min_document_grounded_cases,
+        document_grounded_cases,
+        f">={min_document_grounded_cases}",
+    )
+    add(
+        "content_grounded_breadth",
+        content_grounded_cases >= min_content_grounded_cases,
+        content_grounded_cases,
+        f">={min_content_grounded_cases}",
+    )
+    add(
+        "category_breadth",
+        categories_count >= min_categories,
+        categories_count,
+        f">={min_categories}",
+    )
     add("recall_floor", recall >= min_recall, recall, f">={min_recall}")
     add("precision_floor", precision >= min_precision, precision, f">={min_precision}")
     add("top1_accuracy", top1_accuracy >= min_top1_accuracy, top1_accuracy, f">={min_top1_accuracy}")
@@ -404,17 +446,17 @@ def evaluate_retrieval_decision(
     add("acl_leakage", acl_leakage <= max_acl_leakage, acl_leakage, f"<={max_acl_leakage}")
     add("ground_truth_coverage", coverage >= min_ground_truth_coverage, coverage, f">={min_ground_truth_coverage}")
     index_readiness = candidate.get("index_readiness")
-    if isinstance(index_readiness, dict):
-        add(
-            "index_readiness",
-            index_readiness.get("ready") is True,
-            {
-                "ready": index_readiness.get("ready") is True,
-                "collection_name": str(index_readiness.get("collection_name") or ""),
-                "reasons": list(index_readiness.get("reasons") or []),
-            },
-            "ready=true",
-        )
+    readiness = index_readiness if isinstance(index_readiness, dict) else {}
+    add(
+        "index_readiness",
+        readiness.get("ready") is True,
+        {
+            "ready": readiness.get("ready") is True,
+            "collection_name": str(readiness.get("collection_name") or ""),
+            "reasons": list(readiness.get("reasons") or ["readiness_evidence_missing"]),
+        },
+        "ready=true",
+    )
 
     no_answer = candidate.get("no_answer_accuracy")
     add(
@@ -466,7 +508,11 @@ def evaluate_retrieval_decision(
         "ok": ok,
         "checks": checks,
         "candidate": {
-            "queries": int(candidate.get("queries") or 0),
+            "queries": queries,
+            "categories_count": categories_count,
+            "no_answer_cases": no_answer_cases,
+            "document_grounded_cases": document_grounded_cases,
+            "content_grounded_cases": content_grounded_cases,
             "recall_at_k": recall,
             "precision_at_k": precision,
             "irrelevant_rate_at_k": irrelevant_rate,
@@ -476,6 +522,6 @@ def evaluate_retrieval_decision(
             "acl_results_checked": acl_results_checked,
             "no_answer_accuracy": no_answer,
             "ground_truth_coverage": coverage,
-            "index_readiness": index_readiness if isinstance(index_readiness, dict) else None,
+            "index_readiness": readiness or None,
         },
     }

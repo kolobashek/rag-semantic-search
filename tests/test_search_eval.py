@@ -144,7 +144,68 @@ def test_retrieval_v3_metrics_cover_document_chunk_page_no_answer_and_acl() -> N
     assert report["acl_leakage_rate"] == 0
     assert report["acl_results_checked"] == 1
     assert report["ground_truth_coverage"] == 1
+    assert report["categories_count"] == 1
+    assert report["no_answer_cases"] == 1
+    assert report["document_grounded_cases"] == 1
+    assert report["content_grounded_cases"] == 1
+    assert report["acl_cases"] == 1
     assert report["rows"][1]["recall_at_k"] is None
+
+
+def test_retrieval_decision_requires_broad_eval_and_readiness_evidence() -> None:
+    candidate = {
+        "queries": 36,
+        "categories_count": 7,
+        "no_answer_cases": 3,
+        "document_grounded_cases": 20,
+        "content_grounded_cases": 0,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "irrelevant_rate_at_k": 0.0,
+        "top1_accuracy": 1.0,
+        "latency_p95_ms": 100,
+        "acl_leakage_rate": 0.0,
+        "acl_results_checked": 10,
+        "no_answer_accuracy": 1.0,
+        "ground_truth_coverage": 1.0,
+    }
+
+    decision = evaluate_retrieval_decision(candidate)
+
+    assert decision["decision"] == "NO_GO"
+    failed = {check["name"] for check in decision["checks"] if not check["ok"]}
+    assert {
+        "eval_query_breadth",
+        "no_answer_case_breadth",
+        "content_grounded_breadth",
+        "index_readiness",
+    } <= failed
+
+
+def test_retrieval_decision_accepts_broad_ready_candidate() -> None:
+    candidate = {
+        "queries": 60,
+        "categories_count": 8,
+        "no_answer_cases": 12,
+        "document_grounded_cases": 30,
+        "content_grounded_cases": 15,
+        "recall_at_k": 0.95,
+        "precision_at_k": 0.8,
+        "irrelevant_rate_at_k": 0.2,
+        "top1_accuracy": 0.9,
+        "latency_p95_ms": 1500,
+        "acl_leakage_rate": 0.0,
+        "acl_results_checked": 25,
+        "no_answer_accuracy": 0.95,
+        "ground_truth_coverage": 0.8,
+        "index_readiness": {
+            "ready": True,
+            "collection_name": "catalog_v2_e5",
+            "reasons": [],
+        },
+    }
+
+    assert evaluate_retrieval_decision(candidate)["decision"] == "GO"
 
 
 def test_retrieval_decision_rejects_regression_and_missing_safety_evidence() -> None:

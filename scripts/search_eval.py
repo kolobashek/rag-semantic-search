@@ -14,8 +14,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from rag_catalog.cli.pilot_gate import source_fingerprint
 from rag_catalog.cli.finalize_search_index import collection_readiness
+from rag_catalog.cli.pilot_gate import source_fingerprint
 from rag_catalog.core.rag_core import RAGSearcher, apply_retrieval_preset, load_config
 from rag_catalog.core.search_eval import evaluate_retrieval_decision, evaluate_search, load_golden_queries
 
@@ -119,6 +119,11 @@ def main() -> int:
     parser.add_argument("--max-acl-leakage", type=float, default=0.0)
     parser.add_argument("--min-no-answer-accuracy", type=float, default=0.8)
     parser.add_argument("--min-ground-truth-coverage", type=float, default=0.5)
+    parser.add_argument("--min-eval-queries", type=int, default=50)
+    parser.add_argument("--min-no-answer-cases", type=int, default=10)
+    parser.add_argument("--min-document-grounded-cases", type=int, default=20)
+    parser.add_argument("--min-content-grounded-cases", type=int, default=10)
+    parser.add_argument("--min-categories", type=int, default=6)
     parser.add_argument("--require-faithfulness", action="store_true")
     parser.add_argument("--no-warmup", action="store_true", help="Do not warm embedder/filesystem caches before timing.")
     parser.add_argument("--warmup-query", default="карточка предприятия", help="Query text used for eval warmup.")
@@ -221,6 +226,11 @@ def main() -> int:
         max_acl_leakage=max(0.0, float(args.max_acl_leakage)),
         min_no_answer_accuracy=max(0.0, float(args.min_no_answer_accuracy)),
         min_ground_truth_coverage=max(0.0, float(args.min_ground_truth_coverage)),
+        min_eval_queries=max(0, int(args.min_eval_queries)),
+        min_no_answer_cases=max(0, int(args.min_no_answer_cases)),
+        min_document_grounded_cases=max(0, int(args.min_document_grounded_cases)),
+        min_content_grounded_cases=max(0, int(args.min_content_grounded_cases)),
+        min_categories=max(0, int(args.min_categories)),
         require_faithfulness=bool(args.require_faithfulness),
     )
     report["retrieval_decision"] = decision
@@ -235,6 +245,10 @@ def main() -> int:
             "# Search Evaluation Report",
             "",
             f"- Queries: {report['queries']}",
+            f"- Categories: {report['categories_count']}",
+            f"- No-answer cases: {report['no_answer_cases']}",
+            f"- Document-grounded cases: {report['document_grounded_cases']}",
+            f"- Content-grounded cases: {report['content_grounded_cases']}",
             f"- Limit: {report['limit']}",
             f"- Recall@k: {report['recall_at_k']:.3f}",
             f"- Precision@k: {report['precision_at_k']:.3f}",
