@@ -7,6 +7,7 @@ batching, embedding, and state updates remain owned by the caller.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -31,6 +32,8 @@ from qdrant_client.models import (
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_MAX_UPSERT_BODY_BYTES = 28 * 1024 * 1024
+
 
 def _is_payload_too_large_error(exc: Exception) -> bool:
     message = str(exc).lower()
@@ -41,6 +44,43 @@ def _is_payload_too_large_error(exc: Exception) -> bool:
         or "status code 413" in message
         or "413 (payload too large)" in message
     )
+
+
+def _estimated_point_json_size(point: PointStruct) -> int:
+    """Estimate the UTF-8 JSON bytes Qdrant will receive for one point."""
+    if hasattr(point, "model_dump"):
+        value = point.model_dump(mode="json", exclude_none=True)
+    else:  # pragma: no cover - compatibility with qdrant-client on Pydantic v1
+        value = point.dict(exclude_none=True)
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    )
+
+
+def _partition_upsert_batches(
+    points: Sequence[PointStruct],
+    *,
+    max_body_bytes: int,
+) -> list[list[PointStruct]]:
+    # Reserve space for the request wrapper and JSON separators. The default
+    # target also leaves headroom below Qdrant's 32 MiB HTTP body limit.
+    wrapper_bytes = 512
+    batches: list[list[PointStruct]] = []
+    current: list[PointStruct] = []
+    current_bytes = wrapper_bytes
+    limit = max(wrapper_bytes + 1, int(max_body_bytes))
+
+    for point in points:
+        point_bytes = _estimated_point_json_size(point) + 1
+        if current and current_bytes + point_bytes > limit:
+            batches.append(current)
+            current = []
+            current_bytes = wrapper_bytes
+        current.append(point)
+        current_bytes += point_bytes
+    if current:
+        batches.append(current)
+    return batches
 
 
 def ensure_collection(
@@ -207,8 +247,9 @@ def upsert_points(
     points: Sequence[PointStruct],
     timeout_sec: int = 60,
     retries: int = 2,
+    max_body_bytes: int = _DEFAULT_MAX_UPSERT_BODY_BYTES,
 ) -> int:
-    """Upsert points, splitting batches that exceed Qdrant's HTTP body limit."""
+    """Upsert points in body-limited batches, retaining reactive splitting."""
     if not points:
         return 0
     timeout = max(5, int(timeout_sec or 60))
@@ -260,4 +301,11 @@ def upsert_points(
             raise last_error
         return len(prepared)
 
-    return write_batch(list(points))
+    prepared_batches = _partition_upsert_batches(points, max_body_bytes=max_body_bytes)
+    if len(prepared_batches) > 1:
+        logger.info(
+            "Qdrant batch из %d точек заранее разделён по размеру JSON на %d частей",
+            len(points),
+            len(prepared_batches),
+        )
+    return sum(write_batch(batch) for batch in prepared_batches)

@@ -144,6 +144,25 @@ def test_upsert_points_passes_timeout_and_retries() -> None:
     assert client.upserted == [("catalog", 1, {"wait": True, "timeout": 300})]
 
 
+def test_upsert_points_prepartitions_by_estimated_json_size() -> None:
+    client = _FakeClient(["catalog"])
+    points = [
+        PointStruct(id=f"p{i}", vector=[0.1, 0.2], payload={"text": "x" * 180})
+        for i in range(5)
+    ]
+
+    assert upsert_points(
+        client,
+        collection_name="catalog",
+        points=points,
+        max_body_bytes=900,
+    ) == 5
+
+    assert sum(call[1] for call in client.upserted) == 5
+    assert len(client.upserted) > 1
+    assert all(call[1] < len(points) for call in client.upserted)
+
+
 def test_upsert_points_splits_payload_limited_batch() -> None:
     client = _PayloadLimitedClient(max_points=2)
     points = [PointStruct(id=f"p{i}", vector=[0.1, 0.2], payload={"x": i}) for i in range(5)]
