@@ -403,6 +403,18 @@ def evaluate_retrieval_decision(
     add("acl_evidence", acl_results_checked > 0, acl_results_checked, ">0 checked forbidden results")
     add("acl_leakage", acl_leakage <= max_acl_leakage, acl_leakage, f"<={max_acl_leakage}")
     add("ground_truth_coverage", coverage >= min_ground_truth_coverage, coverage, f">={min_ground_truth_coverage}")
+    index_readiness = candidate.get("index_readiness")
+    if isinstance(index_readiness, dict):
+        add(
+            "index_readiness",
+            index_readiness.get("ready") is True,
+            {
+                "ready": index_readiness.get("ready") is True,
+                "collection_name": str(index_readiness.get("collection_name") or ""),
+                "reasons": list(index_readiness.get("reasons") or []),
+            },
+            "ready=true",
+        )
 
     no_answer = candidate.get("no_answer_accuracy")
     add(
@@ -464,5 +476,6 @@ def evaluate_retrieval_decision(
             "acl_results_checked": acl_results_checked,
             "no_answer_accuracy": no_answer,
             "ground_truth_coverage": coverage,
+            "index_readiness": index_readiness if isinstance(index_readiness, dict) else None,
         },
     }

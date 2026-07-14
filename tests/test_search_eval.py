@@ -205,3 +205,30 @@ def test_retrieval_decision_requires_comparable_precision_baseline() -> None:
 
     failed = {check["name"] for check in decision["checks"] if not check["ok"]}
     assert {"precision_regression", "top1_regression"} <= failed
+
+
+def test_retrieval_decision_rejects_unfinalized_index() -> None:
+    candidate = {
+        "queries": 20,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "irrelevant_rate_at_k": 0.0,
+        "top1_accuracy": 1.0,
+        "latency_p95_ms": 100,
+        "acl_leakage_rate": 0.0,
+        "acl_results_checked": 10,
+        "no_answer_accuracy": 1.0,
+        "ground_truth_coverage": 1.0,
+        "index_readiness": {
+            "ready": False,
+            "collection_name": "catalog_v2_e5",
+            "reasons": ["fulltext_index_missing", "unindexed_vectors=500000"],
+        },
+    }
+
+    decision = evaluate_retrieval_decision(candidate)
+
+    assert decision["decision"] == "NO_GO"
+    check = next(item for item in decision["checks"] if item["name"] == "index_readiness")
+    assert check["ok"] is False
+    assert check["actual"]["collection_name"] == "catalog_v2_e5"

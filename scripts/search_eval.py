@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from rag_catalog.cli.pilot_gate import source_fingerprint
+from rag_catalog.cli.finalize_search_index import collection_readiness
 from rag_catalog.core.rag_core import RAGSearcher, apply_retrieval_preset, load_config
 from rag_catalog.core.search_eval import evaluate_retrieval_decision, evaluate_search, load_golden_queries
 
@@ -184,8 +185,24 @@ def main() -> int:
         "reranker_enabled": bool(cfg.get("retrieval_reranker_enabled")),
         "reranker_model": str(cfg.get("retrieval_reranker_model") or ""),
         "reranker_backend": str(cfg.get("retrieval_reranker_backend") or ""),
-        "collection_name": str(cfg.get("collection_name") or ""),
+        "collection_name": searcher.collection_name,
     }
+    try:
+        collection_info = searcher.qdrant.get_collection(searcher.collection_name)
+        report["index_readiness"] = {
+            **collection_readiness(
+                collection_info,
+                require_fulltext=bool(cfg.get("retrieval_fulltext_enabled", False)),
+                max_unindexed_vectors=int(cfg.get("qdrant_max_unindexed_vectors") or 50_000),
+            ),
+            "collection_name": searcher.collection_name,
+        }
+    except Exception as exc:
+        report["index_readiness"] = {
+            "ready": False,
+            "collection_name": searcher.collection_name,
+            "reasons": [f"readiness_probe_failed:{type(exc).__name__}"],
+        }
     baseline = None
     if args.baseline_report:
         baseline = json.loads(Path(args.baseline_report).read_text(encoding="utf-8"))
