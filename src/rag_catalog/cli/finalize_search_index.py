@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import logging
 import time
@@ -8,13 +9,15 @@ from pathlib import Path
 from typing import Any, Dict
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import OptimizersConfigDiff
+from qdrant_client.models import OptimizersConfigDiff, PayloadSelectorInclude
 
 from rag_catalog.core.embedding_collections import resolve_embedding_collection_name
 from rag_catalog.core.indexing import ensure_payload_indexes
 from rag_catalog.core.rag_core import load_config
 
 logger = logging.getLogger(__name__)
+
+_REQUIRED_PAYLOAD_FIELDS = ("type", "text", "full_path", "doc_id", "payload_schema_version")
 
 
 def _enum_text(value: Any) -> str:
@@ -58,6 +61,47 @@ def collection_readiness(
     }
 
 
+def sample_payload_integrity(
+    client: Any,
+    *,
+    collection_name: str,
+    sample_size: int,
+) -> Dict[str, Any]:
+    limit = min(10_000, max(0, int(sample_size)))
+    if limit == 0:
+        return {"ok": True, "sample_size": 0, "missing_fields": {}, "types": {}, "schema_versions": {}}
+    fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index"]
+    points, _offset = client.scroll(
+        collection_name=collection_name,
+        limit=limit,
+        with_payload=PayloadSelectorInclude(include=fields),
+        with_vectors=False,
+    )
+    missing: Counter[str] = Counter()
+    types: Counter[str] = Counter()
+    versions: Counter[str] = Counter()
+    for point in points:
+        payload = dict(getattr(point, "payload", None) or {})
+        point_type = str(payload.get("type") or "")
+        types[point_type or "<missing>"] += 1
+        versions[str(payload.get("payload_schema_version") or "<missing>")] += 1
+        for field_name in _REQUIRED_PAYLOAD_FIELDS:
+            if payload.get(field_name) in (None, "", []):
+                missing[field_name] += 1
+        if point_type not in {"file_metadata", "folder_metadata"} and payload.get("chunk_index") is None:
+            missing["content.chunk_index"] += 1
+    if not points:
+        missing["sample"] = 1
+    return {
+        "ok": not missing,
+        "sample_size": len(points),
+        "requested_sample_size": limit,
+        "missing_fields": dict(sorted(missing.items())),
+        "types": dict(sorted(types.items())),
+        "schema_versions": dict(sorted(versions.items())),
+    }
+
+
 def finalize_collection(
     client: Any,
     *,
@@ -67,6 +111,7 @@ def finalize_collection(
     timeout_sec: int,
     poll_seconds: float,
     max_unindexed_vectors: int,
+    payload_sample_size: int,
 ) -> Dict[str, Any]:
     timeout = max(30, int(timeout_sec or 30))
     ensure_payload_indexes(
@@ -96,7 +141,18 @@ def finalize_collection(
                 "indexing_threshold": max(1, int(indexing_threshold)),
             }
         )
-        if snapshot["ready"] or time.monotonic() >= deadline:
+        if snapshot["ready"]:
+            payload_integrity = sample_payload_integrity(
+                client,
+                collection_name=collection_name,
+                sample_size=payload_sample_size,
+            )
+            snapshot["payload_integrity"] = payload_integrity
+            if not payload_integrity["ok"]:
+                snapshot["ready"] = False
+                snapshot["reasons"].append("payload_integrity_failed")
+            return snapshot
+        if time.monotonic() >= deadline:
             return snapshot
         logger.info(
             "Qdrant finalize: indexed=%d/%d, unindexed=%d, reasons=%s",
@@ -130,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
         default=int(cfg.get("qdrant_finalize_timeout_sec") or 7_200),
     )
     parser.add_argument("--poll-sec", type=float, default=10.0)
+    parser.add_argument(
+        "--payload-sample-size",
+        type=int,
+        default=int(cfg.get("qdrant_payload_audit_sample_size") or 1_000),
+    )
     parser.add_argument("--no-fulltext", action="store_true")
     parser.add_argument("--output", default="")
     args = parser.parse_args(argv)
@@ -153,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_sec=int(args.timeout_sec),
         poll_seconds=float(args.poll_sec),
         max_unindexed_vectors=int(args.max_unindexed_vectors),
+        payload_sample_size=int(args.payload_sample_size),
     )
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if str(args.output or "").strip():
