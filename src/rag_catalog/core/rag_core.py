@@ -1062,8 +1062,25 @@ class RAGSearcher:
         for point in points:
             payload = dict(getattr(point, "payload", None) or {})
             text = str(payload.get("text") or "")
-            normalized = " ".join(tokenize(text))
-            occurrences = sum(max(1, normalized.count(term)) for term in terms)
+            text_terms = [
+                term.lower().replace("ё", "е")
+                for term in re.findall(r"[a-zа-яё0-9\-]{2,}", text, flags=re.IGNORECASE)
+            ]
+            matched_terms = 0
+            occurrences = 0
+            for term in terms:
+                stem = term.rstrip("аеиоуыьъйяю") if len(term) >= 5 else term
+                term_occurrences = sum(
+                    1
+                    for candidate in text_terms
+                    if candidate == term or (len(stem) >= 4 and candidate.startswith(stem))
+                )
+                if term_occurrences:
+                    matched_terms += 1
+                    occurrences += term_occurrences
+            if matched_terms < len(terms):
+                continue
+            normalized = " ".join(text_terms)
             exact_phrase = bool(query_norm and query_norm in normalized)
             score = min(0.999, 0.96 + (0.025 if exact_phrase else 0.0) + min(0.014, occurrences * 0.002))
             result = self._result_from_payload(
@@ -1072,7 +1089,7 @@ class RAGSearcher:
                 rank_reason="точное совпадение в содержимом",
                 retrieval_source="fulltext",
             )
-            result["fulltext_matched_terms"] = len(terms)
+            result["fulltext_matched_terms"] = matched_terms
             result["fulltext_query_terms"] = len(terms)
             result["fulltext_occurrences"] = occurrences
             ranked.append(result)
@@ -1804,7 +1821,13 @@ class RAGSearcher:
                 if len(clean_text) < min_content_chars and "fulltext" not in sources:
                     continue
 
-            strong_lexical = "fulltext" in sources
+            fulltext_matched = int(item.get("fulltext_matched_terms") or 0)
+            fulltext_total = int(item.get("fulltext_query_terms") or len(query_terms) or 0)
+            strong_lexical = (
+                "fulltext" in sources
+                and fulltext_total > 0
+                and fulltext_matched >= fulltext_total
+            )
             numeric_sources = {"numeric_exact", "numeric_fs_exact", "spreadsheet_numeric_exact"}
             if sources & numeric_sources and numeric_query_has_trusted_context(query):
                 strong_lexical = True

@@ -295,16 +295,26 @@ def test_fulltext_content_channel_returns_exact_russian_match() -> None:
     s = _make_searcher(connected=True)
     s.config = {"retrieval_fulltext_enabled": True}
     s._fulltext_available = True
-    s.qdrant = _FakeQdrantScroll([
-        {
-            "type": "pdf_content",
-            "filename": "Устав.pdf",
-            "path": "Компании/Устав.pdf",
-            "full_path": r"O:\Компании\Устав.pdf",
-            "extension": ".pdf",
-            "text": "Устав общества Спецмайнинг утвержден решением участников",
-        }
-    ])
+    s.qdrant = _FakeQdrantScroll(
+        [
+            {
+                "type": "pdf_content",
+                "filename": "Устав.pdf",
+                "path": "Компании/Устав.pdf",
+                "full_path": r"O:\Компании\Устав.pdf",
+                "extension": ".pdf",
+                "text": "Устав общества Спецмайнинг утвержден решением участников",
+            },
+            {
+                "type": "pdf_content",
+                "filename": "Случайный.pdf",
+                "path": "Архив/Случайный.pdf",
+                "full_path": r"O:\Архив\Случайный.pdf",
+                "extension": ".pdf",
+                "text": "Устав другого общества без искомой организации",
+            },
+        ]
+    )
 
     out = s._fulltext_content_search(
         query="спецмайнинг устав",
@@ -316,6 +326,26 @@ def test_fulltext_content_channel_returns_exact_russian_match() -> None:
     assert [item["filename"] for item in out] == ["Устав.pdf"]
     assert out[0]["retrieval_source"] == "fulltext"
     assert out[0]["fulltext_matched_terms"] == 2
+
+
+def test_relevance_gate_rejects_partial_fulltext_evidence() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.84,
+        "retrieval_min_content_chars": 120,
+    }
+    partial = {
+        "type": "pdf_content",
+        "filename": "partial.pdf",
+        "text": "Устав общества без искомой организации. " * 5,
+        "score": 0.96,
+        "retrieval_source": "fulltext",
+        "fulltext_matched_terms": 1,
+        "fulltext_query_terms": 2,
+    }
+
+    assert s._apply_relevance_gate("спецмайнинг устав", [partial]) == []
 
 
 def test_relevance_gate_rejects_weak_dense_noise_and_microchunks() -> None:
