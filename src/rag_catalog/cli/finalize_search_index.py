@@ -7,7 +7,7 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Mapping
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -93,6 +93,7 @@ def _inspect_payload_integrity(
     *,
     min_content_chars: int,
     required_content_fields: tuple[str, ...],
+    expected_content_values: Mapping[str, Any],
     missing: Counter[str],
     quality_violations: Counter[str],
     content_quality: Counter[str],
@@ -116,6 +117,10 @@ def _inspect_payload_integrity(
             for field_name in required_content_fields:
                 if payload.get(field_name) in (None, "", []):
                     missing[f"content.{field_name}"] += 1
+            for field_name, expected_value in expected_content_values.items():
+                actual_value = payload.get(field_name)
+                if actual_value not in (None, "", []) and actual_value != expected_value:
+                    quality_violations[f"content.{field_name}.unexpected_value"] += 1
             content_quality["sampled"] += 1
             text = str(payload.get("text") or "").strip()
             if text and not re.sub(r"[\W_]+", "", text, flags=re.UNICODE):
@@ -168,6 +173,7 @@ def sample_payload_integrity(
     min_content_chars: int = 0,
     query_filter: Any = None,
     required_content_fields: tuple[str, ...] = (),
+    expected_content_values: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     limit = min(10_000, max(0, int(sample_size)))
     if limit == 0:
@@ -183,7 +189,13 @@ def sample_payload_integrity(
             "types": {},
             "schema_versions": {},
         }
-    fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index", *required_content_fields]
+    expected_values = dict(expected_content_values or {})
+    fields = [
+        *_REQUIRED_PAYLOAD_FIELDS,
+        "chunk_index",
+        *required_content_fields,
+        *expected_values,
+    ]
     payload_selector = PayloadSelectorInclude(include=fields)
     sampling_strategy = "random"
     try:
@@ -221,6 +233,7 @@ def sample_payload_integrity(
         points,
         min_content_chars=min_content_chars,
         required_content_fields=required_content_fields,
+        expected_content_values=expected_values,
         missing=missing,
         quality_violations=quality_violations,
         content_quality=content_quality,
@@ -248,10 +261,17 @@ def scan_payload_integrity(
     min_content_chars: int = 0,
     query_filter: Any = None,
     required_content_fields: tuple[str, ...] = (),
+    expected_content_values: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Inspect every payload matching a filter without loading vectors into memory."""
     limit = min(10_000, max(1, int(batch_size)))
-    fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index", *required_content_fields]
+    expected_values = dict(expected_content_values or {})
+    fields = [
+        *_REQUIRED_PAYLOAD_FIELDS,
+        "chunk_index",
+        *required_content_fields,
+        *expected_values,
+    ]
     payload_selector = PayloadSelectorInclude(include=fields)
     missing: Counter[str] = Counter()
     quality_violations: Counter[str] = Counter()
@@ -276,6 +296,7 @@ def scan_payload_integrity(
             points,
             min_content_chars=min_content_chars,
             required_content_fields=required_content_fields,
+            expected_content_values=expected_values,
             missing=missing,
             quality_violations=quality_violations,
             content_quality=content_quality,
@@ -384,6 +405,7 @@ def finalize_collection(
                         "row_end",
                         "spreadsheet_payload_schema_version",
                     ),
+                    expected_content_values={"spreadsheet_payload_schema_version": 2},
                 )
                 snapshot["spreadsheet_integrity"] = spreadsheet_integrity
                 if not spreadsheet_integrity["ok"]:

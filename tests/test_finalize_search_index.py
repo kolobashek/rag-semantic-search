@@ -163,6 +163,9 @@ def test_finalize_collection_can_require_full_spreadsheet_audit(monkeypatch) -> 
         "row_end",
         "spreadsheet_payload_schema_version",
     )
+    assert full_audit_calls[0]["expected_content_values"] == {
+        "spreadsheet_payload_schema_version": 2
+    }
 
 
 def test_payload_integrity_rejects_missing_content_contract_fields() -> None:
@@ -256,10 +259,53 @@ def test_payload_integrity_forwards_filter_and_requires_spreadsheet_provenance()
             "row_end",
             "spreadsheet_payload_schema_version",
         ),
+        expected_content_values={"spreadsheet_payload_schema_version": 2},
     )
 
     assert result["ok"] is True
     assert client.kwargs["query_filter"] is query_filter
+
+
+def test_payload_integrity_rejects_old_spreadsheet_schema_version() -> None:
+    class _LegacySpreadsheetClient:
+        def scroll(self, **_kwargs):
+            return (
+                [
+                    SimpleNamespace(
+                        payload={
+                            "type": "xlsx_content",
+                            "text": "Позиция 1 | Экскаватор | 1000 руб.",
+                            "full_path": r"O:\\Прайс.xlsx",
+                            "doc_id": "sheet-1",
+                            "payload_schema_version": 3,
+                            "chunk_index": 0,
+                            "sheet": "Прайс",
+                            "row_start": 1,
+                            "row_end": 2,
+                            "spreadsheet_payload_schema_version": 1,
+                        }
+                    )
+                ],
+                None,
+            )
+
+    result = sample_payload_integrity(
+        _LegacySpreadsheetClient(),
+        collection_name="catalog_v2",
+        sample_size=100,
+        required_content_fields=(
+            "sheet",
+            "row_start",
+            "row_end",
+            "spreadsheet_payload_schema_version",
+        ),
+        expected_content_values={"spreadsheet_payload_schema_version": 2},
+    )
+
+    assert result["ok"] is False
+    assert result["quality_violations"] == {
+        "content.spreadsheet_payload_schema_version.unexpected_value": 1
+    }
 
 
 def test_full_payload_integrity_scrolls_every_page() -> None:
@@ -296,6 +342,7 @@ def test_full_payload_integrity_scrolls_every_page() -> None:
             "row_end",
             "spreadsheet_payload_schema_version",
         ),
+        expected_content_values={"spreadsheet_payload_schema_version": 2},
     )
 
     assert client.offsets == [None, "page-2"]
