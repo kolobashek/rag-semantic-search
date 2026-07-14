@@ -573,6 +573,42 @@ def test_rerank_results_reorders_top_candidates_with_cross_encoder_scores() -> N
     assert out[0]["reranker_score"] == 10.0
 
 
+def test_onnx_reranker_uses_cached_local_snapshot(monkeypatch) -> None:
+    import sentence_transformers
+
+    captured = {}
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name, **kwargs):
+            captured["model_name"] = model_name
+            captured["kwargs"] = kwargs
+
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_reranker_model": "cross-encoder/example",
+        "retrieval_reranker_backend": "onnx",
+        "retrieval_reranker_onnx_provider": "CPUExecutionProvider",
+        "retrieval_reranker_onnx_file_name": "onnx/model_qint8.onnx",
+    }
+    s._reranker = None
+    monkeypatch.setattr(sentence_transformers, "CrossEncoder", FakeCrossEncoder, raising=False)
+    monkeypatch.setattr(
+        "rag_catalog.core.rag_core._local_model_reference",
+        lambda _model_name: r"C:\cache\cross-encoder-example",
+    )
+
+    assert isinstance(s.reranker, FakeCrossEncoder)
+    assert captured["model_name"] == r"C:\cache\cross-encoder-example"
+    assert captured["kwargs"] == {
+        "backend": "onnx",
+        "model_kwargs": {
+            "provider": "CPUExecutionProvider",
+            "file_name": "onnx/model_qint8.onnx",
+        },
+        "local_files_only": True,
+    }
+
+
 def test_refresh_fs_cache_uses_state_db_without_network_tree_walk(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog"
     qdrant = tmp_path / "qdrant"

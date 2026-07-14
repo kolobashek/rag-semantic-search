@@ -167,6 +167,21 @@ _TERM_ALIASES = {
     "обслуживания": ["обслуживание", "техническое обслуживание", "услуги", "ремонт", "сервис"],
     "технических": ["технические", "техническое обслуживание", "услуги", "ремонт", "сервис"],
 }
+
+
+def _local_model_reference(model_name: str) -> str:
+    """Resolve a cached Hugging Face model without permitting network access."""
+    clean = str(model_name or "").strip()
+    if not clean or Path(clean).exists():
+        return clean
+    try:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+        return str(snapshot_download(repo_id=clean, local_files_only=True))
+    except Exception:
+        return clean
+
+
 _WEIGHT_LINE_RE = re.compile(
     r"(масса|вес|снаряженн\w*\s+масса|разрешенн\w*\s+максимальн\w*\s+масса)[^\n\r]{0,80}",
     re.IGNORECASE,
@@ -367,7 +382,7 @@ class RAGSearcher:
                     model_kwargs.get("file_name") or "auto",
                 )
                 self._reranker = CrossEncoder(
-                    model_name,
+                    _local_model_reference(model_name),
                     backend="onnx",
                     model_kwargs=model_kwargs,
                     local_files_only=True,
