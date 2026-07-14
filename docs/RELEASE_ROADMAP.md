@@ -73,7 +73,7 @@ Done criteria:
 Owner: Codex.
 
 - DONE 2026-05-14: baseline `eval/search_golden.json` расширен до 32 запросов по exact/folder/document/OCR-like сценариям.
-- DONE 2026-07-14: основной golden расширен до 50 уникальных запросов: 10 no-answer, 27 document-grounded и 7 категорий. Release gate требует также 10 проверенных chunk/page-grounded cases, поэтому cutover остаётся `NO_GO` до разметки фрагментов по финальной OCR-коллекции.
+- DONE 2026-07-14: основной golden содержит 50 уникальных запросов: 10 no-answer, 31 document-grounded, 11 проверенных chunk-grounded и 7 категорий. Все 11 цитат повторно найдены в ожидаемых документах shadow-коллекции; cutover остаётся `NO_GO` до финального OCR/reindex, ACL smoke и сравнительного eval.
 - DONE 2026-07-14: search eval и human-review workflow используют единые breadth-пороги; отсутствующий `index_readiness` теперь блокирует `GO`, а не пропускает проверку.
 - DONE 2026-05-14: golden cases разделены по категориям (`folder_or_name`, `exact_number_or_vehicle`, `document_type`, `ocr_or_scan`, `semantic_business`, `general`); eval считает `by_category`. Cloud Drive-specific cases добавить после стабилизации registry search fixtures.
 - Запускать `scripts/search_eval.py` в CI как optional/manual gate сначала, затем как required для retrieval changes.
