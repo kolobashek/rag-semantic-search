@@ -446,8 +446,35 @@ def test_relevance_gate_requires_text_evidence_for_mixed_numeric_query() -> None
 
     assert s._apply_relevance_gate("несуществующая организация 847291", [numeric_only]) == []
     assert s._apply_relevance_gate("qzxv-несуществующий-документ-999999", [numeric_only]) == []
-    assert s._apply_relevance_gate("СТС 847291", [numeric_only])[0]["relevance_evidence"] == "lexical"
+    assert s._apply_relevance_gate("СТС 847291", [numeric_only]) == []
     assert s._apply_relevance_gate("договор 847291", [numeric_only])[0]["relevance_evidence"] == "lexical"
+
+
+def test_relevance_gate_requires_machine_document_evidence_after_fusion() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.84,
+        "retrieval_single_term_min_dense_score": 0.86,
+        "retrieval_min_content_chars": 120,
+    }
+    generic_pdf = {
+        "type": "pdf_content",
+        "filename": "PC300.pdf",
+        "path": r"Почта\PC300.pdf",
+        "text": "Акт сверки по экскаватору Komatsu PC300. " * 5,
+        "dense_score": 0.99,
+        "retrieval_source": "dense",
+    }
+    passport = {
+        **generic_pdf,
+        "filename": "Выписка из электронного паспорта PC300.pdf",
+        "text": "Выписка из электронного паспорта PC300. " * 5,
+    }
+
+    assert s._apply_relevance_gate("паспорт PC300", [generic_pdf, passport]) == [
+        {**passport, "relevance_evidence": "dense", "relevance_floor": 0.84}
+    ]
 
 
 def test_rrf_recency_boost_is_relative_and_does_not_displace_exact_match() -> None:

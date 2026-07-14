@@ -17,7 +17,7 @@ from bisect import bisect_left
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ._platform_compat import apply_windows_platform_workarounds
 
@@ -159,6 +159,16 @@ FS_CACHE_TTL_SEC = 300
 FS_CACHE_MAX_ITEMS = 250_000
 
 _ENTITY_RE = re.compile(r"\b[a-zа-я]*\d+[a-zа-я0-9\-]*\b", re.IGNORECASE)
+_MACHINE_DOCUMENT_INTENT_TERMS = frozenset(
+    {"паспорт", "паспорта", "паспорты", "псм", "птс", "стс", "техпаспорт"}
+)
+_MACHINE_DOCUMENT_EVIDENCE_MARKERS = (
+    "паспорт",
+    "псм",
+    "птс",
+    "стс",
+    "свидетельство о регистрации",
+)
 _TERM_ALIASES = {
     "touareg": ["туарег", "volkswagen", "фольксваген", "vw"],
     "туарег": ["touareg", "volkswagen", "фольксваген", "vw"],
@@ -167,6 +177,15 @@ _TERM_ALIASES = {
     "обслуживания": ["обслуживание", "техническое обслуживание", "услуги", "ремонт", "сервис"],
     "технических": ["технические", "техническое обслуживание", "услуги", "ремонт", "сервис"],
 }
+
+
+def _wants_machine_document(terms: Iterable[str]) -> bool:
+    return any(str(term or "").lower().replace("ё", "е") in _MACHINE_DOCUMENT_INTENT_TERMS for term in terms)
+
+
+def _has_machine_document_evidence(value: Any) -> bool:
+    haystack = str(value or "").lower().replace("ё", "е")
+    return any(marker in haystack for marker in _MACHINE_DOCUMENT_EVIDENCE_MARKERS)
 
 
 def _local_model_reference(model_name: str) -> str:
@@ -1549,10 +1568,9 @@ class RAGSearcher:
             for group in expansion.get("groups", [])
             if isinstance(group, dict) and str(group.get("label") or "").strip()
         ]
-        wants_machine_passport = any(
-            term in {"паспорт", "паспорта", "паспорты", "псм", "птс", "стс", "техпаспорт"}
-            for term in raw_terms
-        ) or any("паспорт техники" in label for label in alias_groups)
+        wants_machine_passport = _wants_machine_document(raw_terms) or any(
+            "паспорт техники" in label for label in alias_groups
+        )
         wants_vin_plate = "vin" in raw_terms
         vin_context_terms = [term for term in raw_terms if term != "vin"]
         vin_vehicle_doc_context_terms = [term for term in raw_terms if term not in {"vin", "птс", "стс"}]
@@ -1594,16 +1612,7 @@ class RAGSearcher:
             if matched == 0:
                 continue
             is_folder = item.get("kind") == "folder"
-            has_machine_passport_evidence = any(
-                marker in hay
-                for marker in (
-                    "паспорт",
-                    "псм",
-                    "птс",
-                    "стс",
-                    "свидетельство о регистрации",
-                )
-            )
+            has_machine_passport_evidence = _has_machine_document_evidence(hay)
             if wants_machine_passport and not is_folder and not has_machine_passport_evidence:
                 continue
             first_term = terms[0] if terms else ""
@@ -1798,6 +1807,7 @@ class RAGSearcher:
         if not bool(self.config.get("retrieval_relevance_gate_enabled", False)):
             return results
         query_terms = tokenize(query)
+        wants_machine_document = _wants_machine_document(self._terms_from_text(query))
         dense_floor = float(self.config.get("retrieval_min_dense_score", 0.78) or 0.78)
         if len(query_terms) == 1:
             dense_floor = max(
@@ -1817,6 +1827,14 @@ class RAGSearcher:
             source = str(item.get("retrieval_source") or "").strip()
             if source:
                 sources.add(source)
+
+            if wants_machine_document:
+                document_evidence = " ".join(
+                    str(item.get(key) or "")
+                    for key in ("filename", "path", "full_path", "text", "tags")
+                )
+                if not _has_machine_document_evidence(document_evidence):
+                    continue
 
             if item_type not in {"file_metadata", "folder_metadata"}:
                 clean_text = " ".join(str(item.get("text") or "").split())
