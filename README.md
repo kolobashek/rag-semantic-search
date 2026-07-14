@@ -141,6 +141,14 @@ python index_rag.py --quality-report
 python index_rag.py --recreate --stage all
 ```
 
+Перед release/cutover финализируйте shadow-коллекцию с полным spreadsheet payload audit. При `--spreadsheet-full-audit` значение sample size используется как размер страницы Qdrant, а проверка проходит все найденные XLS/XLSX/XLSM payload:
+
+```powershell
+python -m rag_catalog.cli.finalize_search_index `
+  --spreadsheet-full-audit --spreadsheet-sample-size 2000 `
+  --output runtime/eval/index-readiness.json
+```
+
 Индексное состояние хранится в SQLite `index_state.db`, а не в JSON. Это снижает риск file-lock ошибок на Windows и позволяет безопаснее продолжать долгие прогоны.
 
 Поддерживаемые форматы: `.doc`, `.docx`, `.xls`, `.xlsx`, `.xlsm`, `.pdf`, `.pptx`, `.rtf`, `.txt`, `.csv`, `.html`, `.htm`, изображения с OCR и архивы `.zip`, `.7z`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz`, `.tbz2`, `.tar.xz`, `.txz`, `.rar` с такими файлами внутри.

@@ -7,7 +7,7 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -88,6 +88,78 @@ def collection_readiness(
     }
 
 
+def _inspect_payload_integrity(
+    points: Iterable[Any],
+    *,
+    min_content_chars: int,
+    required_content_fields: tuple[str, ...],
+    missing: Counter[str],
+    quality_violations: Counter[str],
+    content_quality: Counter[str],
+    types: Counter[str],
+    versions: Counter[str],
+) -> int:
+    inspected = 0
+    for point in points:
+        inspected += 1
+        payload = dict(getattr(point, "payload", None) or {})
+        point_type = str(payload.get("type") or "")
+        types[point_type or "<missing>"] += 1
+        versions[str(payload.get("payload_schema_version") or "<missing>")] += 1
+        for field_name in _REQUIRED_PAYLOAD_FIELDS:
+            if payload.get(field_name) in (None, "", []):
+                missing[field_name] += 1
+        is_content = point_type not in {"file_metadata", "folder_metadata"}
+        if is_content and payload.get("chunk_index") is None:
+            missing["content.chunk_index"] += 1
+        if is_content:
+            for field_name in required_content_fields:
+                if payload.get(field_name) in (None, "", []):
+                    missing[f"content.{field_name}"] += 1
+            content_quality["sampled"] += 1
+            text = str(payload.get("text") or "").strip()
+            if text and not re.sub(r"[\W_]+", "", text, flags=re.UNICODE):
+                quality_violations["content.separator_only"] += 1
+            minimum = max(0, int(min_content_chars or 0))
+            if minimum and 0 < len(text) < minimum:
+                content_quality["short_under_min"] += 1
+                try:
+                    chunk_index = int(payload.get("chunk_index") or 0)
+                except (TypeError, ValueError):
+                    chunk_index = 0
+                if chunk_index > 0:
+                    quality_violations["content.short_noninitial"] += 1
+    return inspected
+
+
+def _payload_integrity_report(
+    *,
+    inspected: int,
+    requested: int,
+    sampling_strategy: str,
+    scanned_all: bool,
+    missing: Counter[str],
+    quality_violations: Counter[str],
+    content_quality: Counter[str],
+    types: Counter[str],
+    versions: Counter[str],
+) -> Dict[str, Any]:
+    if inspected == 0:
+        missing["sample"] += 1
+    return {
+        "ok": not missing and not quality_violations,
+        "sampling_strategy": sampling_strategy,
+        "scanned_all": bool(scanned_all),
+        "sample_size": inspected,
+        "requested_sample_size": requested,
+        "missing_fields": dict(sorted(missing.items())),
+        "quality_violations": dict(sorted(quality_violations.items())),
+        "content_quality": dict(sorted(content_quality.items())),
+        "types": dict(sorted(types.items())),
+        "schema_versions": dict(sorted(versions.items())),
+    }
+
+
 def sample_payload_integrity(
     client: Any,
     *,
@@ -102,7 +174,9 @@ def sample_payload_integrity(
         return {
             "ok": True,
             "sampling_strategy": "none",
+            "scanned_all": False,
             "sample_size": 0,
+            "requested_sample_size": 0,
             "missing_fields": {},
             "quality_violations": {},
             "content_quality": {},
@@ -143,48 +217,93 @@ def sample_payload_integrity(
     content_quality: Counter[str] = Counter()
     types: Counter[str] = Counter()
     versions: Counter[str] = Counter()
-    for point in points:
-        payload = dict(getattr(point, "payload", None) or {})
-        point_type = str(payload.get("type") or "")
-        types[point_type or "<missing>"] += 1
-        versions[str(payload.get("payload_schema_version") or "<missing>")] += 1
-        for field_name in _REQUIRED_PAYLOAD_FIELDS:
-            if payload.get(field_name) in (None, "", []):
-                missing[field_name] += 1
-        is_content = point_type not in {"file_metadata", "folder_metadata"}
-        if is_content and payload.get("chunk_index") is None:
-            missing["content.chunk_index"] += 1
-        if is_content:
-            for field_name in required_content_fields:
-                if payload.get(field_name) in (None, "", []):
-                    missing[f"content.{field_name}"] += 1
-        if is_content:
-            content_quality["sampled"] += 1
-            text = str(payload.get("text") or "").strip()
-            if text and not re.sub(r"[\W_]+", "", text, flags=re.UNICODE):
-                quality_violations["content.separator_only"] += 1
-            minimum = max(0, int(min_content_chars or 0))
-            if minimum and 0 < len(text) < minimum:
-                content_quality["short_under_min"] += 1
-                try:
-                    chunk_index = int(payload.get("chunk_index") or 0)
-                except (TypeError, ValueError):
-                    chunk_index = 0
-                if chunk_index > 0:
-                    quality_violations["content.short_noninitial"] += 1
-    if not points:
-        missing["sample"] = 1
-    return {
-        "ok": not missing and not quality_violations,
-        "sampling_strategy": sampling_strategy,
-        "sample_size": len(points),
-        "requested_sample_size": limit,
-        "missing_fields": dict(sorted(missing.items())),
-        "quality_violations": dict(sorted(quality_violations.items())),
-        "content_quality": dict(sorted(content_quality.items())),
-        "types": dict(sorted(types.items())),
-        "schema_versions": dict(sorted(versions.items())),
-    }
+    inspected = _inspect_payload_integrity(
+        points,
+        min_content_chars=min_content_chars,
+        required_content_fields=required_content_fields,
+        missing=missing,
+        quality_violations=quality_violations,
+        content_quality=content_quality,
+        types=types,
+        versions=versions,
+    )
+    return _payload_integrity_report(
+        inspected=inspected,
+        requested=limit,
+        sampling_strategy=sampling_strategy,
+        scanned_all=False,
+        missing=missing,
+        quality_violations=quality_violations,
+        content_quality=content_quality,
+        types=types,
+        versions=versions,
+    )
+
+
+def scan_payload_integrity(
+    client: Any,
+    *,
+    collection_name: str,
+    batch_size: int = 1_000,
+    min_content_chars: int = 0,
+    query_filter: Any = None,
+    required_content_fields: tuple[str, ...] = (),
+) -> Dict[str, Any]:
+    """Inspect every payload matching a filter without loading vectors into memory."""
+    limit = min(10_000, max(1, int(batch_size)))
+    fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index", *required_content_fields]
+    payload_selector = PayloadSelectorInclude(include=fields)
+    missing: Counter[str] = Counter()
+    quality_violations: Counter[str] = Counter()
+    content_quality: Counter[str] = Counter()
+    types: Counter[str] = Counter()
+    versions: Counter[str] = Counter()
+    inspected = 0
+    offset: Any = None
+    while True:
+        scroll_kwargs: Dict[str, Any] = {
+            "collection_name": collection_name,
+            "limit": limit,
+            "with_payload": payload_selector,
+            "with_vectors": False,
+        }
+        if query_filter is not None:
+            scroll_kwargs["scroll_filter"] = query_filter
+        if offset is not None:
+            scroll_kwargs["offset"] = offset
+        points, next_offset = client.scroll(**scroll_kwargs)
+        inspected += _inspect_payload_integrity(
+            points,
+            min_content_chars=min_content_chars,
+            required_content_fields=required_content_fields,
+            missing=missing,
+            quality_violations=quality_violations,
+            content_quality=content_quality,
+            types=types,
+            versions=versions,
+        )
+        if next_offset is None:
+            break
+        if not points or next_offset == offset:
+            raise RuntimeError("Qdrant full payload audit did not advance its scroll offset")
+        offset = next_offset
+        if inspected and inspected % 100_000 < limit:
+            logger.info(
+                "Qdrant full payload audit: collection=%s inspected=%d",
+                collection_name,
+                inspected,
+            )
+    return _payload_integrity_report(
+        inspected=inspected,
+        requested=0,
+        sampling_strategy="full_scroll",
+        scanned_all=True,
+        missing=missing,
+        quality_violations=quality_violations,
+        content_quality=content_quality,
+        types=types,
+        versions=versions,
+    )
 
 
 def finalize_collection(
@@ -199,6 +318,7 @@ def finalize_collection(
     payload_sample_size: int,
     min_content_chars: int = 0,
     spreadsheet_sample_size: int = 0,
+    spreadsheet_full_audit: bool = False,
 ) -> Dict[str, Any]:
     timeout = max(30, int(timeout_sec or 30))
     ensure_payload_indexes(
@@ -240,10 +360,15 @@ def finalize_collection(
                 snapshot["ready"] = False
                 snapshot["reasons"].append("payload_integrity_failed")
             if spreadsheet_sample_size > 0:
-                spreadsheet_integrity = sample_payload_integrity(
+                audit_fn = scan_payload_integrity if spreadsheet_full_audit else sample_payload_integrity
+                spreadsheet_integrity = audit_fn(
                     client,
                     collection_name=collection_name,
-                    sample_size=spreadsheet_sample_size,
+                    **(
+                        {"batch_size": spreadsheet_sample_size}
+                        if spreadsheet_full_audit
+                        else {"sample_size": spreadsheet_sample_size}
+                    ),
                     min_content_chars=min_content_chars,
                     query_filter=Filter(
                         must=[
@@ -305,6 +430,11 @@ def main(argv: list[str] | None = None) -> int:
         default=int(cfg.get("qdrant_spreadsheet_audit_sample_size") or 500),
         help="Random integrity sample for xlsx/xlsm/xls payloads; 0 disables the spreadsheet gate.",
     )
+    parser.add_argument(
+        "--spreadsheet-full-audit",
+        action="store_true",
+        help="Scroll and validate every xlsx/xlsm/xls payload; sample size becomes the page size.",
+    )
     parser.add_argument("--no-fulltext", action="store_true")
     parser.add_argument("--output", default="")
     args = parser.parse_args(argv)
@@ -331,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         payload_sample_size=int(args.payload_sample_size),
         min_content_chars=int(cfg.get("index_min_chunk_chars") or 120),
         spreadsheet_sample_size=max(0, int(args.spreadsheet_sample_size)),
+        spreadsheet_full_audit=bool(args.spreadsheet_full_audit),
     )
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if str(args.output or "").strip():

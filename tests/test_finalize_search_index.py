@@ -8,6 +8,7 @@ from rag_catalog.cli.finalize_search_index import (
     collection_readiness,
     finalize_collection,
     sample_payload_integrity,
+    scan_payload_integrity,
 )
 
 
@@ -121,6 +122,43 @@ def test_finalize_collection_waits_for_payload_and_vector_indexes(monkeypatch) -
     assert result["payload_integrity"]["ok"] is True
 
 
+def test_finalize_collection_can_require_full_spreadsheet_audit(monkeypatch) -> None:
+    client = _Client()
+    monkeypatch.setattr("rag_catalog.cli.finalize_search_index.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "rag_catalog.cli.finalize_search_index.sample_payload_integrity",
+        lambda *_args, **_kwargs: {"ok": True, "scanned_all": False},
+    )
+    full_audit_calls: list[dict] = []
+
+    def _full_audit(*_args, **kwargs):
+        full_audit_calls.append(kwargs)
+        return {"ok": True, "scanned_all": True, "sample_size": 1234}
+
+    monkeypatch.setattr(
+        "rag_catalog.cli.finalize_search_index.scan_payload_integrity",
+        _full_audit,
+    )
+
+    result = finalize_collection(
+        client,
+        collection_name="catalog_v2",
+        indexing_threshold=20_000,
+        require_fulltext=True,
+        timeout_sec=60,
+        poll_seconds=0.1,
+        max_unindexed_vectors=10_000,
+        payload_sample_size=100,
+        spreadsheet_sample_size=2_000,
+        spreadsheet_full_audit=True,
+    )
+
+    assert result["ready"] is True
+    assert result["spreadsheet_integrity"]["scanned_all"] is True
+    assert full_audit_calls[0]["batch_size"] == 2_000
+    assert isinstance(full_audit_calls[0]["query_filter"], Filter)
+
+
 def test_payload_integrity_rejects_missing_content_contract_fields() -> None:
     class _BrokenClient:
         def scroll(self, **_kwargs):
@@ -210,6 +248,44 @@ def test_payload_integrity_forwards_filter_and_requires_spreadsheet_provenance()
 
     assert result["ok"] is True
     assert client.kwargs["query_filter"] is query_filter
+
+
+def test_full_payload_integrity_scrolls_every_page() -> None:
+    class _PagedClient:
+        offsets: list[object] = []
+
+        def scroll(self, **kwargs):
+            self.offsets.append(kwargs.get("offset"))
+            base = {
+                "type": "xlsx_content",
+                "text": "Позиция 1 | Экскаватор | 1000 руб.",
+                "full_path": r"O:\\Прайс.xlsx",
+                "doc_id": "sheet-1",
+                "payload_schema_version": 3,
+                "sheet": "Прайс",
+                "row_start": 1,
+                "row_end": 2,
+            }
+            if kwargs.get("offset") is None:
+                return [SimpleNamespace(payload={**base, "chunk_index": 0})], "page-2"
+            return [SimpleNamespace(payload={**base, "text": "обрывок", "chunk_index": 2})], None
+
+    client = _PagedClient()
+    result = scan_payload_integrity(
+        client,
+        collection_name="catalog_v2",
+        batch_size=100,
+        min_content_chars=120,
+        query_filter=Filter(),
+        required_content_fields=("sheet", "row_start", "row_end"),
+    )
+
+    assert client.offsets == [None, "page-2"]
+    assert result["scanned_all"] is True
+    assert result["sampling_strategy"] == "full_scroll"
+    assert result["sample_size"] == 2
+    assert result["quality_violations"] == {"content.short_noninitial": 1}
+    assert result["ok"] is False
 
 
 def test_finalize_collection_blocks_on_spreadsheet_integrity_failure() -> None:
