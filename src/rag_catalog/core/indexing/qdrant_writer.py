@@ -109,6 +109,8 @@ def ensure_payload_indexes(
     *,
     collection_name: str,
     fulltext_enabled: bool = False,
+    wait: bool = False,
+    timeout_sec: int = 300,
 ) -> None:
     """Best-effort payload indexes for filters and Russian full-text retrieval."""
     for field_name in ("numeric_tokens", "type", "extension", "full_path"):
@@ -117,7 +119,8 @@ def ensure_payload_indexes(
                 collection_name=collection_name,
                 field_name=field_name,
                 field_schema=PayloadSchemaType.KEYWORD,
-                wait=False,
+                wait=wait,
+                timeout=max(5, int(timeout_sec or 300)),
             )
         except Exception as exc:
             message = str(exc).lower()
@@ -143,7 +146,8 @@ def ensure_payload_indexes(
                     language=SnowballLanguage.RUSSIAN,
                 ),
             ),
-            wait=False,
+            wait=wait,
+            timeout=max(5, int(timeout_sec or 300)),
         )
     except Exception as exc:
         message = str(exc).lower()
