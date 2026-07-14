@@ -388,13 +388,27 @@ def render_index_screen(
                 count_label = f"{processed:,} / {total_f:,}".replace(",", " ")
                 pct_label = f"{pct * 100:.0f}%"
                 if not is_running and ocr_inventory:
+                    engine_counts = dict(ocr_inventory.get("engine_counts") or {})
+                    engine_text = "/".join(
+                        f"{name} {int(count):,}"
+                        for name, count in sorted(engine_counts.items())
+                    )
+                    speed = float(ocr_inventory.get("pages_per_minute") or 0.0)
                     stats_text = (
                         f"подходящих {int(ocr_inventory.get('eligible_total') or 0):,} · "
                         f"распознано {int(ocr_inventory.get('recognized_files') or 0):,} · "
                         f"частично {int(ocr_inventory.get('partial_files') or 0):,} · "
                         f"ошибок {int(ocr_inventory.get('error_files') or 0):,} · "
+                        f"страниц {int(ocr_inventory.get('recognized_pages') or 0):,} · "
                         f"строк {int(ocr_inventory.get('recognized_lines') or 0):,}"
                     )
+                    if speed > 0:
+                        stats_text += f" · {speed:.1f} стр/мин"
+                    if engine_text:
+                        stats_text += f" · {engine_text}"
+                    fallback_files = int(ocr_inventory.get("fallback_files") or 0)
+                    if fallback_files > 0:
+                        stats_text += f" · fallback {fallback_files:,}"
                 else:
                     stats_text = f"найдено {int(row.get('found_scanned') or 0):,} · обработано {int(row.get('processed_pdfs') or 0):,}"
             else:

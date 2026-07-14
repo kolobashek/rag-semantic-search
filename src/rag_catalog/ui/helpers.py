@@ -1781,6 +1781,7 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if cached and now - float(cached.get("ts") or 0) < OCR_INVENTORY_CACHE_TTL_SECONDS:
         data = dict(cached.get("data") or {})
         data["status_counts"] = dict(data.get("status_counts") or {})
+        data["engine_counts"] = dict(data.get("engine_counts") or {})
         data["cached"] = True
         return data
 
@@ -1796,6 +1797,11 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "recognized_pages": 0,
         "recognized_chars": 0,
         "recognized_lines": 0,
+        "recognized_duration_ms": 0,
+        "pages_per_minute": 0.0,
+        "seconds_per_page": 0.0,
+        "fallback_files": 0,
+        "engine_counts": {},
         "status_counts": {},
     }
     state_rows: Dict[str, Dict[str, Any]] = {}
@@ -1841,12 +1847,17 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
     ocr_rows: List[Dict[str, Any]] = []
     try:
         result_cols = _db_query_dicts(telemetry_file, "PRAGMA table_info(ocr_file_results)")
-        has_line_count = any(str(row.get("name") or "") == "line_count" for row in result_cols)
+        result_col_names = {str(row.get("name") or "") for row in result_cols}
+        has_line_count = "line_count" in result_col_names
         line_expr = "line_count" if has_line_count else "0 AS line_count"
+        duration_expr = "duration_ms" if "duration_ms" in result_col_names else "0 AS duration_ms"
+        engine_expr = "engine" if "engine" in result_col_names else "'' AS engine"
+        fallback_expr = "fallback_used" if "fallback_used" in result_col_names else "0 AS fallback_used"
         ocr_rows = _db_query_dicts(
             telemetry_file,
             f"""
-            SELECT file_path, status, pages, char_count, {line_expr}
+            SELECT file_path, status, pages, char_count, {line_expr},
+                   {duration_expr}, {engine_expr}, {fallback_expr}
             FROM ocr_file_results
             """,
         )
@@ -1863,6 +1874,9 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
     recognized_pages = 0
     recognized_chars = 0
     recognized_lines = 0
+    recognized_duration_ms = 0
+    fallback_files = 0
+    engine_counts: Dict[str, int] = {}
 
     for row in ocr_rows:
         path = str(row.get("file_path") or "").strip()
@@ -1871,6 +1885,11 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         result_paths.add(path)
         status = str(row.get("status") or "unknown").strip().lower() or "unknown"
         status_counts[status] = status_counts.get(status, 0) + 1
+        engine = str(row.get("engine") or "").strip().lower()
+        if engine:
+            engine_counts[engine] = engine_counts.get(engine, 0) + 1
+        if bool(row.get("fallback_used")):
+            fallback_files += 1
         chars = int(row.get("char_count") or 0)
         if status == "error":
             error_paths.add(path)
@@ -1882,6 +1901,7 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         recognized_pages += int(row.get("pages") or 0)
         recognized_chars += chars
         recognized_lines += int(row.get("line_count") or 0)
+        recognized_duration_ms += max(0, int(row.get("duration_ms") or 0))
         state = state_rows.get(path) or {}
         if (
             str(state.get("stage") or "") != "content"
@@ -1892,6 +1912,11 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     relevant_paths = candidate_paths | result_paths
     pending_paths = candidate_paths - recognized_paths - empty_paths - error_paths
+    pages_per_minute = (
+        recognized_pages * 60_000.0 / recognized_duration_ms
+        if recognized_pages > 0 and recognized_duration_ms > 0
+        else 0.0
+    )
     out.update(
         {
             "found": bool(state_rows or ocr_rows or out.get("found")),
@@ -1905,11 +1930,17 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "recognized_pages": recognized_pages,
             "recognized_chars": recognized_chars,
             "recognized_lines": recognized_lines,
+            "recognized_duration_ms": recognized_duration_ms,
+            "pages_per_minute": pages_per_minute,
+            "seconds_per_page": 60.0 / pages_per_minute if pages_per_minute > 0 else 0.0,
+            "fallback_files": fallback_files,
+            "engine_counts": engine_counts,
             "status_counts": status_counts,
         }
     )
     cached_data = dict(out)
     cached_data["status_counts"] = dict(status_counts)
+    cached_data["engine_counts"] = dict(engine_counts)
     _OCR_INVENTORY_CACHE[cache_key] = {"ts": now, "data": cached_data}
     return out
 

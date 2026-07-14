@@ -448,9 +448,38 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
     )
     db_path = tmp_path / "telemetry.db"
     db = TelemetryDB(str(db_path))
-    db.save_ocr_file_result(str(done_pdf), 1.0, text="line 1\nline 2", pages=2, chars=12, status="ok")
-    db.save_ocr_file_result(str(partial_pdf), 1.0, text="line 3", pages=1, chars=6, status="ok")
-    db.save_ocr_file_result(str(error_pdf), 1.0, status="error", error="boom")
+    db.save_ocr_file_result(
+        str(done_pdf),
+        1.0,
+        text="line 1\nline 2",
+        pages=2,
+        chars=12,
+        status="ok",
+        requested_engine="rapidocr",
+        engine="rapidocr",
+        duration_ms=60_000,
+    )
+    db.save_ocr_file_result(
+        str(partial_pdf),
+        1.0,
+        text="line 3",
+        pages=1,
+        chars=6,
+        status="ok",
+        requested_engine="rapidocr",
+        engine="rapidocr",
+        duration_ms=30_000,
+    )
+    db.save_ocr_file_result(
+        str(error_pdf),
+        1.0,
+        status="error",
+        error="boom",
+        requested_engine="rapidocr",
+        engine="tesseract",
+        fallback_used=True,
+        duration_ms=1_000,
+    )
 
     telemetry = _read_index_telemetry(
         {
@@ -466,7 +495,13 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
     assert inventory["partial_files"] == 1
     assert inventory["pending_candidates"] == 1
     assert inventory["error_files"] == 1
+    assert inventory["recognized_pages"] == 3
     assert inventory["recognized_lines"] == 3
+    assert inventory["recognized_duration_ms"] == 90_000
+    assert inventory["pages_per_minute"] == pytest.approx(2.0)
+    assert inventory["seconds_per_page"] == pytest.approx(30.0)
+    assert inventory["engine_counts"] == {"rapidocr": 2, "tesseract": 1}
+    assert inventory["fallback_files"] == 1
 
 
 def test_ocr_inventory_counts_small_deferred_pdf_as_candidate(tmp_path) -> None:

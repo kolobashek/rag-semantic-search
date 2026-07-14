@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -519,7 +520,7 @@ def main() -> int:
             return 2
 
     # ── Создать запись OCR-прохода до долгого scan Qdrant ────────────────────
-    ocr_start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    ocr_start_time = datetime.now(timezone.utc).isoformat()
     ocr_run_id = telemetry.start_ocr_run(
         collection_name=args.collection,
         found_scanned=0,
