@@ -375,6 +375,20 @@ def _ui_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
     return max(5.0, min(45.0, raw))
 
 
+def _ui_llm_expand_enabled(
+    cfg: Dict[str, Any],
+    *,
+    available: bool,
+    user_enabled: bool,
+) -> bool:
+    return bool(
+        cfg.get("llm_enabled")
+        and cfg.get("llm_search_expand_enabled")
+        and available
+        and user_enabled
+    )
+
+
 def _ui_quick_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
     try:
         raw = float(cfg.get("ui_quick_search_timeout_sec") or 8.0)
@@ -834,7 +848,11 @@ def _build_page(initial_screen: str = "search") -> None:
         llm_available = False
         if llm_enabled:
             llm_available = await run.io_bound(_ollama_endpoint_available, ollama_url)
-        llm_expand_enabled = llm_enabled and llm_available and bool(state.ai_search_expand)
+        llm_expand_enabled = _ui_llm_expand_enabled(
+            state.cfg,
+            available=llm_available,
+            user_enabled=bool(state.ai_search_expand),
+        )
         expand_model = str(state.cfg.get("llm_expand_model") or "phi3:mini")
         rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
         quick_started = _time.perf_counter()
@@ -1395,7 +1413,11 @@ def _build_page(initial_screen: str = "search") -> None:
                 ).props("borderless dense clearable input-class=text-base").classes("flex-1")
                 ai_expand_checkbox = ui.checkbox("AI", value=bool(state.ai_search_expand)).props("dense").classes("rag-ai-expand")
                 ai_expand_checkbox.tooltip("AI-дополнение запроса")
-                if not bool(state.cfg.get("llm_enabled")):
+                if not _ui_llm_expand_enabled(
+                    state.cfg,
+                    available=True,
+                    user_enabled=True,
+                ):
                     ai_expand_checkbox.disable()
 
                 def update_ai_expand(event: events.ValueChangeEventArguments) -> None:

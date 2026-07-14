@@ -110,3 +110,21 @@ def test_implicit_cloud_result_use_stays_neutral(monkeypatch) -> None:
         "cloud_path": "Shared/invoice.xlsx",
         "source": "cloud_drive",
     }
+
+
+def test_ui_query_expansion_requires_global_feature_flag() -> None:
+    assert not nice_app._ui_llm_expand_enabled(
+        {"llm_enabled": True},
+        available=True,
+        user_enabled=True,
+    )
+    assert not nice_app._ui_llm_expand_enabled(
+        {"llm_enabled": True, "llm_search_expand_enabled": True},
+        available=False,
+        user_enabled=True,
+    )
+    assert nice_app._ui_llm_expand_enabled(
+        {"llm_enabled": True, "llm_search_expand_enabled": True},
+        available=True,
+        user_enabled=True,
+    )
