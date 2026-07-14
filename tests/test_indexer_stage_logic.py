@@ -15,7 +15,11 @@ from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
 from rag_catalog.core.extractors import ExtractedDocument, TextBlock, document_from_legacy_text
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing import stage_runner
-from rag_catalog.core.indexing.stage_runner import _normalize_only_path_key, _task_matches_only_paths
+from rag_catalog.core.indexing.stage_runner import (
+    _normalize_only_path_key,
+    _task_matches_only_paths,
+    _wait_for_reader_thread,
+)
 from rag_catalog.core.telemetry_db import TelemetryDB
 
 
@@ -64,6 +68,19 @@ def test_stage_pipeline_keeps_only_bounded_work_in_flight() -> None:
 
     assert yielded == total
     assert consumed == total
+
+
+def test_reader_wait_observes_cancel_without_waiting_for_file_timeout(monkeypatch) -> None:
+    class _BusyThread:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            assert timeout is not None
+
+    monkeypatch.setattr(stage_runner, "read_indexer_control", lambda: {"command": "cancel"})
+
+    assert _wait_for_reader_thread(_BusyThread(), timeout_sec=600) == "cancel"
 
 
 class _FakeQdrant:

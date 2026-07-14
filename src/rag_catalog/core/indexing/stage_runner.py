@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
 from ..extractors import ExtractedDocument, extract_doc_meta
+from ..indexer_control import read_indexer_control
 from ..retrieval import prepare_passage_texts
 from .qdrant_writer import upsert_points
 
@@ -31,6 +32,19 @@ _WINDOWS_7Z_PATHS = (
     Path("C:/Program Files/7-Zip/7z.exe"),
     Path("C:/Program Files (x86)/7-Zip/7z.exe"),
 )
+
+
+def _wait_for_reader_thread(thread: Any, *, timeout_sec: float) -> str:
+    """Wait in short intervals so cancel is not hidden by a long extraction."""
+    deadline = time.monotonic() + max(0.1, float(timeout_sec))
+    while thread.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "timeout"
+        thread.join(timeout=min(1.0, remaining))
+        if str(read_indexer_control().get("command") or "running").lower() == "cancel":
+            return "cancel"
+    return "completed"
 
 
 def _bounded_executor_results(
@@ -731,6 +745,7 @@ class IndexStageRunner:
                     normalize_embeddings=True,
                     batch_size=ENCODE_BATCH, show_progress_bar=False,
                 )
+                indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
                 encoded_points.extend(
                     PointStruct(id=_point_id(p), vector=v.tolist(), payload=p)
                     for v, p in zip(vectors, chunk_payloads)
@@ -922,18 +937,21 @@ class IndexStageRunner:
 
                     _t = _th.Thread(target=_reader, daemon=True)
                     _t.start()
-                    _t.join(timeout=FILE_TIMEOUT)
-                    if _t.is_alive():
+                    reader_status = _wait_for_reader_thread(_t, timeout_sec=FILE_TIMEOUT)
+                    if reader_status in {"timeout", "cancel"}:
                         # Поток завис (SMB stall) — освобождаем семафор только
                         # после его завершения через отдельный cleanup-поток.
-                        self._logger.warning(
-                            "ТАЙМАУТ SMB (>%dс): пропускаю %s — воркер остался в фоне",
-                            FILE_TIMEOUT, relative_path.name,
-                        )
+                        if reader_status == "timeout":
+                            self._logger.warning(
+                                "ТАЙМАУТ SMB (>%dс): пропускаю %s — воркер остался в фоне",
+                                FILE_TIMEOUT, relative_path.name,
+                            )
                         def _cleanup(_t=_t, _sem=_reader_sem):
                             _t.join()        # ждём в фоне сколько потребуется
                             _sem.release()   # освобождаем слот
                         _th.Thread(target=_cleanup, daemon=True).start()
+                        if reader_status == "cancel":
+                            return {"skipped": True}
                         full_text = ""
                         failure_error = f"timeout>{FILE_TIMEOUT}s"
                     else:
