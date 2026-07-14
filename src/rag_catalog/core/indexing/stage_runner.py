@@ -247,16 +247,23 @@ def _normalize_only_path_key(value: Any) -> str:
     return str(value or "").strip().replace("/", "\\").lower()
 
 
+def _task_only_path_keys(item: Dict[str, Any]) -> set[str]:
+    return {
+        _normalize_only_path_key(key)
+        for key in (
+            item.get("state_key"),
+            item.get("filepath"),
+            item.get("source_path"),
+            item.get("relative_path"),
+        )
+        if key
+    }
+
+
 def _task_matches_only_paths(item: Dict[str, Any], allowed: set[str]) -> bool:
     if not allowed:
         return True
-    keys = {
-        item.get("state_key"),
-        item.get("filepath"),
-        item.get("source_path"),
-        item.get("relative_path"),
-    }
-    return any(_normalize_only_path_key(key) in allowed for key in keys if key)
+    return bool(_task_only_path_keys(item) & allowed)
 
 
 class IndexStageRunner:
@@ -575,6 +582,20 @@ class IndexStageRunner:
             before = len(all_tasks)
             all_tasks = [item for item in all_tasks if _task_matches_only_paths(item, only_paths)]
             self._logger.info("Ограничение списка файлов: %d → %d по --only-paths-file", before, len(all_tasks))
+            matched_only_paths = {
+                key
+                for item in all_tasks
+                for key in _task_only_path_keys(item)
+                if key in only_paths
+            }
+            unmatched_only_paths = sorted(only_paths - matched_only_paths)
+            if unmatched_only_paths:
+                self._logger.warning(
+                    "--only-paths-file: %d путей не сопоставлены с текущим inventory; первые %d: %s",
+                    len(unmatched_only_paths),
+                    min(10, len(unmatched_only_paths)),
+                    unmatched_only_paths[:10],
+                )
 
         # small не читает тяжёлые файлы дважды: они сразу переходят в large.
         # large видит весь корпус, пропускает уже полные small-файлы и догружает partial.

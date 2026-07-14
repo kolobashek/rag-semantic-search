@@ -19,6 +19,7 @@ from rag_catalog.core.indexing import stage_runner
 from rag_catalog.core.indexing.stage_runner import (
     _normalize_only_path_key,
     _task_matches_only_paths,
+    _task_only_path_keys,
     _wait_for_reader_thread,
 )
 from rag_catalog.core.telemetry_db import TelemetryDB
@@ -41,6 +42,20 @@ def test_only_path_filter_matches_windows_and_posix_forms() -> None:
     allowed = {_normalize_only_path_key(r"O:\Обмен\docs\a.pdf")}
     assert _task_matches_only_paths({"state_key": "O:/Обмен/docs/a.pdf"}, allowed)
     assert not _task_matches_only_paths({"state_key": r"O:\Обмен\docs\b.pdf"}, allowed)
+
+
+def test_only_path_keys_expose_the_exact_inventory_matches() -> None:
+    item = {
+        "state_key": r"O:\Обмен\archive.zip::docs\a.xlsx",
+        "source_path": "O:/Обмен/archive.zip",
+        "relative_path": "archive.zip::docs/a.xlsx",
+    }
+
+    assert _task_only_path_keys(item) == {
+        _normalize_only_path_key(r"O:\Обмен\archive.zip::docs\a.xlsx"),
+        _normalize_only_path_key(r"O:\Обмен\archive.zip"),
+        _normalize_only_path_key(r"archive.zip::docs\a.xlsx"),
+    }
 
 
 def test_stage_pipeline_keeps_only_bounded_work_in_flight() -> None:
