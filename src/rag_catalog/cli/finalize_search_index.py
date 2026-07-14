@@ -11,7 +11,15 @@ from typing import Any, Dict
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.models import OptimizersConfigDiff, PayloadSelectorInclude, Sample, SampleQuery
+from qdrant_client.models import (
+    FieldCondition,
+    Filter,
+    MatchAny,
+    OptimizersConfigDiff,
+    PayloadSelectorInclude,
+    Sample,
+    SampleQuery,
+)
 
 from rag_catalog.core.embedding_collections import resolve_embedding_collection_name
 from rag_catalog.core.indexing import ensure_payload_indexes
@@ -86,6 +94,8 @@ def sample_payload_integrity(
     collection_name: str,
     sample_size: int,
     min_content_chars: int = 0,
+    query_filter: Any = None,
+    required_content_fields: tuple[str, ...] = (),
 ) -> Dict[str, Any]:
     limit = min(10_000, max(0, int(sample_size)))
     if limit == 0:
@@ -99,26 +109,34 @@ def sample_payload_integrity(
             "types": {},
             "schema_versions": {},
         }
-    fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index"]
+    fields = [*_REQUIRED_PAYLOAD_FIELDS, "chunk_index", *required_content_fields]
     payload_selector = PayloadSelectorInclude(include=fields)
     sampling_strategy = "random"
     try:
+        query_kwargs: Dict[str, Any] = {
+            "collection_name": collection_name,
+            "query": SampleQuery(sample=Sample.RANDOM),
+            "limit": limit,
+            "with_payload": payload_selector,
+            "with_vectors": False,
+        }
+        if query_filter is not None:
+            query_kwargs["query_filter"] = query_filter
         response = client.query_points(
-            collection_name=collection_name,
-            query=SampleQuery(sample=Sample.RANDOM),
-            limit=limit,
-            with_payload=payload_selector,
-            with_vectors=False,
+            **query_kwargs,
         )
         points = list(response.points)
     except (AttributeError, TypeError, NotImplementedError, UnexpectedResponse) as exc:
         logger.warning("Qdrant random payload sampling недоступен, использую scroll: %s", exc)
-        points, _offset = client.scroll(
-            collection_name=collection_name,
-            limit=limit,
-            with_payload=payload_selector,
-            with_vectors=False,
-        )
+        scroll_kwargs: Dict[str, Any] = {
+            "collection_name": collection_name,
+            "limit": limit,
+            "with_payload": payload_selector,
+            "with_vectors": False,
+        }
+        if query_filter is not None:
+            scroll_kwargs["scroll_filter"] = query_filter
+        points, _offset = client.scroll(**scroll_kwargs)
         sampling_strategy = "scroll_fallback"
     missing: Counter[str] = Counter()
     quality_violations: Counter[str] = Counter()
@@ -136,6 +154,10 @@ def sample_payload_integrity(
         is_content = point_type not in {"file_metadata", "folder_metadata"}
         if is_content and payload.get("chunk_index") is None:
             missing["content.chunk_index"] += 1
+        if is_content:
+            for field_name in required_content_fields:
+                if payload.get(field_name) in (None, "", []):
+                    missing[f"content.{field_name}"] += 1
         if is_content:
             content_quality["sampled"] += 1
             text = str(payload.get("text") or "").strip()
@@ -176,6 +198,7 @@ def finalize_collection(
     max_unindexed_vectors: int,
     payload_sample_size: int,
     min_content_chars: int = 0,
+    spreadsheet_sample_size: int = 0,
 ) -> Dict[str, Any]:
     timeout = max(30, int(timeout_sec or 30))
     ensure_payload_indexes(
@@ -216,6 +239,26 @@ def finalize_collection(
             if not payload_integrity["ok"]:
                 snapshot["ready"] = False
                 snapshot["reasons"].append("payload_integrity_failed")
+            if spreadsheet_sample_size > 0:
+                spreadsheet_integrity = sample_payload_integrity(
+                    client,
+                    collection_name=collection_name,
+                    sample_size=spreadsheet_sample_size,
+                    min_content_chars=min_content_chars,
+                    query_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="extension",
+                                match=MatchAny(any=[".xlsx", ".xlsm", ".xls"]),
+                            )
+                        ]
+                    ),
+                    required_content_fields=("sheet", "row_start", "row_end"),
+                )
+                snapshot["spreadsheet_integrity"] = spreadsheet_integrity
+                if not spreadsheet_integrity["ok"]:
+                    snapshot["ready"] = False
+                    snapshot["reasons"].append("spreadsheet_integrity_failed")
             return snapshot
         if time.monotonic() >= deadline:
             return snapshot
@@ -256,6 +299,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=int(cfg.get("qdrant_payload_audit_sample_size") or 1_000),
     )
+    parser.add_argument(
+        "--spreadsheet-sample-size",
+        type=int,
+        default=int(cfg.get("qdrant_spreadsheet_audit_sample_size") or 500),
+        help="Random integrity sample for xlsx/xlsm/xls payloads; 0 disables the spreadsheet gate.",
+    )
     parser.add_argument("--no-fulltext", action="store_true")
     parser.add_argument("--output", default="")
     args = parser.parse_args(argv)
@@ -281,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         max_unindexed_vectors=int(args.max_unindexed_vectors),
         payload_sample_size=int(args.payload_sample_size),
         min_content_chars=int(cfg.get("index_min_chunk_chars") or 120),
+        spreadsheet_sample_size=max(0, int(args.spreadsheet_sample_size)),
     )
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if str(args.output or "").strip():

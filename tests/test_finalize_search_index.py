@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from qdrant_client.models import Filter
+
 from rag_catalog.cli.finalize_search_index import (
     collection_readiness,
     finalize_collection,
@@ -170,6 +172,102 @@ def test_payload_integrity_uses_random_qdrant_sampling_when_available() -> None:
     assert result["ok"] is True
     assert result["sampling_strategy"] == "random"
     assert client.query.sample.value == "random"
+
+
+def test_payload_integrity_forwards_filter_and_requires_spreadsheet_provenance() -> None:
+    class _RandomClient:
+        kwargs = None
+
+        def query_points(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                points=[
+                    SimpleNamespace(
+                        payload={
+                            "type": "xlsx_content",
+                            "text": "Позиция 1 | Экскаватор | 1000 руб.",
+                            "full_path": r"O:\\Прайс.xlsx",
+                            "doc_id": "sheet-1",
+                            "payload_schema_version": 3,
+                            "chunk_index": 0,
+                            "sheet": "Прайс",
+                            "row_start": 1,
+                            "row_end": 2,
+                        }
+                    )
+                ]
+            )
+
+    query_filter = Filter()
+    client = _RandomClient()
+    result = sample_payload_integrity(
+        client,
+        collection_name="catalog_v2",
+        sample_size=100,
+        query_filter=query_filter,
+        required_content_fields=("sheet", "row_start", "row_end"),
+    )
+
+    assert result["ok"] is True
+    assert client.kwargs["query_filter"] is query_filter
+
+
+def test_finalize_collection_blocks_on_spreadsheet_integrity_failure() -> None:
+    class _SpreadsheetBrokenClient:
+        def create_payload_index(self, **_kwargs) -> None:
+            pass
+
+        def update_collection(self, **_kwargs) -> None:
+            pass
+
+        def get_collection(self, _collection_name: str):
+            return _info(points=100, indexed=100, schema=("type", "extension", "text"))
+
+        def query_points(self, **kwargs):
+            if kwargs.get("query_filter") is None:
+                payload = {
+                    "type": "pdf_content",
+                    "text": "условия договора",
+                    "full_path": r"O:\\Договор.pdf",
+                    "doc_id": "doc-1",
+                    "payload_schema_version": 3,
+                    "chunk_index": 0,
+                }
+            else:
+                payload = {
+                    "type": "xlsx_content",
+                    "text": "обрывок",
+                    "full_path": r"O:\\Прайс.xlsx",
+                    "doc_id": "sheet-1",
+                    "payload_schema_version": 3,
+                    "chunk_index": 3,
+                }
+            return SimpleNamespace(points=[SimpleNamespace(payload=payload)])
+
+    result = finalize_collection(
+        _SpreadsheetBrokenClient(),
+        collection_name="catalog_v2",
+        indexing_threshold=20_000,
+        require_fulltext=True,
+        timeout_sec=60,
+        poll_seconds=0.1,
+        max_unindexed_vectors=0,
+        payload_sample_size=10,
+        min_content_chars=120,
+        spreadsheet_sample_size=10,
+    )
+
+    assert result["ready"] is False
+    assert result["spreadsheet_integrity"]["ok"] is False
+    assert "spreadsheet_integrity_failed" in result["reasons"]
+    assert result["spreadsheet_integrity"]["missing_fields"] == {
+        "content.row_end": 1,
+        "content.row_start": 1,
+        "content.sheet": 1,
+    }
+    assert result["spreadsheet_integrity"]["quality_violations"] == {
+        "content.short_noninitial": 1,
+    }
 
 
 def test_payload_integrity_rejects_separator_only_content() -> None:
