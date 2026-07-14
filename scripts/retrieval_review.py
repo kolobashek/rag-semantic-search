@@ -18,6 +18,30 @@ from rag_catalog.core.retrieval_review import (
     prepare_review_queue,
     validate_review_queue,
 )
+from rag_catalog.core.search_eval import (
+    DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    DEFAULT_MIN_EVAL_CATEGORIES,
+    DEFAULT_MIN_EVAL_QUERIES,
+    DEFAULT_MIN_NO_ANSWER_CASES,
+)
+
+
+def _add_coverage_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--min-items", type=int, default=DEFAULT_MIN_EVAL_QUERIES)
+    parser.add_argument("--min-no-answer", type=int, default=DEFAULT_MIN_NO_ANSWER_CASES)
+    parser.add_argument("--min-forbidden", type=int, default=3)
+    parser.add_argument(
+        "--min-document-grounded",
+        type=int,
+        default=DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    )
+    parser.add_argument(
+        "--min-content-grounded",
+        type=int,
+        default=DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    )
+    parser.add_argument("--min-categories", type=int, default=DEFAULT_MIN_EVAL_CATEGORIES)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,14 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--candidate-limit", type=int, default=10)
     validate = sub.add_parser("validate")
     validate.add_argument("review")
-    validate.add_argument("--min-no-answer", type=int, default=3)
-    validate.add_argument("--min-forbidden", type=int, default=3)
+    _add_coverage_arguments(validate)
     validate.add_argument("--verbose", action="store_true")
     finalize = sub.add_parser("finalize")
     finalize.add_argument("review")
     finalize.add_argument("--output", required=True)
-    finalize.add_argument("--min-no-answer", type=int, default=3)
-    finalize.add_argument("--min-forbidden", type=int, default=3)
+    _add_coverage_arguments(finalize)
     args = parser.parse_args(argv)
 
     if args.command == "prepare":
@@ -60,8 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     queue = load_json_object(review_path)
     validation = validate_review_queue(
         queue,
+        min_items=max(0, int(args.min_items)),
         min_no_answer=max(0, int(args.min_no_answer)),
         min_forbidden=max(0, int(args.min_forbidden)),
+        min_document_grounded=max(0, int(args.min_document_grounded)),
+        min_content_grounded=max(0, int(args.min_content_grounded)),
+        min_categories=max(0, int(args.min_categories)),
     )
     if args.command == "validate":
         summary = {key: value for key, value in validation.items() if key != "errors"}
@@ -76,8 +102,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Golden output уже существует: {output}")
     golden = finalize_review_queue(
         queue,
+        min_items=max(0, int(args.min_items)),
         min_no_answer=max(0, int(args.min_no_answer)),
         min_forbidden=max(0, int(args.min_forbidden)),
+        min_document_grounded=max(0, int(args.min_document_grounded)),
+        min_content_grounded=max(0, int(args.min_content_grounded)),
+        min_categories=max(0, int(args.min_categories)),
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(golden, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -12,6 +12,11 @@ from typing import Any, Callable, Dict, Iterable, List
 
 _TOKEN_RE = re.compile(r"[a-zа-яё0-9\-]{2,}", flags=re.IGNORECASE)
 _STOPWORDS = {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
+DEFAULT_MIN_EVAL_QUERIES = 50
+DEFAULT_MIN_NO_ANSWER_CASES = 10
+DEFAULT_MIN_DOCUMENT_GROUNDED_CASES = 20
+DEFAULT_MIN_CONTENT_GROUNDED_CASES = 10
+DEFAULT_MIN_EVAL_CATEGORIES = 6
 _TERM_ALIASES: Dict[str, List[str]] = {
     "touareg": ["туарег", "фольксваген", "volkswagen", "vw"],
     "туарег": ["touareg", "фольксваген", "volkswagen", "vw"],
@@ -381,11 +386,11 @@ def evaluate_retrieval_decision(
     max_acl_leakage: float = 0.0,
     min_no_answer_accuracy: float = 0.8,
     min_ground_truth_coverage: float = 0.5,
-    min_eval_queries: int = 50,
-    min_no_answer_cases: int = 10,
-    min_document_grounded_cases: int = 20,
-    min_content_grounded_cases: int = 10,
-    min_categories: int = 6,
+    min_eval_queries: int = DEFAULT_MIN_EVAL_QUERIES,
+    min_no_answer_cases: int = DEFAULT_MIN_NO_ANSWER_CASES,
+    min_document_grounded_cases: int = DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    min_content_grounded_cases: int = DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    min_categories: int = DEFAULT_MIN_EVAL_CATEGORIES,
     require_faithfulness: bool = False,
 ) -> Dict[str, Any]:
     """Produce a deterministic GO/NO_GO gate for a shadow retrieval candidate."""

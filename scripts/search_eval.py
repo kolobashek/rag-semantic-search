@@ -17,7 +17,16 @@ if str(SRC) not in sys.path:
 from rag_catalog.cli.finalize_search_index import collection_readiness
 from rag_catalog.cli.pilot_gate import source_fingerprint
 from rag_catalog.core.rag_core import RAGSearcher, apply_retrieval_preset, load_config
-from rag_catalog.core.search_eval import evaluate_retrieval_decision, evaluate_search, load_golden_queries
+from rag_catalog.core.search_eval import (
+    DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    DEFAULT_MIN_EVAL_CATEGORIES,
+    DEFAULT_MIN_EVAL_QUERIES,
+    DEFAULT_MIN_NO_ANSWER_CASES,
+    evaluate_retrieval_decision,
+    evaluate_search,
+    load_golden_queries,
+)
 
 
 def _parse_config_value(value: str) -> Any:
@@ -119,11 +128,19 @@ def main() -> int:
     parser.add_argument("--max-acl-leakage", type=float, default=0.0)
     parser.add_argument("--min-no-answer-accuracy", type=float, default=0.8)
     parser.add_argument("--min-ground-truth-coverage", type=float, default=0.5)
-    parser.add_argument("--min-eval-queries", type=int, default=50)
-    parser.add_argument("--min-no-answer-cases", type=int, default=10)
-    parser.add_argument("--min-document-grounded-cases", type=int, default=20)
-    parser.add_argument("--min-content-grounded-cases", type=int, default=10)
-    parser.add_argument("--min-categories", type=int, default=6)
+    parser.add_argument("--min-eval-queries", type=int, default=DEFAULT_MIN_EVAL_QUERIES)
+    parser.add_argument("--min-no-answer-cases", type=int, default=DEFAULT_MIN_NO_ANSWER_CASES)
+    parser.add_argument(
+        "--min-document-grounded-cases",
+        type=int,
+        default=DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    )
+    parser.add_argument(
+        "--min-content-grounded-cases",
+        type=int,
+        default=DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    )
+    parser.add_argument("--min-categories", type=int, default=DEFAULT_MIN_EVAL_CATEGORIES)
     parser.add_argument("--require-faithfulness", action="store_true")
     parser.add_argument("--no-warmup", action="store_true", help="Do not warm embedder/filesystem caches before timing.")
     parser.add_argument("--warmup-query", default="карточка предприятия", help="Query text used for eval warmup.")

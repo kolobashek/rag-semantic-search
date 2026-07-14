@@ -19,6 +19,13 @@ from rag_catalog.core.retrieval_review import (
     save_review_queue_atomic,
     validate_review_queue,
 )
+from rag_catalog.core.search_eval import (
+    DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    DEFAULT_MIN_EVAL_CATEGORIES,
+    DEFAULT_MIN_EVAL_QUERIES,
+    DEFAULT_MIN_NO_ANSWER_CASES,
+)
 
 
 def _lines(value: str) -> list[str]:
@@ -44,8 +51,12 @@ def run_review_ui(
     host: str,
     port: int,
     show: bool,
+    min_items: int,
     min_no_answer: int,
     min_forbidden: int,
+    min_document_grounded: int,
+    min_content_grounded: int,
+    min_categories: int,
 ) -> None:
     queue = load_json_object(review_path)
     state = {"index": 0}
@@ -102,7 +113,15 @@ def run_review_ui(
                 )
 
         def validation_snapshot() -> dict[str, Any]:
-            return validate_review_queue(queue, min_no_answer=min_no_answer, min_forbidden=min_forbidden)
+            return validate_review_queue(
+                queue,
+                min_items=min_items,
+                min_no_answer=min_no_answer,
+                min_forbidden=min_forbidden,
+                min_document_grounded=min_document_grounded,
+                min_content_grounded=min_content_grounded,
+                min_categories=min_categories,
+            )
 
         def refresh_progress() -> None:
             result = validation_snapshot()
@@ -110,7 +129,10 @@ def run_review_ui(
                 f"{state['index'] + 1}/{len(items)} · reviewed {result['reviewed']} · pending {result['pending']}"
             )
             validation_label.set_text(
+                f"Cases: {result['items']}/{min_items} · Categories: {result['categories']}/{min_categories} · "
                 f"No-answer: {result['no_answer_cases']}/{min_no_answer} · "
+                f"Documents: {result['document_grounded_cases']}/{min_document_grounded} · "
+                f"Content: {result['content_grounded_cases']}/{min_content_grounded} · "
                 f"Forbidden: {result['forbidden_cases']}/{min_forbidden}"
             )
             previous_button.set_enabled(state["index"] > 0)
@@ -307,16 +329,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8092)
     parser.add_argument("--no-show", action="store_true")
-    parser.add_argument("--min-no-answer", type=int, default=3)
+    parser.add_argument("--min-items", type=int, default=DEFAULT_MIN_EVAL_QUERIES)
+    parser.add_argument("--min-no-answer", type=int, default=DEFAULT_MIN_NO_ANSWER_CASES)
     parser.add_argument("--min-forbidden", type=int, default=3)
+    parser.add_argument(
+        "--min-document-grounded",
+        type=int,
+        default=DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    )
+    parser.add_argument(
+        "--min-content-grounded",
+        type=int,
+        default=DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    )
+    parser.add_argument("--min-categories", type=int, default=DEFAULT_MIN_EVAL_CATEGORIES)
     args = parser.parse_args(argv)
     run_review_ui(
         Path(args.review).expanduser().resolve(),
         host=str(args.host),
         port=int(args.port),
         show=not args.no_show,
+        min_items=max(0, int(args.min_items)),
         min_no_answer=max(0, int(args.min_no_answer)),
         min_forbidden=max(0, int(args.min_forbidden)),
+        min_document_grounded=max(0, int(args.min_document_grounded)),
+        min_content_grounded=max(0, int(args.min_content_grounded)),
+        min_categories=max(0, int(args.min_categories)),
     )
     return 0
 

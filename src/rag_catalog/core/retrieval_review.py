@@ -7,6 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .search_eval import (
+    DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    DEFAULT_MIN_EVAL_CATEGORIES,
+    DEFAULT_MIN_EVAL_QUERIES,
+    DEFAULT_MIN_NO_ANSWER_CASES,
+)
+
 REVIEW_SCHEMA_VERSION = 1
 
 
@@ -118,8 +126,12 @@ def prepare_review_queue(
 def validate_review_queue(
     review_queue: Dict[str, Any],
     *,
-    min_no_answer: int = 3,
+    min_items: int = DEFAULT_MIN_EVAL_QUERIES,
+    min_no_answer: int = DEFAULT_MIN_NO_ANSWER_CASES,
     min_forbidden: int = 3,
+    min_document_grounded: int = DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    min_content_grounded: int = DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    min_categories: int = DEFAULT_MIN_EVAL_CATEGORIES,
 ) -> Dict[str, Any]:
     errors: list[Dict[str, Any]] = []
     items = list(review_queue.get("items") or [])
@@ -128,6 +140,9 @@ def validate_review_queue(
     no_answer_count = 0
     forbidden_count = 0
     positive_count = 0
+    document_grounded_count = 0
+    content_grounded_count = 0
+    categories: set[str] = set()
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             errors.append({"index": index, "error": "item_not_object"})
@@ -145,6 +160,7 @@ def validate_review_queue(
             errors.append({"index": index, "query": query, "error": "review_pending"})
             continue
         reviewed += 1
+        categories.add(str(item.get("category") or "general").strip() or "general")
         if not str(review.get("reviewed_by") or "").strip():
             errors.append({"index": index, "query": query, "error": "reviewed_by_missing"})
         if not str(review.get("reviewed_at") or "").strip():
@@ -162,6 +178,10 @@ def validate_review_queue(
             positive_count += 1
             if not expected_paths:
                 errors.append({"index": index, "query": query, "error": "expected_paths_missing"})
+            else:
+                document_grounded_count += 1
+            if expected_chunks or expected_pages:
+                content_grounded_count += 1
         if forbidden:
             forbidden_count += 1
         for page in expected_pages:
@@ -176,6 +196,38 @@ def validate_review_queue(
                 "error": "no_answer_coverage_insufficient",
                 "actual": no_answer_count,
                 "required": max(0, int(min_no_answer)),
+            }
+        )
+    if len(items) < max(0, int(min_items)):
+        errors.append(
+            {
+                "error": "review_item_coverage_insufficient",
+                "actual": len(items),
+                "required": max(0, int(min_items)),
+            }
+        )
+    if document_grounded_count < max(0, int(min_document_grounded)):
+        errors.append(
+            {
+                "error": "document_grounded_coverage_insufficient",
+                "actual": document_grounded_count,
+                "required": max(0, int(min_document_grounded)),
+            }
+        )
+    if content_grounded_count < max(0, int(min_content_grounded)):
+        errors.append(
+            {
+                "error": "content_grounded_coverage_insufficient",
+                "actual": content_grounded_count,
+                "required": max(0, int(min_content_grounded)),
+            }
+        )
+    if len(categories) < max(0, int(min_categories)):
+        errors.append(
+            {
+                "error": "category_coverage_insufficient",
+                "actual": len(categories),
+                "required": max(0, int(min_categories)),
             }
         )
     if forbidden_count < max(0, int(min_forbidden)):
@@ -194,6 +246,9 @@ def validate_review_queue(
         "positive_cases": positive_count,
         "no_answer_cases": no_answer_count,
         "forbidden_cases": forbidden_count,
+        "document_grounded_cases": document_grounded_count,
+        "content_grounded_cases": content_grounded_count,
+        "categories": len(categories),
         "errors": errors,
     }
 
@@ -201,13 +256,21 @@ def validate_review_queue(
 def finalize_review_queue(
     review_queue: Dict[str, Any],
     *,
-    min_no_answer: int = 3,
+    min_items: int = DEFAULT_MIN_EVAL_QUERIES,
+    min_no_answer: int = DEFAULT_MIN_NO_ANSWER_CASES,
     min_forbidden: int = 3,
+    min_document_grounded: int = DEFAULT_MIN_DOCUMENT_GROUNDED_CASES,
+    min_content_grounded: int = DEFAULT_MIN_CONTENT_GROUNDED_CASES,
+    min_categories: int = DEFAULT_MIN_EVAL_CATEGORIES,
 ) -> List[Dict[str, Any]]:
     validation = validate_review_queue(
         review_queue,
+        min_items=min_items,
         min_no_answer=min_no_answer,
         min_forbidden=min_forbidden,
+        min_document_grounded=min_document_grounded,
+        min_content_grounded=min_content_grounded,
+        min_categories=min_categories,
     )
     if not validation["ok"]:
         raise ValueError(json.dumps(validation, ensure_ascii=False, sort_keys=True))
