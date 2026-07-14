@@ -30,7 +30,6 @@ from . import settings_view as _settings_view
 from . import stats_view as _stats_view
 from .auth_session import (
     apply_login_session,
-    complete_login_session,
     logout_session,
     prepare_login_session,
     restore_session,
@@ -54,9 +53,8 @@ from .helpers import (
     _directory_children,
     _ensure_searcher,
     _file_icon_svg,
-    _filter_cloud_drive_search_results,
-    _highlight_query_terms,
     _has_confident_numeric_exact_match,
+    _highlight_query_terms,
     _is_admin,
     _load_user_state,
     _merge_search_results,
@@ -88,7 +86,6 @@ from .state import (
     _get_telemetry,
     _is_saved_search,
     _log_app_event,
-    _refresh_current_user,
     _toggle_saved_search,
     _username,
     capture_screen_state,
@@ -111,6 +108,48 @@ install_env_log_handler()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 IMPLICIT_RESULT_USE_FEEDBACK = 0
+
+
+def _record_implicit_search_result_use(
+    state: PageState,
+    result: Dict[str, Any],
+    *,
+    index: int,
+    reason: str,
+) -> None:
+    """Record result use for analytics without treating it as relevance feedback."""
+    result_path = str(result.get("full_path") or result.get("path") or "")
+    cloud_file_id = str(result.get("cloud_file_id") or "")
+    cloud_version_id = str(result.get("cloud_version_id") or "")
+    cloud_path = str(result.get("cloud_path") or "")
+    telemetry_details = {
+        "screen": "search",
+        "reason": reason,
+        "cloud_file_id": cloud_file_id,
+        "cloud_version_id": cloud_version_id,
+        "cloud_path": cloud_path,
+        "source": "cloud_drive" if cloud_file_id or cloud_path else "filesystem",
+    }
+    try:
+        _get_telemetry(state).log_search_feedback(
+            username=_username(state),
+            source="nicegui",
+            query=state.searched_query,
+            result_path=result_path,
+            result_title=str(result.get("filename") or result_path),
+            feedback=IMPLICIT_RESULT_USE_FEEDBACK,
+            result_rank=index,
+            result_score=float(result.get("score") or 0),
+            details=telemetry_details,
+        )
+    except Exception:
+        logger.debug("Unable to record implicit search result use", exc_info=True)
+    _log_app_event(
+        state,
+        "search",
+        "result_use",
+        details={**telemetry_details, "path": result_path, "query": state.searched_query},
+    )
 
 
 def _install_nicegui_reconnect_patch() -> None:
@@ -1941,35 +1980,7 @@ def _build_page(initial_screen: str = "search") -> None:
             ui.notify("Оценка сохранена.", type="positive")
 
         def track_result_use(reason: str, result: Dict[str, Any] = result, index: int = index) -> None:
-            result_path = str(result.get("full_path") or result.get("path") or "")
-            telemetry_details = {
-                "screen": "search",
-                "reason": reason,
-                "cloud_file_id": cloud_file_id,
-                "cloud_version_id": cloud_version_id,
-                "cloud_path": cloud_path,
-                "source": "cloud_drive" if is_cloud_result else "filesystem",
-            }
-            try:
-                _get_telemetry(state).log_search_feedback(
-                    username=_username(state),
-                    source="nicegui",
-                    query=state.searched_query,
-                    result_path=result_path,
-                    result_title=str(result.get("filename") or result_path),
-                    feedback=IMPLICIT_RESULT_USE_FEEDBACK,
-                    result_rank=index,
-                    result_score=float(result.get("score") or 0),
-                    details=telemetry_details,
-                )
-            except Exception:
-                pass
-            _log_app_event(
-                state,
-                "search",
-                "result_use",
-                details={**telemetry_details, "path": result_path, "query": state.searched_query},
-            )
+            _record_implicit_search_result_use(state, result, index=index, reason=reason)
 
         def open_primary() -> None:
             if kind == "Каталог":
@@ -2029,10 +2040,14 @@ def _build_page(initial_screen: str = "search") -> None:
             with ui.row().classes("w-full items-center justify-between gap-2"):
                 with ui.row().classes("rag-actions items-center"):
                     if is_cloud_result and cloud_path:
+                        def _open_cloud_location(pth: str = cloud_path) -> None:
+                            track_result_use("open_cloud_location")
+                            go_cloud_explorer(pth)
+
                         ui.button(
                             "В Cloud Drive",
                             icon="cloud",
-                            on_click=lambda pth=cloud_path: go_cloud_explorer(pth),
+                            on_click=_open_cloud_location,
                         ).props("outline dense no-caps")
                         if kind != "Каталог":
                             def _cd_preview(pth: str = cloud_path) -> None:
@@ -2051,7 +2066,11 @@ def _build_page(initial_screen: str = "search") -> None:
                             ui.button(icon="download", on_click=_cd_download).props("outline dense round").tooltip(f"Скачать из Cloud Drive: {cloud_path.rsplit('/', 1)[-1]}")
                     if full_path:
                         if kind == "Каталог":
-                            ui.button("В проводник приложения", icon="folder_open", on_click=lambda p=full_path: go_explorer(p)).props("outline dense")
+                            def open_folder_in_app(pth: str = full_path) -> None:
+                                track_result_use("open_folder_in_app_explorer")
+                                go_explorer(pth)
+
+                            ui.button("В проводник приложения", icon="folder_open", on_click=open_folder_in_app).props("outline dense")
                         else:
                             def open_in_app_explorer(pth: str = full_path) -> None:
                                 track_result_use("open_in_app_explorer")
@@ -2059,11 +2078,23 @@ def _build_page(initial_screen: str = "search") -> None:
 
                             ui.button("В проводник приложения", icon="folder", on_click=open_in_app_explorer).props("outline dense")
                             if p and p.exists() and p.is_file():
-                                ui.button("Скачать", icon="download", on_click=lambda pth=p: ui.download(pth, filename=pth.name)).props("outline dense")
+                                def download_local_file(pth: Path = p) -> None:
+                                    track_result_use("local_download")
+                                    ui.download(pth, filename=pth.name)
+
+                                ui.button("Скачать", icon="download", on_click=download_local_file).props("outline dense")
                         if kind == "Каталог":
-                            ui.button("Открыть в ОС", icon="open_in_new", on_click=lambda pth=full_path: _open_os_path(pth)).props("outline dense")
+                            def open_folder_in_os(pth: str = full_path) -> None:
+                                track_result_use("open_folder_in_os")
+                                _open_os_path(pth)
+
+                            ui.button("Открыть в ОС", icon="open_in_new", on_click=open_folder_in_os).props("outline dense")
                         else:
-                            ui.button("Найти в ОС", icon="open_in_new", on_click=lambda pth=full_path: _select_in_os_explorer(pth)).props("outline dense").tooltip("Выделить файл в проводнике Windows")
+                            def select_file_in_os(pth: str = full_path) -> None:
+                                track_result_use("select_file_in_os")
+                                _select_in_os_explorer(pth)
+
+                            ui.button("Найти в ОС", icon="open_in_new", on_click=select_file_in_os).props("outline dense").tooltip("Выделить файл в проводнике Windows")
                     if llm_on and kind != "Каталог":
                         if is_explaining and state.doc_explain_loading:
                             ui.spinner(size="xs").classes("ml-1")
