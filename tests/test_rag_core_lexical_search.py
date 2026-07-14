@@ -134,6 +134,28 @@ def test_lexical_search_uses_search_aliases_for_company_card(tmp_path: Path) -> 
     assert out[0]["filename"] == "Карточка предприятия Спецмаш Альфа-Банк 2026.docx"
 
 
+def test_lexical_search_reports_original_and_expanded_term_coverage(tmp_path: Path) -> None:
+    (tmp_path / "Карточка предприятия ТСК.doc").write_bytes(b"doc")
+    s = _searcher_with_catalog(tmp_path)
+    s.telemetry = TelemetryDB(str(tmp_path / "telemetry.db"))
+    s.telemetry.save_search_alias_group(
+        key="company_card",
+        label="карточка предприятия реквизиты организации",
+        aliases=["карточка предприятия"],
+    )
+
+    out = s._lexical_catalog_search(
+        query="карточка предприятия тск",
+        limit=10,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert out[0]["lexical_raw_matched_terms"] == 3
+    assert out[0]["lexical_raw_query_terms"] == 3
+    assert out[0]["lexical_query_terms"] >= out[0]["lexical_raw_query_terms"]
+
+
 def test_lexical_search_uses_service_context_for_requisites_query(tmp_path: Path) -> None:
     service_folder = tmp_path / "Услуги" / "ООО СРК"
     service_folder.mkdir(parents=True)

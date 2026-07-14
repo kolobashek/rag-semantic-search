@@ -373,6 +373,31 @@ def test_relevance_gate_accepts_weak_dense_candidate_confirmed_by_reranker() -> 
     ]
 
 
+def test_relevance_gate_uses_original_terms_instead_of_alias_expansion() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.78,
+        "retrieval_single_term_min_dense_score": 0.80,
+        "retrieval_min_content_chars": 120,
+    }
+    exact = {
+        "type": "file_metadata",
+        "filename": "Карточка предприятия ТСК.doc",
+        "text": "Файл: Карточка предприятия ТСК.doc",
+        "score": 1.0,
+        "retrieval_source": "lexical",
+        "lexical_matched_terms": 3,
+        "lexical_query_terms": 10,
+        "lexical_raw_matched_terms": 3,
+        "lexical_raw_query_terms": 3,
+    }
+
+    assert s._apply_relevance_gate("карточка предприятия тск", [exact]) == [
+        {**exact, "relevance_evidence": "lexical", "relevance_floor": 0.78}
+    ]
+
+
 def test_relevance_gate_requires_text_evidence_for_mixed_numeric_query() -> None:
     s = _make_searcher(connected=True)
     s.config = {

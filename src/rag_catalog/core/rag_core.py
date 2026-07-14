@@ -1555,9 +1555,8 @@ class RAGSearcher:
                 score = 0.955
             else:
                 score = 0.86 + min(0.08, matched / max(1, len(terms)) * 0.08)
-            raw_matched = 0
+            raw_matched = sum(1 for t in raw_terms if term_matches(hay, t))
             if len(raw_terms) > 1:
-                raw_matched = sum(1 for t in raw_terms if term_matches(hay, t))
                 if raw_matched < len(raw_terms):
                     score = min(score, 0.91 + min(0.04, raw_matched / max(1, len(raw_terms)) * 0.04))
             if alias_groups:
@@ -1637,6 +1636,8 @@ class RAGSearcher:
                 "retrieval_source": "lexical",
                 "lexical_matched_terms": matched,
                 "lexical_query_terms": len(terms),
+                "lexical_raw_matched_terms": raw_matched,
+                "lexical_raw_query_terms": len(raw_terms),
             })
         out.sort(
             key=lambda x: (
@@ -1794,8 +1795,14 @@ class RAGSearcher:
             )
             if sources & numeric_sources and numeric_context_only:
                 strong_lexical = True
-            lexical_matched = int(item.get("lexical_matched_terms") or 0)
-            lexical_total = int(item.get("lexical_query_terms") or len(query_terms) or 0)
+            lexical_matched = int(
+                item.get("lexical_raw_matched_terms", item.get("lexical_matched_terms")) or 0
+            )
+            lexical_total = int(
+                item.get("lexical_raw_query_terms", item.get("lexical_query_terms"))
+                or len(query_terms)
+                or 0
+            )
             bm25_matched = int(item.get("bm25_matched_terms") or 0)
             bm25_total = int(item.get("bm25_query_terms") or len(query_terms) or 0)
             if lexical_total and lexical_matched >= lexical_total:
