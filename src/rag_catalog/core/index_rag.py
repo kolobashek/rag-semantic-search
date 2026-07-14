@@ -1510,6 +1510,7 @@ class RAGIndexer:
         existing_files: List[Path | str],
         *,
         preserve_members_of_existing_archives: bool = False,
+        allow_empty_inventory: bool = False,
     ) -> List[str]:
         """Return state keys absent from the current filesystem inventory.
 
@@ -1519,6 +1520,14 @@ class RAGIndexer:
         enumerate members and remove stale members precisely.
         """
         existing_paths = {str(f) for f in existing_files}
+        if not existing_paths and not allow_empty_inventory:
+            state_total = int((self.state_db.stats() or {}).get("total") or 0)
+            if state_total:
+                raise RuntimeError(
+                    "Cleanup отменён: filesystem inventory пуст, но state содержит "
+                    f"{state_total} записей. Проверьте доступность каталога или повторите "
+                    "с явным --allow-empty-cleanup."
+                )
         deleted_keys = self.state_db.list_deleted_candidates(existing_paths)
         if preserve_members_of_existing_archives and deleted_keys:
             archive_exists: Dict[str, bool] = {}
@@ -1550,11 +1559,13 @@ class RAGIndexer:
         existing_files: List[Path | str],
         *,
         preserve_members_of_existing_archives: bool = False,
+        allow_empty_inventory: bool = False,
     ) -> int:
         """Удалить из state БД и Qdrant файлы, которых больше нет на диске."""
         deleted_keys = self._deleted_file_candidates(
             existing_files,
             preserve_members_of_existing_archives=preserve_members_of_existing_archives,
+            allow_empty_inventory=allow_empty_inventory,
         )
         if not deleted_keys:
             return 0
@@ -1830,6 +1841,12 @@ def main() -> None:
         help=("Только очистить индекс от файлов, которые удалены с диска, без полного сканирования. Быстро (~1 мин)."),
     )
     parser.add_argument(
+        "--allow-empty-cleanup",
+        action="store_true",
+        help="Разрешить --cleanup удалить непустой state при пустом filesystem inventory. "
+        "Использовать только для подтверждённо пустого каталога.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Показать файлы, которые будут обработаны, и причины без записи в Qdrant/state.",
@@ -2004,6 +2021,7 @@ def main() -> None:
                 candidates = indexer._deleted_file_candidates(
                     all_files,
                     preserve_members_of_existing_archives=True,
+                    allow_empty_inventory=bool(args.allow_empty_cleanup),
                 )
                 logger.info(
                     "--dry-run cleanup: найдено %d кандидатов; удаление из индекса не выполняется.",
@@ -2016,6 +2034,7 @@ def main() -> None:
                 deleted = indexer._cleanup_deleted_files(
                     all_files,
                     preserve_members_of_existing_archives=True,
+                    allow_empty_inventory=bool(args.allow_empty_cleanup),
                 )
             indexer._run_deleted_files += deleted
             run_totals["total_files"] = len(all_files)

@@ -781,15 +781,43 @@ def test_lightweight_cleanup_removes_members_of_deleted_archives(tmp_path: Path)
     assert idx._deleted_file_candidates(
         [],
         preserve_members_of_existing_archives=True,
+        allow_empty_inventory=True,
     ) == [member_key]
     count = idx._cleanup_deleted_files(
         [],
         preserve_members_of_existing_archives=True,
+        allow_empty_inventory=True,
     )
 
     assert count == 1
     assert deleted == [Path(member_key)]
     assert idx.state_db.get_entry(member_key) is None
+
+
+def test_cleanup_rejects_empty_inventory_for_nonempty_state(tmp_path: Path) -> None:
+    missing_file = tmp_path / "missing.xlsx"
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.state_db.upsert_many(
+        [
+            {
+                "full_path": str(missing_file),
+                "fingerprint": "missing-file",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 10,
+                "extension": ".xlsx",
+            }
+        ]
+    )
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda path: deleted.append(path)
+
+    with pytest.raises(RuntimeError, match="filesystem inventory пуст"):
+        idx._cleanup_deleted_files([])
+
+    assert deleted == []
+    assert idx.state_db.get_entry(str(missing_file)) is not None
 
 
 def test_dry_run_reports_work_without_writing_points_or_state(tmp_path: Path) -> None:
