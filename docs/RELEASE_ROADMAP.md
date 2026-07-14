@@ -72,7 +72,9 @@ Done criteria:
 
 Owner: Codex.
 
-- DONE 2026-05-14: `eval/search_golden.json` расширен до 32 запросов по exact/folder/document/OCR-like сценариям.
+- DONE 2026-05-14: baseline `eval/search_golden.json` расширен до 32 запросов по exact/folder/document/OCR-like сценариям.
+- DONE 2026-07-14: основной golden расширен до 50 уникальных запросов: 10 no-answer, 27 document-grounded и 7 категорий. Release gate требует также 10 проверенных chunk/page-grounded cases, поэтому cutover остаётся `NO_GO` до разметки фрагментов по финальной OCR-коллекции.
+- DONE 2026-07-14: search eval и human-review workflow используют единые breadth-пороги; отсутствующий `index_readiness` теперь блокирует `GO`, а не пропускает проверку.
 - DONE 2026-05-14: golden cases разделены по категориям (`folder_or_name`, `exact_number_or_vehicle`, `document_type`, `ocr_or_scan`, `semantic_business`, `general`); eval считает `by_category`. Cloud Drive-specific cases добавить после стабилизации registry search fixtures.
 - Запускать `scripts/search_eval.py` в CI как optional/manual gate сначала, затем как required для retrieval changes.
 - DONE 2026-05-14: eval report включает Recall/MRR/nDCG, zero-result rate, latency p50/p95; CLI умеет JSON и Markdown artifacts.
@@ -83,7 +85,7 @@ Done criteria:
 
 - DONE 2026-05-14: eval можно запустить одной командой локально: `python scripts/search_eval.py --golden eval/search_golden.json --limit 10`.
 - DONE 2026-05-14: результат сохраняется в JSON/Markdown artifact через `--output` и `--markdown-output`.
-- пороги качества ещё нужно согласовать; `release_v2` latency regression должен быть устранён до required CI gate.
+- quality/safety/breadth пороги зафиксированы в CLI; `release_v2` должен пройти их вместе с latency, ACL smoke и index readiness до required CI gate.
 
 ### 4. Indexing And OCR Reliability
 

@@ -346,5 +346,129 @@
     "expected": [],
     "expect_no_answer": true,
     "category": "no_answer"
+  },
+  {
+    "query": "стс 9941 210904",
+    "expected": [
+      "стс",
+      "9941",
+      "210904"
+    ],
+    "expected_paths": [
+      "ВПН 30.06.2025г/1.22 ПТС, СТС/СТС.pdf"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "сор 9941 210904",
+    "expected": [
+      "стс",
+      "9941",
+      "210904"
+    ],
+    "expected_paths": [
+      "ВПН 30.06.2025г/1.22 ПТС, СТС/СТС.pdf"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "стс 9977100445",
+    "expected": [
+      "стс",
+      "9977100445"
+    ],
+    "expected_paths": [
+      "Омода О 655 РС 154/СТС омода 655.pdf"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "стс 9977 100445",
+    "expected": [
+      "стс",
+      "9977",
+      "100445"
+    ],
+    "expected_paths": [
+      "Омода О 655 РС 154/СТС омода 655.pdf"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "паспорт Komatsu PC300",
+    "expected": [
+      "komatsu",
+      "pc300",
+      "паспорт"
+    ],
+    "expected_paths": [
+      "PC300.pdf"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "6357",
+    "expected": [
+      "6357",
+      "псм"
+    ],
+    "expected_paths": [
+      "Экскаватор 6357/Выписка из электронного паспорта 6357.pdf"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "lovol",
+    "expected": [
+      "lovol",
+      "vin"
+    ],
+    "expected_paths": [
+      "Шильдик Foton Lovol FL966H.jpg",
+      "Погрузчик Lovol FL966H.jpg"
+    ],
+    "category": "exact_number_or_vehicle"
+  },
+  {
+    "query": "инн 000000000000 несуществующая организация",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "vin ZZZZZZZZZZZZZZZZZ",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "договор № НЕСУЩ-2026-999999",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "счет № QX-999999 от 31.02.2099",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "паспорт гражданина Марсианин Плутонович",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "экскаватор модель NEVERFOUND-847291",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
+  },
+  {
+    "query": "акт сверки ООО Несуществующий Контрагент 999999",
+    "expected": [],
+    "expect_no_answer": true,
+    "category": "no_answer"
   }
 ]

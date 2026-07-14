@@ -349,7 +349,7 @@ python scripts/retrieval_review.py finalize runtime/eval/retrieval-v3-review.jso
   --output eval/retrieval_v3_golden.json
 ```
 
-Локальный UI привязан к `127.0.0.1`, сохраняет каждое решение атомарно и держит предыдущую версию рядом в `.bak`. В нём можно отметить relevant/forbidden кандидатов, добавить отсутствующий путь или создать отдельный no-answer запрос. Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация по умолчанию требует минимум три no-answer и три forbidden/ACL cases. Retrieval GO также требует ненулевой `acl_results_checked`; нулевая утечка при отсутствии ACL ground truth больше не считается доказательством безопасности.
+Локальный UI привязан к `127.0.0.1`, сохраняет каждое решение атомарно и держит предыдущую версию рядом в `.bak`. В нём можно отметить relevant/forbidden кандидатов, добавить отсутствующий путь или создать отдельный no-answer запрос. Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация и retrieval gate по умолчанию требуют минимум 50 запросов, 10 no-answer, 20 document-grounded, 10 chunk/page-grounded, 6 категорий и 3 forbidden/ACL cases. Retrieval GO также требует `index_readiness=true` и ненулевой `acl_results_checked`; отсутствие readiness или нулевая утечка без ACL ground truth не считаются доказательством готовности.
 
 Для автоматического gate передайте свежий authenticated smoke через `--acl-evidence runtime/pilot-ui-smoke/<run>/pilot-ui-smoke.json`. CLI отклонит неуспешный или устаревший артефакт с другим fingerprint исходников.
 
