@@ -29,13 +29,23 @@ from rag_catalog.core.search_eval import (
     load_golden_queries,
 )
 
+_EVALUATION_PROTOCOL_VERSION = "search-eval-v2"
 
-def _evaluation_fingerprints(golden_path: Path, *, source: str) -> Dict[str, str]:
+
+def _evaluation_fingerprints(golden_path: Path, *, source: str, limit: int) -> Dict[str, Any]:
     golden_fingerprint = hashlib.sha256(golden_path.read_bytes()).hexdigest()
-    combined = hashlib.sha256(f"{source}\0{golden_fingerprint}".encode("utf-8")).hexdigest()
+    protocol = {
+        "version": _EVALUATION_PROTOCOL_VERSION,
+        "limit": max(1, int(limit)),
+    }
+    protocol_json = json.dumps(protocol, sort_keys=True, separators=(",", ":"))
+    combined = hashlib.sha256(
+        f"{source}\0{golden_fingerprint}\0{protocol_json}".encode("utf-8")
+    ).hexdigest()
     return {
         "source_fingerprint": source,
         "golden_fingerprint": golden_fingerprint,
+        "evaluation_protocol": protocol,
         "evaluation_fingerprint": combined,
     }
 
@@ -172,6 +182,7 @@ def main() -> int:
     evaluation_fingerprints = _evaluation_fingerprints(
         golden_path,
         source=current_source_fingerprint,
+        limit=max(1, int(args.limit)),
     )
     if not args.no_warmup:
         try:

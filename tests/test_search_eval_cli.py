@@ -83,12 +83,15 @@ def test_evaluation_fingerprint_binds_sources_and_golden(tmp_path) -> None:
     golden = tmp_path / "golden.json"
     golden.write_text('[{"query":"alpha","expected":["alpha"]}]', encoding="utf-8")
 
-    first = _evaluation_fingerprints(golden, source="source-a")
-    second = _evaluation_fingerprints(golden, source="source-a")
-    changed_source = _evaluation_fingerprints(golden, source="source-b")
+    first = _evaluation_fingerprints(golden, source="source-a", limit=10)
+    second = _evaluation_fingerprints(golden, source="source-a", limit=10)
+    changed_source = _evaluation_fingerprints(golden, source="source-b", limit=10)
+    changed_limit = _evaluation_fingerprints(golden, source="source-a", limit=5)
     golden.write_text('[{"query":"beta","expected":["beta"]}]', encoding="utf-8")
-    changed_golden = _evaluation_fingerprints(golden, source="source-a")
+    changed_golden = _evaluation_fingerprints(golden, source="source-a", limit=10)
 
     assert first == second
+    assert first["evaluation_protocol"] == {"version": "search-eval-v2", "limit": 10}
     assert first["evaluation_fingerprint"] != changed_source["evaluation_fingerprint"]
+    assert first["evaluation_fingerprint"] != changed_limit["evaluation_fingerprint"]
     assert first["evaluation_fingerprint"] != changed_golden["evaluation_fingerprint"]
