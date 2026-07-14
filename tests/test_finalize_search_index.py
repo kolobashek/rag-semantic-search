@@ -15,7 +15,10 @@ def _info(*, points: int, indexed: int, schema: tuple[str, ...], status: str = "
         optimizer_status=optimizer,
         points_count=points,
         indexed_vectors_count=indexed,
-        payload_schema={key: object() for key in schema},
+        payload_schema={
+            key: SimpleNamespace(data_type="text" if key == "text" else "keyword")
+            for key in schema
+        },
     )
 
 
@@ -40,6 +43,22 @@ def test_collection_readiness_accepts_small_unindexed_tail() -> None:
 
     assert result["ready"] is True
     assert result["unindexed_vectors"] == 25_000
+    assert result["payload_index_types"]["text"] == "text"
+
+
+def test_collection_readiness_rejects_text_field_with_keyword_index() -> None:
+    info = _info(points=100, indexed=100, schema=("type", "text"))
+    info.payload_schema["text"] = SimpleNamespace(data_type="keyword")
+
+    result = collection_readiness(
+        info,
+        require_fulltext=True,
+        max_unindexed_vectors=0,
+    )
+
+    assert result["ready"] is False
+    assert result["fulltext_ready"] is False
+    assert "fulltext_index_wrong_type=keyword" in result["reasons"]
 
 
 class _Client:

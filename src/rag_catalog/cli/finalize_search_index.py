@@ -27,6 +27,16 @@ def _enum_text(value: Any) -> str:
     return str(raw or "").strip().lower()
 
 
+def _payload_index_types(schema: Any) -> Dict[str, str]:
+    if not hasattr(schema, "items"):
+        return {str(key): "unknown" for key in schema or []}
+    types: Dict[str, str] = {}
+    for key, value in schema.items():
+        data_type = value.get("data_type") if isinstance(value, dict) else getattr(value, "data_type", value)
+        types[str(key)] = _enum_text(data_type) or "unknown"
+    return types
+
+
 def collection_readiness(
     info: Any,
     *,
@@ -34,7 +44,10 @@ def collection_readiness(
     max_unindexed_vectors: int,
 ) -> Dict[str, Any]:
     schema = getattr(info, "payload_schema", None) or {}
-    schema_fields = {str(key) for key in schema.keys()} if hasattr(schema, "keys") else {str(key) for key in schema}
+    schema_types = _payload_index_types(schema)
+    schema_fields = set(schema_types)
+    text_index_type = schema_types.get("text", "")
+    fulltext_ready = text_index_type == "text"
     points = int(getattr(info, "points_count", 0) or 0)
     indexed = int(getattr(info, "indexed_vectors_count", 0) or 0)
     unindexed = max(0, points - indexed)
@@ -45,8 +58,11 @@ def collection_readiness(
         reasons.append(f"collection_status={status or 'unknown'}")
     if optimizer not in {"ok", "green"}:
         reasons.append(f"optimizer_status={optimizer or 'unknown'}")
-    if require_fulltext and "text" not in schema_fields:
-        reasons.append("fulltext_index_missing")
+    if require_fulltext and not fulltext_ready:
+        if text_index_type:
+            reasons.append(f"fulltext_index_wrong_type={text_index_type}")
+        else:
+            reasons.append("fulltext_index_missing")
     if unindexed > max(0, int(max_unindexed_vectors)):
         reasons.append(f"unindexed_vectors={unindexed}")
     return {
@@ -58,7 +74,8 @@ def collection_readiness(
         "unindexed_vectors": unindexed,
         "max_unindexed_vectors": max(0, int(max_unindexed_vectors)),
         "payload_indexes": sorted(schema_fields),
-        "fulltext_ready": "text" in schema_fields,
+        "payload_index_types": dict(sorted(schema_types.items())),
+        "fulltext_ready": fulltext_ready,
         "reasons": reasons,
     }
 
