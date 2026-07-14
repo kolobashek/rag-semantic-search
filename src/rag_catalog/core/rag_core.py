@@ -179,6 +179,14 @@ _TERM_ALIASES = {
 }
 
 
+def _payload_index_type(schema: Any, field_name: str) -> str:
+    if not hasattr(schema, "get"):
+        return ""
+    value = schema.get(field_name)
+    data_type = value.get("data_type") if isinstance(value, dict) else getattr(value, "data_type", value)
+    return str(getattr(data_type, "value", data_type) or "").strip().lower()
+
+
 def _wants_machine_document(terms: Iterable[str]) -> bool:
     return any(str(term or "").lower().replace("ё", "е") in _MACHINE_DOCUMENT_INTENT_TERMS for term in terms)
 
@@ -324,7 +332,7 @@ class RAGSearcher:
                 logger.info("Подключено к Qdrant локально: %s", qdrant_path)
             collection_info = self.qdrant.get_collection(self.collection_name)
             schema = getattr(collection_info, "payload_schema", None) or {}
-            self._fulltext_available = "text" in schema
+            self._fulltext_available = _payload_index_type(schema, "text") == "text"
             self.connected = True
         except Exception as exc:
             logger.error("Не удалось подключиться к Qdrant: %s", exc)

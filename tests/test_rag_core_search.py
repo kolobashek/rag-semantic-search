@@ -8,7 +8,7 @@ import pytest
 from qdrant_client.models import Filter
 
 from rag_catalog.core.index_state_db import IndexStateDB
-from rag_catalog.core.rag_core import apply_retrieval_preset
+from rag_catalog.core.rag_core import _payload_index_type, apply_retrieval_preset
 from rag_catalog.core.retrieval import prepare_passage_text, prepare_query_text
 from rag_core import MAX_QUERY_LEN, RAGSearcher
 
@@ -35,6 +35,12 @@ def test_multilingual_e5_inputs_use_asymmetric_prefixes() -> None:
     assert prepare_query_text(model, "спецмайнинг") == "query: спецмайнинг"
     assert prepare_passage_text(model, "устав компании") == "passage: устав компании"
     assert prepare_query_text("sentence-transformers/all-MiniLM-L6-v2", "query") == "query"
+
+
+def test_fulltext_runtime_requires_text_payload_index_type() -> None:
+    assert _payload_index_type({"text": {"data_type": "text"}}, "text") == "text"
+    assert _payload_index_type({"text": {"data_type": "keyword"}}, "text") == "keyword"
+    assert _payload_index_type({"type": {"data_type": "keyword"}}, "text") == ""
 
 
 class _FakeTelemetry:
