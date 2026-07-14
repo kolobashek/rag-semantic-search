@@ -12,6 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
+from rag_catalog.core.index_rag import _configure_forced_replacement
 from rag_catalog.core.extractors import ExtractedDocument, TextBlock, document_from_legacy_text
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing import stage_runner
@@ -295,6 +296,38 @@ def test_forced_extension_reindex_replaces_existing_vectors(tmp_path: Path) -> N
 
     assert deleted == [path]
     assert idx.state_db.get_entry(str(path))["stage"] == "content"
+
+
+def test_force_replace_cli_mode_does_not_reset_state() -> None:
+    state_db = SimpleNamespace(update_stage_for_extensions=lambda *_args, **_kwargs: pytest.fail("state reset"))
+    idx = SimpleNamespace(state_db=state_db, force_replace_extensions=set())
+
+    _configure_forced_replacement(
+        idx,
+        mark_stage_metadata_for="",
+        force_replace_for="xlsx, .XLSM",
+        dry_run=False,
+    )
+
+    assert idx.force_replace_extensions == {".xlsx", ".xlsm"}
+
+
+def test_mark_stage_cli_mode_resets_state_and_forces_replacement() -> None:
+    calls: list[tuple[set[str], str]] = []
+    state_db = SimpleNamespace(
+        update_stage_for_extensions=lambda extensions, *, stage: calls.append((extensions, stage)) or 3
+    )
+    idx = SimpleNamespace(state_db=state_db, force_replace_extensions=set())
+
+    _configure_forced_replacement(
+        idx,
+        mark_stage_metadata_for=".XLSX,xls",
+        force_replace_for="",
+        dry_run=False,
+    )
+
+    assert calls == [({".xlsx", ".xls"}, "metadata")]
+    assert idx.force_replace_extensions == {".xlsx", ".xls"}
 
 
 def test_stage_scan_skips_file_removed_between_walk_and_stat(tmp_path: Path) -> None:

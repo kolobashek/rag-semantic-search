@@ -1644,6 +1644,40 @@ class RAGIndexer:
 # ─────────────────────────── CLI entry point ───────────────────────────
 
 
+def _parse_extension_csv(value: str) -> set[str]:
+    return {
+        item.strip().lower() if item.strip().startswith(".") else "." + item.strip().lower()
+        for item in str(value or "").split(",")
+        if item.strip()
+    }
+
+
+def _configure_forced_replacement(
+    indexer: "RAGIndexer",
+    *,
+    mark_stage_metadata_for: str,
+    force_replace_for: str,
+    dry_run: bool,
+) -> None:
+    forced_extensions = _parse_extension_csv(force_replace_for)
+    marked_extensions = _parse_extension_csv(mark_stage_metadata_for)
+    if marked_extensions:
+        if dry_run:
+            logger.info("--dry-run: миграция state --mark-stage-metadata-for не выполняется.")
+        else:
+            changed = indexer.state_db.update_stage_for_extensions(marked_extensions, stage="metadata")
+            forced_extensions.update(marked_extensions)
+            logger.info(
+                "Миграция state: %d записей с расширениями %s помечены stage=metadata",
+                changed,
+                sorted(marked_extensions),
+            )
+
+    indexer.force_replace_extensions = forced_extensions
+    if forced_extensions:
+        logger.info("Полная замена старых векторов включена для расширений: %s", sorted(forced_extensions))
+
+
 def main() -> None:
     cfg = load_config()
 
@@ -1772,6 +1806,14 @@ def main() -> None:
         "Пример: --mark-stage-metadata-for .pdf. Пригодится после legacy-прохода --metadata-only-for.",
     )
     parser.add_argument(
+        "--force-replace-for",
+        default="",
+        dest="force_replace_for",
+        help="При индексировании полностью заменить старые векторы для указанных расширений, "
+        "не изменяя текущий stage в state. Используйте для продолжения прерванной миграции, "
+        "которую ранее запустили с --mark-stage-metadata-for.",
+    )
+    parser.add_argument(
         "--only-paths-file",
         default="",
         dest="only_paths_file",
@@ -1891,18 +1933,12 @@ def main() -> None:
     # Миграция: пометить указанные расширения в state как stage=metadata
     # (это нужно, если раньше был прогон --metadata-only-for без поддержки stage,
     # и мы хотим, чтобы на этапах small/large эти файлы переиндексировались).
-    if args.mark_stage_metadata_for:
-        if args.dry_run:
-            logger.info("--dry-run: миграция state --mark-stage-metadata-for не выполняется.")
-        else:
-            exts = {
-                e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
-                for e in args.mark_stage_metadata_for.split(",")
-                if e.strip()
-            }
-            changed = indexer.state_db.update_stage_for_extensions(exts, stage="metadata")
-            indexer.force_replace_extensions = set(exts)
-            logger.info("Миграция state: %d записей с расширениями %s помечены stage=metadata", changed, sorted(exts))
+    _configure_forced_replacement(
+        indexer,
+        mark_stage_metadata_for=args.mark_stage_metadata_for,
+        force_replace_for=args.force_replace_for,
+        dry_run=bool(args.dry_run),
+    )
 
     try:
         if args.cleanup:
