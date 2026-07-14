@@ -4,10 +4,8 @@ ocr_pdfs.py — OCR-проход по сканированным PDF в RAG-ка
 Алгоритм:
   1. Подключается к Qdrant и находит PDF-файлы с пустым/коротким текстом
      (индексированные ранее с флагом --no-ocr).
-  2. Удаляет найденные файлы из index_state.db (сбрасывает кэш),
-     чтобы index_rag.py переиндексировал их заново.
-  3. Запускает index_rag.py без --no-ocr — OCR применяется автоматически
-     для файлов с пустым текстовым слоем.
+  2. Помечает найденные state-записи для переиндексации, сохраняя identity.
+  3. Запускает index_rag.py с полной заменой старых векторов и включённым OCR.
 
 Требования:
     pip install pytesseract pdf2image pymupdf
@@ -405,6 +403,19 @@ def remove_from_state_db(state_db_path: Path, file_paths: List[str]) -> int:
     return removed
 
 
+def mark_for_reindex_in_state_db(state_db_path: Path, file_paths: List[str]) -> int:
+    """Mark OCR candidates without deleting identity needed to replace vectors."""
+    if not state_db_path.exists():
+        raise FileNotFoundError(
+            f"SQLite state БД не найдена: {state_db_path}. "
+            "Сначала запустите index_rag для инициализации и миграции state."
+        )
+    state_db = IndexStateDB(str(state_db_path))
+    marked = state_db.update_stage_for_paths(file_paths, stage="metadata")
+    logger.info("Помечено state-записей для OCR-переиндексации: %d", marked)
+    return marked
+
+
 # ─────────────────────────── main ────────────────────────────────────────────
 
 def main() -> int:
@@ -581,10 +592,10 @@ def main() -> int:
         )
         return 0
 
-    # ── 2. Убрать их из state БД, чтобы индексатор переобработал ─────────────
+    # ── 2. Пометить state, сохранив identity для удаления старых векторов ────
     state_db_path = Path(args.state_dir) / "index_state.db"
     try:
-        removed = remove_from_state_db(state_db_path, scanned)
+        marked = mark_for_reindex_in_state_db(state_db_path, scanned)
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         telemetry.finish_ocr_run(
@@ -596,7 +607,7 @@ def main() -> int:
 
     telemetry.update_ocr_progress(
         ocr_run_id=ocr_run_id,
-        note=f"state_entries_removed={removed}",
+        note=f"state_entries_marked={marked}",
     )
     candidates_file = PROJECT_ROOT / "runtime" / f"ocr_candidates_{ocr_run_id}.txt"
     candidates_file.parent.mkdir(parents=True, exist_ok=True)
@@ -617,6 +628,7 @@ def main() -> int:
         "--stage",      "large",  # сканированные PDF — этап large
         "--force-ocr",
         "--only-paths-file", str(candidates_file),
+        "--force-replace-for", ",".join(sorted(OCR_CAPABLE_EXTENSIONS)),
         # НЕТ --no-ocr: OCR включён
     ]
     if str(args.ocr_engine or "tesseract").strip().lower() == "rapidocr":

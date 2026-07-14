@@ -12,6 +12,7 @@ from rag_catalog.core.ocr_pdfs import (
     ensure_ocr_payload_indexes,
     find_pending_ocr_candidates_from_runtime,
     find_state_db_ocr_candidates,
+    mark_for_reindex_in_state_db,
     remove_from_state_db,
 )
 from rag_catalog.core.telemetry_db import TelemetryDB
@@ -35,6 +36,34 @@ def test_remove_from_state_db_deletes_matching_paths(tmp_path: Path) -> None:
 def test_remove_from_state_db_raises_when_db_missing(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         remove_from_state_db(tmp_path / "missing_index_state.db", [r"O:\a.pdf"])
+
+
+def test_mark_for_reindex_preserves_candidate_state_identity(tmp_path: Path) -> None:
+    db_path = tmp_path / "index_state.db"
+    db = IndexStateDB(str(db_path))
+    db.upsert_many(
+        [
+            {
+                "full_path": r"O:\a.pdf",
+                "fingerprint": "1_1",
+                "mtime": 1.0,
+                "stage": "content",
+                "indexed_stage": "large",
+                "indexed_chunks": 3,
+                "total_chunks": 3,
+                "size_bytes": 1,
+                "extension": ".pdf",
+            }
+        ]
+    )
+
+    assert mark_for_reindex_in_state_db(db_path, [r"O:\a.pdf"]) == 1
+
+    row = db.get_entry(r"O:\a.pdf")
+    assert row is not None
+    assert row["fingerprint"] == "1_1"
+    assert row["stage"] == "metadata"
+    assert row["indexed_chunks"] == 0
 
 
 def test_rapidocr_uses_single_index_worker() -> None:
@@ -296,3 +325,6 @@ def test_ocr_main_passes_only_candidate_paths_to_indexer(monkeypatch, tmp_path: 
     candidates_path = Path(cmd[cmd.index("--only-paths-file") + 1])
     assert candidates_path.read_text(encoding="utf-8").splitlines() == [candidate]
     assert "--force-ocr" in cmd
+    assert "--force-replace-for" in cmd
+    assert ".pdf" in cmd[cmd.index("--force-replace-for") + 1]
+    assert db.get_entry(candidate) is not None

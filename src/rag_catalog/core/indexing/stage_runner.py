@@ -1228,17 +1228,23 @@ class IndexStageRunner:
 
                 # При full-проходе после quick не трогаем уже записанные первые чанки,
                 # а добавляем только хвост. В остальных случаях старые векторы заменяются.
+                force_replace = bool(
+                    str(result["meta_payload"].get("extension") or "").lower()
+                    in set(getattr(indexer, "force_replace_extensions", set()) or set())
+                )
                 metadata_only_upgrade = bool(
                     result.get("same_fingerprint")
                     and str(result.get("existing_stage") or "") in {"metadata", "empty"}
                     and stage in {"small", "large"}
-                    and str(result["meta_payload"].get("extension") or "").lower()
-                    not in set(getattr(indexer, "force_replace_extensions", set()) or set())
+                    and not force_replace
                 )
-                if result["was_indexed"] and not result.get("append_only") and not metadata_only_upgrade:
+                if (
+                    (result["was_indexed"] or force_replace)
+                    and not result.get("append_only")
+                    and not metadata_only_upgrade
+                ):
                     indexer._delete_file_vectors(Path(result["file_key"]))
-                    stage_stats["updated_files"] += 1
-                elif result["was_indexed"]:
+                if result["was_indexed"]:
                     stage_stats["updated_files"] += 1
                 else:
                     stage_stats["added_files"] += 1

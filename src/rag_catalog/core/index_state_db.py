@@ -726,6 +726,37 @@ class IndexStateDB:
                 )
                 return int(cur.rowcount or 0)
 
+    def update_stage_for_paths(self, paths: Iterable[str], stage: str = "metadata") -> int:
+        """Mark selected entries for reindex while preserving file/cloud identity."""
+        values = list(dict.fromkeys(str(path or "").strip() for path in paths if str(path or "").strip()))
+        if not values:
+            return 0
+        now = _utc_now()
+        target_stage = str(stage or "metadata")
+        changed = 0
+        with self._lock:
+            with self._connect() as conn:
+                for start in range(0, len(values), 500):
+                    batch = values[start : start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    cur = conn.execute(
+                        f"""
+                        UPDATE state_entries
+                        SET stage=?,
+                            indexed_stage=?,
+                            indexed_chunks=0,
+                            total_chunks=0,
+                            status='ok',
+                            last_error='',
+                            next_retry_at=0,
+                            updated_at=?
+                        WHERE full_path IN ({placeholders})
+                        """,
+                        (target_stage, target_stage, now, *batch),
+                    )
+                    changed += int(cur.rowcount or 0)
+        return changed
+
     def mark_all_for_reindex(self, *, stage: str = "metadata") -> int:
         now = _utc_now()
         target_stage = str(stage or "metadata")

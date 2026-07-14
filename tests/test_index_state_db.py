@@ -89,6 +89,39 @@ def test_state_db_persists_cloud_drive_identity(tmp_path: Path) -> None:
     assert row["storage_key"] == "Folder A/hello.txt"
 
 
+def test_update_stage_for_paths_preserves_identity_and_resets_progress(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many(
+        [
+            {
+                "full_path": "cloud:file-1",
+                "fingerprint": "sha256:abc",
+                "mtime": 1.0,
+                "stage": "content",
+                "indexed_stage": "large",
+                "indexed_chunks": 7,
+                "total_chunks": 7,
+                "size_bytes": 5,
+                "extension": ".pdf",
+                "cloud_file_id": "file-1",
+                "cloud_version_id": "version-1",
+                "cloud_path": "Folder/report.pdf",
+                "storage_key": "objects/report.pdf",
+            }
+        ]
+    )
+
+    assert db.update_stage_for_paths(["cloud:file-1", "missing"], stage="metadata") == 1
+
+    row = db.get_entry("cloud:file-1")
+    assert row is not None
+    assert row["stage"] == "metadata"
+    assert row["indexed_chunks"] == 0
+    assert row["cloud_file_id"] == "file-1"
+    assert row["cloud_version_id"] == "version-1"
+    assert row["storage_key"] == "objects/report.pdf"
+
+
 def test_state_db_stats_aggregates_by_extension(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
     db.upsert_many(

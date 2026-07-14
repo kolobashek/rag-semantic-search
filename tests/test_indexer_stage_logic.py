@@ -298,6 +298,20 @@ def test_forced_extension_reindex_replaces_existing_vectors(tmp_path: Path) -> N
     assert idx.state_db.get_entry(str(path))["stage"] == "content"
 
 
+def test_forced_extension_reindex_deletes_vectors_when_state_entry_is_missing(tmp_path: Path) -> None:
+    path = tmp_path / "recovered.pdf"
+    path.write_text("Содержательный текст документа " * 10, encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="Содержательный текст документа " * 10)
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda value: deleted.append(value)
+    idx.force_replace_extensions = {".pdf"}
+
+    idx.index_directory(stage="small")
+
+    assert deleted == [path]
+    assert idx.state_db.get_entry(str(path))["stage"] == "content"
+
+
 def test_force_replace_cli_mode_does_not_reset_state() -> None:
     state_db = SimpleNamespace(update_stage_for_extensions=lambda *_args, **_kwargs: pytest.fail("state reset"))
     idx = SimpleNamespace(state_db=state_db, force_replace_extensions=set())
