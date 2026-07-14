@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -27,6 +28,16 @@ from rag_catalog.core.search_eval import (
     evaluate_search,
     load_golden_queries,
 )
+
+
+def _evaluation_fingerprints(golden_path: Path, *, source: str) -> Dict[str, str]:
+    golden_fingerprint = hashlib.sha256(golden_path.read_bytes()).hexdigest()
+    combined = hashlib.sha256(f"{source}\0{golden_fingerprint}".encode("utf-8")).hexdigest()
+    return {
+        "source_fingerprint": source,
+        "golden_fingerprint": golden_fingerprint,
+        "evaluation_fingerprint": combined,
+    }
 
 
 def _parse_config_value(value: str) -> Any:
@@ -155,7 +166,13 @@ def main() -> int:
 
     cfg = _apply_config_overrides(load_config(), list(args.config_set or []))
     searcher = RAGSearcher(cfg)
-    golden = load_golden_queries(args.golden)
+    golden_path = Path(args.golden).expanduser().resolve()
+    golden = load_golden_queries(golden_path)
+    current_source_fingerprint = source_fingerprint(ROOT)
+    evaluation_fingerprints = _evaluation_fingerprints(
+        golden_path,
+        source=current_source_fingerprint,
+    )
     if not args.no_warmup:
         try:
             searcher.embedder.encode(str(args.warmup_query or "warmup"), normalize_embeddings=True)
@@ -177,6 +194,7 @@ def main() -> int:
             print(f"[eval {current}/{len(golden)}] done: {elapsed_ms} ms", file=sys.stderr, flush=True)
 
     report = evaluate_search(golden, _search, limit=max(1, int(args.limit)))
+    report.update(evaluation_fingerprints)
     if str(args.acl_evidence or "").strip():
         evidence_path = Path(str(args.acl_evidence)).expanduser().resolve()
         try:
@@ -187,7 +205,7 @@ def main() -> int:
                 report,
                 evidence_value,
                 evidence_path=str(evidence_path),
-                current_source_fingerprint=source_fingerprint(ROOT),
+                current_source_fingerprint=current_source_fingerprint,
             )
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             print(f"invalid ACL evidence: {exc}", file=sys.stderr)
@@ -266,6 +284,9 @@ def main() -> int:
             f"- No-answer cases: {report['no_answer_cases']}",
             f"- Document-grounded cases: {report['document_grounded_cases']}",
             f"- Content-grounded cases: {report['content_grounded_cases']}",
+            f"- Source fingerprint: {report['source_fingerprint']}",
+            f"- Golden fingerprint: {report['golden_fingerprint']}",
+            f"- Evaluation fingerprint: {report['evaluation_fingerprint']}",
             f"- Limit: {report['limit']}",
             f"- Recall@k: {report['recall_at_k']:.3f}",
             f"- Precision@k: {report['precision_at_k']:.3f}",

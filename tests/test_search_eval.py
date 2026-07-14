@@ -276,6 +276,44 @@ def test_retrieval_decision_requires_comparable_precision_baseline() -> None:
     assert {"precision_regression", "top1_regression"} <= failed
 
 
+def test_retrieval_decision_rejects_stale_baseline_fingerprint() -> None:
+    candidate = {
+        "queries": 60,
+        "categories_count": 8,
+        "no_answer_cases": 12,
+        "document_grounded_cases": 30,
+        "content_grounded_cases": 15,
+        "recall_at_k": 0.95,
+        "precision_at_k": 0.8,
+        "irrelevant_rate_at_k": 0.2,
+        "top1_accuracy": 0.9,
+        "latency_p95_ms": 1500,
+        "acl_leakage_rate": 0.0,
+        "acl_results_checked": 25,
+        "no_answer_accuracy": 0.95,
+        "ground_truth_coverage": 0.8,
+        "evaluation_fingerprint": "current",
+        "index_readiness": {
+            "ready": True,
+            "collection_name": "catalog_v2_e5",
+            "reasons": [],
+        },
+    }
+    baseline = {
+        "recall_at_k": 0.95,
+        "precision_at_k": 0.8,
+        "top1_accuracy": 0.9,
+        "latency_p95_ms": 1500,
+        "evaluation_fingerprint": "stale",
+    }
+
+    decision = evaluate_retrieval_decision(candidate, baseline=baseline)
+
+    check = next(item for item in decision["checks"] if item["name"] == "baseline_fingerprint")
+    assert check["ok"] is False
+    assert decision["decision"] == "NO_GO"
+
+
 def test_retrieval_decision_rejects_unfinalized_index() -> None:
     candidate = {
         "queries": 20,

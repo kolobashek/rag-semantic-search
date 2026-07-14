@@ -468,6 +468,17 @@ def evaluate_retrieval_decision(
             "true",
         )
     if baseline is not None:
+        candidate_fingerprint = str(candidate.get("evaluation_fingerprint") or "")
+        baseline_fingerprint = str(baseline.get("evaluation_fingerprint") or "")
+        add(
+            "baseline_fingerprint",
+            bool(candidate_fingerprint) and candidate_fingerprint == baseline_fingerprint,
+            {
+                "candidate": candidate_fingerprint or None,
+                "baseline": baseline_fingerprint or None,
+            },
+            "same non-empty evaluation fingerprint",
+        )
         baseline_recall = float(baseline.get("recall_at_k") or 0.0)
         recall_drop = baseline_recall - recall
         add("recall_regression", recall_drop <= max_recall_drop, recall_drop, f"<={max_recall_drop}")
@@ -518,5 +529,6 @@ def evaluate_retrieval_decision(
             "no_answer_accuracy": no_answer,
             "ground_truth_coverage": coverage,
             "index_readiness": readiness or None,
+            "evaluation_fingerprint": str(candidate.get("evaluation_fingerprint") or "") or None,
         },
     }

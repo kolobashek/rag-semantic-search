@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.search_eval import _apply_acl_evidence, _apply_config_overrides
+from scripts.search_eval import _apply_acl_evidence, _apply_config_overrides, _evaluation_fingerprints
 
 
 def test_config_override_applies_named_retrieval_preset() -> None:
@@ -77,3 +77,18 @@ def test_acl_evidence_rejects_stale_source_fingerprint() -> None:
             evidence_path="acl.json",
             current_source_fingerprint="current",
         )
+
+
+def test_evaluation_fingerprint_binds_sources_and_golden(tmp_path) -> None:
+    golden = tmp_path / "golden.json"
+    golden.write_text('[{"query":"alpha","expected":["alpha"]}]', encoding="utf-8")
+
+    first = _evaluation_fingerprints(golden, source="source-a")
+    second = _evaluation_fingerprints(golden, source="source-a")
+    changed_source = _evaluation_fingerprints(golden, source="source-b")
+    golden.write_text('[{"query":"beta","expected":["beta"]}]', encoding="utf-8")
+    changed_golden = _evaluation_fingerprints(golden, source="source-a")
+
+    assert first == second
+    assert first["evaluation_fingerprint"] != changed_source["evaluation_fingerprint"]
+    assert first["evaluation_fingerprint"] != changed_golden["evaluation_fingerprint"]
