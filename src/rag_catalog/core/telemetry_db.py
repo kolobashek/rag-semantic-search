@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from .db_contract import ensure_schema_version
 from .sqlite_runtime import prepare_sqlite_connection
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _utc_now() -> str:
@@ -208,7 +208,8 @@ class TelemetryDB:
                         duration_ms INTEGER NOT NULL DEFAULT 0,
                         ok INTEGER NOT NULL DEFAULT 1,
                         error TEXT,
-                        username TEXT NOT NULL DEFAULT ''
+                        username TEXT NOT NULL DEFAULT '',
+                        details_json TEXT NOT NULL DEFAULT '{}'
                     );
 
                     CREATE TABLE IF NOT EXISTS fact_logs (
@@ -414,6 +415,9 @@ class TelemetryDB:
         if "query_used" not in search_cols:
             conn.execute("ALTER TABLE search_logs ADD COLUMN query_used TEXT NOT NULL DEFAULT ''")
             search_cols.add("query_used")
+        if "details_json" not in search_cols:
+            conn.execute("ALTER TABLE search_logs ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'")
+            search_cols.add("details_json")
         conn.execute(
             """
             UPDATE search_logs
@@ -486,6 +490,7 @@ class TelemetryDB:
         username: str = "",
         query_original: str = "",
         query_used: str = "",
+        details: Optional[Dict[str, Any]] = None,
     ) -> None:
         with self._lock:
             with self._connect() as conn:
@@ -493,9 +498,9 @@ class TelemetryDB:
                     """
                     INSERT INTO search_logs (
                         ts, source, query, query_original, query_used, limit_value, file_type, content_only,
-                        results_count, duration_ms, ok, error, username
+                        results_count, duration_ms, ok, error, username, details_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         _utc_now(),
@@ -511,6 +516,7 @@ class TelemetryDB:
                         1 if ok else 0,
                         error or "",
                         (username or "").strip().lower(),
+                        json.dumps(details or {}, ensure_ascii=False),
                     ),
                 )
 

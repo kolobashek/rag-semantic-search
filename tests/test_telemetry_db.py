@@ -44,9 +44,12 @@ def test_search_logs_include_username_and_migrate(tmp_path) -> None:
         duration_ms=42,
         ok=True,
         username="admin",
+        details={"relevance_gate": {"rejected_count": 2}},
     )
 
-    rows = db.fetch_dicts("SELECT username, query, query_original, query_used, results_count FROM search_logs")
+    rows = db.fetch_dicts(
+        "SELECT username, query, query_original, query_used, results_count, details_json FROM search_logs"
+    )
     assert rows == [
         {
             "username": "admin",
@@ -54,6 +57,7 @@ def test_search_logs_include_username_and_migrate(tmp_path) -> None:
             "query_original": "passport",
             "query_used": "passport",
             "results_count": 3,
+            "details_json": '{"relevance_gate": {"rejected_count": 2}}',
         }
     ]
 
@@ -103,10 +107,18 @@ def test_existing_search_logs_without_username_are_migrated_before_indexes(tmp_p
         username="admin",
     )
 
-    rows = db.fetch_dicts("SELECT query, query_original, query_used, username FROM search_logs ORDER BY id")
+    rows = db.fetch_dicts(
+        "SELECT query, query_original, query_used, username, details_json FROM search_logs ORDER BY id"
+    )
     assert rows == [
-        {"query": "old", "query_original": "old", "query_used": "old", "username": ""},
-        {"query": "new", "query_original": "new original", "query_used": "new expanded", "username": "admin"},
+        {"query": "old", "query_original": "old", "query_used": "old", "username": "", "details_json": "{}"},
+        {
+            "query": "new",
+            "query_original": "new original",
+            "query_used": "new expanded",
+            "username": "admin",
+            "details_json": "{}",
+        },
     ]
 
 

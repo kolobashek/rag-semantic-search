@@ -653,6 +653,14 @@ class RAGSearcher:
             content_only=content_only,
             title_only=title_only,
         )
+        retrieval_diagnostics: Dict[str, Any] = {
+            "channels": {
+                "dense": len(results),
+                "numeric_exact": len(numeric_exact_results),
+                "lexical": len(lexical_results),
+                "fulltext": len(fulltext_results),
+            }
+        }
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
             rerank_top_n = max(limit, int(self.config.get("retrieval_reranker_top_n", max(limit * 3, 30)) or limit))
             bm25_results = self._bm25_catalog_search(
@@ -665,10 +673,11 @@ class RAGSearcher:
             channels = [numeric_exact_results, lexical_results, bm25_results, fulltext_results, results]
             fused = rrf_fuse(channels, limit=max(limit * 4, 40))
             results = self._merge_ranked_results([], fused, limit=rerank_top_n, query=query_used)
+            retrieval_diagnostics["channels"]["bm25"] = len(bm25_results)
+            retrieval_diagnostics["channels"]["fused"] = len(results)
             if bool(self.config.get("retrieval_reranker_enabled", False)):
                 results = self._rerank_results(query_used, results, limit=rerank_top_n)
-            else:
-                results = self._apply_relevance_gate(lexical_query, results)
+                retrieval_diagnostics["channels"]["reranked"] = len(results)
         else:
             results = self._merge_ranked_results(
                 [*numeric_exact_results, *lexical_results, *fulltext_results],
@@ -676,7 +685,12 @@ class RAGSearcher:
                 limit=limit,
                 query=query_used,
             )
-        results = self._apply_relevance_gate(lexical_query, results)
+            retrieval_diagnostics["channels"]["merged"] = len(results)
+        results = self._apply_relevance_gate(
+            lexical_query,
+            results,
+            diagnostics=retrieval_diagnostics,
+        )
         results = results[:limit]
         results = [self._repair_result_display_fields(item) for item in results]
 
@@ -693,6 +707,7 @@ class RAGSearcher:
             username=username,
             query_original=query_original_used,
             query_used=query_used,
+            details=retrieval_diagnostics,
         )
         return results
 
@@ -1802,9 +1817,19 @@ class RAGSearcher:
         self,
         query: str,
         results: List[Dict[str, Any]],
+        *,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Drop weak dense-only candidates and malformed content fragments."""
         if not bool(self.config.get("retrieval_relevance_gate_enabled", False)):
+            if diagnostics is not None:
+                diagnostics["relevance_gate"] = {
+                    "enabled": False,
+                    "input_count": len(results),
+                    "output_count": len(results),
+                    "rejected_count": 0,
+                    "rejected_by_reason": {},
+                }
             return results
         query_terms = tokenize(query)
         wants_machine_document = _wants_machine_document(self._terms_from_text(query))
@@ -1817,6 +1842,11 @@ class RAGSearcher:
         min_content_chars = max(20, int(self.config.get("retrieval_min_content_chars", 120) or 120))
         reranker_floor = float(self.config.get("retrieval_reranker_min_score", -4.0) or -4.0)
         gated: List[Dict[str, Any]] = []
+        rejected_by_reason: Dict[str, int] = {}
+
+        def reject(reason: str) -> None:
+            rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
+
         for item in results:
             item_type = str(item.get("type") or "")
             sources = {
@@ -1834,11 +1864,13 @@ class RAGSearcher:
                     for key in ("filename", "path", "full_path", "text", "tags")
                 )
                 if not _has_machine_document_evidence(document_evidence):
+                    reject("missing_machine_document_evidence")
                     continue
 
             if item_type not in {"file_metadata", "folder_metadata"}:
                 clean_text = " ".join(str(item.get("text") or "").split())
                 if len(clean_text) < min_content_chars and "fulltext" not in sources:
+                    reject("short_content")
                     continue
 
             fulltext_matched = int(item.get("fulltext_matched_terms") or 0)
@@ -1868,10 +1900,15 @@ class RAGSearcher:
 
             raw_reranker = item.get("reranker_score")
             if raw_reranker is not None and not strong_lexical and float(raw_reranker) < reranker_floor:
+                reject("reranker_below_floor")
                 continue
             reranker_pass = raw_reranker is not None and float(raw_reranker) >= reranker_floor
             dense_score = float(item.get("dense_score") or (item.get("score") if sources == {"dense"} else 0) or 0)
             if not strong_lexical and not reranker_pass and dense_score < dense_floor:
+                if "fulltext" in sources and 0 < fulltext_matched < fulltext_total:
+                    reject("partial_fulltext")
+                else:
+                    reject("weak_dense")
                 continue
             updated = dict(item)
             updated["relevance_evidence"] = (
@@ -1879,6 +1916,26 @@ class RAGSearcher:
             )
             updated["relevance_floor"] = dense_floor
             gated.append(updated)
+        gate_diagnostics = {
+            "enabled": True,
+            "input_count": len(results),
+            "output_count": len(gated),
+            "rejected_count": len(results) - len(gated),
+            "rejected_by_reason": rejected_by_reason,
+            "dense_floor": dense_floor,
+            "min_content_chars": min_content_chars,
+            "reranker_floor": reranker_floor,
+            "machine_document_intent": wants_machine_document,
+        }
+        if diagnostics is not None:
+            diagnostics["relevance_gate"] = gate_diagnostics
+        if rejected_by_reason:
+            logger.info(
+                "Relevance gate: input=%d output=%d rejected=%s",
+                len(results),
+                len(gated),
+                rejected_by_reason,
+            )
         return gated
 
     def _rerank_results(self, query: str, results: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:

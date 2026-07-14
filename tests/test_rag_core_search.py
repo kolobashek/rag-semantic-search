@@ -132,6 +132,22 @@ def test_search_no_results_is_valid_empty_list_and_truncates_query() -> None:
     assert call["query"] == long_query
     assert len(call["query_used"]) == MAX_QUERY_LEN
     assert "truncated_from=" in call["error"]
+    assert call["details"] == {
+        "channels": {
+            "dense": 0,
+            "numeric_exact": 0,
+            "lexical": 0,
+            "fulltext": 0,
+            "merged": 0,
+        },
+        "relevance_gate": {
+            "enabled": False,
+            "input_count": 0,
+            "output_count": 0,
+            "rejected_count": 0,
+            "rejected_by_reason": {},
+        },
+    }
 
 
 def test_search_does_not_run_spreadsheet_numeric_scan_for_alphanumeric_model(monkeypatch) -> None:
@@ -374,9 +390,21 @@ def test_relevance_gate_rejects_weak_dense_noise_and_microchunks() -> None:
         "fulltext_query_terms": 1,
     }
 
-    assert s._apply_relevance_gate("спецмайнинг", [noise, exact]) == [
+    diagnostics = {}
+    assert s._apply_relevance_gate("спецмайнинг", [noise, exact], diagnostics=diagnostics) == [
         {**exact, "relevance_evidence": "lexical", "relevance_floor": 0.8}
     ]
+    assert diagnostics["relevance_gate"] == {
+        "enabled": True,
+        "input_count": 2,
+        "output_count": 1,
+        "rejected_count": 1,
+        "rejected_by_reason": {"short_content": 1},
+        "dense_floor": 0.8,
+        "min_content_chars": 120,
+        "reranker_floor": -4.0,
+        "machine_document_intent": False,
+    }
 
 
 def test_relevance_gate_accepts_weak_dense_candidate_confirmed_by_reranker() -> None:
