@@ -97,6 +97,20 @@ def _effective_ocr_workers(requested: int, engine: str) -> int:
     return _effective_workers(requested)
 
 
+def _require_gpu_ocr_runtime(engine: str, *, require_gpu: bool) -> None:
+    if not require_gpu:
+        return
+    if str(engine or "").strip().lower() != "rapidocr":
+        raise ValueError("--require-gpu поддерживается только с --ocr-engine rapidocr")
+    from .extractors.ocr_rapid import gpu_ocr_available  # noqa: PLC0415
+
+    if not gpu_ocr_available():
+        raise RuntimeError(
+            "RapidOCR GPU preflight failed: rapidocr_onnxruntime или "
+            "DirectML/DmlExecutionProvider недоступен"
+        )
+
+
 # ─────────────────────────── Qdrant helpers ──────────────────────────────────
 
 def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) -> List[str]:
@@ -492,6 +506,11 @@ def main() -> int:
         choices=("tesseract", "rapidocr"),
         help="OCR движок: tesseract (CPU, по умолчанию) или rapidocr (GPU/DirectML)",
     )
+    parser.add_argument(
+        "--require-gpu",
+        action="store_true",
+        help="Для RapidOCR требовать DirectML и завершаться до изменения state, если GPU недоступен.",
+    )
     args = parser.parse_args()
     args.collection = resolve_embedding_collection_name(
         args.collection,
@@ -500,6 +519,11 @@ def main() -> int:
         suffix=str(cfg.get("embedding_collection_suffix") or ""),
     )
     workers_effective = _effective_ocr_workers(int(args.workers or 0), str(args.ocr_engine or "tesseract"))
+    try:
+        _require_gpu_ocr_runtime(str(args.ocr_engine or "tesseract"), require_gpu=bool(args.require_gpu))
+    except (RuntimeError, ValueError) as exc:
+        logger.error("%s", exc)
+        return 2
 
     # ── Инициализация телеметрии ─────────────────────────────────────────────
     telemetry_path = (cfg.get("telemetry_db_path") or "").strip()

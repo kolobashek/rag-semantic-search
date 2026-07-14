@@ -9,6 +9,7 @@ from rag_catalog.core import ocr_pdfs
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.ocr_pdfs import (
     _effective_ocr_workers,
+    _require_gpu_ocr_runtime,
     ensure_ocr_payload_indexes,
     find_pending_ocr_candidates_from_runtime,
     find_state_db_ocr_candidates,
@@ -69,6 +70,30 @@ def test_mark_for_reindex_preserves_candidate_state_identity(tmp_path: Path) -> 
 def test_rapidocr_uses_single_index_worker() -> None:
     assert _effective_ocr_workers(8, "rapidocr") == 1
     assert _effective_ocr_workers(3, "tesseract") == 3
+
+
+def test_required_gpu_ocr_rejects_non_rapid_engine() -> None:
+    with pytest.raises(ValueError, match="rapidocr"):
+        _require_gpu_ocr_runtime("tesseract", require_gpu=True)
+
+
+def test_required_gpu_ocr_fails_closed_without_directml(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rag_catalog.core.extractors.ocr_rapid.gpu_ocr_available",
+        lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="DirectML"):
+        _require_gpu_ocr_runtime("rapidocr", require_gpu=True)
+
+
+def test_required_gpu_ocr_accepts_directml(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rag_catalog.core.extractors.ocr_rapid.gpu_ocr_available",
+        lambda: True,
+    )
+
+    _require_gpu_ocr_runtime("rapidocr", require_gpu=True)
 
 
 def test_find_state_db_ocr_candidates_returns_large_unprocessed_pdfs(tmp_path: Path) -> None:
