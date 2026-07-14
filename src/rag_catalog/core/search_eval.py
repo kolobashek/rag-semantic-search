@@ -505,6 +505,33 @@ def evaluate_retrieval_decision(
     )
     evaluation_profile = candidate.get("evaluation_profile")
     profile = evaluation_profile if isinstance(evaluation_profile, dict) else {}
+    add(
+        "evaluation_profile",
+        bool(profile),
+        profile or None,
+        "non-empty resolved retrieval profile",
+    )
+    relevance_gate_enabled = profile.get("relevance_gate_enabled") is True
+    add(
+        "relevance_gate_enabled",
+        relevance_gate_enabled,
+        relevance_gate_enabled,
+        "true",
+    )
+    min_dense_score = float(profile.get("min_dense_score") or 0.0)
+    single_term_min_dense_score = float(
+        profile.get("single_term_min_dense_score") or 0.0
+    )
+    add(
+        "relevance_thresholds",
+        min_dense_score > 0.0
+        and single_term_min_dense_score >= min_dense_score,
+        {
+            "min_dense_score": min_dense_score,
+            "single_term_min_dense_score": single_term_min_dense_score,
+        },
+        "min_dense_score>0 and single_term_min_dense_score>=min_dense_score",
+    )
     source_counts_raw = candidate.get("retrieval_source_counts")
     source_counts = source_counts_raw if isinstance(source_counts_raw, dict) else {}
     if profile.get("bm25_enabled") is True:
@@ -620,6 +647,7 @@ def evaluate_retrieval_decision(
             "no_answer_accuracy": no_answer,
             "ground_truth_coverage": coverage,
             "index_readiness": readiness or None,
+            "evaluation_profile": profile or None,
             "evaluation_fingerprint": str(candidate.get("evaluation_fingerprint") or "") or None,
         },
     }

@@ -198,6 +198,9 @@ def test_retrieval_decision_requires_broad_eval_and_readiness_evidence() -> None
         "no_answer_case_breadth",
         "content_grounded_breadth",
         "index_readiness",
+        "evaluation_profile",
+        "relevance_gate_enabled",
+        "relevance_thresholds",
     } <= failed
 
 
@@ -217,6 +220,11 @@ def test_retrieval_decision_accepts_broad_ready_candidate() -> None:
         "acl_results_checked": 25,
         "no_answer_accuracy": 0.95,
         "ground_truth_coverage": 0.8,
+        "evaluation_profile": {
+            "relevance_gate_enabled": True,
+            "min_dense_score": 0.78,
+            "single_term_min_dense_score": 0.80,
+        },
         "index_readiness": {
             "ready": True,
             "collection_name": "catalog_v2_e5",
@@ -245,7 +253,12 @@ def test_retrieval_decision_requires_complete_reranker_execution() -> None:
         "ground_truth_coverage": 0.8,
         "evaluated_results_count": 100,
         "reranked_results_count": 99,
-        "evaluation_profile": {"reranker_enabled": True},
+        "evaluation_profile": {
+            "relevance_gate_enabled": True,
+            "min_dense_score": 0.78,
+            "single_term_min_dense_score": 0.80,
+            "reranker_enabled": True,
+        },
         "index_readiness": {
             "ready": True,
             "collection_name": "catalog_v2_e5",
@@ -285,7 +298,13 @@ def test_retrieval_decision_requires_sparse_channel_execution_evidence() -> None
         "acl_results_checked": 25,
         "no_answer_accuracy": 0.95,
         "ground_truth_coverage": 0.8,
-        "evaluation_profile": {"bm25_enabled": True, "fulltext_enabled": True},
+        "evaluation_profile": {
+            "relevance_gate_enabled": True,
+            "min_dense_score": 0.78,
+            "single_term_min_dense_score": 0.80,
+            "bm25_enabled": True,
+            "fulltext_enabled": True,
+        },
         "retrieval_source_counts": {"dense": 100},
         "index_readiness": {
             "ready": True,
