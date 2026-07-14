@@ -504,6 +504,48 @@ def evaluate_retrieval_decision(
         },
         "ready=true",
     )
+    quality_evidence_raw = candidate.get("index_quality_evidence")
+    quality_evidence = quality_evidence_raw if isinstance(quality_evidence_raw, dict) else {}
+    add(
+        "index_quality_evidence",
+        quality_evidence.get("ok") is True,
+        {
+            "ok": quality_evidence.get("ok") is True,
+            "collection_name": str(quality_evidence.get("collection_name") or ""),
+            "reasons": list(quality_evidence.get("reasons") or ["index_quality_evidence_missing"]),
+        },
+        "validated full finalization evidence",
+    )
+    payload_integrity_raw = quality_evidence.get("payload_integrity")
+    payload_integrity = payload_integrity_raw if isinstance(payload_integrity_raw, dict) else {}
+    add(
+        "payload_integrity",
+        payload_integrity.get("ok") is True
+        and int(payload_integrity.get("sample_size") or 0) > 0,
+        {
+            "ok": payload_integrity.get("ok") is True,
+            "sample_size": int(payload_integrity.get("sample_size") or 0),
+        },
+        "ok=true and sample_size>0",
+    )
+    spreadsheet_integrity_raw = quality_evidence.get("spreadsheet_integrity")
+    spreadsheet_integrity = (
+        spreadsheet_integrity_raw if isinstance(spreadsheet_integrity_raw, dict) else {}
+    )
+    add(
+        "spreadsheet_full_audit",
+        spreadsheet_integrity.get("ok") is True
+        and spreadsheet_integrity.get("scanned_all") is True
+        and str(spreadsheet_integrity.get("sampling_strategy") or "") == "full_scroll"
+        and int(spreadsheet_integrity.get("sample_size") or 0) > 0,
+        {
+            "ok": spreadsheet_integrity.get("ok") is True,
+            "scanned_all": spreadsheet_integrity.get("scanned_all") is True,
+            "sampling_strategy": str(spreadsheet_integrity.get("sampling_strategy") or ""),
+            "sample_size": int(spreadsheet_integrity.get("sample_size") or 0),
+        },
+        "ok=true, scanned_all=true, full_scroll and sample_size>0",
+    )
     evaluation_profile = candidate.get("evaluation_profile")
     profile = evaluation_profile if isinstance(evaluation_profile, dict) else {}
     add(
@@ -514,15 +556,18 @@ def evaluate_retrieval_decision(
     )
     profile_collection = str(profile.get("collection_name") or "")
     readiness_collection = str(readiness.get("collection_name") or "")
+    quality_collection = str(quality_evidence.get("collection_name") or "")
     add(
         "index_collection_match",
         bool(profile_collection)
-        and profile_collection == readiness_collection,
+        and profile_collection == readiness_collection
+        and profile_collection == quality_collection,
         {
             "evaluation_profile": profile_collection or None,
             "index_readiness": readiness_collection or None,
+            "index_quality_evidence": quality_collection or None,
         },
-        "same non-empty collection name",
+        "same non-empty collection name across profile, live readiness and quality evidence",
     )
     required_profile_values = dict(required_profile or {})
     for key, expected_value in sorted(required_profile_values.items()):
@@ -669,6 +714,7 @@ def evaluate_retrieval_decision(
             "no_answer_accuracy": no_answer,
             "ground_truth_coverage": coverage,
             "index_readiness": readiness or None,
+            "index_quality_evidence": quality_evidence or None,
             "evaluation_profile": profile or None,
             "evaluation_fingerprint": str(candidate.get("evaluation_fingerprint") or "") or None,
         },

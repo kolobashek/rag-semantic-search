@@ -336,13 +336,16 @@ Retrieval v3 evaluation accepts optional per-query `expected_paths`, `expected_c
 ```powershell
 python scripts/search_eval.py --golden eval/retrieval_v3_golden.json --limit 10 `
   --config-set retrieval_preset=release_v2 `
-  --config-set collection_name=catalog_shadow_v3 `
+  --config-set collection_name=catalog_v2_e5 `
   --require-profile retrieval_preset=release_v2 `
   --require-profile retrieval_pipeline=v2 `
-  --require-profile collection_name=catalog_shadow_v3 `
+  --require-profile collection_name=catalog_v2_e5 `
+  --require-profile embedding_model=intfloat/multilingual-e5-small `
+  --index-readiness-evidence runtime/eval/index-readiness.json `
+  --acl-evidence runtime/pilot-ui-smoke/latest/pilot-ui-smoke.json `
   --baseline-report runtime/eval/legacy.json `
-  --output runtime/eval/shadow-v3.json `
-  --decision-output runtime/eval/shadow-v3-decision.json `
+  --output runtime/eval/release-v2.json `
+  --decision-output runtime/eval/release-v2-decision.json `
   --fail-under-recall 0.875 --max-p95-ms 3000 --max-p95-ratio 1.5 `
   --min-precision-at-k 0.5 --min-top1-accuracy 0.8 --max-irrelevant-rate 0.5 `
   --max-acl-leakage 0 --min-no-answer-accuracy 0.8 `
@@ -366,7 +369,7 @@ python scripts/retrieval_review.py finalize runtime/eval/retrieval-v3-review.jso
   --output eval/retrieval_v3_golden.json
 ```
 
-Локальный UI привязан к `127.0.0.1`, сохраняет каждое решение атомарно и держит предыдущую версию рядом в `.bak`. В нём можно отметить relevant/forbidden кандидатов, добавить отсутствующий путь или создать отдельный no-answer запрос. Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация и retrieval gate по умолчанию требуют минимум 50 запросов, 10 no-answer, 20 document-grounded, 10 chunk/page-grounded, 6 категорий и 3 forbidden/ACL cases. Retrieval GO также требует `index_readiness=true`, ненулевой `acl_results_checked`, resolved profile с включённым relevance gate и корректными порогами. Если profile включает BM25, full-text или reranker, отчёт обязан подтвердить фактическое участие соответствующих каналов; для reranker требуется 100% покрытие всех оценённых top-k результатов. Отсутствие readiness или нулевая утечка без ACL ground truth не считаются доказательством готовности.
+Локальный UI привязан к `127.0.0.1`, сохраняет каждое решение атомарно и держит предыдущую версию рядом в `.bak`. В нём можно отметить relevant/forbidden кандидатов, добавить отсутствующий путь или создать отдельный no-answer запрос. Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация и retrieval gate по умолчанию требуют минимум 50 запросов, 10 no-answer, 20 document-grounded, 10 chunk/page-grounded, 6 категорий и 3 forbidden/ACL cases. Retrieval GO также требует live `index_readiness=true`, свежий `--index-readiness-evidence` с полным spreadsheet scan, ненулевой `acl_results_checked`, resolved profile с включённым relevance gate и корректными порогами. Артефакт финализации принимается только для той же коллекции и того же `points_count`; случайный spreadsheet sample не проходит gate. Если profile включает BM25, full-text или reranker, отчёт обязан подтвердить фактическое участие соответствующих каналов; для reranker требуется 100% покрытие всех оценённых top-k результатов. Отсутствие readiness или нулевая утечка без ACL ground truth не считаются доказательством готовности.
 
 Для автоматического gate передайте свежий authenticated smoke через `--acl-evidence runtime/pilot-ui-smoke/<run>/pilot-ui-smoke.json`. CLI отклонит неуспешный или устаревший артефакт с другим fingerprint исходников.
 

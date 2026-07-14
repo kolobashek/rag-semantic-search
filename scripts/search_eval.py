@@ -138,6 +138,65 @@ def _apply_acl_evidence(
     return merged
 
 
+def _validate_index_readiness_evidence(
+    evidence: Dict[str, Any],
+    *,
+    evidence_path: str,
+    collection_name: str,
+    live_readiness: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Bind a full finalization artifact to the current live collection state."""
+    reasons: List[str] = []
+    artifact_collection = str(evidence.get("collection_name") or "")
+    expected_collection = str(collection_name or "")
+    live_collection = str(live_readiness.get("collection_name") or "")
+    artifact_points = int(evidence.get("points_count") or 0)
+    live_points = int(live_readiness.get("points_count") or 0)
+    artifact_indexed = int(evidence.get("indexed_vectors_count") or 0)
+    live_indexed = int(live_readiness.get("indexed_vectors_count") or 0)
+    payload_integrity = evidence.get("payload_integrity")
+    payload = payload_integrity if isinstance(payload_integrity, dict) else {}
+    spreadsheet_integrity = evidence.get("spreadsheet_integrity")
+    spreadsheet = spreadsheet_integrity if isinstance(spreadsheet_integrity, dict) else {}
+
+    if evidence.get("ready") is not True:
+        reasons.append("artifact_not_ready")
+    if not expected_collection or artifact_collection != expected_collection:
+        reasons.append("artifact_collection_mismatch")
+    if live_collection != expected_collection:
+        reasons.append("live_collection_mismatch")
+    if live_readiness.get("ready") is not True:
+        reasons.append("live_collection_not_ready")
+    if artifact_points <= 0 or artifact_points != live_points:
+        reasons.append("points_count_mismatch")
+    if artifact_indexed <= 0 or live_indexed < artifact_indexed:
+        reasons.append("indexed_vectors_regressed")
+    if payload.get("ok") is not True or int(payload.get("sample_size") or 0) <= 0:
+        reasons.append("payload_integrity_missing_or_failed")
+    if spreadsheet.get("ok") is not True:
+        reasons.append("spreadsheet_integrity_failed")
+    if spreadsheet.get("scanned_all") is not True:
+        reasons.append("spreadsheet_full_audit_missing")
+    if str(spreadsheet.get("sampling_strategy") or "") != "full_scroll":
+        reasons.append("spreadsheet_audit_not_full_scroll")
+    if int(spreadsheet.get("sample_size") or 0) <= 0:
+        reasons.append("spreadsheet_audit_empty")
+    if reasons:
+        raise ValueError("Index readiness evidence is invalid: " + ", ".join(reasons))
+
+    return {
+        "ok": True,
+        "path": evidence_path,
+        "collection_name": expected_collection,
+        "points_count": artifact_points,
+        "indexed_vectors_count": artifact_indexed,
+        "live_points_count": live_points,
+        "live_indexed_vectors_count": live_indexed,
+        "payload_integrity": payload,
+        "spreadsheet_integrity": spreadsheet,
+    }
+
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate search relevance on a golden query set.")
@@ -151,6 +210,11 @@ def main() -> int:
         "--acl-evidence",
         default="",
         help="Fresh pilot UI smoke JSON containing authenticated search ACL evidence.",
+    )
+    parser.add_argument(
+        "--index-readiness-evidence",
+        default="",
+        help="Full finalization JSON produced with --spreadsheet-full-audit.",
     )
     parser.add_argument("--decision-output", default="", help="Optional JSON path for the GO/NO_GO decision.")
     parser.add_argument("--enforce-decision-gate", action="store_true", help="Exit 1 when the retrieval decision is NO_GO.")
@@ -205,6 +269,42 @@ def main() -> int:
         option_name="--require-profile",
     )
     searcher = RAGSearcher(cfg)
+    try:
+        collection_info = searcher.qdrant.get_collection(searcher.collection_name)
+        live_index_readiness = {
+            **collection_readiness(
+                collection_info,
+                require_fulltext=bool(cfg.get("retrieval_fulltext_enabled", False)),
+                max_unindexed_vectors=int(cfg.get("qdrant_max_unindexed_vectors") or 50_000),
+            ),
+            "collection_name": searcher.collection_name,
+        }
+    except Exception as exc:
+        live_index_readiness = {
+            "ready": False,
+            "collection_name": searcher.collection_name,
+            "reasons": [f"readiness_probe_failed:{type(exc).__name__}"],
+        }
+    index_quality_evidence: Dict[str, Any] = {
+        "ok": False,
+        "collection_name": searcher.collection_name,
+        "reasons": ["index_readiness_evidence_missing"],
+    }
+    if str(args.index_readiness_evidence or "").strip():
+        evidence_path = Path(str(args.index_readiness_evidence)).expanduser().resolve()
+        try:
+            evidence_value = json.loads(evidence_path.read_text(encoding="utf-8"))
+            if not isinstance(evidence_value, dict):
+                raise ValueError("Index readiness evidence must be a JSON object.")
+            index_quality_evidence = _validate_index_readiness_evidence(
+                evidence_value,
+                evidence_path=str(evidence_path),
+                collection_name=searcher.collection_name,
+                live_readiness=live_index_readiness,
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"invalid index readiness evidence: {exc}", file=sys.stderr)
+            return 2
     golden_path = Path(args.golden).expanduser().resolve()
     golden = load_golden_queries(golden_path)
     current_source_fingerprint = source_fingerprint(ROOT)
@@ -267,22 +367,8 @@ def main() -> int:
         "reranker_backend": str(cfg.get("retrieval_reranker_backend") or ""),
         "collection_name": searcher.collection_name,
     }
-    try:
-        collection_info = searcher.qdrant.get_collection(searcher.collection_name)
-        report["index_readiness"] = {
-            **collection_readiness(
-                collection_info,
-                require_fulltext=bool(cfg.get("retrieval_fulltext_enabled", False)),
-                max_unindexed_vectors=int(cfg.get("qdrant_max_unindexed_vectors") or 50_000),
-            ),
-            "collection_name": searcher.collection_name,
-        }
-    except Exception as exc:
-        report["index_readiness"] = {
-            "ready": False,
-            "collection_name": searcher.collection_name,
-            "reasons": [f"readiness_probe_failed:{type(exc).__name__}"],
-        }
+    report["index_readiness"] = live_index_readiness
+    report["index_quality_evidence"] = index_quality_evidence
     baseline = None
     if args.baseline_report:
         baseline = json.loads(Path(args.baseline_report).read_text(encoding="utf-8"))

@@ -11,6 +11,20 @@ from rag_catalog.core.search_eval import (
 )
 
 
+def _index_quality_evidence(collection_name: str = "catalog_v2_e5") -> dict:
+    return {
+        "ok": True,
+        "collection_name": collection_name,
+        "payload_integrity": {"ok": True, "sample_size": 1000},
+        "spreadsheet_integrity": {
+            "ok": True,
+            "scanned_all": True,
+            "sampling_strategy": "full_scroll",
+            "sample_size": 250_000,
+        },
+    }
+
+
 def test_relevance_metrics() -> None:
     results = [
         {"filename": "wrong.txt", "path": "x/wrong.txt"},
@@ -233,6 +247,7 @@ def test_retrieval_decision_accepts_broad_ready_candidate() -> None:
             "collection_name": "catalog_v2_e5",
             "reasons": [],
         },
+        "index_quality_evidence": _index_quality_evidence(),
     }
 
     decision = evaluate_retrieval_decision(
@@ -246,6 +261,15 @@ def test_retrieval_decision_accepts_broad_ready_candidate() -> None:
 
     assert decision["decision"] == "GO"
     assert decision["required_profile"]["collection_name"] == "catalog_v2_e5"
+
+    candidate["index_quality_evidence"]["spreadsheet_integrity"]["scanned_all"] = False
+    partial_audit = evaluate_retrieval_decision(candidate)
+    audit_check = next(
+        item for item in partial_audit["checks"] if item["name"] == "spreadsheet_full_audit"
+    )
+    assert audit_check["ok"] is False
+    assert partial_audit["decision"] == "NO_GO"
+    candidate["index_quality_evidence"]["spreadsheet_integrity"]["scanned_all"] = True
 
     candidate["index_readiness"]["collection_name"] = "catalog"
     mismatch = evaluate_retrieval_decision(candidate)
@@ -300,6 +324,7 @@ def test_retrieval_decision_requires_complete_reranker_execution() -> None:
             "collection_name": "catalog_v2_e5",
             "reasons": [],
         },
+        "index_quality_evidence": _index_quality_evidence(),
     }
 
     incomplete = evaluate_retrieval_decision(candidate)
@@ -348,6 +373,7 @@ def test_retrieval_decision_requires_sparse_channel_execution_evidence() -> None
             "collection_name": "catalog_v2_e5",
             "reasons": [],
         },
+        "index_quality_evidence": _index_quality_evidence(),
     }
 
     missing = evaluate_retrieval_decision(candidate)

@@ -8,6 +8,7 @@ from scripts.search_eval import (
     _enforce_eval_runtime_contracts,
     _evaluation_fingerprints,
     _parse_named_values,
+    _validate_index_readiness_evidence,
 )
 
 
@@ -131,3 +132,66 @@ def test_evaluation_fingerprint_binds_sources_and_golden(tmp_path) -> None:
     assert first["evaluation_fingerprint"] != changed_source["evaluation_fingerprint"]
     assert first["evaluation_fingerprint"] != changed_limit["evaluation_fingerprint"]
     assert first["evaluation_fingerprint"] != changed_golden["evaluation_fingerprint"]
+
+
+def test_index_readiness_evidence_binds_full_audit_to_live_collection() -> None:
+    evidence = {
+        "ready": True,
+        "collection_name": "catalog_v2_e5",
+        "points_count": 500_000,
+        "indexed_vectors_count": 495_000,
+        "payload_integrity": {"ok": True, "sample_size": 1_000},
+        "spreadsheet_integrity": {
+            "ok": True,
+            "scanned_all": True,
+            "sampling_strategy": "full_scroll",
+            "sample_size": 250_000,
+        },
+    }
+    live = {
+        "ready": True,
+        "collection_name": "catalog_v2_e5",
+        "points_count": 500_000,
+        "indexed_vectors_count": 500_000,
+    }
+
+    result = _validate_index_readiness_evidence(
+        evidence,
+        evidence_path="readiness.json",
+        collection_name="catalog_v2_e5",
+        live_readiness=live,
+    )
+
+    assert result["ok"] is True
+    assert result["live_points_count"] == 500_000
+    assert result["spreadsheet_integrity"]["scanned_all"] is True
+
+
+def test_index_readiness_evidence_rejects_stale_or_partial_audit() -> None:
+    evidence = {
+        "ready": True,
+        "collection_name": "catalog_v2_e5",
+        "points_count": 499_999,
+        "indexed_vectors_count": 499_000,
+        "payload_integrity": {"ok": True, "sample_size": 1_000},
+        "spreadsheet_integrity": {
+            "ok": True,
+            "scanned_all": False,
+            "sampling_strategy": "random",
+            "sample_size": 500,
+        },
+    }
+    live = {
+        "ready": True,
+        "collection_name": "catalog_v2_e5",
+        "points_count": 500_000,
+        "indexed_vectors_count": 500_000,
+    }
+
+    with pytest.raises(ValueError, match="points_count_mismatch.*spreadsheet_full_audit_missing"):
+        _validate_index_readiness_evidence(
+            evidence,
+            evidence_path="readiness.json",
+            collection_name="catalog_v2_e5",
+            live_readiness=live,
+        )
