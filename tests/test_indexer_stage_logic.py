@@ -265,6 +265,21 @@ def test_small_stage_upgrades_unchanged_metadata_without_delete(tmp_path: Path) 
     assert idx.state_db.get_entry(str(p))["stage"] == "content"
 
 
+def test_forced_extension_reindex_replaces_existing_vectors(tmp_path: Path) -> None:
+    path = tmp_path / "replace.txt"
+    path.write_text("Содержательный текст документа " * 10, encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.index_directory(stage="metadata")
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda value: deleted.append(value)
+    idx.force_replace_extensions = {".txt"}
+
+    idx.index_directory(stage="small")
+
+    assert deleted == [path]
+    assert idx.state_db.get_entry(str(path))["stage"] == "content"
+
+
 def test_stage_scan_skips_file_removed_between_walk_and_stat(tmp_path: Path) -> None:
     vanished = tmp_path / "vanished.txt"
     kept = tmp_path / "kept.txt"

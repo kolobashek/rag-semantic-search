@@ -429,6 +429,17 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
     return ""
 
 
+def _spreadsheet_row_text(row: Any) -> str:
+    values = []
+    for cell in row:
+        if cell is None:
+            continue
+        value = str(cell).strip()
+        if value:
+            values.append(value)
+    return " | ".join(values)
+
+
 def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
     """Extract text from XLSX with optional early stop by accumulated chars."""
     wb: Any | None = None
@@ -443,8 +454,8 @@ def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
             sheet_name = ws.title
             parts.append(f"Лист: {sheet_name}")
             for row in ws.iter_rows(values_only=True):
-                row_text = " | ".join(str(c) if c is not None else "" for c in row)
-                if row_text.strip():
+                row_text = _spreadsheet_row_text(row)
+                if row_text:
                     parts.append(row_text)
                     total_chars += len(row_text)
                     if max_chars and total_chars >= max_chars:
@@ -486,8 +497,8 @@ def extract_xlsx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDoc
                 break
             sheet_name = str(ws.title)
             for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-                row_text = " | ".join(str(c) if c is not None else "" for c in row)
-                if not row_text.strip():
+                row_text = _spreadsheet_row_text(row)
+                if not row_text:
                     continue
                 blocks.append(TextBlock(text=row_text, sheet=sheet_name, row_start=row_idx, row_end=row_idx))
                 total_chars += len(row_text)
@@ -535,8 +546,8 @@ def extract_xls(filepath: Path, *, max_chars: int = 0) -> str:
             parts.append(f"Лист: {sheet.name}")
             for row_idx in range(sheet.nrows):
                 row = sheet.row_values(row_idx)
-                row_text = " | ".join(str(v) if v not in ("", None) else "" for v in row)
-                if row_text.strip():
+                row_text = _spreadsheet_row_text(row)
+                if row_text:
                     parts.append(row_text)
                     total_chars += len(row_text)
                     if max_chars and total_chars >= max_chars:
@@ -565,8 +576,8 @@ def extract_xls_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocu
                 break
             for row_idx in range(sheet.nrows):
                 row = sheet.row_values(row_idx)
-                row_text = " | ".join(str(v) if v not in ("", None) else "" for v in row)
-                if not row_text.strip():
+                row_text = _spreadsheet_row_text(row)
+                if not row_text:
                     continue
                 row_number = row_idx + 1
                 blocks.append(TextBlock(text=row_text, sheet=str(sheet.name), row_start=row_number, row_end=row_number))

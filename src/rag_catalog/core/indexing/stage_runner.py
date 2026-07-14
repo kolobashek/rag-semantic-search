@@ -1214,6 +1214,8 @@ class IndexStageRunner:
                     result.get("same_fingerprint")
                     and str(result.get("existing_stage") or "") in {"metadata", "empty"}
                     and stage in {"small", "large"}
+                    and str(result["meta_payload"].get("extension") or "").lower()
+                    not in set(getattr(indexer, "force_replace_extensions", set()) or set())
                 )
                 if result["was_indexed"] and not result.get("append_only") and not metadata_only_upgrade:
                     indexer._delete_file_vectors(Path(result["file_key"]))

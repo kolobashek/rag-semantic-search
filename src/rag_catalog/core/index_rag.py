@@ -490,6 +490,7 @@ class RAGIndexer:
         self.metadata_only_extensions = {
             e.lower() if e.startswith(".") else f".{e.lower()}" for e in (metadata_only_extensions or set())
         }
+        self.force_replace_extensions: set[str] = set()
         telemetry_path = telemetry_db_path.strip() if telemetry_db_path else ""
         if not telemetry_path:
             telemetry_path = str(self.qdrant_db_path / "rag_telemetry.db")
@@ -1900,6 +1901,7 @@ def main() -> None:
                 if e.strip()
             }
             changed = indexer.state_db.update_stage_for_extensions(exts, stage="metadata")
+            indexer.force_replace_extensions = set(exts)
             logger.info("Миграция state: %d записей с расширениями %s помечены stage=metadata", changed, sorted(exts))
 
     try:

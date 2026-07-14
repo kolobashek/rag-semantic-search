@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from openpyxl import Workbook
+
 from rag_catalog.core.extractors.files import extract_spreadsheet_document, extract_xlsx, extract_xlsx_document
 
 
@@ -182,3 +184,18 @@ def test_extract_spreadsheet_document_routes_xlsm_to_openpyxl(tmp_path: Path) ->
 
     assert doc.blocks
     assert doc.blocks[0].text == "Артикул | Алмаз"
+
+
+def test_extract_xlsx_document_skips_formula_rows_without_cached_values(tmp_path: Path) -> None:
+    path = tmp_path / "formula-empty.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Данные"
+    sheet["A1"] = "Артикул"
+    sheet["B1"] = "Количество"
+    sheet["AN2"] = "=1+1"
+    workbook.save(path)
+
+    doc = extract_xlsx_document(path)
+
+    assert [block.text for block in doc.blocks] == ["Артикул | Количество"]
