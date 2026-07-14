@@ -18,6 +18,14 @@ from .search_eval import (
 REVIEW_SCHEMA_VERSION = 1
 
 
+def append_expected_chunk_text(current: str, excerpt: str) -> str:
+    chunks = [line.strip() for line in str(current or "").splitlines() if line.strip()]
+    clean_excerpt = " ".join(str(excerpt or "").split())
+    if clean_excerpt and clean_excerpt not in chunks:
+        chunks.append(clean_excerpt)
+    return "\n".join(chunks)
+
+
 def load_json_object(path: str | Path) -> Dict[str, Any]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -86,6 +94,7 @@ def prepare_review_queue(
                     "filename": str(candidate.get("filename") or ""),
                     "page": candidate.get("page"),
                     "score": candidate.get("score"),
+                    "excerpt": " ".join(str(candidate.get("excerpt") or "").split())[:500],
                 }
             )
             if len(candidates) >= max(1, int(candidate_limit)):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from rag_catalog.core.retrieval_review import (
+    append_expected_chunk_text,
     finalize_review_queue,
     load_json_object,
     prepare_review_queue,
@@ -16,6 +17,16 @@ _SMALL_COVERAGE = {
     "min_content_grounded": 0,
     "min_categories": 0,
 }
+
+
+def test_append_expected_chunk_text_normalizes_and_deduplicates_excerpt() -> None:
+    assert append_expected_chunk_text("Первый фрагмент", " Второй\n  фрагмент ") == (
+        "Первый фрагмент\nВторой фрагмент"
+    )
+    assert append_expected_chunk_text(
+        "Первый фрагмент\nВторой фрагмент",
+        "Второй фрагмент",
+    ) == "Первый фрагмент\nВторой фрагмент"
 
 
 def _reviewed_item(query: str, *, no_answer: bool = False, forbidden: bool = False) -> dict:
@@ -47,7 +58,12 @@ def test_prepare_review_queue_keeps_candidates_separate_from_ground_truth() -> N
                 {
                     "query": "договор",
                     "top": [
-                        {"filename": "Договор.pdf", "path": "Договоры/Договор.pdf", "score": 0.9},
+                        {
+                            "filename": "Договор.pdf",
+                            "path": "Договоры/Договор.pdf",
+                            "score": 0.9,
+                            "excerpt": "Оплата  в течение\n10 дней.",
+                        },
                         {"filename": "Договор.pdf", "path": "Договоры/Договор.pdf", "score": 0.8},
                     ],
                 }
@@ -62,6 +78,7 @@ def test_prepare_review_queue_keeps_candidates_separate_from_ground_truth() -> N
             "filename": "Договор.pdf",
             "page": None,
             "score": 0.9,
+            "excerpt": "Оплата в течение 10 дней.",
         }
     ]
     assert queue["items"][0]["review"]["expected_paths"] == []

@@ -91,7 +91,14 @@ def test_evaluate_search_summary() -> None:
     golden = [GoldenQuery(query="карточка тск", expected=["тск"], category="folder_or_name")]
 
     def search_fn(_query: str, _limit: int) -> list[dict]:
-        return [{"filename": "Карточка ТСК.docx", "path": "Катя/Карточка ТСК.docx", "score": 0.9}]
+        return [
+            {
+                "filename": "Карточка ТСК.docx",
+                "path": "Катя/Карточка ТСК.docx",
+                "score": 0.9,
+                "text": "Карточка   предприятия\nООО ТСК",
+            }
+        ]
 
     report = evaluate_search(golden, search_fn, limit=10)
 
@@ -108,6 +115,7 @@ def test_evaluate_search_summary() -> None:
     assert report["by_category"]["folder_or_name"]["queries"] == 1
     assert report["rows"][0]["category"] == "folder_or_name"
     assert report["rows"][0]["top"][0]["filename"] == "Карточка ТСК.docx"
+    assert report["rows"][0]["top"][0]["excerpt"] == "Карточка предприятия ООО ТСК"
 
 
 def test_retrieval_v3_metrics_cover_document_chunk_page_no_answer_and_acl() -> None:

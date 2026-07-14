@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 from nicegui import ui
 
 from rag_catalog.core.retrieval_review import (
+    append_expected_chunk_text,
     load_json_object,
     save_review_queue_atomic,
     validate_review_queue,
@@ -70,8 +71,9 @@ def run_review_ui(
         body { background:#0d0f12; color:#e8eaed; }
         .review-shell { width:min(1180px, 100%); margin:0 auto; padding:18px 20px 40px; }
         .review-toolbar { position:sticky; top:0; z-index:10; background:#0d0f12ee; border-bottom:1px solid #2a2d33; }
-        .review-candidate { display:grid; grid-template-columns:48px minmax(0,1fr) 92px 104px; gap:10px; align-items:center; border-bottom:1px solid #25282e; padding:9px 0; }
+        .review-candidate { display:grid; grid-template-columns:48px minmax(0,1fr) 92px 104px 40px; gap:10px; align-items:center; border-bottom:1px solid #25282e; padding:9px 0; }
         .review-path { overflow-wrap:anywhere; color:#aeb4bf; font-size:12px; }
+        .review-excerpt { overflow-wrap:anywhere; color:#c3c7cf; font-size:12px; line-height:1.35; }
         .review-meta { color:#9097a3; font-size:12px; }
         @media(max-width:700px) {
           .review-shell { padding:12px; }
@@ -217,24 +219,40 @@ def run_review_ui(
                 ).props("data-testid=no-answer")
                 ui.label("Кандидаты baseline не являются ground truth. Отметьте решение reviewer.").classes("review-meta")
 
+                expected_chunks = ui.textarea(
+                    "Expected chunks — характерные фрагменты",
+                    value="\n".join(str(value) for value in (review.get("expected_chunks") or [])),
+                ).props("outlined autogrow data-testid=expected-chunks").classes("w-full")
+
+                def add_expected_chunk(excerpt: str) -> None:
+                    expected_chunks.set_value(
+                        append_expected_chunk_text(str(expected_chunks.value or ""), excerpt)
+                    )
+
                 for candidate in item.get("candidates") or []:
                     path = str(candidate.get("path") or "")
+                    excerpt = " ".join(str(candidate.get("excerpt") or "").split())
                     with ui.element("div").classes("review-candidate"):
                         ui.label(f"#{candidate.get('rank')}").classes("review-meta")
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label(str(candidate.get("filename") or Path(path).name)).classes("text-sm")
                             ui.label(path).classes("review-path")
+                            if excerpt:
+                                ui.label(excerpt).classes("review-excerpt")
                         selected[path] = ui.checkbox("Relevant", value=path in expected_paths).props("dense")
                         forbidden_selected[path] = ui.checkbox("Forbidden", value=path in forbidden_paths).props("dense")
+                        add_chunk = ui.button(
+                            icon="playlist_add",
+                            on_click=lambda _event, value=excerpt: add_expected_chunk(value),
+                            color=None,
+                        ).props("flat round dense aria-label=Добавить_фрагмент")
+                        add_chunk.set_enabled(bool(excerpt))
+                        add_chunk.tooltip("Добавить фрагмент в ground truth")
 
                 extra_expected = ui.textarea(
                     "Другие expected paths — по одному на строку",
                     value="\n".join(sorted(expected_paths - candidate_paths)),
                 ).props("outlined autogrow data-testid=extra-expected").classes("w-full")
-                expected_chunks = ui.textarea(
-                    "Expected chunks — характерные фрагменты",
-                    value="\n".join(str(value) for value in (review.get("expected_chunks") or [])),
-                ).props("outlined autogrow data-testid=expected-chunks").classes("w-full")
                 expected_pages = ui.input(
                     "Expected pages — через запятую",
                     value=", ".join(str(value) for value in (review.get("expected_pages") or [])),

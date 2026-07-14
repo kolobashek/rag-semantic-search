@@ -100,10 +100,14 @@ def _result_path_text(result: Dict[str, Any]) -> str:
     ).lower().replace("ё", "е")
 
 
-def _result_chunk_text(result: Dict[str, Any]) -> str:
+def _result_chunk_source(result: Dict[str, Any]) -> str:
     return " ".join(
         str(result.get(key) or "") for key in ("text", "chunk_text", "content", "snippet")
-    ).lower().replace("ё", "е")
+    )
+
+
+def _result_chunk_text(result: Dict[str, Any]) -> str:
+    return _result_chunk_source(result).lower().replace("ё", "е")
 
 
 def _result_page(result: Dict[str, Any]) -> int | None:
@@ -302,6 +306,7 @@ def evaluate_search(
                         "path": str(result.get("path") or result.get("full_path") or result.get("cloud_path") or ""),
                         "page": _result_page(result),
                         "score": float(result.get("rank_score", result.get("score") or 0) or 0),
+                        "excerpt": re.sub(r"\s+", " ", _result_chunk_source(result)).strip()[:500],
                     }
                     for result in results[:limit]
                 ],
