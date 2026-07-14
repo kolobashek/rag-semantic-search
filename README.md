@@ -185,7 +185,11 @@ tools/poppler/bin/*
 tesseract --version
 pdftoppm -v
 python ocr_pdfs.py --url http://localhost:6333
+python -m rag_catalog.core.ocr_pdfs --ocr-engine rapidocr --require-gpu --workers 1
 ```
+
+`--require-gpu` выполняет preflight RapidOCR + DirectML до изменения `index_state.db`.
+Если `DmlExecutionProvider` недоступен, проход завершается с ошибкой вместо скрытого перехода на CPU.
 
 ## Cloud Drive
 
