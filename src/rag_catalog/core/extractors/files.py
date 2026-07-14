@@ -859,18 +859,37 @@ def ocr_pdf(
     use_rapid: bool = False,
     raise_on_failure: bool = False,
     batch_pages: int = _DEFAULT_PDF_OCR_BATCH_PAGES,
+    rapid_fallback_enabled: bool = True,
+    diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """OCR scanned PDF.
 
     use_rapid=True  → RapidOCR + DirectML/GPU (AMD/Intel/NVIDIA без CUDA)
     use_rapid=False → Tesseract (default, CPU)
     """
+    requested_engine = "rapidocr" if use_rapid else "tesseract"
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "requested_engine": requested_engine,
+                "engine": requested_engine,
+                "fallback_used": False,
+                "fallback_reason": "",
+            }
+        )
     if use_rapid:
         try:
             from rag_catalog.core.extractors.ocr_rapid import ocr_pdf_rapid  # noqa: PLC0415
             return ocr_pdf_rapid(filepath, poppler_bin=poppler_bin, batch_pages=batch_pages)
         except Exception as exc:
+            if diagnostics is not None:
+                diagnostics["fallback_reason"] = str(exc)
+            if not rapid_fallback_enabled:
+                raise RuntimeError(f"RapidOCR PDF failed for {filepath}: {exc}") from exc
             logger.warning("RapidOCR PDF не удался, fallback на Tesseract: %s", exc)
+            if diagnostics is not None:
+                diagnostics["engine"] = "tesseract"
+                diagnostics["fallback_used"] = True
     try:
         import pdf2image.pdf2image as pdf2image_impl  # type: ignore
         import pytesseract  # type: ignore

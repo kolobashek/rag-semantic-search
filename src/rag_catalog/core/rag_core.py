@@ -87,6 +87,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "index_exclude_patterns": [],
     "ocr_max_image_pages": 50,
     "ocr_pdf_batch_pages": 8,
+    "ocr_rapid_fallback_enabled": True,
     "catalog_wait_attempts": 10,
     "catalog_wait_seconds": 60,
     "small_office_mb": 20.0,

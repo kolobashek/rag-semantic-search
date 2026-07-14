@@ -6,6 +6,30 @@ from concurrent.futures import ThreadPoolExecutor
 from rag_catalog.core.telemetry_db import TelemetryDB
 
 
+def test_ocr_result_records_engine_fallback_and_duration(tmp_path) -> None:
+    db = TelemetryDB(str(tmp_path / "telemetry.db"))
+
+    db.save_ocr_file_result(
+        "scan.pdf",
+        123.0,
+        text="line one\nline two",
+        pages=2,
+        chars=17,
+        requested_engine="rapidocr",
+        engine="tesseract",
+        fallback_used=True,
+        duration_ms=4321,
+    )
+
+    row = db.get_ocr_file_result("scan.pdf", 123.0)
+    assert row is not None
+    assert row["requested_engine"] == "rapidocr"
+    assert row["engine"] == "tesseract"
+    assert row["fallback_used"] == 1
+    assert row["duration_ms"] == 4321
+    assert row["line_count"] == 2
+
+
 def test_telemetry_uses_multi_process_safe_rollback_journal(tmp_path) -> None:
     db_path = tmp_path / "telemetry.db"
     first = TelemetryDB(str(db_path))

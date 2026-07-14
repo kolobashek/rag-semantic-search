@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from .db_contract import ensure_schema_version
 from .sqlite_runtime import prepare_sqlite_connection
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _utc_now() -> str:
@@ -352,6 +352,10 @@ class TelemetryDB:
                         line_count INTEGER NOT NULL DEFAULT 0,
                         status TEXT NOT NULL DEFAULT 'ok',
                         error_text TEXT NOT NULL DEFAULT '',
+                        requested_engine TEXT NOT NULL DEFAULT '',
+                        engine TEXT NOT NULL DEFAULT '',
+                        fallback_used INTEGER NOT NULL DEFAULT 0,
+                        duration_ms INTEGER NOT NULL DEFAULT 0,
                         ts_processed TEXT NOT NULL,
                         UNIQUE(file_path)
                     );
@@ -443,6 +447,14 @@ class TelemetryDB:
         ocr_result_cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocr_file_results)").fetchall()}
         if "line_count" not in ocr_result_cols:
             conn.execute("ALTER TABLE ocr_file_results ADD COLUMN line_count INTEGER NOT NULL DEFAULT 0")
+        if "requested_engine" not in ocr_result_cols:
+            conn.execute("ALTER TABLE ocr_file_results ADD COLUMN requested_engine TEXT NOT NULL DEFAULT ''")
+        if "engine" not in ocr_result_cols:
+            conn.execute("ALTER TABLE ocr_file_results ADD COLUMN engine TEXT NOT NULL DEFAULT ''")
+        if "fallback_used" not in ocr_result_cols:
+            conn.execute("ALTER TABLE ocr_file_results ADD COLUMN fallback_used INTEGER NOT NULL DEFAULT 0")
+        if "duration_ms" not in ocr_result_cols:
+            conn.execute("ALTER TABLE ocr_file_results ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_default_search_aliases(self, conn: sqlite3.Connection) -> None:
         now = _utc_now()
@@ -1411,6 +1423,10 @@ class TelemetryDB:
         chars: int = 0,
         status: str = "ok",
         error: str = "",
+        requested_engine: str = "",
+        engine: str = "",
+        fallback_used: bool = False,
+        duration_ms: int = 0,
     ) -> None:
         """Сохранить (или обновить) результат OCR для файла."""
         line_count = sum(1 for line in str(text or "").splitlines() if line.strip())
@@ -1420,8 +1436,9 @@ class TelemetryDB:
                 conn.execute(
                     """
                     INSERT INTO ocr_file_results
-                        (file_path, file_mtime, extracted_text, pages, char_count, line_count, status, error_text, ts_processed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (file_path, file_mtime, extracted_text, pages, char_count, line_count, status, error_text,
+                         requested_engine, engine, fallback_used, duration_ms, ts_processed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_path) DO UPDATE SET
                         file_mtime   = excluded.file_mtime,
                         extracted_text = excluded.extracted_text,
@@ -1430,9 +1447,27 @@ class TelemetryDB:
                         line_count   = excluded.line_count,
                         status       = excluded.status,
                         error_text   = excluded.error_text,
+                        requested_engine = excluded.requested_engine,
+                        engine       = excluded.engine,
+                        fallback_used = excluded.fallback_used,
+                        duration_ms  = excluded.duration_ms,
                         ts_processed = excluded.ts_processed
                     """,
-                    (file_path, float(file_mtime), text, int(pages), int(chars), line_count, status, error, _utc_now()),
+                    (
+                        file_path,
+                        float(file_mtime),
+                        text,
+                        int(pages),
+                        int(chars),
+                        line_count,
+                        status,
+                        error,
+                        str(requested_engine or ""),
+                        str(engine or ""),
+                        int(bool(fallback_used)),
+                        max(0, int(duration_ms or 0)),
+                        _utc_now(),
+                    ),
                 )
                 conn.commit()
 

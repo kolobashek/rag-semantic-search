@@ -150,7 +150,7 @@ def _state_entry_still_needs_ocr(conn: sqlite3.Connection, path: str) -> bool:
         (path,),
     ).fetchone()
     if row is None:
-        return True
+        return False
     stage = str(row["stage"] or "")
     indexed_stage = str(row["indexed_stage"] or "")
     status = str(row["status"] or "")
@@ -158,7 +158,7 @@ def _state_entry_still_needs_ocr(conn: sqlite3.Connection, path: str) -> bool:
 
 
 def find_pending_ocr_candidates_from_runtime(state_dir: Path, runtime_dir: Path) -> List[str]:
-    """Recover unfinished OCR candidates that were removed from state DB by a cancelled run."""
+    """Recover unfinished OCR candidates that still belong to the current state DB."""
     db_path = Path(state_dir) / "index_state.db"
     if not db_path.exists() or not Path(runtime_dir).exists():
         return []

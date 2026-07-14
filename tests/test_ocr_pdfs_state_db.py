@@ -179,7 +179,7 @@ def test_find_pending_ocr_candidates_from_runtime_skips_completed_state_entries(
         encoding="utf-8",
     )
 
-    assert find_pending_ocr_candidates_from_runtime(tmp_path, runtime_dir) == [r"O:\empty.pdf", r"O:\missing.pdf"]
+    assert find_pending_ocr_candidates_from_runtime(tmp_path, runtime_dir) == [r"O:\empty.pdf"]
 
 
 def test_ensure_ocr_payload_indexes_creates_missing_qdrant_indexes(monkeypatch) -> None:

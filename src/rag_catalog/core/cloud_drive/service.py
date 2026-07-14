@@ -2313,6 +2313,7 @@ class CloudDriveService:
             ocr_tesseract_cmd=str(index_config.get('ocr_tesseract_cmd') or ''),
             ocr_poppler_bin=str(index_config.get('ocr_poppler_bin') or ''),
             ocr_pdf_batch_pages=int(index_config.get('ocr_pdf_batch_pages') or 8),
+            ocr_rapid_fallback_enabled=bool(index_config.get('ocr_rapid_fallback_enabled', True)),
             qdrant_timeout_sec=int(index_config.get('qdrant_timeout_sec') or 60),
             ocr_max_image_pages=int(index_config.get('ocr_max_image_pages') or 50),
             min_chunk_chars=int(index_config.get('index_min_chunk_chars') or 120),

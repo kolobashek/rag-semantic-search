@@ -164,6 +164,7 @@ tools/poppler/bin/*
 - `ocr_poppler_bin`
 - `ocr_max_image_pages` — лимит кадров/страниц для OCR многостраничных изображений.
 - `ocr_pdf_batch_pages` — число PDF-страниц, одновременно рендерящихся для OCR (по умолчанию 8).
+- `ocr_rapid_fallback_enabled` — разрешить fallback RapidOCR → Tesseract; отключите для чистого GPU-бенчмарка.
 
 Или через env:
 

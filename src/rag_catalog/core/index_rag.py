@@ -408,6 +408,7 @@ class RAGIndexer:
         ocr_poppler_bin: str = "",
         ocr_engine: str = "tesseract",
         ocr_pdf_batch_pages: int = 8,
+        ocr_rapid_fallback_enabled: bool = True,
         qdrant_timeout_sec: int = 60,
         exclude_patterns: Optional[List[str]] = None,
         only_paths: Optional[set[str]] = None,
@@ -459,6 +460,7 @@ class RAGIndexer:
         self.ocr_poppler_bin = str(ocr_poppler_bin or "").strip()
         self.ocr_engine = str(ocr_engine or "tesseract").strip().lower()
         self.ocr_pdf_batch_pages = max(1, int(ocr_pdf_batch_pages or 8))
+        self.ocr_rapid_fallback_enabled = bool(ocr_rapid_fallback_enabled)
         self._use_rapid_ocr = self.ocr_engine == "rapidocr"
         if not self.ocr_tesseract_cmd or not self.ocr_poppler_bin:
             runtime = resolve_ocr_runtime(
@@ -904,6 +906,8 @@ class RAGIndexer:
             logger.info("OCR из кэша: %s", filepath.name)
             return str(cached.get("extracted_text") or "")
 
+        diagnostics: Dict[str, Any] = {}
+        started = time.perf_counter()
         try:
             text = ocr_pdf(
                 filepath,
@@ -912,19 +916,27 @@ class RAGIndexer:
                 use_rapid=getattr(self, "_use_rapid_ocr", False),
                 raise_on_failure=True,
                 batch_pages=getattr(self, "ocr_pdf_batch_pages", 8),
+                rapid_fallback_enabled=getattr(self, "ocr_rapid_fallback_enabled", True),
+                diagnostics=diagnostics,
             )
         except Exception as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
             try:
                 self.telemetry.save_ocr_file_result(
                     logical_path,
                     logical_mtime,
                     status="error",
                     error=str(exc),
+                    requested_engine=str(diagnostics.get("requested_engine") or getattr(self, "ocr_engine", "")),
+                    engine=str(diagnostics.get("engine") or getattr(self, "ocr_engine", "")),
+                    fallback_used=bool(diagnostics.get("fallback_used")),
+                    duration_ms=duration_ms,
                 )
             except Exception:
                 pass
             raise
 
+        duration_ms = int((time.perf_counter() - started) * 1000)
         try:
             pages = text.count("Страница:") if text else 0
             if pages == 0 and text.strip():
@@ -937,6 +949,10 @@ class RAGIndexer:
                 pages=pages,
                 chars=chars,
                 status="ok" if chars > 0 else "empty",
+                requested_engine=str(diagnostics.get("requested_engine") or getattr(self, "ocr_engine", "")),
+                engine=str(diagnostics.get("engine") or getattr(self, "ocr_engine", "")),
+                fallback_used=bool(diagnostics.get("fallback_used")),
+                duration_ms=duration_ms,
             )
         except Exception:
             pass
@@ -1958,6 +1974,7 @@ def main() -> None:
         ocr_poppler_bin=str(cfg.get("ocr_poppler_bin") or ""),
         ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
         ocr_pdf_batch_pages=int(cfg.get("ocr_pdf_batch_pages", 8) or 8),
+        ocr_rapid_fallback_enabled=bool(cfg.get("ocr_rapid_fallback_enabled", True)),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
         min_chunk_chars=int(cfg.get("index_min_chunk_chars", 120) or 120),
         fulltext_enabled=(

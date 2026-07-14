@@ -118,3 +118,30 @@ def test_ocr_pdf_retries_cached_error(monkeypatch, tmp_path):
     assert idx._ocr_pdf(path) == "recovered text"
     assert calls == [True]
     assert idx.telemetry.save_ocr_file_result.call_args.kwargs["status"] == "ok"
+
+
+def test_ocr_pdf_records_actual_engine_and_duration(monkeypatch, tmp_path):
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.telemetry = MagicMock()
+    idx.telemetry.get_ocr_file_result.return_value = None
+    idx.ocr_engine = "rapidocr"
+    idx._use_rapid_ocr = True
+    path = tmp_path / "fallback.pdf"
+    path.write_bytes(b"%PDF-1.7")
+
+    def recognize(*_args, **kwargs):
+        kwargs["diagnostics"].update(
+            requested_engine="rapidocr",
+            engine="tesseract",
+            fallback_used=True,
+        )
+        return "recognized text"
+
+    monkeypatch.setattr("rag_catalog.core.index_rag.ocr_pdf", recognize)
+
+    assert idx._ocr_pdf(path) == "recognized text"
+    saved = idx.telemetry.save_ocr_file_result.call_args.kwargs
+    assert saved["requested_engine"] == "rapidocr"
+    assert saved["engine"] == "tesseract"
+    assert saved["fallback_used"] is True
+    assert saved["duration_ms"] >= 0
