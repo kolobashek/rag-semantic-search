@@ -310,7 +310,7 @@ DELETE /api/cloud-drive/share-links
 - RAG answer mode with citations and weak-source fallback;
 - Telegram assistant mode.
 
-Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted.
+Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted. Interactive search can fail open to fused ranking (`retrieval_reranker_fail_open=true`), while `scripts/search_eval.py` always fails closed when reranking is enabled so a broken model cannot produce a reranker evaluation artifact.
 Evaluation artifacts record both `retrieval_preset` and the effective `retrieval_pipeline`; CLI `--config-set retrieval_preset=release_v2` reapplies preset defaults unless a pipeline setting is explicitly overridden. Startup warmup prepares the metadata token index and BM25 tokens so the warm-search SLO does not include avoidable per-query scans of the full catalog.
 Baseline comparisons also require the same non-empty evaluation fingerprint, derived from the current source fingerprint, exact golden-file SHA-256, evaluation protocol version and `top-k` limit. A stale, fingerprint-less or differently configured `--baseline-report` keeps the decision at `NO_GO`.
 Numeric identifiers are resolved from the indexed `numeric_tokens` payload. Live spreadsheet scanning is disabled in the request path; `numeric_exact_fs_fallback_enabled=true` is an emergency compatibility option for an old incomplete index and can make a query slow or dependent on source-drive availability.

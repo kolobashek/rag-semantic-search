@@ -664,6 +664,58 @@ def test_rerank_results_reorders_top_candidates_with_cross_encoder_scores() -> N
     assert out[0]["reranker_score"] == 10.0
 
 
+def test_reranker_eval_mode_raises_instead_of_silent_fallback() -> None:
+    class FailingReranker:
+        def predict(self, _pairs):
+            raise RuntimeError("onnx failed")
+
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+        "retrieval_reranker_fail_open": False,
+    }
+    s._reranker = FailingReranker()
+
+    with pytest.raises(RuntimeError, match="Reranker prediction failed"):
+        s._rerank_results("target", [{"text": "candidate", "score": 0.5}], limit=1)
+
+
+def test_reranker_rejects_incomplete_score_vector_in_eval_mode() -> None:
+    class IncompleteReranker:
+        def predict(self, _pairs):
+            return [1.0]
+
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+        "retrieval_reranker_fail_open": False,
+    }
+    s._reranker = IncompleteReranker()
+    results = [{"text": "one", "score": 0.5}, {"text": "two", "score": 0.4}]
+
+    with pytest.raises(RuntimeError, match="1 scores for 2 candidates"):
+        s._rerank_results("target", results, limit=2)
+
+
+def test_reranker_interactive_mode_keeps_fused_fallback() -> None:
+    class FailingReranker:
+        def predict(self, _pairs):
+            raise RuntimeError("onnx failed")
+
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+        "retrieval_reranker_fail_open": True,
+    }
+    s._reranker = FailingReranker()
+    results = [{"text": "candidate", "score": 0.5}]
+
+    assert s._rerank_results("target", results, limit=1) == results
+
+
 def test_onnx_reranker_uses_cached_local_snapshot(monkeypatch) -> None:
     import sentence_transformers
 

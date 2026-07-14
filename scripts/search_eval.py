@@ -82,6 +82,14 @@ def _apply_config_overrides(config: Dict[str, Any], items: List[str]) -> Dict[st
     return out
 
 
+def _enforce_eval_runtime_contracts(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep optional retrieval stages observable instead of silently falling back."""
+    out = dict(config)
+    if bool(out.get("retrieval_reranker_enabled", False)):
+        out["retrieval_reranker_fail_open"] = False
+    return out
+
+
 def _format_metric(value: Any) -> str:
     return "n/a" if value is None else f"{float(value):.3f}"
 
@@ -174,7 +182,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    cfg = _apply_config_overrides(load_config(), list(args.config_set or []))
+    cfg = _enforce_eval_runtime_contracts(
+        _apply_config_overrides(load_config(), list(args.config_set or []))
+    )
     searcher = RAGSearcher(cfg)
     golden_path = Path(args.golden).expanduser().resolve()
     golden = load_golden_queries(golden_path)

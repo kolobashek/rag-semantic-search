@@ -88,6 +88,7 @@
   "retrieval_single_term_min_dense_score": 0.80,
   "retrieval_min_content_chars": 120,
   "retrieval_reranker_enabled": false,
+  "retrieval_reranker_fail_open": true,
   "retrieval_reranker_model": "",
   "retrieval_reranker_backend": "",
   "retrieval_reranker_onnx_provider": "",

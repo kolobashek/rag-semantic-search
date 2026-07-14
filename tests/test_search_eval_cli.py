@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.search_eval import _apply_acl_evidence, _apply_config_overrides, _evaluation_fingerprints
+from scripts.search_eval import (
+    _apply_acl_evidence,
+    _apply_config_overrides,
+    _enforce_eval_runtime_contracts,
+    _evaluation_fingerprints,
+)
 
 
 def test_config_override_applies_named_retrieval_preset() -> None:
@@ -16,6 +21,14 @@ def test_config_override_applies_named_retrieval_preset() -> None:
 
     assert result["retrieval_pipeline"] == "v2"
     assert result["retrieval_bm25_enabled"] is True
+
+
+def test_reranker_eval_is_always_fail_closed() -> None:
+    result = _enforce_eval_runtime_contracts(
+        {"retrieval_reranker_enabled": True, "retrieval_reranker_fail_open": True}
+    )
+
+    assert result["retrieval_reranker_fail_open"] is False
 
 
 def test_config_override_preserves_explicit_candidate_setting() -> None:

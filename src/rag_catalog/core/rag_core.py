@@ -146,6 +146,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retrieval_single_term_min_dense_score": 0.80,
     "retrieval_min_content_chars": 120,
     "retrieval_reranker_enabled": False,
+    "retrieval_reranker_fail_open": True,
     "retrieval_reranker_model": "",
     "retrieval_reranker_backend": "",
     "retrieval_reranker_onnx_provider": "",
@@ -1954,30 +1955,46 @@ class RAGSearcher:
         config = getattr(self, "config", {}) or {}
         if not bool(config.get("retrieval_reranker_enabled", False)):
             return results[:limit]
-        model = self.reranker
+        fail_open = bool(config.get("retrieval_reranker_fail_open", True))
+
+        def fail_or_fallback(message: str, exc: Exception | None = None) -> List[Dict[str, Any]]:
+            if fail_open:
+                logger.warning("%s; using fused ranking", message)
+                return results[:limit]
+            if exc is not None:
+                raise RuntimeError(message) from exc
+            raise RuntimeError(message)
+
+        try:
+            model = self.reranker
+        except Exception as exc:
+            return fail_or_fallback(f"Reranker failed to load: {exc}", exc)
         if model is None:
-            return results[:limit]
+            return fail_or_fallback("Reranker is enabled but no model is configured")
 
         candidates = results[: max(limit, int(config.get("retrieval_reranker_top_n", limit) or limit))]
         pairs = [(query, self._rerank_text(item)) for item in candidates]
         try:
-            raw_scores = list(model.predict(pairs))
+            raw_scores = [float(score) for score in model.predict(pairs)]
         except Exception as exc:
-            logger.warning("Reranker failed, using fused ranking: %s", exc)
-            return results[:limit]
+            return fail_or_fallback(f"Reranker prediction failed: {exc}", exc)
 
         if not raw_scores:
-            return results[:limit]
-        lo = min(float(score) for score in raw_scores)
-        hi = max(float(score) for score in raw_scores)
+            return fail_or_fallback("Reranker returned no scores")
+        if len(raw_scores) != len(candidates):
+            return fail_or_fallback(
+                f"Reranker returned {len(raw_scores)} scores for {len(candidates)} candidates"
+            )
+        lo = min(raw_scores)
+        hi = max(raw_scores)
         span = max(hi - lo, 1e-9)
         weight = max(0.0, min(1.0, float(config.get("retrieval_reranker_weight", 0.65) or 0.65)))
         reranked: List[Dict[str, Any]] = []
         for item, raw_score in zip(candidates, raw_scores):
-            reranker_score = (float(raw_score) - lo) / span
+            reranker_score = (raw_score - lo) / span
             base_score = float(item.get("rank_score", item.get("score") or 0) or 0)
             updated = dict(item)
-            updated["reranker_score"] = round(float(raw_score), 6)
+            updated["reranker_score"] = round(raw_score, 6)
             updated["rank_score"] = round((1.0 - weight) * base_score + weight * reranker_score, 6)
             updated["retrieval_reranked"] = True
             reranked.append(updated)
