@@ -105,6 +105,7 @@ def test_delete_file_vectors_uses_payload_identity_when_present() -> None:
     call = client.deleted_points[0]
     assert call["collection_name"] == "catalog"
     assert call["timeout"] == 5
+    assert call["wait"] is True
     conditions = call["points_selector"].filter.must
     assert [condition.key for condition in conditions] == ["cloud_file_id"]
 

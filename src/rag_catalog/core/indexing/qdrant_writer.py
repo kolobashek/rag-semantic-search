@@ -178,7 +178,7 @@ def delete_file_vectors(
         try:
             client.delete(
                 collection_name=collection_name,
-                wait=False,
+                wait=True,
                 timeout=timeout_sec,
                 points_selector=FilterSelector(filter=Filter(must=must)),
             )
