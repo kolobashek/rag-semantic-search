@@ -203,3 +203,21 @@ def test_clear_filesystem_cache_forces_rescan(tmp_path: Path) -> None:
         content_only=False,
     )
     assert [x["filename"] for x in refreshed] == ["new.pdf"]
+
+
+def test_metadata_candidate_index_supports_prefix_stems(tmp_path: Path) -> None:
+    from rag_catalog.core.retrieval import prepare_bm25_items
+
+    (tmp_path / "Карточка предприятия.docx").write_bytes(b"docx")
+    (tmp_path / "Договор аренды.docx").write_bytes(b"docx")
+    s = _searcher_with_catalog(tmp_path)
+    items = s._refresh_fs_cache()
+    for item in items:
+        s._prepare_metadata_search_item(item)
+    prepare_bm25_items(items)
+    s._build_metadata_token_index(items)
+
+    candidates = s._metadata_candidates(items, ["предприят"])
+
+    assert [item["filename"] for item in candidates] == ["Карточка предприятия.docx"]
+    assert s._metadata_sorted_tokens == tuple(sorted(s._metadata_token_docs))

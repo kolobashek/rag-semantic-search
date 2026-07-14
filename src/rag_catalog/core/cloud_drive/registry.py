@@ -255,9 +255,13 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_folders_parent ON cloud_folders(parent_id, name);
                     CREATE INDEX IF NOT EXISTS idx_cloud_folders_parent_active_cover
                         ON cloud_folders(parent_id, deleted_at, id);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_folders_source_path_active
+                        ON cloud_folders(source_path) WHERE deleted_at='';
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_folder ON cloud_files(folder_id, name);
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_folder_active_size
                         ON cloud_files(folder_id, deleted_at, size_bytes);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_files_source_path_active
+                        ON cloud_files(source_path) WHERE deleted_at='';
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_storage_key ON cloud_files(storage_key);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);

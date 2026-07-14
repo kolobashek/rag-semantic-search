@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import time
+from bisect import bisect_left
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +27,12 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchText, MatchValue
 
 from .embedding_collections import resolve_collection_name_from_config
-from .exact_tokens import numeric_exact_tokens, query_numeric_tokens, repair_mojibake_text
+from .exact_tokens import (
+    numeric_exact_tokens,
+    numeric_query_has_trusted_context,
+    query_numeric_tokens,
+    repair_mojibake_text,
+)
 from .index_state_db import IndexStateDB
 from .retrieval import bm25_rank_items, prepare_bm25_items, prepare_query_text, rrf_fuse, tokenize
 from .telemetry_db import TelemetryDB
@@ -87,8 +93,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "qdrant_timeout_sec": 60,
     "qdrant_scroll_limit": 256,
     "search_warmup_enabled": True,
+    "ui_llm_expand_max_quick_results": 3,
     "metadata_needle_cache_size": 512,
     "numeric_exact_fs_fallback_enabled": False,
+    "ui_socket_ping_timeout_sec": 60,
     # OCR runtime: можно оставить пустым и использовать bundled tools/
     "ocr_tesseract_cmd": "",
     "ocr_poppler_bin": "",
@@ -260,6 +268,7 @@ class RAGSearcher:
         self._fs_cache: Dict[str, Any] = {"ts": 0.0, "items": []}
         self._metadata_index_source = 0
         self._metadata_token_docs: Dict[str, tuple[int, ...]] = {}
+        self._metadata_sorted_tokens: tuple[str, ...] = ()
         self._metadata_needle_docs: OrderedDict[str, tuple[int, ...]] = OrderedDict()
         self._metadata_corpus_size = 0
         self._metadata_average_doc_length = 0.0
@@ -912,6 +921,7 @@ class RAGSearcher:
         self._fs_cache = {"ts": 0.0, "items": []}
         self._metadata_index_source = 0
         self._metadata_token_docs = {}
+        self._metadata_sorted_tokens = ()
         self._metadata_needle_docs = OrderedDict()
         self._metadata_corpus_size = 0
         self._metadata_average_doc_length = 0.0
@@ -941,6 +951,7 @@ class RAGSearcher:
             for token in tokens:
                 token_docs.setdefault(str(token), []).append(index)
         self._metadata_token_docs = {token: tuple(indices) for token, indices in token_docs.items()}
+        self._metadata_sorted_tokens = tuple(sorted(self._metadata_token_docs))
         self._metadata_needle_docs = OrderedDict()
         self._metadata_corpus_size = corpus_size
         self._metadata_average_doc_length = total_doc_length / max(1, corpus_size)
@@ -950,6 +961,7 @@ class RAGSearcher:
         if int(getattr(self, "_metadata_index_source", 0) or 0) != id(items):
             return items
         token_docs = getattr(self, "_metadata_token_docs", {}) or {}
+        sorted_tokens = getattr(self, "_metadata_sorted_tokens", ()) or tuple(sorted(token_docs))
         needle_docs = getattr(self, "_metadata_needle_docs", None)
         if not isinstance(needle_docs, OrderedDict):
             needle_docs = OrderedDict(needle_docs or {})
@@ -969,9 +981,11 @@ class RAGSearcher:
                 matched = needle_docs.get(needle)
                 if matched is None:
                     found: set[int] = set()
-                    for token, document_indices in token_docs.items():
-                        if needle in token:
-                            found.update(document_indices)
+                    start = bisect_left(sorted_tokens, needle)
+                    for token in sorted_tokens[start:]:
+                        if not token.startswith(needle):
+                            break
+                        found.update(token_docs[token])
                     matched = tuple(found)
                     needle_docs[needle] = matched
                     while len(needle_docs) > cache_size:
@@ -1182,7 +1196,14 @@ class RAGSearcher:
                 if key in seen:
                     continue
                 seen.add(key)
-                out.append(self._result_from_payload(payload, score=score, rank_reason="точное совпадение номера", retrieval_source="numeric_exact"))
+                result = self._result_from_payload(
+                    payload,
+                    score=score,
+                    rank_reason="точное совпадение номера",
+                    retrieval_source="numeric_exact",
+                )
+                result["numeric_query_trusted_context"] = numeric_query_has_trusted_context(query)
+                out.append(result)
                 if len(out) >= limit:
                     return out
         if out or not bool(
@@ -1291,6 +1312,7 @@ class RAGSearcher:
                 "chunk_index": None,
                 "rank_reason": "точное совпадение номера в таблице",
                 "retrieval_source": "numeric_fs_exact",
+                "numeric_query_trusted_context": numeric_query_has_trusted_context(query),
             }
             out.append(self._repair_result_display_fields(result))
             if len(out) >= limit or matched_joined:
@@ -1769,31 +1791,7 @@ class RAGSearcher:
 
             strong_lexical = "fulltext" in sources
             numeric_sources = {"numeric_exact", "numeric_fs_exact", "spreadsheet_numeric_exact"}
-            numeric_context_terms = [
-                term.lower().replace("ё", "е")
-                for term in re.findall(r"[a-zа-яё]{2,}", str(query or ""), flags=re.IGNORECASE)
-                if term.lower().replace("ё", "е")
-                not in {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
-            ]
-            trusted_numeric_context = {
-                "vin",
-                "птс",
-                "стс",
-                "псм",
-                "утм",
-                "инн",
-                "кпп",
-                "огрн",
-                "счет",
-                "договор",
-                "акт",
-                "номер",
-                "госномер",
-            }
-            numeric_context_only = not numeric_context_terms or all(
-                term in trusted_numeric_context for term in numeric_context_terms
-            )
-            if sources & numeric_sources and numeric_context_only:
+            if sources & numeric_sources and numeric_query_has_trusted_context(query):
                 strong_lexical = True
             lexical_matched = int(
                 item.get("lexical_raw_matched_terms", item.get("lexical_matched_terms")) or 0

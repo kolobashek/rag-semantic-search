@@ -4,7 +4,8 @@ import inspect
 import weakref
 from collections import deque
 
-from rag_catalog.ui import css, nice_app, settings_view
+from rag_catalog.ui import css, helpers, nice_app, settings_view
+from rag_catalog.ui import system as ui_system
 
 
 def test_primary_screen_registry_covers_all_route_pages() -> None:
@@ -24,6 +25,16 @@ def test_primary_screen_registry_covers_all_route_pages() -> None:
 
     for key in keys:
         assert hasattr(nice_app, f"{key}_page")
+
+
+def test_background_workers_use_below_normal_priority_on_windows(monkeypatch) -> None:
+    monkeypatch.setattr(ui_system.subprocess, "CREATE_NO_WINDOW", 1, raising=False)
+    monkeypatch.setattr(ui_system.subprocess, "DETACHED_PROCESS", 2, raising=False)
+    monkeypatch.setattr(ui_system.subprocess, "CREATE_NEW_PROCESS_GROUP", 4, raising=False)
+    monkeypatch.setattr(ui_system.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 8, raising=False)
+    monkeypatch.setattr(ui_system.subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 16, raising=False)
+
+    assert ui_system._windows_detached_creationflags() == 31
 
 
 def test_navigation_registry_marks_admin_and_public_screens() -> None:
@@ -175,6 +186,25 @@ def test_ui_reconnect_timeout_preserves_short_lived_sessions() -> None:
     assert "reconnect_timeout=_ui_reconnect_timeout_seconds(cfg)" in main_source
 
 
+def test_ui_socket_ping_timeout_tolerates_long_background_searches(monkeypatch) -> None:
+    assert nice_app._ui_socket_ping_timeout_seconds({}) == 60.0
+    assert nice_app._ui_socket_ping_timeout_seconds({"ui_socket_ping_timeout_sec": "10"}) == 30.0
+    assert nice_app._ui_socket_ping_timeout_seconds({"ui_socket_ping_timeout_sec": "180"}) == 120.0
+    assert nice_app._ui_socket_ping_timeout_seconds({"ui_socket_ping_timeout_sec": "bad"}) == 60.0
+
+    class Engine:
+        ping_timeout = 20.0
+
+    class Server:
+        eio = Engine()
+
+    from nicegui import core
+
+    monkeypatch.setattr(core, "sio", Server())
+    nice_app._configure_nicegui_transport({"ui_socket_ping_timeout_sec": 75})
+    assert core.sio.eio.ping_timeout == 75.0
+
+
 def test_login_io_does_not_block_nicegui_event_loop() -> None:
     source = inspect.getsource(nice_app._build_page)
 
@@ -262,6 +292,139 @@ def test_search_keeps_websocket_responsive_while_semantic_pass_runs() -> None:
     assert "run_full_start" in source
     assert "run_render_final" in source
     assert "render_skip_client_dead" in source
+    assert "run_exact_name_complete" in source
+    assert "llm_expand_skipped" in source
+
+
+def test_quick_search_uses_indexed_numeric_payload_without_source_scan() -> None:
+    calls: list[str] = []
+
+    class Searcher:
+        def _numeric_exact_search(self, **_kwargs):
+            calls.append("numeric_index")
+            return []
+
+        def _spreadsheet_numeric_exact_scan(self, **_kwargs):
+            raise AssertionError("quick search must not scan source spreadsheets")
+
+        def _lexical_catalog_search(self, **_kwargs):
+            calls.append("lexical")
+            return []
+
+    assert helpers._run_quick_name_search(
+        Searcher(),
+        query="СТС 9941 210904",
+        limit=10,
+        file_type=None,
+    ) == []
+    assert calls == ["numeric_index", "lexical"]
+
+
+def test_quick_search_drops_numeric_noise_for_untrusted_context() -> None:
+    class Searcher:
+        def _numeric_exact_search(self, **_kwargs):
+            return [{"filename": "noise.pdf", "retrieval_source": "numeric_exact"}]
+
+        def _lexical_catalog_search(self, **_kwargs):
+            return []
+
+    assert helpers._run_quick_name_search(
+        Searcher(),
+        query="qzxv-документ-999999",
+        limit=10,
+        file_type=None,
+    ) == []
+
+
+def test_authorized_quick_search_keeps_acl_in_worker_operation(monkeypatch) -> None:
+    events: list[str] = []
+    results = [{"filename": "visible.docx"}]
+
+    monkeypatch.setattr(
+        helpers,
+        "_run_quick_name_search",
+        lambda *_args, **_kwargs: events.append("search") or results,
+    )
+    monkeypatch.setattr(
+        helpers,
+        "_filter_cloud_drive_search_results",
+        lambda _cfg, _user, items: events.append("acl") or items,
+    )
+
+    found = helpers._run_authorized_quick_name_search(
+        object(),
+        cfg={},
+        user={"username": "admin"},
+        query="visible",
+        limit=10,
+        file_type=None,
+    )
+
+    assert found == results
+    assert events == ["search", "acl"]
+
+
+def test_untrusted_numeric_context_does_not_short_circuit_search() -> None:
+    numeric = [{"retrieval_source": "numeric_exact", "numeric_query_trusted_context": False}]
+
+    assert helpers._count_exact_name_matches("qzxv-документ-999999", numeric) == 0
+    assert helpers._has_confident_numeric_exact_match("qzxv-документ-999999", numeric) is False
+    assert helpers._has_confident_numeric_exact_match(
+        "СТС 999999",
+        [{"retrieval_source": "numeric_exact", "numeric_query_trusted_context": True}],
+    ) is True
+
+
+def test_cloud_drive_service_is_reused_between_searches(monkeypatch, tmp_path) -> None:
+    created: list[object] = []
+
+    def from_config(_cfg):
+        service = object()
+        created.append(service)
+        return service
+
+    cfg = {
+        "cloud_drive_enabled": True,
+        "cloud_drive_db_path": str(tmp_path / "cloud.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    helpers._CD_SERVICE_CACHE.clear()
+    monkeypatch.setattr(helpers.CloudDriveService, "from_config", from_config)
+
+    first = helpers._cd_cached_service(cfg)
+    second = helpers._cd_cached_service(dict(cfg))
+
+    assert first is second
+    assert len(created) == 1
+    helpers._CD_SERVICE_CACHE.clear()
+
+
+def test_search_warmup_builds_metadata_cache_before_loading_model(monkeypatch) -> None:
+    events: list[str] = []
+
+    class Embedder:
+        def encode(self, _texts):
+            events.append("embedder")
+
+    class Searcher:
+        connected = True
+        embedder = Embedder()
+
+        def __init__(self, _cfg):
+            events.append("searcher")
+
+        def warm_retrieval_cache(self):
+            events.append("metadata")
+
+    monkeypatch.setattr(helpers, "RAGSearcher", Searcher)
+    monkeypatch.setattr(helpers, "_qdrant_http_ready", lambda _cfg: True)
+    helpers._SEARCHER_CACHE.clear()
+
+    helpers._warm_searcher_cache({"qdrant_url": "http://localhost:6333"})
+
+    assert events == ["searcher", "metadata", "embedder"]
+    helpers._SEARCHER_CACHE.clear()
 
 
 def test_render_does_not_attach_busy_timers_to_rebuilt_content() -> None:
@@ -285,6 +448,7 @@ def test_browser_diagnostics_are_installed() -> None:
     assert "socket_connect_error" in js_source
     assert "socket_reconnected" in js_source
     assert "downtime_ms" in js_source
+    assert "[data-rag-refresh-screen]" in js_source
     assert "javascript_error" in js_source
     assert "unhandled_rejection_error" in js_source
     assert '@app.post("/api/ui-events")' in api_source

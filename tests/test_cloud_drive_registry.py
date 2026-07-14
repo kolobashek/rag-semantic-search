@@ -1431,7 +1431,9 @@ def test_registry_migrates_v1_cloud_jobs_to_v2(tmp_path: Path) -> None:
     assert 'cloud_import_sources' in tables
     assert int(version) == CLOUD_DRIVE_SCHEMA_VERSION
     assert 'idx_cloud_files_folder_active_size' in indexes
+    assert 'idx_cloud_files_source_path_active' in indexes
     assert 'idx_cloud_folders_parent_active_cover' in folder_indexes
+    assert 'idx_cloud_folders_source_path_active' in folder_indexes
 
 
 def test_registry_repairs_current_version_missing_source_mtime_columns(tmp_path: Path) -> None:

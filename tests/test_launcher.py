@@ -7,6 +7,28 @@ from pathlib import Path
 from rag_catalog.cli import launcher
 
 
+def test_spawned_services_use_local_model_cache(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+
+    class Process:
+        pid = 4242
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return Process()
+
+    monkeypatch.setattr(launcher, "RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+
+    pid = launcher._spawn_python_module("example.module", [], tmp_path, "web.log")
+
+    assert pid == 4242
+    env = captured["kwargs"]["env"]
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["TRANSFORMERS_OFFLINE"] == "1"
+
+
 def test_shared_runtime_dir_uses_telemetry_parent(tmp_path: Path) -> None:
     cfg = {
         "telemetry_db_path": str(tmp_path / "shared" / "rag_telemetry.db"),

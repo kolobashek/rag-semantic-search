@@ -56,6 +56,7 @@ from .helpers import (
     _file_icon_svg,
     _filter_cloud_drive_search_results,
     _highlight_query_terms,
+    _has_confident_numeric_exact_match,
     _is_admin,
     _load_user_state,
     _merge_search_results,
@@ -72,8 +73,8 @@ from .helpers import (
     _resolve_catalog_file,
     _result_group,
     _result_kind,
-    _run_catalog_search,
-    _run_quick_name_search,
+    _run_authorized_catalog_search,
+    _run_authorized_quick_name_search,
     _save_ui_settings,
     _search_suggestions,
     _select_in_os_explorer,
@@ -350,6 +351,21 @@ def _ui_reconnect_timeout_seconds(cfg: Dict[str, Any]) -> float:
     except (TypeError, ValueError):
         raw = 5.0
     return max(3.0, min(30.0, raw))
+
+
+def _ui_socket_ping_timeout_seconds(cfg: Dict[str, Any]) -> float:
+    """Allow long local searches without declaring a healthy socket dead."""
+    try:
+        raw = float(cfg.get("ui_socket_ping_timeout_sec") or 60.0)
+    except (TypeError, ValueError):
+        raw = 60.0
+    return max(30.0, min(120.0, raw))
+
+
+def _configure_nicegui_transport(cfg: Dict[str, Any]) -> None:
+    from nicegui import core  # noqa: PLC0415
+
+    core.sio.eio.ping_timeout = _ui_socket_ping_timeout_seconds(cfg)
 
 
 _IO_TIMEOUT = object()
@@ -783,6 +799,8 @@ def _build_page(initial_screen: str = "search") -> None:
         expand_model = str(state.cfg.get("llm_expand_model") or "phi3:mini")
         rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
         quick_started = _time.perf_counter()
+        quick_results: List[Dict[str, Any]] = []
+        exact_count = 0
         try:
             _log_app_event(
                 state,
@@ -791,8 +809,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 details=_search_diag({"timeout_sec": _ui_quick_search_timeout_seconds(state.cfg)}),
             )
             quick_results = await _run_io_bound_with_ui_timeout(
-                _run_quick_name_search,
+                _run_authorized_quick_name_search,
                 searcher,
+                cfg=state.cfg,
+                user=state.current_user,
                 query=semantic_q,
                 limit=state.limit,
                 file_type=effective_file_type,
@@ -802,7 +822,6 @@ def _build_page(initial_screen: str = "search") -> None:
                 raise TimeoutError
             if state.search_request_id != request_id:
                 return
-            quick_results = _filter_cloud_drive_search_results(state.cfg, state.current_user, quick_results)
             state.results = quick_results
             exact_count = _count_exact_name_matches(query, quick_results)
             state.search_stats_hint = f"Быстро найдено: {len(quick_results)} · точных совпадений: {exact_count}"
@@ -818,10 +837,7 @@ def _build_page(initial_screen: str = "search") -> None:
                 )
                 return
             render_safely()
-            has_numeric_exact = any(
-                str(item.get("retrieval_source") or "") in {"numeric_fs_exact", "numeric_exact"}
-                for item in quick_results
-            )
+            has_numeric_exact = _has_confident_numeric_exact_match(query, quick_results)
             if has_numeric_exact:
                 state.search_lazy_loading = False
                 exact_item = quick_results[0]
@@ -859,6 +875,22 @@ def _build_page(initial_screen: str = "search") -> None:
                     "duration_ms": round((_time.perf_counter() - quick_started) * 1000),
                 },
             )
+            if exact_count > 0 and not state.content_only:
+                state.search_lazy_loading = False
+                _persist_search_recovery(state, "exact_name_results")
+                _log_app_event(
+                    state,
+                    "search",
+                    "run_exact_name_complete",
+                    details={
+                        "query": query,
+                        "results": len(quick_results),
+                        "exact_matches": exact_count,
+                        "duration_ms": round((_time.perf_counter() - search_started) * 1000),
+                    },
+                )
+                render_safely()
+                return
         except TimeoutError:
             if state.search_request_id != request_id:
                 return
@@ -898,6 +930,24 @@ def _build_page(initial_screen: str = "search") -> None:
             return
 
         # Ленивая догрузка: сначала, при необходимости, расширяем запрос через LLM.
+        try:
+            llm_expand_max_quick = max(0, int(state.cfg.get("ui_llm_expand_max_quick_results") or 3))
+        except (TypeError, ValueError):
+            llm_expand_max_quick = 3
+        if llm_expand_enabled and len(quick_results) > llm_expand_max_quick:
+            llm_expand_enabled = False
+            _log_app_event(
+                state,
+                "search",
+                "llm_expand_skipped",
+                details=_search_diag(
+                    {
+                        "quick_results": len(quick_results),
+                        "max_quick_results": llm_expand_max_quick,
+                        "reason": "enough_quick_results",
+                    }
+                ),
+            )
         search_query = semantic_q
         if llm_expand_enabled:
             llm_expand_started = _time.perf_counter()
@@ -957,8 +1007,10 @@ def _build_page(initial_screen: str = "search") -> None:
                 ),
             )
             full_results = await _run_io_bound_with_ui_timeout(
-                _run_catalog_search,
+                _run_authorized_catalog_search,
                 searcher,
+                cfg=state.cfg,
+                user=state.current_user,
                 limit=state.limit,
                 file_type=effective_file_type,
                 content_only=state.content_only,
@@ -974,7 +1026,6 @@ def _build_page(initial_screen: str = "search") -> None:
             if state.search_request_id != request_id:
                 return
             merged = _merge_search_results(state.results, full_results, limit=state.limit)
-            merged = _filter_cloud_drive_search_results(state.cfg, state.current_user, merged)
             state.results = _apply_query_operators(merged, parsed_query)
             cloud_semantic_count = sum(
                 1
@@ -3292,7 +3343,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     _start_recovery_watchdog(cfg)
     _start_global_scheduler(cfg)
     if bool(cfg.get("search_warmup_enabled", True)):
-        threading.Thread(target=_warm_searcher_cache, args=(cfg,), name="search-warmup", daemon=True).start()
+        _warm_searcher_cache(cfg)
+    _configure_nicegui_transport(cfg)
     ui.run(
         title="RAG Каталог",
         host=args.host,

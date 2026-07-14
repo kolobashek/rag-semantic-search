@@ -129,6 +129,9 @@
           attempt: Number(attempt || 0),
           downtime_ms: disconnectedAt ? Date.now() - disconnectedAt : 0,
         });
+        setTimeout(() => {
+          document.querySelector('[data-rag-refresh-screen]')?.click();
+        }, 350);
         disconnectedAt = 0;
       });
       send('socket_diagnostics_ready', { connected: !!socket.connected });

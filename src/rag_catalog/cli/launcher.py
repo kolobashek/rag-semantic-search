@@ -207,6 +207,8 @@ def _spawn_python_module(module: str, args: list[str], cwd: Path, log_name: str)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["PYTHONIOENCODING"] = "utf-8"
+    env.setdefault("HF_HUB_OFFLINE", "1")
+    env.setdefault("TRANSFORMERS_OFFLINE", "1")
     env["RAG_LOG_HISTORY_NAME"] = log_name
     env["RAG_LOG_LABEL"] = module
     _runtime_dir()

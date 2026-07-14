@@ -12,6 +12,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -24,7 +25,7 @@ from urllib.parse import quote
 from nicegui import ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
-from rag_catalog.core.exact_tokens import query_numeric_tokens
+from rag_catalog.core.exact_tokens import numeric_query_has_trusted_context
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.log_history import (
     iter_history_texts,
@@ -854,25 +855,25 @@ def _run_quick_name_search(
     limit: int,
     file_type: Optional[str],
 ) -> List[Dict[str, Any]]:
-    exact: List[Dict[str, Any]] = []
-    numeric_tokens = [token for token in query_numeric_tokens(query) if len(token) >= 5]
-    if numeric_tokens:
-        try:
-            exact = _normalize_search_results(
-                searcher._spreadsheet_numeric_exact_scan(  # noqa: SLF001
-                    query=query,
-                    tokens=numeric_tokens,
-                    limit=limit,
-                    file_type=file_type,
-                )
+    try:
+        exact = _normalize_search_results(
+            searcher._numeric_exact_search(  # noqa: SLF001
+                query=query,
+                limit=limit,
+                file_type=file_type,
+                content_only=False,
+                title_only=False,
             )
-        except Exception:
-            exact = []
+        )
+    except Exception:
+        exact = []
+    if not numeric_query_has_trusted_context(query):
+        exact = []
 
     quick = _normalize_search_results(
         searcher._lexical_catalog_search(  # noqa: SLF001
             query=query,
-            limit=max(limit * 3, 60),
+            limit=max(limit, 40),
             file_type=file_type,
             content_only=False,
             title_only=True,
@@ -898,7 +899,10 @@ def _count_exact_name_matches(query: str, results: List[Dict[str, Any]]) -> int:
         return 0
     count = 0
     for item in results:
-        if str(item.get("retrieval_source") or "") in {"numeric_fs_exact", "numeric_exact"}:
+        if (
+            str(item.get("retrieval_source") or "") in {"numeric_fs_exact", "numeric_exact"}
+            and bool(item.get("numeric_query_trusted_context", numeric_query_has_trusted_context(query)))
+        ):
             count += 1
             continue
         name = str(item.get("filename") or "").lower().replace("ё", "е")
@@ -906,6 +910,15 @@ def _count_exact_name_matches(query: str, results: List[Dict[str, Any]]) -> int:
         if needle in name or needle in path:
             count += 1
     return count
+
+
+def _has_confident_numeric_exact_match(query: str, results: List[Dict[str, Any]]) -> bool:
+    trusted_query = numeric_query_has_trusted_context(query)
+    return any(
+        str(item.get("retrieval_source") or "") in {"numeric_fs_exact", "numeric_exact"}
+        and bool(item.get("numeric_query_trusted_context", trusted_query))
+        for item in results
+    )
 
 
 def _merge_search_results(
@@ -1102,13 +1115,45 @@ def _safe_explorer_path(state: PageState) -> Path:
 
 # ─────────────────────────── Cloud Drive helpers ─────────────────────────────
 
-def _cd_get_service(cfg: Dict[str, Any]) -> Optional["CloudDriveService"]:
+_CD_SERVICE_CACHE: Dict[tuple[str, ...], CloudDriveService] = {}
+_CD_SERVICE_CACHE_LOCK = threading.Lock()
+
+
+def _cd_service_cache_key(cfg: Dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(cfg.get(key) or "").strip()
+        for key in (
+            "cloud_drive_db_path",
+            "cloud_drive_storage",
+            "cloud_drive_storage_root",
+            "cloud_drive_bucket",
+            "cloud_drive_s3_endpoint",
+            "cloud_drive_s3_region",
+            "cloud_drive_s3_access_key",
+            "cloud_drive_s3_secret_key",
+        )
+    )
+
+
+def _cd_cached_service(cfg: Dict[str, Any]) -> Optional["CloudDriveService"]:
     try:
-        if not cfg.get("cloud_drive_enabled") or not str(cfg.get("cloud_drive_db_path") or "").strip():
+        if not str(cfg.get("cloud_drive_db_path") or "").strip():
             return None
-        return CloudDriveService.from_config(cfg)
+        key = _cd_service_cache_key(cfg)
+        with _CD_SERVICE_CACHE_LOCK:
+            service = _CD_SERVICE_CACHE.get(key)
+            if service is None:
+                service = CloudDriveService.from_config(cfg)
+                _CD_SERVICE_CACHE[key] = service
+            return service
     except Exception:
         return None
+
+
+def _cd_get_service(cfg: Dict[str, Any]) -> Optional["CloudDriveService"]:
+    if not cfg.get("cloud_drive_enabled"):
+        return None
+    return _cd_cached_service(cfg)
 
 
 def _cd_list_children(
@@ -1311,7 +1356,9 @@ def _cd_registry_acl_allows(
     if not _cd_acl_allows(cfg, user, path):
         return False
     try:
-        svc = service or CloudDriveService.from_config(cfg)
+        svc = service or _cd_cached_service(cfg)
+        if svc is None:
+            return False
         return bool(
             svc.user_can_access(
                 username=str((user or {}).get("username") or ""),
@@ -1386,11 +1433,11 @@ def _filter_cloud_drive_search_results(
             effective_user["group_ids"] = []
             effective_user["groups"] = []
     try:
-        service: CloudDriveService | None = CloudDriveService.from_config(cfg)
+        service = _cd_cached_service(cfg)
     except Exception:
         service = None
     if service is None:
-        return results
+        return [] if str(cfg.get("cloud_drive_db_path") or "").strip() else results
 
     filtered: List[Dict[str, Any]] = []
     is_admin = str(effective_user.get("role") or "").strip().lower() == "admin"
@@ -1430,6 +1477,54 @@ def _filter_cloud_drive_search_results(
                 item.setdefault("cloud_file_id", cloud_file_id)
             filtered.append(item)
     return filtered
+
+
+def _run_authorized_quick_name_search(
+    searcher: RAGSearcher,
+    *,
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    query: str,
+    limit: int,
+    file_type: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Run quick retrieval and ACL filtering in the same worker thread."""
+    results = _run_quick_name_search(
+        searcher,
+        query=query,
+        limit=limit,
+        file_type=file_type,
+    )
+    return _filter_cloud_drive_search_results(cfg, user, results)
+
+
+def _run_authorized_catalog_search(
+    searcher: RAGSearcher,
+    *,
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    query: str,
+    query_original: str,
+    query_used: str,
+    limit: int,
+    file_type: Optional[str],
+    content_only: bool,
+    title_only: bool,
+    username: str = "",
+) -> List[Dict[str, Any]]:
+    """Run full retrieval and ACL filtering without blocking NiceGUI."""
+    results = _run_catalog_search(
+        searcher,
+        query=query,
+        query_original=query_original,
+        query_used=query_used,
+        limit=limit,
+        file_type=file_type,
+        content_only=content_only,
+        title_only=title_only,
+        username=username,
+    )
+    return _filter_cloud_drive_search_results(cfg, user, results)
 
 
 # ─────────────────────────── search helpers ─────────────────────────────────
@@ -2019,8 +2114,8 @@ def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
             searcher = RAGSearcher(cfg)
             _SEARCHER_CACHE[key] = searcher
         if searcher.connected:
-            searcher.embedder.encode(["warmup"])
             searcher.warm_retrieval_cache()
+            searcher.embedder.encode(["warmup"])
     except Exception:
         # Warmup is an optimization; search path will report real errors to the user.
         pass

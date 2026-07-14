@@ -72,7 +72,13 @@ def _open_log(log_path: "Path", label: str) -> "Any":
 
 def _windows_detached_creationflags() -> int:
     flags = 0
-    for name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB"):
+    for name in (
+        "CREATE_NO_WINDOW",
+        "DETACHED_PROCESS",
+        "CREATE_NEW_PROCESS_GROUP",
+        "CREATE_BREAKAWAY_FROM_JOB",
+        "BELOW_NORMAL_PRIORITY_CLASS",
+    ):
         flags |= int(getattr(subprocess, name, 0) or 0)
     return flags
 

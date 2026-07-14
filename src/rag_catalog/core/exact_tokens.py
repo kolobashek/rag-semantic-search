@@ -6,6 +6,13 @@ import re
 from typing import Iterable, List
 
 _MOJIBAKE_MARKERS = set("αΓπΣσΩδ∞φτ≈√ⁿ²■ «»")
+_NUMERIC_CONTEXT_STOP_WORDS = {
+    "и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна",
+}
+_TRUSTED_NUMERIC_CONTEXT = {
+    "vin", "птс", "стс", "псм", "утм", "инн", "кпп", "огрн", "счет",
+    "договор", "акт", "номер", "госномер",
+}
 
 
 def numeric_exact_tokens(text: str, *, max_tokens: int = 200) -> List[str]:
@@ -48,6 +55,16 @@ def numeric_exact_tokens(text: str, *, max_tokens: int = 200) -> List[str]:
 def query_numeric_tokens(query: str) -> List[str]:
     """Numeric tokens worth using as exact-match filters for a user query."""
     return [token for token in numeric_exact_tokens(query, max_tokens=40) if len(token) >= 4]
+
+
+def numeric_query_has_trusted_context(query: str) -> bool:
+    """Return whether numeric matches may be treated as decisive evidence."""
+    context_terms = [
+        term.lower().replace("ё", "е")
+        for term in re.findall(r"[a-zа-яё]{2,}", str(query or ""), flags=re.IGNORECASE)
+        if term.lower().replace("ё", "е") not in _NUMERIC_CONTEXT_STOP_WORDS
+    ]
+    return not context_terms or all(term in _TRUSTED_NUMERIC_CONTEXT for term in context_terms)
 
 
 def _cyrillic_score(text: str) -> int:
