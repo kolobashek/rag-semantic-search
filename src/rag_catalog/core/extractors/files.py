@@ -813,6 +813,7 @@ def ocr_pdf(
     tesseract_cmd: str = "",
     poppler_bin: str = "",
     use_rapid: bool = False,
+    raise_on_failure: bool = False,
 ) -> str:
     """OCR scanned PDF.
 
@@ -829,11 +830,13 @@ def ocr_pdf(
         import pdf2image.pdf2image as pdf2image_impl  # type: ignore
         import pytesseract  # type: ignore
         from pdf2image import convert_from_path  # type: ignore
-    except ImportError:
+    except ImportError as exc:
         logger.warning(
             "pytesseract/pdf2image не установлены. "
             "Установите: pip install pytesseract pdf2image"
         )
+        if raise_on_failure:
+            raise RuntimeError("pytesseract/pdf2image are unavailable") from exc
         return ""
 
     try:
@@ -858,6 +861,8 @@ def ocr_pdf(
         return "\n".join(parts)
     except Exception as exc:
         logger.warning("OCR не удался для %s: %s", filepath, exc)
+        if raise_on_failure:
+            raise RuntimeError(f"Tesseract PDF OCR failed for {filepath}: {exc}") from exc
         return ""
 
 
@@ -867,6 +872,7 @@ def extract_image(
     tesseract_cmd: str = "",
     max_pages: int = 50,
     use_rapid: bool = False,
+    raise_on_failure: bool = False,
 ) -> str:
     """Extract text from an image.
 
@@ -881,19 +887,23 @@ def extract_image(
             logger.warning("RapidOCR image не удался, fallback на Tesseract: %s", exc)
     try:
         import pytesseract  # type: ignore
-    except ImportError:
+    except ImportError as exc:
         logger.debug(
             "pytesseract не установлен — OCR изображений недоступен. "
             "Установите: pip install pytesseract"
         )
+        if raise_on_failure:
+            raise RuntimeError("pytesseract is unavailable") from exc
         return ""
     try:
         from PIL import Image  # type: ignore
-    except ImportError:
+    except ImportError as exc:
         logger.debug(
             "Pillow не установлен — OCR изображений недоступен. "
             "Установите: pip install Pillow"
         )
+        if raise_on_failure:
+            raise RuntimeError("Pillow is unavailable") from exc
         return ""
     try:
         apply_tesseract_runtime(pytesseract, tesseract_cmd)
@@ -935,6 +945,8 @@ def extract_image(
         return result
     except Exception as exc:
         logger.warning("OCR изображения не удался для %s: %s", filepath, exc)
+        if raise_on_failure:
+            raise RuntimeError(f"Tesseract image OCR failed for {filepath}: {exc}") from exc
         return ""
 
 

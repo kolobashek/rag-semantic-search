@@ -3,7 +3,10 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import pytest
+
 from rag_catalog.core import ocr_runtime
+from rag_catalog.core.extractors.ocr_rapid import _ocr_pdf_rapid_impl
 
 
 def test_resolve_ocr_runtime_uses_config_paths(tmp_path: Path) -> None:
@@ -41,3 +44,16 @@ def test_apply_tesseract_runtime_sets_nested_attr() -> None:
     fake = types.SimpleNamespace(pytesseract=holder)
     ocr_runtime.apply_tesseract_runtime(fake, "C:/tools/tesseract.exe")
     assert holder.tesseract_cmd == "C:/tools/tesseract.exe"
+
+
+def test_rapidocr_pdf_conversion_failure_is_not_reported_as_empty(monkeypatch, tmp_path: Path) -> None:
+    import pdf2image
+
+    monkeypatch.setattr(
+        pdf2image,
+        "convert_from_path",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("poppler failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="RapidOCR PDF conversion failed"):
+        _ocr_pdf_rapid_impl(tmp_path / "broken.pdf")

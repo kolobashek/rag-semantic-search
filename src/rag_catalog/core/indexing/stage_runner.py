@@ -897,7 +897,11 @@ class IndexStageRunner:
                     failure_error = "reader_limit_exhausted"
                 else:
                     def _reader():
+                        ocr_context = getattr(indexer, "_ocr_context", None)
                         try:
+                            if ocr_context is not None:
+                                ocr_context.logical_path = file_key
+                                ocr_context.logical_mtime = mtime
                             reader_fn = _doc_fn or _fn
                             if item.get("archive_path") and item.get("archive_member"):
                                 with tempfile.TemporaryDirectory(prefix="rag_zip_") as tmp:
@@ -908,6 +912,13 @@ class IndexStageRunner:
                                 _buf[0] = reader_fn(source_path)
                         except Exception as _e:
                             _buf[1] = _e
+                        finally:
+                            if ocr_context is not None:
+                                for attr in ("logical_path", "logical_mtime"):
+                                    try:
+                                        delattr(ocr_context, attr)
+                                    except AttributeError:
+                                        pass
 
                     _t = _th.Thread(target=_reader, daemon=True)
                     _t.start()

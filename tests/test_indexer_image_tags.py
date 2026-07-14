@@ -292,15 +292,18 @@ class TestExtractImage:
         indexer.skip_ocr = False
         return indexer
 
-    def test_returns_empty_when_pytesseract_missing(self, tmp_path):
-        """Если pytesseract не установлен — возвращает ''."""
+    def test_records_error_when_pytesseract_missing(self, tmp_path):
+        """Отсутствующий OCR runtime не маскируется под пустой документ."""
         indexer = self._make_indexer(tmp_path)
+        indexer.telemetry = MagicMock()
+        indexer.telemetry.get_ocr_file_result.return_value = None
         f = tmp_path / "img.jpg"
         f.write_bytes(b"\xff\xd8\xff\xe0")  # минимальный JPEG header
 
         with patch.dict("sys.modules", {"pytesseract": None}):
-            result = indexer._extract_image(f)
-        assert result == ""
+            with pytest.raises(RuntimeError, match="pytesseract is unavailable"):
+                indexer._extract_image(f)
+        assert indexer.telemetry.save_ocr_file_result.call_args.kwargs["status"] == "error"
 
     def _make_mock_image(self, mode: str = "RGB", n_frames: int = 1) -> MagicMock:
         """Вспомогательный метод: PIL.Image mock с поддержкой контекстного менеджера."""
@@ -356,9 +359,11 @@ class TestExtractImage:
 
         assert result == "ТЕКСТ"
 
-    def test_returns_empty_on_exception(self, tmp_path):
-        """При ошибке OCR (например повреждённый файл) возвращает ''."""
+    def test_records_ocr_error_and_raises(self, tmp_path):
+        """Техническая ошибка OCR сохраняется отдельно от пустого результата."""
         indexer = self._make_indexer(tmp_path)
+        indexer.telemetry = MagicMock()
+        indexer.telemetry.get_ocr_file_result.return_value = None
         f = tmp_path / "broken.jpg"
         f.write_bytes(b"not an image")
 
@@ -371,9 +376,12 @@ class TestExtractImage:
             "PIL": mock_pil,
             "PIL.Image": mock_pil.Image,
         }):
-            result = indexer._extract_image(f)
+            with pytest.raises(RuntimeError, match="Tesseract image OCR failed"):
+                indexer._extract_image(f)
 
-        assert result == ""
+        saved = indexer.telemetry.save_ocr_file_result.call_args
+        assert saved.kwargs["status"] == "error"
+        assert "cannot identify image file" in saved.kwargs["error"]
 
     def test_converts_non_rgb_mode(self, tmp_path):
         """Изображения не в RGB/L/RGBA конвертируются в RGB перед OCR."""

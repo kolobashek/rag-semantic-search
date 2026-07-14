@@ -181,7 +181,7 @@ def _ocr_image_rapid_impl(filepath: Path) -> str:
         return "\n\n".join(parts)
     except Exception as exc:
         logger.warning("RapidOCR изображение %s: %s", filepath, exc)
-        return ""
+        raise RuntimeError(f"RapidOCR image failed for {filepath}: {exc}") from exc
 
 
 # ───────────────────────── PDF OCR ──────────────────────────────────────────
@@ -196,9 +196,9 @@ def _ocr_pdf_rapid_impl(filepath: Path, *, poppler_bin: str = "") -> str:
     try:
         import pdf2image.pdf2image as pdf2image_impl  # noqa: PLC0415  # type: ignore
         from pdf2image import convert_from_path  # noqa: PLC0415  # type: ignore
-    except ImportError:
+    except ImportError as exc:
         logger.warning("pdf2image не установлен — OCR PDF недоступен")
-        return ""
+        raise RuntimeError("pdf2image is unavailable for RapidOCR PDF") from exc
 
     # Скрываем консольное окно poppler на Windows
     try:
@@ -214,7 +214,7 @@ def _ocr_pdf_rapid_impl(filepath: Path, *, poppler_bin: str = "") -> str:
         pages = convert_from_path(str(filepath), **convert_kwargs)
     except Exception as exc:
         logger.warning("pdf2image не смог конвертировать %s: %s", filepath, exc)
-        return ""
+        raise RuntimeError(f"RapidOCR PDF conversion failed for {filepath}: {exc}") from exc
 
     parts: list[str] = []
     for i, page_img in enumerate(pages):

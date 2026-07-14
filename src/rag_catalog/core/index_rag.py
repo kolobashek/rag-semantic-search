@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -441,6 +442,7 @@ class RAGIndexer:
         self.batch_size = batch_size
         self.recreate = recreate_collection
         self.skip_ocr = skip_ocr
+        self._ocr_context = threading.local()
         self.dry_run = False
         self.max_chunks_per_file = max_chunks_per_file  # 0 = без ограничений
         self.read_workers = max(1, int(read_workers or 4))
@@ -863,44 +865,70 @@ class RAGIndexer:
             return doc
         return document_from_legacy_text(self._cached_ocr_text(filepath))
 
-    def _cached_ocr_text(self, filepath: Path) -> str:
+    def _ocr_result_identity(self, filepath: Path) -> tuple[str, float]:
+        """Return the stable source identity, including members extracted to temp files."""
+        context = getattr(self, "_ocr_context", None)
+        logical_path = str(getattr(context, "logical_path", "") or filepath)
+        logical_mtime = getattr(context, "logical_mtime", None)
+        if logical_mtime is None:
+            logical_mtime = float(filepath.stat().st_mtime)
+        return logical_path, float(logical_mtime)
+
+    def _get_cached_ocr_result(self, filepath: Path) -> Optional[Dict[str, Any]]:
         try:
-            mtime = float(filepath.stat().st_mtime)
-            cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
+            logical_path, logical_mtime = self._ocr_result_identity(filepath)
+            cached = self.telemetry.get_ocr_file_result(logical_path, logical_mtime)
             if isinstance(cached, dict):
-                logger.info("OCR из кэша без запуска OCR: %s", filepath.name)
-                return str(cached.get("extracted_text") or "")
+                if str(cached.get("status") or "").lower() != "error":
+                    return cached
+                logger.info("Повтор OCR после кэшированной ошибки: %s", logical_path)
         except Exception:
             pass
+        return None
+
+    def _cached_ocr_text(self, filepath: Path) -> str:
+        cached = self._get_cached_ocr_result(filepath)
+        if cached is not None:
+            logger.info("OCR из кэша без запуска OCR: %s", filepath.name)
+            return str(cached.get("extracted_text") or "")
         return ""
 
     def _ocr_pdf(self, filepath: Path) -> str:
         """OCR сканированного PDF через pytesseract + pdf2image, с кэшем в telemetry DB."""
-        try:
-            mtime = float(filepath.stat().st_mtime)
-            cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
-            if isinstance(cached, dict):
-                logger.info("OCR из кэша: %s", filepath.name)
-                return str(cached.get("extracted_text") or "")
-        except Exception:
-            pass
-
-        text = ocr_pdf(
-            filepath,
-            tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
-            poppler_bin=getattr(self, "ocr_poppler_bin", ""),
-            use_rapid=getattr(self, "_use_rapid_ocr", False),
-        )
+        logical_path, logical_mtime = self._ocr_result_identity(filepath)
+        cached = self._get_cached_ocr_result(filepath)
+        if cached is not None:
+            logger.info("OCR из кэша: %s", filepath.name)
+            return str(cached.get("extracted_text") or "")
 
         try:
-            mtime = float(filepath.stat().st_mtime)
+            text = ocr_pdf(
+                filepath,
+                tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
+                poppler_bin=getattr(self, "ocr_poppler_bin", ""),
+                use_rapid=getattr(self, "_use_rapid_ocr", False),
+                raise_on_failure=True,
+            )
+        except Exception as exc:
+            try:
+                self.telemetry.save_ocr_file_result(
+                    logical_path,
+                    logical_mtime,
+                    status="error",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+            raise
+
+        try:
             pages = text.count("Страница:") if text else 0
             if pages == 0 and text.strip():
                 pages = 1
             chars = len(text.strip())
             self.telemetry.save_ocr_file_result(
-                str(filepath),
-                mtime,
+                logical_path,
+                logical_mtime,
                 text=text,
                 pages=pages,
                 chars=chars,
@@ -917,28 +945,37 @@ class RAGIndexer:
         Поддерживает JPEG, PNG, GIF, BMP, TIFF, WEBP.
         Возвращает пустую строку если pytesseract не установлен или текст не найден.
         """
-        try:
-            mtime = float(filepath.stat().st_mtime)
-            cached = self.telemetry.get_ocr_file_result(str(filepath), mtime)
-            if cached is not None:
-                logger.info("OCR из кэша: %s", filepath.name)
-                return str(cached.get("extracted_text") or "")
-        except Exception:
-            pass
-
-        text = extract_image(
-            filepath,
-            tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
-            max_pages=int(getattr(self, "ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
-            use_rapid=getattr(self, "_use_rapid_ocr", False),
-        )
+        logical_path, logical_mtime = self._ocr_result_identity(filepath)
+        cached = self._get_cached_ocr_result(filepath)
+        if cached is not None:
+            logger.info("OCR из кэша: %s", filepath.name)
+            return str(cached.get("extracted_text") or "")
 
         try:
-            mtime = float(filepath.stat().st_mtime)
+            text = extract_image(
+                filepath,
+                tesseract_cmd=getattr(self, "ocr_tesseract_cmd", ""),
+                max_pages=int(getattr(self, "ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
+                use_rapid=getattr(self, "_use_rapid_ocr", False),
+                raise_on_failure=True,
+            )
+        except Exception as exc:
+            try:
+                self.telemetry.save_ocr_file_result(
+                    logical_path,
+                    logical_mtime,
+                    status="error",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+            raise
+
+        try:
             chars = len(text.strip())
             self.telemetry.save_ocr_file_result(
-                str(filepath),
-                mtime,
+                logical_path,
+                logical_mtime,
                 text=text,
                 pages=1 if chars > 0 else 0,
                 chars=chars,

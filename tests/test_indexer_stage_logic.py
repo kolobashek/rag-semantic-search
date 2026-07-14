@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tarfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -434,6 +435,34 @@ def test_zip_members_are_indexed_with_logical_archive_paths(tmp_path: Path) -> N
     payloads = [point.payload for point in idx.qdrant.points]
     assert any(payload.get("path") == "docs.zip/folder/readme.txt" for payload in payloads)
     assert any(payload.get("archive_member") == "folder/readme.txt" for payload in payloads)
+
+
+def test_archive_reader_exposes_logical_identity_to_ocr(tmp_path: Path) -> None:
+    archive = tmp_path / "scans.zip"
+    with ZipFile(archive, "w", ZIP_DEFLATED) as zf:
+        zf.writestr("folder/scan.pdf", b"%PDF-1.7")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx._ocr_context = threading.local()
+    observed: list[tuple[str, float, bool]] = []
+
+    def extract_pdf(path: Path) -> ExtractedDocument:
+        observed.append(
+            (
+                idx._ocr_context.logical_path,
+                idx._ocr_context.logical_mtime,
+                path.exists(),
+            )
+        )
+        return document_from_legacy_text("scanned archive text")
+
+    idx._extract_pdf_document = extract_pdf
+
+    idx.index_directory(stage="small")
+
+    assert len(observed) == 1
+    assert observed[0][0] == f"{archive}::folder/scan.pdf"
+    assert observed[0][1] > 0
+    assert observed[0][2] is True
 
 
 def test_zip_members_with_leading_slash_are_read_by_raw_archive_name(tmp_path: Path) -> None:
