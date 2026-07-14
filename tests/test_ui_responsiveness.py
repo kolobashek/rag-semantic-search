@@ -336,6 +336,27 @@ def test_quick_search_drops_numeric_noise_for_untrusted_context() -> None:
     ) == []
 
 
+def test_quick_search_keeps_only_exact_name_matches_when_relevance_gate_is_enabled() -> None:
+    class Searcher:
+        config = {"retrieval_relevance_gate_enabled": True}
+
+        def _numeric_exact_search(self, **_kwargs):
+            return []
+
+        def _lexical_catalog_search(self, **_kwargs):
+            return [
+                {"filename": "supply contract.docx", "path": "Legal/supply contract.docx"},
+                {"filename": "unrelated.docx", "path": "Archive/unrelated.docx"},
+            ]
+
+    assert helpers._run_quick_name_search(
+        Searcher(),
+        query="supply contract",
+        limit=10,
+        file_type=None,
+    ) == [{"filename": "supply contract.docx", "path": "Legal/supply contract.docx"}]
+
+
 def test_authorized_quick_search_keeps_acl_in_worker_operation(monkeypatch) -> None:
     events: list[str] = []
     results = [{"filename": "visible.docx"}]

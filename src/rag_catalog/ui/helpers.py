@@ -808,6 +808,11 @@ def _normalize_search_results(results: Any) -> List[Dict[str, Any]]:
     return [item for item in results if isinstance(item, dict)]
 
 
+def _relevance_gate_enabled(searcher: RAGSearcher) -> bool:
+    config = getattr(searcher, "config", {})
+    return isinstance(config, dict) and bool(config.get("retrieval_relevance_gate_enabled"))
+
+
 def _run_catalog_search(
     searcher: RAGSearcher,
     *,
@@ -834,6 +839,8 @@ def _run_catalog_search(
     )
     if results or content_only or title_only:
         return results
+    if _relevance_gate_enabled(searcher):
+        return []
 
     try:
         fallback = searcher._lexical_catalog_search(  # noqa: SLF001
@@ -890,7 +897,23 @@ def _run_quick_name_search(
         return (exact_name, exact_path, score, -len(path))
 
     quick.sort(key=sort_key, reverse=True)
-    return _merge_search_results(exact, quick, limit=limit)
+    merged = _merge_search_results(exact, quick, limit=limit)
+    if not _relevance_gate_enabled(searcher):
+        return merged
+
+    confident: List[Dict[str, Any]] = []
+    for item in merged:
+        source = str(item.get("retrieval_source") or "")
+        if source in {"numeric_fs_exact", "numeric_exact"} and bool(
+            item.get("numeric_query_trusted_context", numeric_query_has_trusted_context(query))
+        ):
+            confident.append(item)
+            continue
+        name = str(item.get("filename") or "").lower().replace("ё", "е")
+        path = str(item.get("path") or item.get("full_path") or "").lower().replace("ё", "е")
+        if needle and (needle in name or needle in path):
+            confident.append(item)
+    return confident[:limit]
 
 
 def _count_exact_name_matches(query: str, results: List[Dict[str, Any]]) -> int:
@@ -930,7 +953,15 @@ def _merge_search_results(
     merged_by_key: Dict[str, Dict[str, Any]] = {}
 
     def key_of(item: Dict[str, Any]) -> str:
-        return f"{item.get('full_path')}::{item.get('chunk_index')}::{item.get('type')}"
+        identity = (
+            item.get("cloud_file_id")
+            or item.get("full_path")
+            or item.get("cloud_path")
+            or item.get("path")
+            or item.get("filename")
+            or ""
+        )
+        return f"{identity}::{item.get('chunk_index')}::{item.get('type')}"
 
     def rank_key(item: Dict[str, Any]) -> tuple:
         rank_score = float(item.get("rank_score", item.get("score") or 0) or 0)

@@ -194,9 +194,16 @@ def test_popular_query_terms_generalize_search_logs(tmp_path: Path) -> None:
 
 
 class _SearchBackend:
-    def __init__(self, search_result: object, lexical_result: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        search_result: object,
+        lexical_result: list[dict[str, object]],
+        *,
+        relevance_gate_enabled: bool = False,
+    ) -> None:
         self.search_result = search_result
         self.lexical_result = lexical_result
+        self.config = {"retrieval_relevance_gate_enabled": relevance_gate_enabled}
         self.search_kwargs: dict[str, object] = {}
         self.lexical_kwargs: dict[str, object] = {}
 
@@ -251,6 +258,26 @@ def test_catalog_search_uses_lexical_fallback_when_backend_returns_none() -> Non
         content_only=False,
         title_only=False,
     ) == [{"filename": "passport.pdf"}, {"filename": "passport folder"}]
+
+
+def test_catalog_search_does_not_bypass_relevance_gate_with_lexical_fallback() -> None:
+    backend = _SearchBackend(
+        search_result=[],
+        lexical_result=[{"filename": "unrelated.pdf"}],
+        relevance_gate_enabled=True,
+    )
+
+    assert _run_catalog_search(  # type: ignore[arg-type]
+        backend,
+        query="missing subject",
+        query_original="missing subject",
+        query_used="missing subject",
+        limit=10,
+        file_type=None,
+        content_only=False,
+        title_only=False,
+    ) == []
+    assert backend.lexical_kwargs == {}
 
 
 def test_catalog_search_passes_title_only_and_original_query_to_backend() -> None:
