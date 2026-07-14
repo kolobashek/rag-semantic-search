@@ -547,6 +547,19 @@ class IndexStateDB:
                 )
                 return [dict(row) for row in cur.fetchall()]
 
+    def iter_search_entries(self) -> List[Dict[str, Any]]:
+        """Return only fields required to build the filename/path search cache."""
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT full_path, mtime, size_bytes, extension
+                    FROM state_entries
+                    ORDER BY full_path
+                    """
+                )
+                return [dict(row) for row in cur.fetchall()]
+
     def find_by_content_hash(self, content_hash: str, *, exclude_path: str = "") -> Optional[Dict[str, Any]]:
         value = str(content_hash or "").strip()
         if not value:

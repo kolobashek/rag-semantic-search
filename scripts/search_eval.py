@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -97,8 +98,18 @@ def main() -> int:
         except Exception as exc:
             print(f"warning: search eval warmup failed: {exc}", file=sys.stderr)
 
+    progress = {"index": 0}
+
     def _search(query: str, limit: int) -> List[Dict[str, Any]]:
-        return searcher.search(query, limit=limit)
+        progress["index"] += 1
+        current = progress["index"]
+        started = time.perf_counter()
+        print(f"[eval {current}/{len(golden)}] start: {query}", file=sys.stderr, flush=True)
+        try:
+            return searcher.search(query, limit=limit)
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            print(f"[eval {current}/{len(golden)}] done: {elapsed_ms} ms", file=sys.stderr, flush=True)
 
     report = evaluate_search(golden, _search, limit=max(1, int(args.limit)))
     report["evaluation_profile"] = {

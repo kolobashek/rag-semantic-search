@@ -36,6 +36,7 @@
   "qdrant_scroll_limit": 256,
   "search_warmup_enabled": true,
   "metadata_needle_cache_size": 512,
+  "numeric_exact_fs_fallback_enabled": false,
   "ui_reconnect_timeout_sec": 5,
   "ocr_tesseract_cmd": "",
   "ocr_poppler_bin": "",

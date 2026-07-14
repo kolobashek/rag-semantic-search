@@ -150,6 +150,17 @@ def test_search_does_not_run_spreadsheet_numeric_scan_for_alphanumeric_model(mon
     assert called is False
 
 
+def test_search_does_not_scan_source_spreadsheets_for_numeric_query(monkeypatch) -> None:
+    s = _make_searcher(connected=True)
+
+    def fail_scan(**_kwargs):
+        raise AssertionError("source spreadsheet scan must not run in the request path")
+
+    monkeypatch.setattr(s, "_spreadsheet_numeric_exact_scan", fail_scan)
+
+    assert s.search("СТС 9941 210904", source="test") == []
+
+
 def test_search_sets_content_only_must_not_filter() -> None:
     s = _make_searcher(connected=True)
     s.search("abc", content_only=True, source="test")
@@ -379,7 +390,9 @@ def test_relevance_gate_requires_text_evidence_for_mixed_numeric_query() -> None
     }
 
     assert s._apply_relevance_gate("несуществующая организация 847291", [numeric_only]) == []
+    assert s._apply_relevance_gate("qzxv-несуществующий-документ-999999", [numeric_only]) == []
     assert s._apply_relevance_gate("СТС 847291", [numeric_only])[0]["relevance_evidence"] == "lexical"
+    assert s._apply_relevance_gate("договор 847291", [numeric_only])[0]["relevance_evidence"] == "lexical"
 
 
 def test_rrf_recency_boost_is_relative_and_does_not_displace_exact_match() -> None:
@@ -481,6 +494,37 @@ def test_numeric_exact_search_uses_payload_tokens() -> None:
     assert out[0]["filename"] == "тс полный список.xlsx"
     assert out[0]["score"] > 0.99
     assert out[0]["retrieval_source"] == "numeric_exact"
+
+
+def test_numeric_exact_search_uses_source_fallback_only_when_enabled(monkeypatch) -> None:
+    s = _make_searcher(connected=True)
+    s.qdrant = _FakeQdrantScroll([])
+    fallback = [
+        {
+            "type": "xlsx_content",
+            "filename": "legacy.xlsx",
+            "full_path": r"O:\Обмен\legacy.xlsx",
+            "chunk_index": None,
+        }
+    ]
+    monkeypatch.setattr(s, "_spreadsheet_numeric_exact_scan", lambda **_kwargs: fallback)
+
+    disabled = s._numeric_exact_search(
+        query="СТС 9941 210904",
+        limit=5,
+        file_type=None,
+        content_only=False,
+    )
+    s.config = {"numeric_exact_fs_fallback_enabled": True}
+    enabled = s._numeric_exact_search(
+        query="СТС 9941 210904",
+        limit=5,
+        file_type=None,
+        content_only=False,
+    )
+
+    assert disabled == []
+    assert enabled == fallback
 
 
 def test_rerank_results_reorders_top_candidates_with_cross_encoder_scores() -> None:

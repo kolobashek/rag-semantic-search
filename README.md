@@ -308,6 +308,7 @@ DELETE /api/cloud-drive/share-links
 
 Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted.
 Evaluation artifacts record both `retrieval_preset` and the effective `retrieval_pipeline`; CLI `--config-set retrieval_preset=release_v2` reapplies preset defaults unless a pipeline setting is explicitly overridden. Startup warmup prepares the metadata token index and BM25 tokens so the warm-search SLO does not include avoidable per-query scans of the full catalog.
+Numeric identifiers are resolved from the indexed `numeric_tokens` payload. Live spreadsheet scanning is disabled in the request path; `numeric_exact_fs_fallback_enabled=true` is an emergency compatibility option for an old incomplete index and can make a query slow or dependent on source-drive availability.
 
 Embedding migration without overwriting the old collection:
 
@@ -317,7 +318,7 @@ Embedding migration without overwriting the old collection:
 4. Run `python scripts/search_eval.py --golden eval/search_golden.json --limit 10 --output runtime/eval/bge_m3.json --markdown-output runtime/eval/bge_m3.md`.
 5. Switch users to the new collection only after quality and latency are accepted.
 
-Retrieval v3 evaluation accepts optional per-query `expected_paths`, `expected_chunks`, `expected_pages`, `forbidden` and `expect_no_answer`. Candidate reports include document/chunk/page hit rate, no-answer accuracy, ACL leakage, ground-truth coverage and the exact retrieval profile. Compare a shadow candidate with the baseline and produce a machine-readable decision:
+Retrieval v3 evaluation accepts optional per-query `expected_paths`, `expected_chunks`, `expected_pages`, `forbidden` and `expect_no_answer`. Candidate reports include recall, precision, irrelevant-result rate, top-1 accuracy, document/chunk/page hit rate, no-answer accuracy, ACL leakage, ground-truth coverage and the exact retrieval profile. Precision requires each returned result to match the complete expected intent, so one relevant document followed by unrelated results no longer passes unnoticed. Compare a shadow candidate with the baseline and produce a machine-readable decision:
 
 ```powershell
 python scripts/search_eval.py --golden eval/retrieval_v3_golden.json --limit 10 `
@@ -326,6 +327,7 @@ python scripts/search_eval.py --golden eval/retrieval_v3_golden.json --limit 10 
   --output runtime/eval/shadow-v3.json `
   --decision-output runtime/eval/shadow-v3-decision.json `
   --fail-under-recall 0.875 --max-p95-ms 3000 --max-p95-ratio 1.5 `
+  --min-precision-at-k 0.5 --min-top1-accuracy 0.8 --max-irrelevant-rate 0.5 `
   --max-acl-leakage 0 --min-no-answer-accuracy 0.8 `
   --min-ground-truth-coverage 0.5 --enforce-decision-gate
 ```

@@ -41,6 +41,21 @@ def test_state_db_upsert_get_delete_and_count(tmp_path: Path) -> None:
     snapshot = db.entries_snapshot()
     assert set(snapshot) == {r"O:\docs\a.pdf", r"O:\docs\b.docx"}
     assert snapshot[r"O:\docs\b.docx"]["stage"] == "content"
+    search_entries = db.iter_search_entries()
+    assert search_entries == [
+        {
+            "full_path": r"O:\docs\a.pdf",
+            "mtime": 1.0,
+            "size_bytes": 100,
+            "extension": ".pdf",
+        },
+        {
+            "full_path": r"O:\docs\b.docx",
+            "mtime": 2.0,
+            "size_bytes": 200,
+            "extension": ".docx",
+        },
+    ]
     deleted = db.delete_entries([r"O:\docs\a.pdf"])
     assert deleted == 1
     assert db.count() == 1

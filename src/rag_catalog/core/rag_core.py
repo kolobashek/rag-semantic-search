@@ -88,6 +88,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "qdrant_scroll_limit": 256,
     "search_warmup_enabled": True,
     "metadata_needle_cache_size": 512,
+    "numeric_exact_fs_fallback_enabled": False,
     # OCR runtime: можно оставить пустым и использовать bundled tools/
     "ocr_tesseract_cmd": "",
     "ocr_poppler_bin": "",
@@ -187,6 +188,7 @@ RETRIEVAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "retrieval_min_dense_score": 0.78,
         "retrieval_single_term_min_dense_score": 0.80,
         "retrieval_min_content_chars": 120,
+        "numeric_exact_fs_fallback_enabled": False,
         # Reranker stays opt-in until latency and eval thresholds are agreed.
         "retrieval_reranker_enabled": False,
         "retrieval_reranker_top_n": 30,
@@ -447,43 +449,6 @@ class RAGSearcher:
             raise ConnectionError("Нет подключения к Qdrant")
 
         lexical_query = query_original_used or raw_query
-        if not title_only:
-            early_numeric_tokens = [
-                token for token in query_numeric_tokens(lexical_query) if len(token) >= 5
-            ]
-            early_numeric_results = (
-                self._spreadsheet_numeric_exact_scan(
-                    query=lexical_query,
-                    tokens=early_numeric_tokens,
-                    limit=limit,
-                    file_type=file_type,
-                )
-                if early_numeric_tokens
-                else []
-            )
-            if early_numeric_results:
-                results = self._merge_ranked_results(
-                    early_numeric_results,
-                    [],
-                    limit=limit,
-                    query=query_used,
-                )
-                results = [self._repair_result_display_fields(item) for item in results]
-                self.telemetry.log_search(
-                    source=source,
-                    query=query_original_used,
-                    limit_value=limit,
-                    file_type=file_type,
-                    content_only=content_only,
-                    results_count=len(results),
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    ok=True,
-                    error=truncated_note,
-                    username=username,
-                    query_original=query_original_used,
-                    query_used=query_used,
-                )
-                return results
 
         try:
             query_vector = self.embedder.encode(
@@ -821,7 +786,7 @@ class RAGSearcher:
         state_db_path = self._state_db_path()
         if state_db_path and state_db_path.exists():
             try:
-                entries = IndexStateDB(str(state_db_path)).iter_entries()
+                entries = IndexStateDB(str(state_db_path)).iter_search_entries()
                 folder_seen: set[str] = set()
 
                 def add_folder(rel_folder: str) -> None:
@@ -1184,22 +1149,6 @@ class RAGSearcher:
 
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for item in self._spreadsheet_numeric_exact_scan(
-            query=query,
-            tokens=strong_tokens,
-            limit=limit,
-            file_type=file_type,
-        ):
-            key = f"{item.get('full_path')}::{item.get('chunk_index')}::{item.get('type')}"
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(item)
-            if len(out) >= limit:
-                return out
-        if out:
-            return out
-
         scroll_timeout = int((getattr(self, "config", {}) or {}).get("numeric_exact_qdrant_timeout_sec", 2) or 2)
         for required_tokens, score in filters:
             must = [
@@ -1236,6 +1185,28 @@ class RAGSearcher:
                 out.append(self._result_from_payload(payload, score=score, rank_reason="точное совпадение номера", retrieval_source="numeric_exact"))
                 if len(out) >= limit:
                     return out
+        if out or not bool(
+            (getattr(self, "config", {}) or {}).get("numeric_exact_fs_fallback_enabled", False)
+        ):
+            return out
+
+        logger.warning(
+            "Qdrant не нашёл numeric_tokens; запускаю включённый файловый fallback для запроса %r",
+            query,
+        )
+        for item in self._spreadsheet_numeric_exact_scan(
+            query=query,
+            tokens=strong_tokens,
+            limit=limit,
+            file_type=file_type,
+        ):
+            key = f"{item.get('full_path')}::{item.get('chunk_index')}::{item.get('type')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+            if len(out) >= limit:
+                break
         return out
 
     def _spreadsheet_numeric_exact_scan(
@@ -1797,9 +1768,29 @@ class RAGSearcher:
 
             strong_lexical = "fulltext" in sources
             numeric_sources = {"numeric_exact", "numeric_fs_exact", "spreadsheet_numeric_exact"}
-            numeric_context_terms = [term for term in query_terms if not any(char.isdigit() for char in term)]
+            numeric_context_terms = [
+                term.lower().replace("ё", "е")
+                for term in re.findall(r"[a-zа-яё]{2,}", str(query or ""), flags=re.IGNORECASE)
+                if term.lower().replace("ё", "е")
+                not in {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
+            ]
+            trusted_numeric_context = {
+                "vin",
+                "птс",
+                "стс",
+                "псм",
+                "утм",
+                "инн",
+                "кпп",
+                "огрн",
+                "счет",
+                "договор",
+                "акт",
+                "номер",
+                "госномер",
+            }
             numeric_context_only = not numeric_context_terms or all(
-                term in {"vin", "птс", "стс", "псм", "утм"} for term in numeric_context_terms
+                term in trusted_numeric_context for term in numeric_context_terms
             )
             if sources & numeric_sources and numeric_context_only:
                 strong_lexical = True
