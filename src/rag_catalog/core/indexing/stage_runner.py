@@ -963,6 +963,16 @@ class IndexStageRunner:
                 and not failure_error
                 and not full_text.strip()
             )
+            preserve_existing_partial = bool(
+                stage == "large"
+                and existing_entry
+                and str(existing_entry.get("stage") or "") == "partial"
+                and int(existing_entry.get("indexed_chunks") or 0) > 0
+                and not full_text.strip()
+                and not deferred_ocr
+            )
+            if preserve_existing_partial and not failure_error:
+                failure_error = "empty_full_extraction_after_partial"
 
             chunk_source = extracted_doc if extracted_doc is not None else full_text
             chunk_items = indexer._chunk_text_with_provenance(chunk_source) if full_text.strip() else []
@@ -1116,7 +1126,11 @@ class IndexStageRunner:
                 "chunks": chunks,
                 "content_payloads": content_payloads,
                 "has_content": bool(chunks),
+                "source_has_content": bool(full_text.strip()),
                 "append_only": append_only,
+                "preserve_existing_partial": preserve_existing_partial,
+                "existing_indexed_chunks": int((existing_entry or {}).get("indexed_chunks") or 0),
+                "existing_total_chunks": int((existing_entry or {}).get("total_chunks") or 0),
                 "indexed_chunks": (append_from_chunk + len(chunks)) if append_only else len(chunks),
                 "total_chunks": total_chunks,
                 "content_hash": content_hash,
@@ -1216,8 +1230,18 @@ class IndexStageRunner:
                 for cpayload in result["content_payloads"]:
                     pending_texts.append(str(cpayload.get("text") or ""))
                     pending_payloads.append(cpayload)
+                indexed_chunks = int(result.get("indexed_chunks") or 0)
+                total_chunks = int(result.get("total_chunks") or 0)
                 if result.get("error"):
-                    file_stage = "error"
+                    if result.get("preserve_existing_partial"):
+                        file_stage = "partial"
+                        indexed_chunks = int(result.get("existing_indexed_chunks") or 0)
+                        total_chunks = max(
+                            indexed_chunks + 1,
+                            int(result.get("existing_total_chunks") or 0),
+                        )
+                    else:
+                        file_stage = "error"
                     status = "error"
                     last_error = str(result.get("error") or "")
                     next_retry_at = 0.0
@@ -1235,8 +1259,6 @@ class IndexStageRunner:
                 else:
                     if hasattr(indexer, "state_db") and result.get("had_failure"):
                         indexer.state_db.clear_failed_path(str(result["file_key"]))
-                    indexed_chunks = int(result.get("indexed_chunks") or 0)
-                    total_chunks = int(result.get("total_chunks") or 0)
                     if stage == "metadata":
                         file_stage = "metadata"
                     elif result.get("deferred_ocr"):
@@ -1256,7 +1278,11 @@ class IndexStageRunner:
                     )
                     last_error = "deferred_ocr" if result.get("deferred_ocr") else ""
                     next_retry_at = 0.0
-                if stage in ("small", "large") and not result.get("has_content") and not result.get("deferred_ocr"):
+                if (
+                    stage in ("small", "large")
+                    and not result.get("source_has_content")
+                    and not result.get("deferred_ocr")
+                ):
                     self._logger.warning(
                         "Этап %s: файл %s без контента, сохраняю stage=%s (будет повторная попытка)",
                         stage,
@@ -1276,8 +1302,8 @@ class IndexStageRunner:
                         "size_bytes": int(result.get("size_bytes") or 0),
                         "extension": str(result["meta_payload"].get("extension") or ""),
                         "content_hash": str(result.get("content_hash") or ""),
-                        "indexed_chunks": int(result.get("indexed_chunks") or 0),
-                        "total_chunks": int(result.get("total_chunks") or 0),
+                        "indexed_chunks": indexed_chunks,
+                        "total_chunks": total_chunks,
                     }
                 )
 

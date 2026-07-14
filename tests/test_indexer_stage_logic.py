@@ -374,6 +374,34 @@ def test_small_stage_truncates_all_files_and_large_appends_remainder(tmp_path: P
     assert len(idx.qdrant.points) > quick_points
 
 
+def test_large_empty_extraction_preserves_partial_state_for_retry(tmp_path: Path) -> None:
+    p = tmp_path / "unstable.docx"
+    p.write_text("dummy", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text=" ".join(["word"] * 500))
+    idx.max_chunks_per_file = 1
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda path: deleted.append(path)
+
+    idx.index_directory(stage="small")
+    key = str(p)
+    quick = idx.state_db.get_entry(key)
+    quick_points = len(idx.qdrant.points)
+    idx._extract_docx = lambda _path: ""
+
+    stats = idx.index_directory(stage="large")
+
+    failed = idx.state_db.get_entry(key)
+    assert failed["stage"] == "partial"
+    assert failed["status"] == "error"
+    assert failed["last_error"] == "empty_full_extraction_after_partial"
+    assert failed["indexed_chunks"] == quick["indexed_chunks"]
+    assert failed["total_chunks"] == quick["total_chunks"]
+    assert failed["next_retry_at"] > time.time()
+    assert stats["error_files"] == 1
+    assert deleted == []
+    assert len(idx.qdrant.points) == quick_points
+
+
 def test_small_stage_defers_large_pdf_to_large_stage(tmp_path: Path) -> None:
     small = tmp_path / "small.txt"
     large = tmp_path / "large.pdf"
