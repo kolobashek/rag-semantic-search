@@ -269,7 +269,7 @@ def test_retrieval_decision_requires_complete_reranker_execution() -> None:
     assert complete["candidate"]["reranked_results_count"] == 100
 
 
-def test_retrieval_decision_requires_fulltext_execution_evidence() -> None:
+def test_retrieval_decision_requires_sparse_channel_execution_evidence() -> None:
     candidate = {
         "queries": 60,
         "categories_count": 8,
@@ -285,7 +285,7 @@ def test_retrieval_decision_requires_fulltext_execution_evidence() -> None:
         "acl_results_checked": 25,
         "no_answer_accuracy": 0.95,
         "ground_truth_coverage": 0.8,
-        "evaluation_profile": {"fulltext_enabled": True},
+        "evaluation_profile": {"bm25_enabled": True, "fulltext_enabled": True},
         "retrieval_source_counts": {"dense": 100},
         "index_readiness": {
             "ready": True,
@@ -299,10 +299,17 @@ def test_retrieval_decision_requires_fulltext_execution_evidence() -> None:
     check = next(
         item for item in missing["checks"] if item["name"] == "fulltext_execution"
     )
+    bm25_check = next(
+        item for item in missing["checks"] if item["name"] == "bm25_execution"
+    )
     assert check["ok"] is False
+    assert bm25_check["ok"] is False
     assert missing["decision"] == "NO_GO"
 
     candidate["retrieval_source_counts"]["fulltext"] = 1
+    assert evaluate_retrieval_decision(candidate)["decision"] == "NO_GO"
+
+    candidate["retrieval_source_counts"]["bm25"] = 1
     assert evaluate_retrieval_decision(candidate)["decision"] == "GO"
 
 

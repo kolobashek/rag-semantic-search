@@ -507,6 +507,14 @@ def evaluate_retrieval_decision(
     profile = evaluation_profile if isinstance(evaluation_profile, dict) else {}
     source_counts_raw = candidate.get("retrieval_source_counts")
     source_counts = source_counts_raw if isinstance(source_counts_raw, dict) else {}
+    if profile.get("bm25_enabled") is True:
+        bm25_results_count = int(source_counts.get("bm25") or 0)
+        add(
+            "bm25_execution",
+            bm25_results_count > 0,
+            bm25_results_count,
+            ">0 evaluated results attributed to bm25",
+        )
     if profile.get("fulltext_enabled") is True:
         fulltext_results_count = int(source_counts.get("fulltext") or 0)
         add(
