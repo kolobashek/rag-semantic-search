@@ -407,6 +407,7 @@ class RAGIndexer:
         ocr_tesseract_cmd: str = "",
         ocr_poppler_bin: str = "",
         ocr_engine: str = "tesseract",
+        ocr_pdf_batch_pages: int = 8,
         qdrant_timeout_sec: int = 60,
         exclude_patterns: Optional[List[str]] = None,
         only_paths: Optional[set[str]] = None,
@@ -457,6 +458,7 @@ class RAGIndexer:
         self.ocr_tesseract_cmd = str(ocr_tesseract_cmd or "").strip()
         self.ocr_poppler_bin = str(ocr_poppler_bin or "").strip()
         self.ocr_engine = str(ocr_engine or "tesseract").strip().lower()
+        self.ocr_pdf_batch_pages = max(1, int(ocr_pdf_batch_pages or 8))
         self._use_rapid_ocr = self.ocr_engine == "rapidocr"
         if not self.ocr_tesseract_cmd or not self.ocr_poppler_bin:
             runtime = resolve_ocr_runtime(
@@ -909,6 +911,7 @@ class RAGIndexer:
                 poppler_bin=getattr(self, "ocr_poppler_bin", ""),
                 use_rapid=getattr(self, "_use_rapid_ocr", False),
                 raise_on_failure=True,
+                batch_pages=getattr(self, "ocr_pdf_batch_pages", 8),
             )
         except Exception as exc:
             try:
@@ -1954,6 +1957,7 @@ def main() -> None:
         ocr_tesseract_cmd=str(cfg.get("ocr_tesseract_cmd") or ""),
         ocr_poppler_bin=str(cfg.get("ocr_poppler_bin") or ""),
         ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
+        ocr_pdf_batch_pages=int(cfg.get("ocr_pdf_batch_pages", 8) or 8),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
         min_chunk_chars=int(cfg.get("index_min_chunk_chars", 120) or 120),
         fulltext_enabled=(

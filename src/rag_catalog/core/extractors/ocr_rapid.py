@@ -26,7 +26,7 @@ _rapid_engine: Optional[Any] = None
 _active_device: str = "CPU"
 
 # Limit concurrent OCR jobs to avoid overloading GPU/RAM.
-# pdf2image loads entire PDFs into memory; multiple parallel jobs can OOM the system.
+# PDF rendering is batched, but recognition still has substantial per-page memory use.
 _ocr_semaphore = threading.Semaphore(1)
 
 
@@ -186,45 +186,50 @@ def _ocr_image_rapid_impl(filepath: Path) -> str:
 
 # ───────────────────────── PDF OCR ──────────────────────────────────────────
 
-def ocr_pdf_rapid(filepath: Path, *, poppler_bin: str = "") -> str:
+def ocr_pdf_rapid(filepath: Path, *, poppler_bin: str = "", batch_pages: int = 8) -> str:
     """OCR сканированного PDF через pdf2image + RapidOCR."""
     with _ocr_semaphore:
-        return _ocr_pdf_rapid_impl(filepath, poppler_bin=poppler_bin)
+        return _ocr_pdf_rapid_impl(filepath, poppler_bin=poppler_bin, batch_pages=batch_pages)
 
 
-def _ocr_pdf_rapid_impl(filepath: Path, *, poppler_bin: str = "") -> str:
+def _ocr_pdf_rapid_impl(filepath: Path, *, poppler_bin: str = "", batch_pages: int = 8) -> str:
     try:
         import pdf2image.pdf2image as pdf2image_impl  # noqa: PLC0415  # type: ignore
-        from pdf2image import convert_from_path  # noqa: PLC0415  # type: ignore
     except ImportError as exc:
         logger.warning("pdf2image не установлен — OCR PDF недоступен")
         raise RuntimeError("pdf2image is unavailable for RapidOCR PDF") from exc
 
+    from rag_catalog.core.extractors.files import (  # noqa: PLC0415
+        _iter_pdf_pages,
+        _patch_pdf2image_popen_for_windows,
+    )
+
     # Скрываем консольное окно poppler на Windows
     try:
-        from rag_catalog.core.extractors.files import _patch_pdf2image_popen_for_windows  # noqa: PLC0415
         _patch_pdf2image_popen_for_windows(pdf2image_impl)
     except Exception:
         pass
 
+    parts: list[str] = []
     try:
-        convert_kwargs: dict[str, Any] = {"dpi": 200}
-        if str(poppler_bin or "").strip():
-            convert_kwargs["poppler_path"] = str(poppler_bin).strip()
-        pages = convert_from_path(str(filepath), **convert_kwargs)
+        for page_number, total_pages, page_img in _iter_pdf_pages(
+            filepath,
+            poppler_bin=poppler_bin,
+            batch_pages=batch_pages,
+        ):
+            arr = np.array(page_img.convert("RGB"))
+            text = _img_to_text(arr).strip()
+            if text:
+                parts.append(f"Страница: {page_number}\n{text}")
+            logger.info(
+                "RapidOCR PDF %s стр.%d/%d — %d симв.",
+                filepath.name,
+                page_number,
+                total_pages,
+                len(text),
+            )
     except Exception as exc:
         logger.warning("pdf2image не смог конвертировать %s: %s", filepath, exc)
         raise RuntimeError(f"RapidOCR PDF conversion failed for {filepath}: {exc}") from exc
-
-    parts: list[str] = []
-    for i, page_img in enumerate(pages):
-        arr = np.array(page_img.convert("RGB"))
-        text = _img_to_text(arr).strip()
-        if text:
-            parts.append(f"Страница: {i + 1}\n{text}")
-        logger.info(
-            "RapidOCR PDF %s стр.%d/%d — %d симв.",
-            filepath.name, i + 1, len(pages), len(text),
-        )
 
     return "\n\n".join(parts)

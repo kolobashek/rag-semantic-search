@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _XLSX_MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _TOOLS_ROOT = _PROJECT_ROOT / "tools"
+_DEFAULT_PDF_OCR_BATCH_PAGES = 8
 
 
 def _load_xlsx_workbook(filepath: Path, *, read_only: bool = True, data_only: bool = True) -> Any:
@@ -818,6 +819,38 @@ def _patch_pdf2image_popen_for_windows(pdf2image_module: Any) -> None:
     pdf2image_module._rag_hidden_popen_patched = True
 
 
+def _iter_pdf_pages(
+    filepath: Path,
+    *,
+    poppler_bin: str = "",
+    batch_pages: int = _DEFAULT_PDF_OCR_BATCH_PAGES,
+) -> Iterator[tuple[int, int, Any]]:
+    """Render PDF pages in bounded batches and yield page number, total, image."""
+    from pdf2image import convert_from_path, pdfinfo_from_path  # type: ignore
+
+    poppler_path = str(poppler_bin or "").strip()
+    info_kwargs: dict[str, Any] = {}
+    if poppler_path:
+        info_kwargs["poppler_path"] = poppler_path
+    page_count = int(pdfinfo_from_path(str(filepath), **info_kwargs).get("Pages") or 0)
+    if page_count <= 0:
+        return
+
+    pages_per_batch = max(1, int(batch_pages or _DEFAULT_PDF_OCR_BATCH_PAGES))
+    for first_page in range(1, page_count + 1, pages_per_batch):
+        last_page = min(page_count, first_page + pages_per_batch - 1)
+        convert_kwargs: dict[str, Any] = {
+            "dpi": 200,
+            "first_page": first_page,
+            "last_page": last_page,
+        }
+        if poppler_path:
+            convert_kwargs["poppler_path"] = poppler_path
+        images = convert_from_path(str(filepath), **convert_kwargs)
+        for offset, page_img in enumerate(images):
+            yield first_page + offset, page_count, page_img
+
+
 def ocr_pdf(
     filepath: Path,
     *,
@@ -825,6 +858,7 @@ def ocr_pdf(
     poppler_bin: str = "",
     use_rapid: bool = False,
     raise_on_failure: bool = False,
+    batch_pages: int = _DEFAULT_PDF_OCR_BATCH_PAGES,
 ) -> str:
     """OCR scanned PDF.
 
@@ -834,13 +868,12 @@ def ocr_pdf(
     if use_rapid:
         try:
             from rag_catalog.core.extractors.ocr_rapid import ocr_pdf_rapid  # noqa: PLC0415
-            return ocr_pdf_rapid(filepath, poppler_bin=poppler_bin)
+            return ocr_pdf_rapid(filepath, poppler_bin=poppler_bin, batch_pages=batch_pages)
         except Exception as exc:
             logger.warning("RapidOCR PDF не удался, fallback на Tesseract: %s", exc)
     try:
         import pdf2image.pdf2image as pdf2image_impl  # type: ignore
         import pytesseract  # type: ignore
-        from pdf2image import convert_from_path  # type: ignore
     except ImportError as exc:
         logger.warning(
             "pytesseract/pdf2image не установлены. "
@@ -853,20 +886,33 @@ def ocr_pdf(
     try:
         apply_tesseract_runtime(pytesseract, tesseract_cmd)
         _patch_pdf2image_popen_for_windows(pdf2image_impl)
-        convert_kwargs: dict[str, Any] = {"dpi": 200}
-        if str(poppler_bin or "").strip():
-            convert_kwargs["poppler_path"] = str(poppler_bin).strip()
-        pages = convert_from_path(str(filepath), **convert_kwargs)
         parts: list[str] = []
-        for i, page_img in enumerate(pages):
+        pages_processed = 0
+        for page_number, total_pages, page_img in _iter_pdf_pages(
+            filepath,
+            poppler_bin=poppler_bin,
+            batch_pages=batch_pages,
+        ):
+            pages_processed += 1
             text = pytesseract.image_to_string(page_img, lang="rus+eng")
             chars = len(text.strip())
             if text.strip():
-                parts.append(f"Страница: {i + 1}\n{text}")
-            logger.info("OCR страница %d/%d — %d симв. — %s", i + 1, len(pages), chars, filepath.name)
+                parts.append(f"Страница: {page_number}\n{text}")
+            logger.info(
+                "OCR страница %d/%d — %d симв. — %s",
+                page_number,
+                total_pages,
+                chars,
+                filepath.name,
+            )
         total_chars = sum(len(p) for p in parts)
         if parts:
-            logger.info("OCR завершён: %s — %d стр., %d симв.", filepath.name, len(pages), total_chars)
+            logger.info(
+                "OCR завершён: %s — %d стр., %d симв.",
+                filepath.name,
+                pages_processed,
+                total_chars,
+            )
         else:
             logger.warning("OCR не извлёк текст ни на одной странице: %s", filepath.name)
         return "\n".join(parts)

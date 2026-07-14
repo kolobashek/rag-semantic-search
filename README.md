@@ -163,6 +163,7 @@ tools/poppler/bin/*
 - `ocr_tesseract_cmd`
 - `ocr_poppler_bin`
 - `ocr_max_image_pages` — лимит кадров/страниц для OCR многостраничных изображений.
+- `ocr_pdf_batch_pages` — число PDF-страниц, одновременно рендерящихся для OCR (по умолчанию 8).
 
 Или через env:
 

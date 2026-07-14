@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from rag_catalog.core import ocr_runtime
+from rag_catalog.core.extractors.files import _iter_pdf_pages
 from rag_catalog.core.extractors.ocr_rapid import _ocr_pdf_rapid_impl
 
 
@@ -49,6 +50,7 @@ def test_apply_tesseract_runtime_sets_nested_attr() -> None:
 def test_rapidocr_pdf_conversion_failure_is_not_reported_as_empty(monkeypatch, tmp_path: Path) -> None:
     import pdf2image
 
+    monkeypatch.setattr(pdf2image, "pdfinfo_from_path", lambda *_args, **_kwargs: {"Pages": 1})
     monkeypatch.setattr(
         pdf2image,
         "convert_from_path",
@@ -57,3 +59,29 @@ def test_rapidocr_pdf_conversion_failure_is_not_reported_as_empty(monkeypatch, t
 
     with pytest.raises(RuntimeError, match="RapidOCR PDF conversion failed"):
         _ocr_pdf_rapid_impl(tmp_path / "broken.pdf")
+
+
+def test_iter_pdf_pages_renders_bounded_batches(monkeypatch, tmp_path: Path) -> None:
+    import pdf2image
+
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(pdf2image, "pdfinfo_from_path", lambda *_args, **_kwargs: {"Pages": 5})
+
+    def fake_convert(*_args, **kwargs):
+        first_page = int(kwargs["first_page"])
+        last_page = int(kwargs["last_page"])
+        calls.append((first_page, last_page))
+        return [types.SimpleNamespace(number=page) for page in range(first_page, last_page + 1)]
+
+    monkeypatch.setattr(pdf2image, "convert_from_path", fake_convert)
+
+    pages = list(_iter_pdf_pages(tmp_path / "five-pages.pdf", batch_pages=2))
+
+    assert calls == [(1, 2), (3, 4), (5, 5)]
+    assert [(number, total, image.number) for number, total, image in pages] == [
+        (1, 5, 1),
+        (2, 5, 2),
+        (3, 5, 3),
+        (4, 5, 4),
+        (5, 5, 5),
+    ]
