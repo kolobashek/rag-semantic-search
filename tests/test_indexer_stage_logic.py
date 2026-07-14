@@ -713,6 +713,77 @@ def test_zip_member_cleanup_removes_stale_archive_entries(tmp_path: Path) -> Non
     assert deleted == [Path(stale_key)]
 
 
+def test_lightweight_cleanup_preserves_members_of_existing_archives(tmp_path: Path) -> None:
+    archive = tmp_path / "docs.zip"
+    archive.write_bytes(b"archive")
+    missing_file = tmp_path / "missing.xlsx"
+    member_key = f"{archive}::folder/data.xlsx"
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.state_db.upsert_many(
+        [
+            {
+                "full_path": member_key,
+                "fingerprint": "archive-member",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 10,
+                "extension": ".xlsx",
+            },
+            {
+                "full_path": str(missing_file),
+                "fingerprint": "missing-file",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 10,
+                "extension": ".xlsx",
+            },
+        ]
+    )
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda path: deleted.append(path)
+
+    count = idx._cleanup_deleted_files(
+        [archive],
+        preserve_members_of_existing_archives=True,
+    )
+
+    assert count == 1
+    assert deleted == [missing_file]
+    assert idx.state_db.get_entry(member_key) is not None
+    assert idx.state_db.get_entry(str(missing_file)) is None
+
+
+def test_lightweight_cleanup_removes_members_of_deleted_archives(tmp_path: Path) -> None:
+    missing_archive = tmp_path / "deleted.zip"
+    member_key = f"{missing_archive}::folder/data.xlsx"
+    idx = RAGIndexer.__new__(RAGIndexer)
+    idx.state_db = IndexStateDB(str(tmp_path / "index_state.db"))
+    idx.state_db.upsert_many(
+        [
+            {
+                "full_path": member_key,
+                "fingerprint": "archive-member",
+                "mtime": 1.0,
+                "stage": "content",
+                "size_bytes": 10,
+                "extension": ".xlsx",
+            }
+        ]
+    )
+    deleted: list[Path] = []
+    idx._delete_file_vectors = lambda path: deleted.append(path)
+
+    count = idx._cleanup_deleted_files(
+        [],
+        preserve_members_of_existing_archives=True,
+    )
+
+    assert count == 1
+    assert deleted == [Path(member_key)]
+    assert idx.state_db.get_entry(member_key) is None
+
+
 def test_dry_run_reports_work_without_writing_points_or_state(tmp_path: Path) -> None:
     doc = tmp_path / "new.txt"
     doc.write_text("new content", encoding="utf-8")

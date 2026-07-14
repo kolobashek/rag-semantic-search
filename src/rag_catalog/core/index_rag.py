@@ -1505,10 +1505,44 @@ class RAGIndexer:
             report["ocr_results"] = {}
         return report
 
-    def _cleanup_deleted_files(self, existing_files: List[Path | str]) -> int:
-        """Удалить из state БД и Qdrant файлы, которых больше нет на диске."""
+    def _cleanup_deleted_files(
+        self,
+        existing_files: List[Path | str],
+        *,
+        preserve_members_of_existing_archives: bool = False,
+    ) -> int:
+        """Удалить из state БД и Qdrant файлы, которых больше нет на диске.
+
+        A lightweight cleanup inventory contains archive files but not their
+        logical ``archive::member`` entries. Preserve those entries while the
+        parent archive still exists; full metadata/content inventory passes
+        enumerate members and remove stale members precisely.
+        """
         existing_paths = {str(f) for f in existing_files}
         deleted_keys = self.state_db.list_deleted_candidates(existing_paths)
+        if preserve_members_of_existing_archives and deleted_keys:
+            archive_exists: Dict[str, bool] = {}
+            retained_archive_members = 0
+            filtered_keys: List[str] = []
+            for key in deleted_keys:
+                archive_path, separator, _member = str(key).partition("::")
+                if not separator:
+                    filtered_keys.append(key)
+                    continue
+                if archive_path not in archive_exists:
+                    archive_exists[archive_path] = Path(archive_path).is_file()
+                exists = archive_exists[archive_path]
+                if exists:
+                    retained_archive_members += 1
+                else:
+                    filtered_keys.append(key)
+            if retained_archive_members:
+                logger.info(
+                    "Cleanup сохраняет %d элементов существующих архивов; "
+                    "точная очистка элементов выполняется полным inventory",
+                    retained_archive_members,
+                )
+            deleted_keys = filtered_keys
         if not deleted_keys:
             return 0
         logger.info("Удаление %d удалённых файлов из индекса…", len(deleted_keys))
@@ -1957,7 +1991,10 @@ def main() -> None:
                 logger.info("--dry-run cleanup: удаление из индекса не выполняется.")
                 deleted = 0
             else:
-                deleted = indexer._cleanup_deleted_files(all_files)
+                deleted = indexer._cleanup_deleted_files(
+                    all_files,
+                    preserve_members_of_existing_archives=True,
+                )
             indexer._run_deleted_files += deleted
             run_totals["total_files"] = len(all_files)
             logger.info("Очистка завершена. Удалено из индекса: %d", deleted)
