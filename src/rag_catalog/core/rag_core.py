@@ -139,6 +139,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retrieval_bm25_enabled": True,
     "retrieval_bm25_top_k": 50,
     "retrieval_fulltext_enabled": True,
+    "retrieval_fulltext_fail_open": True,
     "retrieval_fulltext_top_k": 100,
     "retrieval_final_top_k": 10,
     "retrieval_relevance_gate_enabled": True,
