@@ -12,8 +12,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
-from rag_catalog.core.index_rag import _configure_forced_replacement
 from rag_catalog.core.extractors import ExtractedDocument, TextBlock, document_from_legacy_text
+from rag_catalog.core.index_rag import _configure_forced_replacement
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing import stage_runner
 from rag_catalog.core.indexing.stage_runner import (
