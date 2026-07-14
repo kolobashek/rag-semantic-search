@@ -133,7 +133,7 @@ def test_upsert_points_returns_written_count() -> None:
     points = [PointStruct(id="p1", vector=[0.1, 0.2], payload={"x": 1})]
 
     assert upsert_points(client, collection_name="catalog", points=points) == 1
-    assert client.upserted == [("catalog", 1, {"wait": False, "timeout": 60})]
+    assert client.upserted == [("catalog", 1, {"wait": True, "timeout": 60})]
 
 
 def test_upsert_points_passes_timeout_and_retries() -> None:
@@ -141,7 +141,7 @@ def test_upsert_points_passes_timeout_and_retries() -> None:
     points = [PointStruct(id="p1", vector=[0.1, 0.2], payload={"x": 1})]
 
     assert upsert_points(client, collection_name="catalog", points=points, timeout_sec=300, retries=1) == 1
-    assert client.upserted == [("catalog", 1, {"wait": False, "timeout": 300})]
+    assert client.upserted == [("catalog", 1, {"wait": True, "timeout": 300})]
 
 
 def test_upsert_points_splits_payload_limited_batch() -> None:

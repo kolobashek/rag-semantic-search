@@ -221,7 +221,7 @@ def upsert_points(
                     client.upsert(
                         collection_name,
                         points=prepared,
-                        wait=False,
+                        wait=True,
                         timeout=timeout,
                     )
                 except TypeError as type_error:
