@@ -134,6 +134,45 @@ def test_restart_bot_does_not_restart_other_services(monkeypatch) -> None:
     assert events == ["runtime", "stop_bot", "start_bot:on"]
 
 
+def test_restart_web_does_not_restart_other_services(monkeypatch) -> None:
+    events: list[str] = []
+    cfg = {"launcher_web_start_timeout_sec": 30}
+    monkeypatch.setattr(launcher, "_runtime_dir", lambda: events.append("runtime"))
+    monkeypatch.setattr(launcher, "load_config", lambda: events.append("config") or cfg)
+    monkeypatch.setattr(launcher, "_stop_web", lambda: events.append("stop_web") or "web=stopped")
+    monkeypatch.setattr(
+        launcher,
+        "_wait_port_closed",
+        lambda host, port: events.append(f"wait:{host}:{port}") or True,
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_start_web",
+        lambda active_cfg, host, port: events.append(f"start_web:{host}:{port}") or "web=started (pid=4242)",
+    )
+
+    result = launcher._restart_web(type("Args", (), {"host": "127.0.0.1", "port": 8080})())
+
+    assert result == 0
+    assert events == ["runtime", "config", "stop_web", "wait:127.0.0.1:8080", "start_web:127.0.0.1:8080"]
+
+
+def test_restart_web_refuses_to_start_on_occupied_port(monkeypatch) -> None:
+    monkeypatch.setattr(launcher, "_runtime_dir", lambda: None)
+    monkeypatch.setattr(launcher, "load_config", lambda: {})
+    monkeypatch.setattr(launcher, "_stop_web", lambda: "web=stopped")
+    monkeypatch.setattr(launcher, "_wait_port_closed", lambda _host, _port: False)
+    monkeypatch.setattr(
+        launcher,
+        "_start_web",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not start on an occupied port")),
+    )
+
+    result = launcher._restart_web(type("Args", (), {"host": "127.0.0.1", "port": 8080})())
+
+    assert result == 1
+
+
 def test_start_web_waits_longer_than_ten_seconds_under_load(monkeypatch, tmp_path: Path) -> None:
     cfg = {
         "telemetry_db_path": str(tmp_path / "shared" / "rag_telemetry.db"),

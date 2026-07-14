@@ -367,7 +367,9 @@ def _stop_web() -> str:
     payload = _read_pid_payload(web_pid_file)
     pid = int(payload.get("pid") or 0)
     if pid <= 0:
-        return "web=not-managed"
+        pid = _find_python_module_pid("rag_catalog.ui.nice_app")
+        if pid <= 0:
+            return "web=not-managed"
     stopped = _kill_pid(pid)
     _remove_pid(web_pid_file)
     return f"web={'stopped' if stopped else 'already-down'} (pid={pid})"
@@ -525,6 +527,19 @@ def _restart_bot(args: argparse.Namespace) -> int:
     return 1 if "failed-to-start" in result else 0
 
 
+def _restart_web(args: argparse.Namespace) -> int:
+    """Restart only NiceGUI without touching Telegram, Qdrant, or index workers."""
+    _runtime_dir()
+    cfg = load_config()
+    print(_stop_web())
+    if not _wait_port_closed(args.host, int(args.port)):
+        print(f"web=restart-failed (port still open: {args.host}:{int(args.port)})")
+        return 1
+    result = _start_web(cfg, args.host, int(args.port))
+    print(result)
+    return 1 if "not-ready" in result else 0
+
+
 def _redact_config(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: Dict[str, Any] = {}
@@ -645,6 +660,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_restart_bot = sub.add_parser("restart-bot", help="Restart only the Telegram bot")
     p_restart_bot.add_argument("--bot", choices=["auto", "on"], default="auto")
 
+    p_restart_web = sub.add_parser("restart-web", help="Restart only the NiceGUI web service")
+    p_restart_web.add_argument("--host", default="127.0.0.1")
+    p_restart_web.add_argument("--port", type=int, default=8080)
+
     p_support = sub.add_parser("support-bundle", help="Write a redacted support diagnostic zip")
     p_support.add_argument("--output", default="", help="Output zip path")
     p_support.add_argument("--host", default="127.0.0.1")
@@ -662,6 +681,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _restart(args)
     if args.cmd == "restart-bot":
         return _restart_bot(args)
+    if args.cmd == "restart-web":
+        return _restart_web(args)
     if args.cmd == "support-bundle":
         return _support_bundle(args)
     return 1

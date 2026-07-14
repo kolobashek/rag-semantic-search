@@ -40,6 +40,7 @@ python -m rag_catalog.cli.launcher start
 python -m rag_catalog.cli.launcher status
 python -m rag_catalog.cli.launcher stop
 python -m rag_catalog.cli.launcher restart
+python -m rag_catalog.cli.launcher restart-web
 python -m rag_catalog.cli.launcher restart-bot --bot on
 python -m rag_catalog.cli.launcher support-bundle --output runtime/support.zip
 ```
