@@ -743,6 +743,10 @@ def test_lightweight_cleanup_preserves_members_of_existing_archives(tmp_path: Pa
     deleted: list[Path] = []
     idx._delete_file_vectors = lambda path: deleted.append(path)
 
+    assert idx._deleted_file_candidates(
+        [archive],
+        preserve_members_of_existing_archives=True,
+    ) == [str(missing_file)]
     count = idx._cleanup_deleted_files(
         [archive],
         preserve_members_of_existing_archives=True,
@@ -774,6 +778,10 @@ def test_lightweight_cleanup_removes_members_of_deleted_archives(tmp_path: Path)
     deleted: list[Path] = []
     idx._delete_file_vectors = lambda path: deleted.append(path)
 
+    assert idx._deleted_file_candidates(
+        [],
+        preserve_members_of_existing_archives=True,
+    ) == [member_key]
     count = idx._cleanup_deleted_files(
         [],
         preserve_members_of_existing_archives=True,

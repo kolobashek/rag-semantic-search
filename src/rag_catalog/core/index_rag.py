@@ -1505,13 +1505,13 @@ class RAGIndexer:
             report["ocr_results"] = {}
         return report
 
-    def _cleanup_deleted_files(
+    def _deleted_file_candidates(
         self,
         existing_files: List[Path | str],
         *,
         preserve_members_of_existing_archives: bool = False,
-    ) -> int:
-        """Удалить из state БД и Qdrant файлы, которых больше нет на диске.
+    ) -> List[str]:
+        """Return state keys absent from the current filesystem inventory.
 
         A lightweight cleanup inventory contains archive files but not their
         logical ``archive::member`` entries. Preserve those entries while the
@@ -1543,6 +1543,19 @@ class RAGIndexer:
                     retained_archive_members,
                 )
             deleted_keys = filtered_keys
+        return deleted_keys
+
+    def _cleanup_deleted_files(
+        self,
+        existing_files: List[Path | str],
+        *,
+        preserve_members_of_existing_archives: bool = False,
+    ) -> int:
+        """Удалить из state БД и Qdrant файлы, которых больше нет на диске."""
+        deleted_keys = self._deleted_file_candidates(
+            existing_files,
+            preserve_members_of_existing_archives=preserve_members_of_existing_archives,
+        )
         if not deleted_keys:
             return 0
         logger.info("Удаление %d удалённых файлов из индекса…", len(deleted_keys))
@@ -1988,7 +2001,16 @@ def main() -> None:
             ]
             logger.info("Файлов на диске: %d", len(all_files))
             if args.dry_run:
-                logger.info("--dry-run cleanup: удаление из индекса не выполняется.")
+                candidates = indexer._deleted_file_candidates(
+                    all_files,
+                    preserve_members_of_existing_archives=True,
+                )
+                logger.info(
+                    "--dry-run cleanup: найдено %d кандидатов; удаление из индекса не выполняется.",
+                    len(candidates),
+                )
+                for candidate in candidates[:20]:
+                    logger.info("--dry-run cleanup candidate: %s", candidate)
                 deleted = 0
             else:
                 deleted = indexer._cleanup_deleted_files(
