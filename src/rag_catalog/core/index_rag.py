@@ -1162,6 +1162,7 @@ class RAGIndexer:
             if block and block.row_start is not None
             else self._extract_marker_int(chunk, r"Строка:\s*(\d+)")
         )
+        row_end = block.row_end if block and block.row_end is not None else row
         sheet = block.sheet if block and block.sheet else self._extract_marker_text(chunk, r"Лист:\s*([^\n\r]+)")
         slide = block.slide if block and block.slide is not None else None
         section = self._extract_section_title(chunk)
@@ -1174,7 +1175,7 @@ class RAGIndexer:
             "sheet": sheet,
             "slide": slide,
             "row_start": row,
-            "row_end": row,
+            "row_end": row_end,
             "provenance": {
                 "doc_id": doc_id,
                 "parent_id": parent_id,
@@ -1183,7 +1184,7 @@ class RAGIndexer:
                 "sheet": sheet,
                 "slide": slide,
                 "row_start": row,
-                "row_end": row,
+                "row_end": row_end,
             },
         }
 

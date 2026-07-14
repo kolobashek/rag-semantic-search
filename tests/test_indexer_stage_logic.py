@@ -230,6 +230,15 @@ def test_structured_chunking_coalesces_rows_and_drops_isolated_fragments(tmp_pat
     sheet_chunk = next(item for item in chunks if item["block"].sheet == "Лист1")
     assert sheet_chunk["block"].row_start == 1
     assert sheet_chunk["block"].row_end == 4
+    provenance = idx._chunk_provenance(
+        chunk=sheet_chunk["text"],
+        chunk_index=0,
+        doc_id="sheet-doc",
+        block=sheet_chunk["block"],
+    )
+    assert provenance["row_start"] == 1
+    assert provenance["row_end"] == 4
+    assert provenance["provenance"]["row_end"] == 4
 
 
 def test_short_whole_document_is_not_discarded(tmp_path: Path) -> None:
