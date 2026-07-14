@@ -417,7 +417,9 @@ def _stop_bot() -> str:
     payload = _read_pid_payload(bot_pid_file)
     pid = int(payload.get("pid") or 0)
     if pid <= 0:
-        return "bot=not-managed"
+        pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+        if pid <= 0:
+            return "bot=not-managed"
     stopped = _kill_pid(pid)
     _remove_pid(bot_pid_file)
     return f"bot={'stopped' if stopped else 'already-down'} (pid={pid})"
@@ -512,6 +514,15 @@ def _restart(args: argparse.Namespace) -> int:
     _stop(argparse.Namespace(with_qdrant=args.with_qdrant))
     _wait_port_closed(args.host, int(args.port))
     return _start(args)
+
+
+def _restart_bot(args: argparse.Namespace) -> int:
+    """Restart only Telegram without touching web, Qdrant, or index workers."""
+    _runtime_dir()
+    print(_stop_bot())
+    result = _start_bot(args.bot)
+    print(result)
+    return 1 if "failed-to-start" in result else 0
 
 
 def _redact_config(value: Any) -> Any:
@@ -631,6 +642,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_restart.add_argument("--bot", choices=["auto", "on", "off"], default="auto")
     p_restart.add_argument("--with-qdrant", action="store_true", help="Stop managed qdrant before restart")
 
+    p_restart_bot = sub.add_parser("restart-bot", help="Restart only the Telegram bot")
+    p_restart_bot.add_argument("--bot", choices=["auto", "on"], default="auto")
+
     p_support = sub.add_parser("support-bundle", help="Write a redacted support diagnostic zip")
     p_support.add_argument("--output", default="", help="Output zip path")
     p_support.add_argument("--host", default="127.0.0.1")
@@ -646,6 +660,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _status(args.host, int(args.port))
     if args.cmd == "restart":
         return _restart(args)
+    if args.cmd == "restart-bot":
+        return _restart_bot(args)
     if args.cmd == "support-bundle":
         return _support_bundle(args)
     return 1

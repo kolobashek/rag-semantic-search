@@ -102,6 +102,38 @@ def test_start_bot_reports_recent_log_error_on_failure(monkeypatch, tmp_path: Pa
     assert not launcher._pid_file(cfg, "bot").exists()
 
 
+def test_stop_bot_discovers_unmanaged_process(monkeypatch, tmp_path: Path) -> None:
+    cfg = {
+        "telemetry_db_path": str(tmp_path / "shared" / "rag_telemetry.db"),
+        "qdrant_db_path": str(tmp_path / "qdrant"),
+    }
+    killed: list[int] = []
+    monkeypatch.setattr(launcher, "load_config", lambda: cfg)
+    monkeypatch.setattr(launcher, "_find_python_module_pid", lambda _module: 4242)
+    monkeypatch.setattr(launcher, "_kill_pid", lambda pid: killed.append(pid) or True)
+
+    result = launcher._stop_bot()
+
+    assert result == "bot=stopped (pid=4242)"
+    assert killed == [4242]
+
+
+def test_restart_bot_does_not_restart_other_services(monkeypatch) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(launcher, "_runtime_dir", lambda: events.append("runtime"))
+    monkeypatch.setattr(launcher, "_stop_bot", lambda: events.append("stop_bot") or "bot=stopped")
+    monkeypatch.setattr(
+        launcher,
+        "_start_bot",
+        lambda mode: events.append(f"start_bot:{mode}") or "bot=started (pid=4242)",
+    )
+
+    result = launcher._restart_bot(type("Args", (), {"bot": "on"})())
+
+    assert result == 0
+    assert events == ["runtime", "stop_bot", "start_bot:on"]
+
+
 def test_start_web_waits_longer_than_ten_seconds_under_load(monkeypatch, tmp_path: Path) -> None:
     cfg = {
         "telemetry_db_path": str(tmp_path / "shared" / "rag_telemetry.db"),
