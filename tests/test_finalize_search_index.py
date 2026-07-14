@@ -7,9 +7,38 @@ from qdrant_client.models import Filter
 from rag_catalog.cli.finalize_search_index import (
     collection_readiness,
     finalize_collection,
+    index_runtime_profile,
     sample_payload_integrity,
     scan_payload_integrity,
 )
+
+
+def test_index_runtime_profile_resolves_index_embedding_fallbacks() -> None:
+    profile = index_runtime_profile(
+        {
+            "embedding_model": "intfloat/multilingual-e5-small",
+            "embedding_backend": "onnx",
+            "embedding_onnx_provider": "DmlExecutionProvider",
+            "embedding_onnx_file_name": "onnx/model.onnx",
+            "vector_size": 384,
+            "chunk_size": 500,
+            "chunk_overlap": 100,
+            "index_min_chunk_chars": 120,
+            "chunk_group_size": 4,
+        }
+    )
+
+    assert profile == {
+        "embedding_model": "intfloat/multilingual-e5-small",
+        "index_embedding_backend": "onnx",
+        "index_embedding_onnx_provider": "DmlExecutionProvider",
+        "index_embedding_onnx_file_name": "onnx/model.onnx",
+        "vector_size": 384,
+        "chunk_size": 500,
+        "chunk_overlap": 100,
+        "index_min_chunk_chars": 120,
+        "chunk_group_size": 4,
+    }
 
 
 def _info(*, points: int, indexed: int, schema: tuple[str, ...], status: str = "green", optimizer: str = "ok"):

@@ -30,6 +30,31 @@ logger = logging.getLogger(__name__)
 _REQUIRED_PAYLOAD_FIELDS = ("type", "text", "full_path", "doc_id", "payload_schema_version")
 
 
+def index_runtime_profile(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return the index-defining runtime values bound to readiness evidence."""
+    return {
+        "embedding_model": str(config.get("embedding_model") or ""),
+        "index_embedding_backend": str(
+            config.get("index_embedding_backend") or config.get("embedding_backend") or ""
+        ),
+        "index_embedding_onnx_provider": str(
+            config.get("index_embedding_onnx_provider")
+            or config.get("embedding_onnx_provider")
+            or ""
+        ),
+        "index_embedding_onnx_file_name": str(
+            config.get("index_embedding_onnx_file_name")
+            or config.get("embedding_onnx_file_name")
+            or ""
+        ),
+        "vector_size": int(config.get("vector_size") or 0),
+        "chunk_size": int(config.get("chunk_size") or 0),
+        "chunk_overlap": int(config.get("chunk_overlap") or 0),
+        "index_min_chunk_chars": int(config.get("index_min_chunk_chars") or 0),
+        "chunk_group_size": int(config.get("chunk_group_size") or 0),
+    }
+
+
 def _enum_text(value: Any) -> str:
     raw = getattr(value, "value", value)
     return str(raw or "").strip().lower()
@@ -490,6 +515,7 @@ def main(argv: list[str] | None = None) -> int:
         spreadsheet_sample_size=max(0, int(args.spreadsheet_sample_size)),
         spreadsheet_full_audit=bool(args.spreadsheet_full_audit),
     )
+    result["index_runtime_profile"] = index_runtime_profile(cfg)
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if str(args.output or "").strip():
         output = Path(str(args.output)).expanduser().resolve()

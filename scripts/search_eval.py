@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from rag_catalog.cli.finalize_search_index import collection_readiness
+from rag_catalog.cli.finalize_search_index import collection_readiness, index_runtime_profile
 from rag_catalog.cli.pilot_gate import source_fingerprint
 from rag_catalog.core.rag_core import RAGSearcher, apply_retrieval_preset, load_config
 from rag_catalog.core.search_eval import (
@@ -182,6 +182,7 @@ def _validate_index_readiness_evidence(
     evidence_path: str,
     collection_name: str,
     live_readiness: Dict[str, Any],
+    expected_index_profile: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Bind a full finalization artifact to the current live collection state."""
     reasons: List[str] = []
@@ -196,6 +197,8 @@ def _validate_index_readiness_evidence(
     payload = payload_integrity if isinstance(payload_integrity, dict) else {}
     spreadsheet_integrity = evidence.get("spreadsheet_integrity")
     spreadsheet = spreadsheet_integrity if isinstance(spreadsheet_integrity, dict) else {}
+    artifact_profile_raw = evidence.get("index_runtime_profile")
+    artifact_profile = artifact_profile_raw if isinstance(artifact_profile_raw, dict) else {}
 
     if evidence.get("ready") is not True:
         reasons.append("artifact_not_ready")
@@ -219,6 +222,12 @@ def _validate_index_readiness_evidence(
         reasons.append("spreadsheet_audit_not_full_scroll")
     if int(spreadsheet.get("sample_size") or 0) <= 0:
         reasons.append("spreadsheet_audit_empty")
+    if not artifact_profile:
+        reasons.append("index_runtime_profile_missing")
+    else:
+        for key, expected_value in sorted(expected_index_profile.items()):
+            if artifact_profile.get(key) != expected_value:
+                reasons.append(f"index_runtime_profile_mismatch:{key}")
     if reasons:
         raise ValueError("Index readiness evidence is invalid: " + ", ".join(reasons))
 
@@ -232,6 +241,7 @@ def _validate_index_readiness_evidence(
         "live_indexed_vectors_count": live_indexed,
         "payload_integrity": payload,
         "spreadsheet_integrity": spreadsheet,
+        "index_runtime_profile": artifact_profile,
     }
 
 
@@ -339,6 +349,7 @@ def main() -> int:
                 evidence_path=str(evidence_path),
                 collection_name=searcher.collection_name,
                 live_readiness=live_index_readiness,
+                expected_index_profile=index_runtime_profile(cfg),
             )
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             print(f"invalid index readiness evidence: {exc}", file=sys.stderr)

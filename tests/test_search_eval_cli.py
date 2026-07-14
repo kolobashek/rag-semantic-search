@@ -173,11 +173,16 @@ def test_evaluation_fingerprint_binds_sources_and_golden(tmp_path) -> None:
 
 
 def test_index_readiness_evidence_binds_full_audit_to_live_collection() -> None:
+    index_profile = {
+        "embedding_model": "intfloat/multilingual-e5-small",
+        "index_embedding_backend": "onnx",
+    }
     evidence = {
         "ready": True,
         "collection_name": "catalog_v2_e5",
         "points_count": 500_000,
         "indexed_vectors_count": 495_000,
+        "index_runtime_profile": index_profile,
         "payload_integrity": {"ok": True, "sample_size": 1_000},
         "spreadsheet_integrity": {
             "ok": True,
@@ -198,6 +203,7 @@ def test_index_readiness_evidence_binds_full_audit_to_live_collection() -> None:
         evidence_path="readiness.json",
         collection_name="catalog_v2_e5",
         live_readiness=live,
+        expected_index_profile=index_profile,
     )
 
     assert result["ok"] is True
@@ -206,11 +212,16 @@ def test_index_readiness_evidence_binds_full_audit_to_live_collection() -> None:
 
 
 def test_index_readiness_evidence_rejects_stale_or_partial_audit() -> None:
+    index_profile = {
+        "embedding_model": "intfloat/multilingual-e5-small",
+        "index_embedding_backend": "onnx",
+    }
     evidence = {
         "ready": True,
         "collection_name": "catalog_v2_e5",
         "points_count": 499_999,
         "indexed_vectors_count": 499_000,
+        "index_runtime_profile": index_profile,
         "payload_integrity": {"ok": True, "sample_size": 1_000},
         "spreadsheet_integrity": {
             "ok": True,
@@ -232,4 +243,43 @@ def test_index_readiness_evidence_rejects_stale_or_partial_audit() -> None:
             evidence_path="readiness.json",
             collection_name="catalog_v2_e5",
             live_readiness=live,
+            expected_index_profile=index_profile,
+        )
+
+
+def test_index_readiness_evidence_rejects_embedding_profile_mismatch() -> None:
+    evidence = {
+        "ready": True,
+        "collection_name": "catalog_v2_e5",
+        "points_count": 500_000,
+        "indexed_vectors_count": 500_000,
+        "payload_integrity": {"ok": True, "sample_size": 1_000},
+        "spreadsheet_integrity": {
+            "ok": True,
+            "scanned_all": True,
+            "sampling_strategy": "full_scroll",
+            "sample_size": 250_000,
+        },
+        "index_runtime_profile": {
+            "embedding_model": "intfloat/multilingual-e5-small",
+            "index_embedding_onnx_provider": "CPUExecutionProvider",
+        },
+    }
+    live = {
+        "ready": True,
+        "collection_name": "catalog_v2_e5",
+        "points_count": 500_000,
+        "indexed_vectors_count": 500_000,
+    }
+
+    with pytest.raises(ValueError, match="index_runtime_profile_mismatch:index_embedding_onnx_provider"):
+        _validate_index_readiness_evidence(
+            evidence,
+            evidence_path="readiness.json",
+            collection_name="catalog_v2_e5",
+            live_readiness=live,
+            expected_index_profile={
+                "embedding_model": "intfloat/multilingual-e5-small",
+                "index_embedding_onnx_provider": "DmlExecutionProvider",
+            },
         )
