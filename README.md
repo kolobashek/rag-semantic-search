@@ -327,7 +327,11 @@ Retrieval v3 evaluation accepts optional per-query `expected_paths`, `expected_c
 
 ```powershell
 python scripts/search_eval.py --golden eval/retrieval_v3_golden.json --limit 10 `
+  --config-set retrieval_preset=release_v2 `
   --config-set collection_name=catalog_shadow_v3 `
+  --require-profile retrieval_preset=release_v2 `
+  --require-profile retrieval_pipeline=v2 `
+  --require-profile collection_name=catalog_shadow_v3 `
   --baseline-report runtime/eval/legacy.json `
   --output runtime/eval/shadow-v3.json `
   --decision-output runtime/eval/shadow-v3-decision.json `

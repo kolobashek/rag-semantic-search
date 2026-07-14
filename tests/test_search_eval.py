@@ -224,6 +224,9 @@ def test_retrieval_decision_accepts_broad_ready_candidate() -> None:
             "relevance_gate_enabled": True,
             "min_dense_score": 0.78,
             "single_term_min_dense_score": 0.80,
+            "collection_name": "catalog_v2_e5",
+            "embedding_model": "intfloat/multilingual-e5-small",
+            "retrieval_pipeline": "v2",
         },
         "index_readiness": {
             "ready": True,
@@ -232,7 +235,39 @@ def test_retrieval_decision_accepts_broad_ready_candidate() -> None:
         },
     }
 
-    assert evaluate_retrieval_decision(candidate)["decision"] == "GO"
+    decision = evaluate_retrieval_decision(
+        candidate,
+        required_profile={
+            "collection_name": "catalog_v2_e5",
+            "embedding_model": "intfloat/multilingual-e5-small",
+            "retrieval_pipeline": "v2",
+        },
+    )
+
+    assert decision["decision"] == "GO"
+    assert decision["required_profile"]["collection_name"] == "catalog_v2_e5"
+
+    candidate["index_readiness"]["collection_name"] = "catalog"
+    mismatch = evaluate_retrieval_decision(candidate)
+    check = next(
+        item for item in mismatch["checks"] if item["name"] == "index_collection_match"
+    )
+    assert check["ok"] is False
+    assert mismatch["decision"] == "NO_GO"
+
+    candidate["index_readiness"]["collection_name"] = "catalog_v2_e5"
+    candidate["evaluation_profile"]["embedding_model"] = "legacy-model"
+    wrong_model = evaluate_retrieval_decision(
+        candidate,
+        required_profile={"embedding_model": "intfloat/multilingual-e5-small"},
+    )
+    model_check = next(
+        item
+        for item in wrong_model["checks"]
+        if item["name"] == "required_profile_embedding_model"
+    )
+    assert model_check["ok"] is False
+    assert wrong_model["decision"] == "NO_GO"
 
 
 def test_retrieval_decision_requires_complete_reranker_execution() -> None:
@@ -258,6 +293,7 @@ def test_retrieval_decision_requires_complete_reranker_execution() -> None:
             "min_dense_score": 0.78,
             "single_term_min_dense_score": 0.80,
             "reranker_enabled": True,
+            "collection_name": "catalog_v2_e5",
         },
         "index_readiness": {
             "ready": True,
@@ -304,6 +340,7 @@ def test_retrieval_decision_requires_sparse_channel_execution_evidence() -> None
             "single_term_min_dense_score": 0.80,
             "bm25_enabled": True,
             "fulltext_enabled": True,
+            "collection_name": "catalog_v2_e5",
         },
         "retrieval_source_counts": {"dense": 100},
         "index_readiness": {

@@ -65,18 +65,24 @@ def _parse_config_value(value: str) -> Any:
         return raw
 
 
-def _apply_config_overrides(config: Dict[str, Any], items: List[str]) -> Dict[str, Any]:
-    out = dict(config)
-    explicit_keys: set[str] = set()
+def _parse_named_values(items: List[str], *, option_name: str) -> Dict[str, Any]:
+    parsed: Dict[str, Any] = {}
     for item in items:
         if "=" not in str(item):
-            raise ValueError(f"Invalid --config-set value: {item!r}. Expected key=value.")
+            raise ValueError(f"Invalid {option_name} value: {item!r}. Expected key=value.")
         key, value = str(item).split("=", 1)
         clean_key = key.strip()
         if not clean_key:
-            raise ValueError(f"Invalid --config-set value: {item!r}. Empty key.")
-        out[clean_key] = _parse_config_value(value)
-        explicit_keys.add(clean_key)
+            raise ValueError(f"Invalid {option_name} value: {item!r}. Empty key.")
+        parsed[clean_key] = _parse_config_value(value)
+    return parsed
+
+
+def _apply_config_overrides(config: Dict[str, Any], items: List[str]) -> Dict[str, Any]:
+    out = dict(config)
+    parsed = _parse_named_values(items, option_name="--config-set")
+    out.update(parsed)
+    explicit_keys = set(parsed)
     if "retrieval_preset" in explicit_keys:
         return apply_retrieval_preset(out, explicit_keys)
     return out
@@ -182,10 +188,21 @@ def main() -> int:
         metavar="KEY=VALUE",
         help="Override config value for this eval run. Can be repeated.",
     )
+    parser.add_argument(
+        "--require-profile",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Require an exact resolved evaluation-profile value. Can be repeated.",
+    )
     args = parser.parse_args()
 
     cfg = _enforce_eval_runtime_contracts(
         _apply_config_overrides(load_config(), list(args.config_set or []))
+    )
+    required_profile = _parse_named_values(
+        list(args.require_profile or []),
+        option_name="--require-profile",
     )
     searcher = RAGSearcher(cfg)
     golden_path = Path(args.golden).expanduser().resolve()
@@ -290,6 +307,7 @@ def main() -> int:
         min_content_grounded_cases=max(0, int(args.min_content_grounded_cases)),
         min_categories=max(0, int(args.min_categories)),
         require_faithfulness=bool(args.require_faithfulness),
+        required_profile=required_profile,
     )
     report["retrieval_decision"] = decision
     text = json.dumps(report, ensure_ascii=False, indent=2)

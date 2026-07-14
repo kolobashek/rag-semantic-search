@@ -7,6 +7,7 @@ from scripts.search_eval import (
     _apply_config_overrides,
     _enforce_eval_runtime_contracts,
     _evaluation_fingerprints,
+    _parse_named_values,
 )
 
 
@@ -21,6 +22,20 @@ def test_config_override_applies_named_retrieval_preset() -> None:
 
     assert result["retrieval_pipeline"] == "v2"
     assert result["retrieval_bm25_enabled"] is True
+
+
+def test_required_profile_values_are_typed() -> None:
+    assert _parse_named_values(
+        ["collection_name=catalog_v2_e5", "vector_size=384", "fulltext_enabled=true"],
+        option_name="--require-profile",
+    ) == {
+        "collection_name": "catalog_v2_e5",
+        "vector_size": 384,
+        "fulltext_enabled": True,
+    }
+
+    with pytest.raises(ValueError, match="--require-profile"):
+        _parse_named_values(["missing-separator"], option_name="--require-profile")
 
 
 def test_reranker_eval_is_always_fail_closed() -> None:

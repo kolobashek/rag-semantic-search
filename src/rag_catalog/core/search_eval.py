@@ -431,6 +431,7 @@ def evaluate_retrieval_decision(
     min_content_grounded_cases: int = DEFAULT_MIN_CONTENT_GROUNDED_CASES,
     min_categories: int = DEFAULT_MIN_EVAL_CATEGORIES,
     require_faithfulness: bool = False,
+    required_profile: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Produce a deterministic GO/NO_GO gate for a shadow retrieval candidate."""
     checks: List[Dict[str, Any]] = []
@@ -511,6 +512,27 @@ def evaluate_retrieval_decision(
         profile or None,
         "non-empty resolved retrieval profile",
     )
+    profile_collection = str(profile.get("collection_name") or "")
+    readiness_collection = str(readiness.get("collection_name") or "")
+    add(
+        "index_collection_match",
+        bool(profile_collection)
+        and profile_collection == readiness_collection,
+        {
+            "evaluation_profile": profile_collection or None,
+            "index_readiness": readiness_collection or None,
+        },
+        "same non-empty collection name",
+    )
+    required_profile_values = dict(required_profile or {})
+    for key, expected_value in sorted(required_profile_values.items()):
+        actual_value = profile.get(key)
+        add(
+            f"required_profile_{key}",
+            actual_value == expected_value,
+            actual_value,
+            f"=={expected_value!r}",
+        )
     relevance_gate_enabled = profile.get("relevance_gate_enabled") is True
     add(
         "relevance_gate_enabled",
@@ -650,4 +672,5 @@ def evaluate_retrieval_decision(
             "evaluation_profile": profile or None,
             "evaluation_fingerprint": str(candidate.get("evaluation_fingerprint") or "") or None,
         },
+        "required_profile": required_profile_values,
     }
