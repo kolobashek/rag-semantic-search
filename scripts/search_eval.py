@@ -14,6 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from rag_catalog.cli.pilot_gate import source_fingerprint
 from rag_catalog.core.rag_core import RAGSearcher, apply_retrieval_preset, load_config
 from rag_catalog.core.search_eval import evaluate_retrieval_decision, evaluate_search, load_golden_queries
 
@@ -54,6 +55,42 @@ def _format_metric(value: Any) -> str:
     return "n/a" if value is None else f"{float(value):.3f}"
 
 
+def _apply_acl_evidence(
+    report: Dict[str, Any],
+    evidence: Dict[str, Any],
+    *,
+    evidence_path: str,
+    current_source_fingerprint: str,
+) -> Dict[str, Any]:
+    """Merge fresh authenticated search ACL evidence into retrieval metrics."""
+    if not evidence.get("ok"):
+        raise ValueError("ACL evidence artifact is not successful.")
+    artifact_fingerprint = str(evidence.get("source_fingerprint") or "")
+    if not current_source_fingerprint or artifact_fingerprint != current_source_fingerprint:
+        raise ValueError("ACL evidence source fingerprint does not match current sources.")
+    checked = int(evidence.get("acl_results_checked") or 0)
+    leakage_rate = float(evidence.get("acl_leakage_rate") or 0.0)
+    if checked <= 0:
+        raise ValueError("ACL evidence contains no checked forbidden search results.")
+    if not 0.0 <= leakage_rate <= 1.0:
+        raise ValueError("ACL evidence leakage rate must be between 0 and 1.")
+
+    existing_checked = int(report.get("acl_results_checked") or 0)
+    existing_rate = float(report.get("acl_leakage_rate") or 0.0)
+    total_checked = existing_checked + checked
+    total_leaks = existing_rate * existing_checked + leakage_rate * checked
+    merged = dict(report)
+    merged["acl_results_checked"] = total_checked
+    merged["acl_leakage_rate"] = total_leaks / max(1, total_checked)
+    merged["acl_evidence"] = {
+        "path": evidence_path,
+        "source_fingerprint": artifact_fingerprint,
+        "results_checked": checked,
+        "leakage_rate": leakage_rate,
+    }
+    return merged
+
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate search relevance on a golden query set.")
@@ -63,6 +100,11 @@ def main() -> int:
     parser.add_argument("--markdown-output", default="", help="Optional Markdown summary path.")
     parser.add_argument("--fail-under-recall", type=float, default=0.0, help="Exit 1 if mean Recall@k is lower.")
     parser.add_argument("--baseline-report", default="", help="Optional baseline JSON for candidate regression checks.")
+    parser.add_argument(
+        "--acl-evidence",
+        default="",
+        help="Fresh pilot UI smoke JSON containing authenticated search ACL evidence.",
+    )
     parser.add_argument("--decision-output", default="", help="Optional JSON path for the GO/NO_GO decision.")
     parser.add_argument("--enforce-decision-gate", action="store_true", help="Exit 1 when the retrieval decision is NO_GO.")
     parser.add_argument("--max-p95-ms", type=int, default=3000)
@@ -112,6 +154,21 @@ def main() -> int:
             print(f"[eval {current}/{len(golden)}] done: {elapsed_ms} ms", file=sys.stderr, flush=True)
 
     report = evaluate_search(golden, _search, limit=max(1, int(args.limit)))
+    if str(args.acl_evidence or "").strip():
+        evidence_path = Path(str(args.acl_evidence)).expanduser().resolve()
+        try:
+            evidence_value = json.loads(evidence_path.read_text(encoding="utf-8"))
+            if not isinstance(evidence_value, dict):
+                raise ValueError("ACL evidence must be a JSON object.")
+            report = _apply_acl_evidence(
+                report,
+                evidence_value,
+                evidence_path=str(evidence_path),
+                current_source_fingerprint=source_fingerprint(ROOT),
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"invalid ACL evidence: {exc}", file=sys.stderr)
+            return 2
     report["evaluation_profile"] = {
         "retrieval_preset": str(cfg.get("retrieval_preset") or "legacy"),
         "retrieval_pipeline": str(cfg.get("retrieval_pipeline") or "legacy"),

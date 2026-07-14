@@ -18,6 +18,7 @@ REQUIRED_UI_CHECKS = {
     "search_state_transition",
     "group_management",
     "acl_api_enforcement",
+    "search_acl_filtering",
     "audit_correlation_evidence",
 }
 REQUIRED_ROUTES = {"/search", "/explorer", "/jobs", "/index", "/stats", "/settings"}

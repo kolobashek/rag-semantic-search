@@ -351,6 +351,8 @@ python scripts/retrieval_review.py finalize runtime/eval/retrieval-v3-review.jso
 
 Локальный UI привязан к `127.0.0.1`, сохраняет каждое решение атомарно и держит предыдущую версию рядом в `.bak`. В нём можно отметить relevant/forbidden кандидатов, добавить отсутствующий путь или создать отдельный no-answer запрос. Для каждого элемента reviewer задаёт `status=reviewed`, `reviewed_by`, `reviewed_at` и либо `expected_paths`, либо `expect_no_answer=true`. Финализация по умолчанию требует минимум три no-answer и три forbidden/ACL cases. Retrieval GO также требует ненулевой `acl_results_checked`; нулевая утечка при отсутствии ACL ground truth больше не считается доказательством безопасности.
 
+Для автоматического gate передайте свежий authenticated smoke через `--acl-evidence runtime/pilot-ui-smoke/<run>/pilot-ui-smoke.json`. CLI отклонит неуспешный или устаревший артефакт с другим fingerprint исходников.
+
 ### Paid Pilot Release Gate
 
 Authenticated UI smoke поднимает отдельный временный contour, не создаёт пользователей в рабочей БД и проверяет login, сохранение search state, groups, ACL success/deny audit с correlation ID, все основные маршруты и responsive layout на 480/900/1280 px:

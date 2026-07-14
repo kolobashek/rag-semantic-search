@@ -1419,6 +1419,8 @@ def _filter_cloud_drive_search_results(
     cfg: Dict[str, Any],
     user: Dict[str, Any] | None,
     results: List[Dict[str, Any]],
+    *,
+    service: CloudDriveService | None = None,
 ) -> List[Dict[str, Any]]:
     if not results:
         return results
@@ -1433,17 +1435,17 @@ def _filter_cloud_drive_search_results(
             effective_user["group_ids"] = []
             effective_user["groups"] = []
     try:
-        service = _cd_cached_service(cfg)
+        effective_service = service or _cd_cached_service(cfg)
     except Exception:
-        service = None
-    if service is None:
+        effective_service = None
+    if effective_service is None:
         return [] if str(cfg.get("cloud_drive_db_path") or "").strip() else results
 
     filtered: List[Dict[str, Any]] = []
     is_admin = str(effective_user.get("role") or "").strip().lower() == "admin"
     resolved: List[tuple[Dict[str, Any], str, str]] = []
     for item in results:
-        node = _cd_registry_node_for_search_item(cfg, service, item)
+        node = _cd_registry_node_for_search_item(cfg, effective_service, item)
         if node is None:
             if is_admin:
                 filtered.append(item)
@@ -1455,7 +1457,7 @@ def _filter_cloud_drive_search_results(
 
     nodes = [(path.strip().strip("/"), file_id) for _item, path, file_id in resolved]
     try:
-        decisions = service.user_access_map(
+        decisions = effective_service.user_access_map(
             username=str(effective_user.get("username") or ""),
             role=str(effective_user.get("role") or ""),
             groups=[str(group_id) for group_id in (effective_user.get("group_ids") or [])],

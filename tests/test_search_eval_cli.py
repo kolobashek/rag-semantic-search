@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from scripts.search_eval import _apply_config_overrides
+import pytest
+
+from scripts.search_eval import _apply_acl_evidence, _apply_config_overrides
 
 
 def test_config_override_applies_named_retrieval_preset() -> None:
@@ -39,3 +41,39 @@ def test_config_override_does_not_reapply_existing_preset() -> None:
     assert result["retrieval_pipeline"] == "custom_pipeline"
     assert result["retrieval_bm25_enabled"] is False
     assert result["retrieval_bm25_top_k"] == 25
+
+
+def test_acl_evidence_is_merged_with_retrieval_forbidden_checks() -> None:
+    report = {"acl_results_checked": 3, "acl_leakage_rate": 1 / 3}
+    evidence = {
+        "ok": True,
+        "source_fingerprint": "current",
+        "acl_results_checked": 2,
+        "acl_leakage_rate": 0.0,
+    }
+
+    merged = _apply_acl_evidence(
+        report,
+        evidence,
+        evidence_path="acl.json",
+        current_source_fingerprint="current",
+    )
+
+    assert merged["acl_results_checked"] == 5
+    assert merged["acl_leakage_rate"] == pytest.approx(0.2)
+    assert merged["acl_evidence"]["results_checked"] == 2
+
+
+def test_acl_evidence_rejects_stale_source_fingerprint() -> None:
+    with pytest.raises(ValueError, match="fingerprint"):
+        _apply_acl_evidence(
+            {},
+            {
+                "ok": True,
+                "source_fingerprint": "stale",
+                "acl_results_checked": 2,
+                "acl_leakage_rate": 0.0,
+            },
+            evidence_path="acl.json",
+            current_source_fingerprint="current",
+        )

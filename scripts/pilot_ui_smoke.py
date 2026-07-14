@@ -24,6 +24,7 @@ from rag_catalog.cli.pilot_gate import source_fingerprint
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
+from rag_catalog.ui.helpers import _filter_cloud_drive_search_results
 
 SCREEN_ROUTES = ("search", "explorer", "jobs", "index", "stats", "settings")
 VIEWPORTS = ((480, 900), (900, 900), (1280, 900))
@@ -77,7 +78,7 @@ def _wait_http(url: str, *, timeout_sec: float = 30.0) -> float:
     raise RuntimeError(f"NiceGUI smoke contour не поднялся за {timeout_sec:.0f} с: {last_error}")
 
 
-def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, str]:
+def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, Any]:
     catalog = root / "catalog"
     state = root / "state"
     storage = root / "storage"
@@ -90,6 +91,11 @@ def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, str]:
     folder.mkdir(exist_ok=True)
     (folder / "Карточка предприятия.txt").write_text(
         "Карточка предприятия Smoke Test.", encoding="utf-8"
+    )
+    personal = catalog / "Users" / "pilot-smoke-user"
+    personal.mkdir(parents=True, exist_ok=True)
+    (personal / "Личный документ.txt").write_text(
+        "Личный документ Pilot Smoke User.", encoding="utf-8"
     )
 
     config = {
@@ -122,6 +128,12 @@ def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, str]:
 
     service = CloudDriveService.from_config(config)
     service.bootstrap_from_catalog(str(catalog), import_files=True)
+    service.grant_path_permission(
+        subject_type="user",
+        subject_id="pilot-smoke-user",
+        path="Users/pilot-smoke-user",
+        access_level="viewer",
+    )
     username = "pilot-smoke-admin"
     password = secrets.token_urlsafe(24)
     auth = UserAuthDB(config["users_db_path"])
@@ -150,6 +162,66 @@ def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, str]:
         "admin_token": auth.create_session(username=username),
         "user_token": auth.create_session(username="pilot-smoke-user"),
         "telemetry_db_path": str(config["telemetry_db_path"]),
+        "config": config,
+        "cloud_drive_service": service,
+        "catalog_path": str(catalog),
+    }
+
+
+def _search_acl_filter_evidence(contour_state: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the production search post-filter with allowed and denied nodes."""
+    cfg = dict(contour_state["config"])
+    service = contour_state["cloud_drive_service"]
+    catalog = Path(str(contour_state["catalog_path"]))
+    auth = UserAuthDB(str(cfg["users_db_path"]))
+    admin = auth.get_user(username="pilot-smoke-admin")
+    user = auth.get_user(username="pilot-smoke-user")
+    if admin is None or user is None:
+        raise RuntimeError("Не удалось загрузить пользователей для search ACL smoke.")
+
+    candidates = [
+        {"filename": "Договор поставки.txt", "full_path": str(catalog / "Договор поставки.txt")},
+        {
+            "filename": "Карточка предприятия.txt",
+            "full_path": str(catalog / "Документы" / "Карточка предприятия.txt"),
+        },
+        {
+            "filename": "Личный документ.txt",
+            "full_path": str(catalog / "Users" / "pilot-smoke-user" / "Личный документ.txt"),
+        },
+    ]
+    admin_visible = _filter_cloud_drive_search_results(
+        cfg,
+        admin,
+        [dict(item) for item in candidates],
+        service=service,
+    )
+    user_visible = _filter_cloud_drive_search_results(
+        cfg,
+        user,
+        [dict(item) for item in candidates],
+        service=service,
+    )
+    admin_names = {str(item.get("filename") or "") for item in admin_visible}
+    user_names = {str(item.get("filename") or "") for item in user_visible}
+    expected_admin = {str(item["filename"]) for item in candidates}
+    expected_user = {"Личный документ.txt"}
+    forbidden_user = expected_admin - expected_user
+    leaked = sorted(forbidden_user.intersection(user_names))
+    if admin_names != expected_admin:
+        raise RuntimeError(f"Admin search ACL smoke потерял результаты: {sorted(expected_admin - admin_names)}")
+    if user_names != expected_user:
+        raise RuntimeError(
+            "User search ACL smoke вернул неверный набор: "
+            f"expected={sorted(expected_user)}, actual={sorted(user_names)}"
+        )
+    return {
+        "acl_results_checked": len(forbidden_user),
+        "acl_leakage_count": len(leaked),
+        "acl_leakage_rate": len(leaked) / max(1, len(forbidden_user)),
+        "allowed_results_checked": len(expected_user),
+        "admin_results_checked": len(expected_admin),
+        "leaked_filenames": leaked,
     }
 
 
@@ -191,6 +263,23 @@ def _record_check(checks: list[dict[str, Any]], name: str, started: float, **det
             "details": details,
         }
     )
+
+
+def _remove_contour(path: Path) -> None:
+    """Remove the stopped Windows contour after SQLite releases its handles."""
+    import shutil
+
+    for _attempt in range(10):
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(0.25)
+            continue
+        if not path.exists():
+            return
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _click_only_visible(locator: Any, *, label: str) -> None:
@@ -430,6 +519,23 @@ def main(argv: list[str] | None = None) -> int:
                 current_source_fingerprint=source_fingerprint(ROOT),
             )
             report["server_startup_ms"] = startup_ms
+            acl_search_started = time.perf_counter()
+            acl_search_details = _search_acl_filter_evidence(contour_state)
+            report["checks"].append(
+                {
+                    "name": "search_acl_filtering",
+                    "ok": True,
+                    "duration_ms": round((time.perf_counter() - acl_search_started) * 1000, 1),
+                    "details": acl_search_details,
+                }
+            )
+            report.update(
+                {
+                    "acl_results_checked": acl_search_details["acl_results_checked"],
+                    "acl_leakage_count": acl_search_details["acl_leakage_count"],
+                    "acl_leakage_rate": acl_search_details["acl_leakage_rate"],
+                }
+            )
             acl_check = next(
                 check for check in report["checks"] if check.get("name") == "acl_api_enforcement"
             )
@@ -491,9 +597,11 @@ def main(argv: list[str] | None = None) -> int:
     report_path = output / "pilot-ui-smoke.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if not args.keep_contour:
-        import shutil
+        import gc
 
-        shutil.rmtree(contour, ignore_errors=True)
+        contour_state.clear()
+        gc.collect()
+        _remove_contour(contour)
     summary = {
         "ok": bool(report.get("ok")),
         "checks_passed": int(report.get("checks_passed") or 0),
