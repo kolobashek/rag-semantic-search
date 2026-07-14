@@ -382,11 +382,31 @@ def _ui_llm_expand_enabled(
     user_enabled: bool,
 ) -> bool:
     return bool(
-        cfg.get("llm_enabled")
-        and cfg.get("llm_search_expand_enabled")
+        _ui_llm_expand_configured(cfg)
         and available
         and user_enabled
     )
+
+
+def _ui_llm_expand_configured(cfg: Dict[str, Any]) -> bool:
+    return bool(cfg.get("llm_enabled") and cfg.get("llm_search_expand_enabled"))
+
+
+def _search_empty_hints(
+    query: str,
+    *,
+    content_only: bool,
+    title_only: bool,
+    file_type: str,
+) -> List[str]:
+    hints: List[str] = []
+    if content_only or title_only:
+        hints.append("Снимите фильтр «Только содержимое» или «Только название»")
+    if file_type and file_type != "Все":
+        hints.append(f"Попробуйте сбросить фильтр типа файла «{file_type}»")
+    if len(query.split()) > 4:
+        hints.append("Сократите запрос до ключевых слов")
+    return hints or ["Измените запрос или фильтры"]
 
 
 def _ui_quick_search_timeout_seconds(cfg: Dict[str, Any]) -> float:
@@ -1411,13 +1431,13 @@ def _build_page(initial_screen: str = "search") -> None:
                     value=state.query,
                     autocomplete=_search_suggestions(state),
                 ).props("borderless dense clearable input-class=text-base").classes("flex-1")
-                ai_expand_checkbox = ui.checkbox("AI", value=bool(state.ai_search_expand)).props("dense").classes("rag-ai-expand")
+                ai_expand_configured = _ui_llm_expand_configured(state.cfg)
+                ai_expand_checkbox = ui.checkbox(
+                    "AI",
+                    value=bool(ai_expand_configured and state.ai_search_expand),
+                ).props("dense").classes("rag-ai-expand")
                 ai_expand_checkbox.tooltip("AI-дополнение запроса")
-                if not _ui_llm_expand_enabled(
-                    state.cfg,
-                    available=True,
-                    user_enabled=True,
-                ):
+                if not ai_expand_configured:
                     ai_expand_checkbox.disable()
 
                 def update_ai_expand(event: events.ValueChangeEventArguments) -> None:
@@ -2395,14 +2415,12 @@ def _build_page(initial_screen: str = "search") -> None:
                 ui.icon("search_off", size="40px").classes("text-slate-300 dark:text-slate-600")
                 ui.label("Совпадений не найдено.").classes("text-lg font-semibold text-slate-500")
                 q = state.searched_query or ""
-                hints: List[str] = []
-                if state.content_only or state.title_only:
-                    hints.append("Снимите фильтр «Только содержимое» или «Только название»")
-                if state.file_type and state.file_type != "Все":
-                    hints.append(f"Попробуйте сбросить фильтр типа файла «{state.file_type}»")
-                if len(q.split()) > 4:
-                    hints.append("Сократите запрос до ключевых слов")
-                hints.append("Проверьте, что индекс создан и Qdrant доступен в настройках")
+                hints = _search_empty_hints(
+                    q,
+                    content_only=state.content_only,
+                    title_only=state.title_only,
+                    file_type=state.file_type,
+                )
                 with ui.column().classes("gap-1 items-center"):
                     for hint in hints:
                         ui.label(f"• {hint}").classes("rag-meta text-sm")

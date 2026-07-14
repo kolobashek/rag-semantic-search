@@ -113,6 +113,10 @@ def test_implicit_cloud_result_use_stays_neutral(monkeypatch) -> None:
 
 
 def test_ui_query_expansion_requires_global_feature_flag() -> None:
+    assert not nice_app._ui_llm_expand_configured({"llm_enabled": True})
+    assert nice_app._ui_llm_expand_configured(
+        {"llm_enabled": True, "llm_search_expand_enabled": True}
+    )
     assert not nice_app._ui_llm_expand_enabled(
         {"llm_enabled": True},
         available=True,
@@ -128,3 +132,25 @@ def test_ui_query_expansion_requires_global_feature_flag() -> None:
         available=True,
         user_enabled=True,
     )
+
+
+def test_search_empty_hints_do_not_report_healthy_index_as_broken() -> None:
+    assert nice_app._search_empty_hints(
+        "несуществующий документ",
+        content_only=False,
+        title_only=False,
+        file_type="Все",
+    ) == ["Измените запрос или фильтры"]
+
+    hints = nice_app._search_empty_hints(
+        "очень длинный запрос из многих ключевых слов",
+        content_only=True,
+        title_only=False,
+        file_type="PDF",
+    )
+    assert hints == [
+        "Снимите фильтр «Только содержимое» или «Только название»",
+        "Попробуйте сбросить фильтр типа файла «PDF»",
+        "Сократите запрос до ключевых слов",
+    ]
+    assert all("Qdrant" not in hint for hint in hints)
