@@ -493,7 +493,9 @@ def _build_page(initial_screen: str = "search") -> None:
         with ui.element("div").classes("rag-hdr-grid"):
             # ── Left: brand ──────────────────────────────────
             with ui.element("div").classes("rag-hdr-brand"):
-                menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props("flat round dense").classes("rag-header-button rag-mobile-menu-button")
+                menu_button = ui.button(icon="menu", on_click=lambda: drawer.toggle(), color=None).props(
+                    "flat round dense aria-label='Открыть меню'"
+                ).classes("rag-header-button rag-mobile-menu-button")
                 if LOGO_PATH.exists():
                     ui.image("/rag-logo.png").classes("w-7 h-7 rounded")
                 else:
@@ -515,13 +517,13 @@ def _build_page(initial_screen: str = "search") -> None:
                     icon="settings",
                     on_click=lambda: open_context_settings(),
                     color=None,
-                ).props("flat round dense").classes("rag-header-button")
+                ).props("flat round dense aria-label='Открыть настройки'").classes("rag-header-button")
                 settings_button.tooltip("Настройки")
                 theme_button = ui.button(
                     icon="light_mode" if state.theme == "dark" else "dark_mode",
                     on_click=lambda: toggle_theme(),
                     color=None,
-                ).props("flat round dense").classes("rag-header-button")
+                ).props("flat round dense aria-label='Сменить цветовую тему'").classes("rag-header-button")
                 theme_button.tooltip("Сменить тему")
                 header_title = ui.label("").classes("hidden")
                 header_user_label = ui.label("").classes("rag-avatar hidden lg:grid")
@@ -1430,7 +1432,10 @@ def _build_page(initial_screen: str = "search") -> None:
                     placeholder="Введите название, номер, контрагента или фразу из документа",
                     value=state.query,
                     autocomplete=_search_suggestions(state),
-                ).props("borderless dense clearable input-class=text-base").classes("flex-1")
+                ).props(
+                    "borderless dense clearable input-class=text-base "
+                    "aria-label='Поиск по каталогу документов'"
+                ).classes("flex-1")
                 ai_expand_configured = _ui_llm_expand_configured(state.cfg)
                 ai_expand_checkbox = ui.checkbox(
                     "AI",
@@ -1452,12 +1457,16 @@ def _build_page(initial_screen: str = "search") -> None:
 
                 ai_expand_checkbox.on_value_change(update_ai_expand)
 
-                ui.button(icon="help_outline", on_click=help_dlg.open, color=None).props("flat round dense").tooltip("Синтаксис поиска")
+                ui.button(icon="help_outline", on_click=help_dlg.open, color=None).props(
+                    "flat round dense aria-label='Открыть справку по поиску'"
+                ).tooltip("Синтаксис поиска")
 
                 def submit_click() -> None:
                     schedule_search(str(search_input.value or ""))
 
-                ui.button(icon="search", on_click=submit_click, color="primary").props("unelevated round").tooltip("Поиск (Ctrl+K для фокуса)")
+                ui.button(icon="search", on_click=submit_click, color="primary").props(
+                    "unelevated round aria-label='Найти документы'"
+                ).tooltip("Поиск (Ctrl+K для фокуса)")
 
             def handle_input(_: events.GenericEventArguments | None = None) -> None:
                 state.query = str(search_input.value or "")
@@ -2289,6 +2298,16 @@ def _build_page(initial_screen: str = "search") -> None:
             pass  # don't break search if registry lookup fails
 
     def render_search_screen() -> None:
+        if not state.searched_query:
+            with ui.column().classes("rag-search-intro w-full items-center gap-2"):
+                with ui.row().classes("rag-search-eyebrow items-center gap-2"):
+                    ui.element("span").classes("rag-ticker-dot")
+                    ui.label("Семантический поиск по рабочим документам")
+                ui.label("Нужный документ — в одном запросе").classes("rag-search-title")
+                ui.label(
+                    "Ищите по названию, содержимому, реквизитам или смыслу — "
+                    "каталог поймёт формулировку и покажет самые точные совпадения."
+                ).classes("rag-search-lead")
         render_search_header()
         if state.search_error:
             ui.label(state.search_error).classes("text-red-700 rag-card p-4")

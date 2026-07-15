@@ -136,6 +136,29 @@ def test_search_header_animation_avoids_vertical_jump() -> None:
     assert "rag-search-rise" not in source
 
 
+def test_semantic_workspace_design_has_accessible_search_contract() -> None:
+    css_source = inspect.getsource(css._install_css)
+    page_source = inspect.getsource(nice_app._build_page)
+
+    for token in (
+        "DESIGN SYSTEM v3",
+        ".rag-search-intro",
+        ".rag-search-title",
+        "prefers-reduced-motion: reduce",
+        ":focus-visible",
+    ):
+        assert token in css_source
+
+    for token in (
+        "Нужный документ — в одном запросе",
+        "aria-label='Поиск по каталогу документов'",
+        "aria-label='Открыть настройки'",
+        "aria-label='Сменить цветовую тему'",
+        "aria-label='Найти документы'",
+    ):
+        assert token in page_source
+
+
 def test_ollama_endpoint_probe_is_fast_and_tolerant(monkeypatch) -> None:
     calls = []
 
