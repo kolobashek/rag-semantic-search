@@ -32,6 +32,18 @@ from rag_catalog.core.search_eval import (
 _EVALUATION_PROTOCOL_VERSION = "search-eval-v2"
 
 
+def _print_console_safe(text: str, *, stream: Any = None) -> None:
+    """Print without letting a legacy Windows code page fail the eval run."""
+    output = stream if stream is not None else sys.stdout
+    encoding = str(getattr(output, "encoding", None) or "utf-8")
+    try:
+        str(text).encode(encoding)
+        safe_text = str(text)
+    except (LookupError, UnicodeEncodeError):
+        safe_text = str(text).encode(encoding, errors="backslashreplace").decode(encoding)
+    print(safe_text, file=output)
+
+
 def _evaluation_fingerprints(golden_path: Path, *, source: str, limit: int) -> Dict[str, Any]:
     golden_fingerprint = hashlib.sha256(golden_path.read_bytes()).hexdigest()
     protocol = {
@@ -507,7 +519,7 @@ def main() -> int:
         decision_path = Path(args.decision_output)
         decision_path.parent.mkdir(parents=True, exist_ok=True)
         decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(text)
+    _print_console_safe(text)
     if float(report["recall_at_k"]) < float(args.fail_under_recall):
         return 1
     if args.enforce_decision_gate and not decision["ok"]:

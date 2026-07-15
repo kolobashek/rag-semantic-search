@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+
 import pytest
 
 from scripts.search_eval import (
@@ -9,6 +11,7 @@ from scripts.search_eval import (
     _enforce_eval_runtime_contracts,
     _evaluation_fingerprints,
     _parse_named_values,
+    _print_console_safe,
     _validate_index_readiness_evidence,
 )
 
@@ -33,6 +36,16 @@ def test_evaluation_profile_records_query_and_index_embedding_runtime() -> None:
     assert profile["index_embedding_onnx_provider"] == "DmlExecutionProvider"
     assert profile["index_embedding_onnx_file_name"] == "onnx/model.onnx"
     assert profile["collection_name"] == "catalog_v2_e5"
+
+
+def test_console_output_does_not_fail_on_legacy_windows_encoding() -> None:
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="cp1251")
+
+    _print_console_safe("Цена: £100", stream=stream)
+    stream.flush()
+
+    assert buffer.getvalue().decode("cp1251").splitlines() == [r"Цена: \xa3100"]
 
 
 def test_evaluation_profile_inherits_index_runtime_from_query_runtime() -> None:
