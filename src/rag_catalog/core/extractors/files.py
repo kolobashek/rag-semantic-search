@@ -450,7 +450,10 @@ def _spreadsheet_row_text(row: Any) -> str:
         value = str(cell).strip()
         if value:
             values.append(value)
-    return " | ".join(values)
+    text = " | ".join(values)
+    if text and not re.sub(r"[\W_]+", "", text, flags=re.UNICODE):
+        return ""
+    return text
 
 
 def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:

@@ -199,3 +199,17 @@ def test_extract_xlsx_document_skips_formula_rows_without_cached_values(tmp_path
     doc = extract_xlsx_document(path)
 
     assert [block.text for block in doc.blocks] == ["Артикул | Количество"]
+
+
+def test_extract_xlsx_document_skips_separator_only_rows(tmp_path: Path) -> None:
+    path = tmp_path / "separator-only.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Данные"
+    sheet.append(["---------------------", "---------", "_"])
+    sheet.append(["Артикул", "Количество", 5])
+    workbook.save(path)
+
+    doc = extract_xlsx_document(path)
+
+    assert [block.text for block in doc.blocks] == ["Артикул | Количество | 5"]
