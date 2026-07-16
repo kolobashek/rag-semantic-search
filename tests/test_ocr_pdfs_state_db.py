@@ -341,7 +341,12 @@ def test_ocr_main_passes_only_candidate_paths_to_indexer(monkeypatch, tmp_path: 
     monkeypatch.setattr(ocr_pdfs, "load_config", lambda: cfg)
     monkeypatch.setattr(ocr_pdfs, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(ocr_pdfs.subprocess, "run", fake_run)
-    monkeypatch.setattr(ocr_pdfs.sys, "argv", ["ocr_pdfs.py"])
+    monkeypatch.setattr(ocr_pdfs, "_require_gpu_ocr_runtime", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        ocr_pdfs.sys,
+        "argv",
+        ["ocr_pdfs.py", "--ocr-engine", "rapidocr", "--require-gpu"],
+    )
 
     assert ocr_pdfs.main() == 0
 
@@ -350,6 +355,7 @@ def test_ocr_main_passes_only_candidate_paths_to_indexer(monkeypatch, tmp_path: 
     candidates_path = Path(cmd[cmd.index("--only-paths-file") + 1])
     assert candidates_path.read_text(encoding="utf-8").splitlines() == [candidate]
     assert "--force-ocr" in cmd
+    assert "--no-ocr-fallback" in cmd
     assert "--force-replace-for" in cmd
     assert ".pdf" in cmd[cmd.index("--force-replace-for") + 1]
     assert db.get_entry(candidate) is not None

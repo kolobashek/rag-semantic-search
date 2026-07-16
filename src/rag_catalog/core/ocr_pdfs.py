@@ -662,6 +662,8 @@ def main() -> int:
     ]
     if str(args.ocr_engine or "tesseract").strip().lower() == "rapidocr":
         cmd += ["--ocr-engine", "rapidocr"]
+    if args.require_gpu:
+        cmd += ["--no-ocr-fallback"]
 
     logger.info("")
     logger.info("=" * 60)

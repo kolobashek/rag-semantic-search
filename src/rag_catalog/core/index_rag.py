@@ -1838,6 +1838,12 @@ def main() -> None:
         help="Принудительно выполнять OCR, даже если в config включён index_skip_ocr.",
     )
     parser.add_argument(
+        "--no-ocr-fallback",
+        action="store_true",
+        dest="no_ocr_fallback",
+        help="Не переходить с RapidOCR на Tesseract при ошибке GPU OCR.",
+    )
+    parser.add_argument(
         "--max-chunks",
         type=int,
         default=int(cfg.get("index_max_chunks", 5)),
@@ -1999,7 +2005,9 @@ def main() -> None:
         ocr_poppler_bin=str(cfg.get("ocr_poppler_bin") or ""),
         ocr_engine=str(getattr(args, "ocr_engine", None) or cfg.get("ocr_engine") or "tesseract"),
         ocr_pdf_batch_pages=int(cfg.get("ocr_pdf_batch_pages", 8) or 8),
-        ocr_rapid_fallback_enabled=bool(cfg.get("ocr_rapid_fallback_enabled", True)),
+        ocr_rapid_fallback_enabled=(
+            False if args.no_ocr_fallback else bool(cfg.get("ocr_rapid_fallback_enabled", True))
+        ),
         qdrant_timeout_sec=int(cfg.get("qdrant_timeout_sec", 60) or 60),
         min_chunk_chars=int(cfg.get("index_min_chunk_chars", 120) or 120),
         fulltext_enabled=(
