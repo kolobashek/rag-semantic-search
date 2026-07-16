@@ -1077,6 +1077,8 @@ class RAGIndexer:
             )
             for chunk in self._chunk_text(combined):
                 clean = str(chunk or "").strip()
+                if clean and not re.sub(r"[\W_]+", "", clean, flags=re.UNICODE):
+                    continue
                 if len(clean) < min_chunk_chars and not allow_short_document:
                     continue
                 items.append({"text": clean, "block": merged_block})

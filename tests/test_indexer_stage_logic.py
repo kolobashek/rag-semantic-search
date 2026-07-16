@@ -294,6 +294,19 @@ def test_short_whole_document_is_not_discarded(tmp_path: Path) -> None:
     assert [item["text"] for item in chunks] == ["Краткая записка"]
 
 
+def test_structured_chunking_drops_separator_only_split_fragments(tmp_path: Path) -> None:
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.min_chunk_chars = 120
+    useful = "Содержательный фрагмент таблицы " * 8
+    idx._chunk_text = lambda _text: [useful, "-" * 160]
+
+    chunks = idx._chunk_text_with_provenance(
+        ExtractedDocument(blocks=(TextBlock(text=useful + "\n" + "-" * 160, sheet="Лист1"),))
+    )
+
+    assert [item["text"] for item in chunks] == [useful.strip()]
+
+
 def test_small_stage_file_without_content_is_marked_empty_for_retry(tmp_path: Path) -> None:
     p = tmp_path / "a.docx"
     p.write_text("dummy", encoding="utf-8")
