@@ -289,6 +289,14 @@ def _resolve_soffice() -> str:
     )
 
 
+def _libreoffice_environment() -> dict[str, str]:
+    """Keep headless document conversion away from desktop printer dialogs."""
+    env = os.environ.copy()
+    env["SAL_DISABLE_PRINTERLIST"] = "1"
+    env.setdefault("SAL_USE_VCLPLUGIN", "svp")
+    return env
+
+
 _DOC_TEXT_RUN_RE = re.compile(
     r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\s,.;:!?()\[\]{}№\"'«»%+\-_/\\]{5,}"
 )
@@ -394,9 +402,12 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
                         soffice,
                         f"-env:UserInstallation={profile_uri}",
                         "--headless",
+                        "--invisible",
                         "--nologo",
                         "--nodefault",
                         "--nofirststartwizard",
+                        "--norestore",
+                        "--nolockcheck",
                         "--convert-to",
                         "txt:Text",
                         "--outdir",
@@ -408,6 +419,7 @@ def extract_doc(filepath: Path, *, max_chars: int = 0) -> str:
                     timeout=40,
                     encoding="utf-8",
                     errors="replace",
+                    env=_libreoffice_environment(),
                     **_windows_hidden_popen_kwargs(),
                 )
                 out_path = temp_root / (filepath.stem + ".txt")

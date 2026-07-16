@@ -130,14 +130,16 @@ def test_extract_doc_uses_isolated_libreoffice_profile(tmp_path: Path, monkeypat
     soffice = tmp_path / "soffice.exe"
     soffice.write_bytes(b"fake")
     captured_args: list[str] = []
+    captured_env: dict[str, str] = {}
     local_source_was_used = False
 
     monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_antiword", lambda: "")
     monkeypatch.setattr("rag_catalog.core.extractors.files._resolve_soffice", lambda: str(soffice))
 
-    def _run(args, **_kwargs):
+    def _run(args, **kwargs):
         nonlocal local_source_was_used
         captured_args.extend(str(item) for item in args)
+        captured_env.update(kwargs["env"])
         local_source = Path(args[-1])
         local_source_was_used = local_source.parent != path.parent and local_source.read_bytes() == b"dummy"
         out_dir = Path(args[args.index("--outdir") + 1])
@@ -148,6 +150,9 @@ def test_extract_doc_uses_isolated_libreoffice_profile(tmp_path: Path, monkeypat
 
     assert extract_doc(path) == "converted text"
     assert any(arg.startswith("-env:UserInstallation=file:") for arg in captured_args)
+    assert {"--headless", "--invisible", "--norestore", "--nolockcheck"}.issubset(captured_args)
+    assert captured_env["SAL_DISABLE_PRINTERLIST"] == "1"
+    assert captured_env["SAL_USE_VCLPLUGIN"] == "svp"
     assert local_source_was_used
 
 
