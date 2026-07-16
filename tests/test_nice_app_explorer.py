@@ -402,6 +402,8 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
     partial_pdf = catalog / "partial.pdf"
     pending_pdf = catalog / "pending.pdf"
     error_pdf = catalog / "error.pdf"
+    stale_pdf = catalog / "stale.pdf"
+    removed_pdf = catalog / "removed.pdf"
     state_db.upsert_many(
         [
             {
@@ -444,6 +446,16 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
                 "size_bytes": 10,
                 "extension": ".pdf",
             },
+            {
+                "full_path": str(stale_pdf),
+                "fingerprint": "5",
+                "mtime": 2.0,
+                "stage": "metadata",
+                "indexed_stage": "metadata",
+                "status": "ok",
+                "size_bytes": 10,
+                "extension": ".pdf",
+            },
         ]
     )
     db_path = tmp_path / "telemetry.db"
@@ -480,6 +492,26 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
         fallback_used=True,
         duration_ms=1_000,
     )
+    db.save_ocr_file_result(
+        str(stale_pdf),
+        1.0,
+        text="obsolete text",
+        pages=5,
+        chars=13,
+        status="ok",
+        engine="rapidocr",
+        duration_ms=50_000,
+    )
+    db.save_ocr_file_result(
+        str(removed_pdf),
+        1.0,
+        text="removed text",
+        pages=7,
+        chars=12,
+        status="ok",
+        engine="rapidocr",
+        duration_ms=70_000,
+    )
 
     telemetry = _read_index_telemetry(
         {
@@ -490,10 +522,10 @@ def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
     )
 
     inventory = telemetry["ocr_inventory"]
-    assert inventory["eligible_total"] == 4
+    assert inventory["eligible_total"] == 5
     assert inventory["recognized_files"] == 2
     assert inventory["partial_files"] == 1
-    assert inventory["pending_candidates"] == 1
+    assert inventory["pending_candidates"] == 2
     assert inventory["error_files"] == 1
     assert inventory["recognized_pages"] == 3
     assert inventory["recognized_lines"] == 3

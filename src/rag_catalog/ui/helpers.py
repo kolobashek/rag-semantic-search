@@ -1814,7 +1814,7 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     """
-                    SELECT full_path, extension, size_bytes, stage, status, indexed_stage
+                    SELECT full_path, extension, size_bytes, mtime, stage, status, indexed_stage
                     FROM state_entries
                     WHERE lower(extension) IN (?,?,?,?,?,?,?,?,?)
                     """,
@@ -1831,6 +1831,7 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 state_rows[path] = {
                     "extension": ext,
                     "size_bytes": int(row["size_bytes"] or 0),
+                    "mtime": float(row["mtime"] or 0.0),
                     "stage": stage,
                     "status": status,
                     "indexed_stage": indexed_stage,
@@ -1856,7 +1857,7 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ocr_rows = _db_query_dicts(
             telemetry_file,
             f"""
-            SELECT file_path, status, pages, char_count, {line_expr},
+            SELECT file_path, file_mtime, status, pages, char_count, {line_expr},
                    {duration_expr}, {engine_expr}, {fallback_expr}
             FROM ocr_file_results
             """,
@@ -1882,6 +1883,9 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         path = str(row.get("file_path") or "").strip()
         if not path:
             continue
+        state = state_rows.get(path)
+        if state is None or abs(float(row.get("file_mtime") or 0.0) - float(state.get("mtime") or 0.0)) >= 1.0:
+            continue
         result_paths.add(path)
         status = str(row.get("status") or "unknown").strip().lower() or "unknown"
         status_counts[status] = status_counts.get(status, 0) + 1
@@ -1902,7 +1906,6 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
         recognized_chars += chars
         recognized_lines += int(row.get("line_count") or 0)
         recognized_duration_ms += max(0, int(row.get("duration_ms") or 0))
-        state = state_rows.get(path) or {}
         if (
             str(state.get("stage") or "") != "content"
             or str(state.get("indexed_stage") or "") not in {"content", "large"}
