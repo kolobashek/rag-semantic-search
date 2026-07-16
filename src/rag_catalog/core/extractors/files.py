@@ -839,6 +839,8 @@ def _iter_pdf_pages(
     *,
     poppler_bin: str = "",
     batch_pages: int = _DEFAULT_PDF_OCR_BATCH_PAGES,
+    first_page: int = 1,
+    last_page: int = 0,
 ) -> Iterator[tuple[int, int, Any]]:
     """Render PDF pages in bounded batches and yield page number, total, image."""
     from pdf2image import convert_from_path, pdfinfo_from_path  # type: ignore
@@ -852,18 +854,20 @@ def _iter_pdf_pages(
         return
 
     pages_per_batch = max(1, int(batch_pages or _DEFAULT_PDF_OCR_BATCH_PAGES))
-    for first_page in range(1, page_count + 1, pages_per_batch):
-        last_page = min(page_count, first_page + pages_per_batch - 1)
+    range_start = max(1, int(first_page or 1))
+    range_end = min(page_count, int(last_page or page_count))
+    for batch_start in range(range_start, range_end + 1, pages_per_batch):
+        batch_end = min(range_end, batch_start + pages_per_batch - 1)
         convert_kwargs: dict[str, Any] = {
             "dpi": 200,
-            "first_page": first_page,
-            "last_page": last_page,
+            "first_page": batch_start,
+            "last_page": batch_end,
         }
         if poppler_path:
             convert_kwargs["poppler_path"] = poppler_path
         images = convert_from_path(str(filepath), **convert_kwargs)
         for offset, page_img in enumerate(images):
-            yield first_page + offset, page_count, page_img
+            yield batch_start + offset, page_count, page_img
 
 
 def ocr_pdf(

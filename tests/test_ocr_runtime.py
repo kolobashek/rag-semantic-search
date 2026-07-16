@@ -87,6 +87,59 @@ def test_iter_pdf_pages_renders_bounded_batches(monkeypatch, tmp_path: Path) -> 
     ]
 
 
+def test_iter_pdf_pages_respects_requested_range(monkeypatch, tmp_path: Path) -> None:
+    import pdf2image
+
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(pdf2image, "pdfinfo_from_path", lambda *_args, **_kwargs: {"Pages": 8})
+
+    def fake_convert(*_args, **kwargs):
+        first_page = int(kwargs["first_page"])
+        last_page = int(kwargs["last_page"])
+        calls.append((first_page, last_page))
+        return [types.SimpleNamespace(number=page) for page in range(first_page, last_page + 1)]
+
+    monkeypatch.setattr(pdf2image, "convert_from_path", fake_convert)
+
+    pages = list(
+        _iter_pdf_pages(
+            tmp_path / "eight-pages.pdf",
+            batch_pages=2,
+            first_page=3,
+            last_page=6,
+        )
+    )
+
+    assert calls == [(3, 4), (5, 6)]
+    assert [number for number, _total, _image in pages] == [3, 4, 5, 6]
+
+
+def test_isolated_pdf_range_splits_failed_batch(monkeypatch, tmp_path: Path) -> None:
+    from rag_catalog.core.extractors import ocr_rapid
+
+    calls: list[tuple[int, int]] = []
+
+    def fake_worker(_path, *, mode, first, last, poppler_bin=""):
+        calls.append((first, last))
+        assert mode == "pdf"
+        if first != last:
+            raise RuntimeError("range too large")
+        return f"page {first}"
+
+    monkeypatch.setattr(ocr_rapid, "_run_isolated_worker", fake_worker)
+
+    text = ocr_rapid._run_pdf_range_isolated(
+        tmp_path / "scan.pdf",
+        first=1,
+        last=4,
+        poppler_bin="",
+    )
+
+    assert text.split() == ["page", "1", "page", "2", "page", "3", "page", "4"]
+    assert calls[0] == (1, 4)
+    assert (1, 1) in calls and (4, 4) in calls
+
+
 def test_rapidocr_failure_does_not_fallback_when_disabled(monkeypatch, tmp_path: Path) -> None:
     def fail_rapid(*_args, **_kwargs):
         raise RuntimeError("directml failed")
