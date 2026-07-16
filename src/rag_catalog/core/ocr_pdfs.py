@@ -515,6 +515,16 @@ def main() -> int:
         action="store_true",
         help="Для RapidOCR требовать DirectML и завершаться до изменения state, если GPU недоступен.",
     )
+    parser.add_argument(
+        "--max-files-per-process",
+        type=int,
+        default=int(cfg.get("ocr_rapid_files_per_process", 0) or 0),
+        help=(
+            "Максимум файлов в одном дочернем index_rag. "
+            "Для RapidOCR значение <= 0 автоматически ограничивается 100 файлами, "
+            "чтобы DirectML освобождал память между партиями."
+        ),
+    )
     args = parser.parse_args()
     args.collection = resolve_embedding_collection_name(
         args.collection,
@@ -643,32 +653,54 @@ def main() -> int:
     candidates_file.write_text("\n".join(scanned) + "\n", encoding="utf-8", errors="replace")
 
     # ── 3. Запустить index_rag как модуль (устойчиво к относительным импортам) ──
-    cmd = [sys.executable, "-u", "-m", "rag_catalog.core.index_rag"]
+    base_cmd = [sys.executable, "-u", "-m", "rag_catalog.core.index_rag"]
 
     if cfg.get("catalog_path"):
-        cmd += ["--catalog", cfg["catalog_path"]]
+        base_cmd += ["--catalog", cfg["catalog_path"]]
     if args.qdrant_url:
-        cmd += ["--url", args.qdrant_url]
+        base_cmd += ["--url", args.qdrant_url]
     else:
-        cmd += ["--db", cfg["qdrant_db_path"]]
-    cmd += [
+        base_cmd += ["--db", cfg["qdrant_db_path"]]
+    base_cmd += [
         "--collection", args.collection,
         "--workers",    str(workers_effective),
         "--stage",      "large",  # сканированные PDF — этап large
         "--force-ocr",
-        "--only-paths-file", str(candidates_file),
         "--force-replace-for", ",".join(sorted(OCR_CAPABLE_EXTENSIONS)),
         # НЕТ --no-ocr: OCR включён
     ]
     if str(args.ocr_engine or "tesseract").strip().lower() == "rapidocr":
-        cmd += ["--ocr-engine", "rapidocr"]
+        base_cmd += ["--ocr-engine", "rapidocr"]
     if args.require_gpu:
-        cmd += ["--no-ocr-fallback"]
+        base_cmd += ["--no-ocr-fallback"]
+
+    is_rapidocr = str(args.ocr_engine or "tesseract").strip().lower() == "rapidocr"
+    files_per_process = int(args.max_files_per_process or 0)
+    if files_per_process <= 0:
+        files_per_process = 100 if is_rapidocr else len(scanned)
+    files_per_process = max(1, files_per_process)
+    batches = [scanned[offset : offset + files_per_process] for offset in range(0, len(scanned), files_per_process)]
+
+    batch_files: List[Path] = []
+    if len(batches) == 1:
+        batch_files.append(candidates_file)
+    else:
+        for batch_number, batch in enumerate(batches, start=1):
+            batch_file = candidates_file.with_name(
+                f"{candidates_file.stem}_part{batch_number:04d}{candidates_file.suffix}"
+            )
+            batch_file.write_text("\n".join(batch) + "\n", encoding="utf-8", errors="replace")
+            batch_files.append(batch_file)
 
     logger.info("")
     logger.info("=" * 60)
     logger.info("Запуск OCR-прохода…")
-    logger.info("Команда: %s", " ".join(cmd))
+    logger.info(
+        "Партии: %d, максимум файлов в дочернем процессе: %d",
+        len(batches),
+        files_per_process,
+    )
+    logger.info("Базовая команда: %s", " ".join(base_cmd))
     logger.info("(Это может занять несколько часов — ~5–30 сек на страницу OCR)")
     logger.info("=" * 60)
     logger.info("")
@@ -677,9 +709,9 @@ def main() -> int:
         """Read the real processed_files count from index_stage_progress (large stage)."""
         try:
             rows = telemetry.fetch_dicts(
-                """SELECT processed_files FROM index_stage_progress
-                   WHERE stage='large' AND ts_started >= ?
-                   ORDER BY ts_started DESC LIMIT 1""",
+                """SELECT COALESCE(SUM(processed_files), 0) AS processed_files
+                   FROM index_stage_progress
+                   WHERE stage='large' AND ts_started >= ?""",
                 (ocr_start_time,),
             )
             if rows:
@@ -694,8 +726,25 @@ def main() -> int:
             # CREATE_NO_WINDOW suppresses console popup; no DETACHED_PROCESS so that
             # stdout/stderr are inherited from this process (→ ocr.log).
             run_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
-        result = subprocess.run(cmd, **run_kwargs)
-        exit_code = result.returncode
+        exit_code = 0
+        for batch_number, (batch, batch_file) in enumerate(zip(batches, batch_files), start=1):
+            cmd = [*base_cmd, "--only-paths-file", str(batch_file)]
+            logger.info(
+                "OCR-партия %d/%d: %d файлов (%s)",
+                batch_number,
+                len(batches),
+                len(batch),
+                batch_file.name,
+            )
+            result = subprocess.run(cmd, **run_kwargs)
+            exit_code = int(result.returncode or 0)
+            if exit_code != 0:
+                logger.error("OCR-партия %d/%d завершилась с кодом %d", batch_number, len(batches), exit_code)
+                break
+            telemetry.update_ocr_progress(
+                ocr_run_id=ocr_run_id,
+                note=f"batch={batch_number}/{len(batches)} processed={_actual_processed_count()}",
+            )
         status = "completed" if exit_code == 0 else "failed"
         telemetry.finish_ocr_run(
             ocr_run_id=ocr_run_id,

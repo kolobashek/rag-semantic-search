@@ -359,3 +359,47 @@ def test_ocr_main_passes_only_candidate_paths_to_indexer(monkeypatch, tmp_path: 
     assert "--force-replace-for" in cmd
     assert ".pdf" in cmd[cmd.index("--force-replace-for") + 1]
     assert db.get_entry(candidate) is not None
+
+
+def test_rapidocr_recycles_child_process_between_candidate_batches(monkeypatch, tmp_path: Path) -> None:
+    telemetry_path = tmp_path / "rag_telemetry.db"
+    candidates = [rf"O:\scan-{index:03d}.pdf" for index in range(205)]
+    cfg = {
+        "catalog_path": str(tmp_path),
+        "qdrant_db_path": str(tmp_path),
+        "qdrant_url": "http://localhost:6333",
+        "collection_name": "catalog",
+        "embedding_model": "",
+        "embedding_collection_versioning": False,
+        "embedding_collection_suffix": "",
+        "index_read_workers": 1,
+        "small_pdf_mb": 2.0,
+        "telemetry_db_path": str(telemetry_path),
+    }
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(list(cmd))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ocr_pdfs, "load_config", lambda: cfg)
+    monkeypatch.setattr(ocr_pdfs, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(ocr_pdfs, "find_state_db_ocr_candidates", lambda *_args, **_kwargs: candidates)
+    monkeypatch.setattr(ocr_pdfs, "find_pending_ocr_candidates_from_runtime", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(ocr_pdfs, "mark_for_reindex_in_state_db", lambda *_args, **_kwargs: len(candidates))
+    monkeypatch.setattr(ocr_pdfs.subprocess, "run", fake_run)
+    monkeypatch.setattr(ocr_pdfs, "_require_gpu_ocr_runtime", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        ocr_pdfs.sys,
+        "argv",
+        ["ocr_pdfs.py", "--ocr-engine", "rapidocr", "--require-gpu"],
+    )
+
+    assert ocr_pdfs.main() == 0
+    assert len(commands) == 3
+    batch_sizes = []
+    for cmd in commands:
+        path = Path(cmd[cmd.index("--only-paths-file") + 1])
+        batch_sizes.append(len(path.read_text(encoding="utf-8").splitlines()))
+        assert "--no-ocr-fallback" in cmd
+    assert batch_sizes == [100, 100, 5]
