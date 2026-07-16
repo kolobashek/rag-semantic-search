@@ -31,7 +31,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from ._platform_compat import apply_windows_platform_workarounds
 
@@ -95,6 +95,80 @@ def _effective_ocr_workers(requested: int, engine: str) -> int:
     if str(engine or "").strip().lower() == "rapidocr":
         return 1
     return _effective_workers(requested)
+
+
+def _estimate_ocr_work(path: str) -> tuple[int, int]:
+    """Return an inexpensive (page/frame count, input bytes) estimate."""
+    filepath = Path(path)
+    try:
+        size_bytes = int(filepath.stat().st_size)
+    except OSError:
+        size_bytes = 0
+    pages = 1
+    try:
+        suffix = filepath.suffix.lower()
+        if suffix == ".pdf":
+            import fitz  # noqa: PLC0415
+
+            with fitz.open(filepath) as document:
+                pages = max(1, int(document.page_count))
+        elif suffix in OCR_IMAGE_EXTENSIONS:
+            from PIL import Image  # noqa: PLC0415
+
+            with Image.open(filepath) as image:
+                pages = max(1, int(getattr(image, "n_frames", 1) or 1))
+    except Exception:
+        pages = 1
+    return pages, size_bytes
+
+
+def _iter_candidate_batches(
+    paths: List[str],
+    *,
+    max_files: int,
+    max_pages: int,
+    max_input_bytes: int,
+) -> Iterator[tuple[List[str], tuple[int, int]]]:
+    """Yield bounded batches without pre-scanning the entire network catalog."""
+    current: List[str] = []
+    current_pages = 0
+    current_bytes = 0
+    for path in paths:
+        pages, size_bytes = _estimate_ocr_work(path)
+        exceeds = bool(current) and (
+            len(current) >= max_files
+            or current_pages + pages > max_pages
+            or current_bytes + size_bytes > max_input_bytes
+        )
+        if exceeds:
+            yield current, (current_pages, current_bytes)
+            current = []
+            current_pages = 0
+            current_bytes = 0
+        current.append(path)
+        current_pages += pages
+        current_bytes += size_bytes
+    if current:
+        yield current, (current_pages, current_bytes)
+
+
+def _build_candidate_batches(
+    paths: List[str],
+    *,
+    max_files: int,
+    max_pages: int,
+    max_input_bytes: int,
+) -> tuple[List[List[str]], List[tuple[int, int]]]:
+    """Materialize bounded batches for diagnostics and focused tests."""
+    materialized = list(
+        _iter_candidate_batches(
+            paths,
+            max_files=max_files,
+            max_pages=max_pages,
+            max_input_bytes=max_input_bytes,
+        )
+    )
+    return [batch for batch, _work in materialized], [work for _batch, work in materialized]
 
 
 def _require_gpu_ocr_runtime(engine: str, *, require_gpu: bool) -> None:
@@ -525,6 +599,18 @@ def main() -> int:
             "чтобы DirectML освобождал память между партиями."
         ),
     )
+    parser.add_argument(
+        "--max-pages-per-process",
+        type=int,
+        default=int(cfg.get("ocr_rapid_pages_per_process", 0) or 0),
+        help="Максимальная оценка страниц/кадров в одном дочернем RapidOCR процессе (авто: 500).",
+    )
+    parser.add_argument(
+        "--max-input-mb-per-process",
+        type=int,
+        default=int(cfg.get("ocr_rapid_input_mb_per_process", 0) or 0),
+        help="Максимальный суммарный размер исходных файлов в дочернем RapidOCR процессе (авто: 512 МБ).",
+    )
     args = parser.parse_args()
     args.collection = resolve_embedding_collection_name(
         args.collection,
@@ -679,26 +765,20 @@ def main() -> int:
     if files_per_process <= 0:
         files_per_process = 100 if is_rapidocr else len(scanned)
     files_per_process = max(1, files_per_process)
-    batches = [scanned[offset : offset + files_per_process] for offset in range(0, len(scanned), files_per_process)]
-
-    batch_files: List[Path] = []
-    if len(batches) == 1:
-        batch_files.append(candidates_file)
-    else:
-        for batch_number, batch in enumerate(batches, start=1):
-            batch_file = candidates_file.with_name(
-                f"{candidates_file.stem}_part{batch_number:04d}{candidates_file.suffix}"
-            )
-            batch_file.write_text("\n".join(batch) + "\n", encoding="utf-8", errors="replace")
-            batch_files.append(batch_file)
-
+    pages_per_process = int(args.max_pages_per_process or 0)
+    if pages_per_process <= 0:
+        pages_per_process = 500 if is_rapidocr else 2**31 - 1
+    input_mb_per_process = int(args.max_input_mb_per_process or 0)
+    if input_mb_per_process <= 0:
+        input_mb_per_process = 512 if is_rapidocr else 2**31 - 1
     logger.info("")
     logger.info("=" * 60)
     logger.info("Запуск OCR-прохода…")
     logger.info(
-        "Партии: %d, максимум файлов в дочернем процессе: %d",
-        len(batches),
+        "Лимиты дочернего процесса: %d файлов, %d страниц, %d МБ",
         files_per_process,
+        pages_per_process,
+        input_mb_per_process,
     )
     logger.info("Базовая команда: %s", " ".join(base_cmd))
     logger.info("(Это может занять несколько часов — ~5–30 сек на страницу OCR)")
@@ -727,23 +807,37 @@ def main() -> int:
             # stdout/stderr are inherited from this process (→ ocr.log).
             run_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
         exit_code = 0
-        for batch_number, (batch, batch_file) in enumerate(zip(batches, batch_files), start=1):
+        batch_iterator = _iter_candidate_batches(
+            scanned,
+            max_files=files_per_process,
+            max_pages=max(1, pages_per_process),
+            max_input_bytes=max(1, input_mb_per_process) * 1_048_576,
+        )
+        for batch_number, (batch, work) in enumerate(
+            batch_iterator,
+            start=1,
+        ):
+            batch_file = candidates_file.with_name(
+                f"{candidates_file.stem}_part{batch_number:04d}{candidates_file.suffix}"
+            )
+            batch_file.write_text("\n".join(batch) + "\n", encoding="utf-8", errors="replace")
             cmd = [*base_cmd, "--only-paths-file", str(batch_file)]
             logger.info(
-                "OCR-партия %d/%d: %d файлов (%s)",
+                "OCR-партия %d: %d файлов, ~%d страниц, %.1f МБ (%s)",
                 batch_number,
-                len(batches),
                 len(batch),
+                work[0],
+                work[1] / 1_048_576,
                 batch_file.name,
             )
             result = subprocess.run(cmd, **run_kwargs)
             exit_code = int(result.returncode or 0)
             if exit_code != 0:
-                logger.error("OCR-партия %d/%d завершилась с кодом %d", batch_number, len(batches), exit_code)
+                logger.error("OCR-партия %d завершилась с кодом %d", batch_number, exit_code)
                 break
             telemetry.update_ocr_progress(
                 ocr_run_id=ocr_run_id,
-                note=f"batch={batch_number}/{len(batches)} processed={_actual_processed_count()}",
+                note=f"batch={batch_number} processed={_actual_processed_count()}",
             )
         status = "completed" if exit_code == 0 else "failed"
         telemetry.finish_ocr_run(

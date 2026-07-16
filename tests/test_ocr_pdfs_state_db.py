@@ -8,6 +8,7 @@ import pytest
 from rag_catalog.core import ocr_pdfs
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.ocr_pdfs import (
+    _build_candidate_batches,
     _effective_ocr_workers,
     _require_gpu_ocr_runtime,
     ensure_ocr_payload_indexes,
@@ -70,6 +71,26 @@ def test_mark_for_reindex_preserves_candidate_state_identity(tmp_path: Path) -> 
 def test_rapidocr_uses_single_index_worker() -> None:
     assert _effective_ocr_workers(8, "rapidocr") == 1
     assert _effective_ocr_workers(3, "tesseract") == 3
+
+
+def test_candidate_batches_respect_page_and_input_limits(monkeypatch) -> None:
+    work = {
+        "a.pdf": (300, 200),
+        "b.pdf": (250, 200),
+        "c.pdf": (10, 900),
+        "d.pdf": (10, 200),
+    }
+    monkeypatch.setattr(ocr_pdfs, "_estimate_ocr_work", lambda path: work[path])
+
+    batches, batch_work = _build_candidate_batches(
+        list(work),
+        max_files=100,
+        max_pages=500,
+        max_input_bytes=1_000,
+    )
+
+    assert batches == [["a.pdf"], ["b.pdf"], ["c.pdf"], ["d.pdf"]]
+    assert batch_work == [(300, 200), (250, 200), (10, 900), (10, 200)]
 
 
 def test_required_gpu_ocr_rejects_non_rapid_engine() -> None:
