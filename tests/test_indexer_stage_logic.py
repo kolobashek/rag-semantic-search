@@ -17,6 +17,7 @@ from rag_catalog.core.index_rag import _configure_forced_replacement
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing import stage_runner
 from rag_catalog.core.indexing.stage_runner import (
+    _encode_with_transient_retry,
     _normalize_only_path_key,
     _task_matches_only_paths,
     _task_only_path_keys,
@@ -36,6 +37,45 @@ class _FakeVec:
 class _FakeEmbedder:
     def encode(self, chunks, normalize_embeddings=True, batch_size=256, show_progress_bar=False):
         return [_FakeVec([0.1, 0.2, 0.3]) for _ in chunks]
+
+
+def test_embedding_retries_transient_onnx_decode_error_with_smaller_batch(monkeypatch) -> None:
+    class _FlakyEmbedder:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def encode(self, chunks, **kwargs):
+            self.batch_sizes.append(int(kwargs["batch_size"]))
+            if len(self.batch_sizes) == 1:
+                raise UnicodeDecodeError("utf-8", b"\xc3", 0, 1, "invalid continuation byte")
+            return [_FakeVec([0.1, 0.2, 0.3]) for _ in chunks]
+
+    embedder = _FlakyEmbedder()
+    monkeypatch.setattr(stage_runner.time, "sleep", lambda _seconds: None)
+
+    vectors = _encode_with_transient_retry(
+        embedder,
+        ["passage: документ"],
+        initial_batch_size=64,
+        logger=stage_runner.logging.getLogger(__name__),
+    )
+
+    assert len(vectors) == 1
+    assert embedder.batch_sizes == [64, 32]
+
+
+def test_embedding_retry_does_not_mask_unrelated_errors() -> None:
+    class _BrokenEmbedder:
+        def encode(self, _chunks, **_kwargs):
+            raise RuntimeError("model contract mismatch")
+
+    with pytest.raises(RuntimeError, match="model contract mismatch"):
+        _encode_with_transient_retry(
+            _BrokenEmbedder(),
+            ["passage: документ"],
+            initial_batch_size=64,
+            logger=stage_runner.logging.getLogger(__name__),
+        )
 
 
 def test_only_path_filter_matches_windows_and_posix_forms() -> None:

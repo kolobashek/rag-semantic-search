@@ -34,6 +34,46 @@ _WINDOWS_7Z_PATHS = (
 )
 
 
+def _encode_with_transient_retry(
+    embedder: Any,
+    texts: List[str],
+    *,
+    initial_batch_size: int,
+    logger: logging.Logger,
+) -> Any:
+    """Retry malformed ONNX/DirectML errors with a smaller inference batch."""
+    batch_sizes = tuple(
+        dict.fromkeys(
+            (
+                max(1, int(initial_batch_size)),
+                max(1, int(initial_batch_size) // 2),
+                max(1, int(initial_batch_size) // 4),
+            )
+        )
+    )
+    for attempt, batch_size in enumerate(batch_sizes, start=1):
+        try:
+            return embedder.encode(
+                texts,
+                normalize_embeddings=True,
+                batch_size=batch_size,
+                show_progress_bar=False,
+            )
+        except UnicodeDecodeError:
+            if attempt >= len(batch_sizes):
+                raise
+            next_batch_size = batch_sizes[attempt]
+            logger.warning(
+                "ONNX/DirectML вернул повреждённое сообщение об ошибке; "
+                "повторяю embedding-батч %d с batch_size=%d (попытка %d/%d)",
+                len(texts),
+                next_batch_size,
+                attempt + 1,
+                len(batch_sizes),
+            )
+            time.sleep(0.5 * attempt)
+
+
 def _wait_for_reader_thread(thread: Any, *, timeout_sec: float) -> str:
     """Wait in short intervals so cancel is not hidden by a long extraction."""
     deadline = time.monotonic() + max(0.1, float(timeout_sec))
@@ -758,13 +798,14 @@ class IndexStageRunner:
             for i in range(0, len(pending_texts), ENCODE_BATCH):
                 chunk_texts    = pending_texts[i : i + ENCODE_BATCH]
                 chunk_payloads = pending_payloads[i : i + ENCODE_BATCH]
-                vectors = indexer.embedder.encode(
+                vectors = _encode_with_transient_retry(
+                    indexer.embedder,
                     prepare_passage_texts(
                         str(getattr(indexer, "embedding_model", "") or ""),
                         chunk_texts,
                     ),
-                    normalize_embeddings=True,
-                    batch_size=ENCODE_BATCH, show_progress_bar=False,
+                    initial_batch_size=ENCODE_BATCH,
+                    logger=self._logger,
                 )
                 indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
                 encoded_points.extend(
