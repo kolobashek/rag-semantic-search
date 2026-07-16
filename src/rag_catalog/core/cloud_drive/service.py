@@ -2329,13 +2329,14 @@ class CloudDriveService:
         if not qdrant_db_path and not qdrant_url:
             return 0
         try:
-            from qdrant_client import QdrantClient
             from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
-            client = QdrantClient(
+            from rag_catalog.core.qdrant_connection import create_qdrant_client
+
+            client = create_qdrant_client(
                 url=qdrant_url,
                 timeout=int(index_config.get('qdrant_timeout_sec') or 60),
-            ) if qdrant_url else QdrantClient(
+            ) if qdrant_url else create_qdrant_client(
                 path=qdrant_db_path,
                 timeout=int(index_config.get('qdrant_timeout_sec') or 60),
             )

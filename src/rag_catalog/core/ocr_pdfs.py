@@ -293,19 +293,23 @@ def find_scanned_pdfs(
     Возвращает список full_path файлов для OCR.
     """
     try:
-        from qdrant_client import QdrantClient
         from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        from .qdrant_connection import create_qdrant_client
     except ImportError:
         logger.error("qdrant-client не установлен. pip install qdrant-client")
         return []
 
     try:
         if qdrant_url:
-            client = QdrantClient(url=qdrant_url, timeout=max(5, int(qdrant_timeout_sec or 60)))
+            client = create_qdrant_client(
+                url=qdrant_url,
+                timeout=max(5, int(qdrant_timeout_sec or 60)),
+            )
         else:
             from .rag_core import load_config as _lc
             cfg = _lc()
-            client = QdrantClient(
+            client = create_qdrant_client(
                 path=str(cfg["qdrant_db_path"]),
                 timeout=max(5, int(qdrant_timeout_sec or 60)),
             )

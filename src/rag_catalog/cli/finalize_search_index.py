@@ -9,7 +9,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
 
-from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     FieldCondition,
@@ -23,6 +22,7 @@ from qdrant_client.models import (
 
 from rag_catalog.core.embedding_collections import resolve_embedding_collection_name
 from rag_catalog.core.indexing import ensure_payload_indexes
+from rag_catalog.core.qdrant_connection import create_qdrant_client
 from rag_catalog.core.rag_core import load_config
 
 logger = logging.getLogger(__name__)
@@ -497,10 +497,10 @@ def main(argv: list[str] | None = None) -> int:
         enabled=bool(cfg.get("embedding_collection_versioning", False)),
         suffix=str(cfg.get("embedding_collection_suffix") or ""),
     )
-    client = (
-        QdrantClient(url=str(args.url), timeout=max(30, int(args.timeout_sec)))
-        if str(args.url).strip()
-        else QdrantClient(path=str(args.db), timeout=max(30, int(args.timeout_sec)))
+    client = create_qdrant_client(
+        url=str(args.url),
+        path=str(args.db),
+        timeout=max(30, int(args.timeout_sec)),
     )
     result = finalize_collection(
         client,

@@ -23,7 +23,6 @@ from ._platform_compat import apply_windows_platform_workarounds
 
 apply_windows_platform_workarounds()
 
-from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchText, MatchValue
 
 from .embedding_collections import resolve_collection_name_from_config
@@ -34,6 +33,7 @@ from .exact_tokens import (
     repair_mojibake_text,
 )
 from .index_state_db import IndexStateDB
+from .qdrant_connection import create_qdrant_client
 from .retrieval import bm25_rank_items, prepare_bm25_items, prepare_query_text, rrf_fuse, tokenize
 from .telemetry_db import TelemetryDB
 
@@ -329,10 +329,10 @@ class RAGSearcher:
         qdrant_timeout = int(self.config.get("qdrant_timeout_sec", 60) or 60)
         try:
             if qdrant_url:
-                self.qdrant = QdrantClient(url=qdrant_url, timeout=qdrant_timeout)
+                self.qdrant = create_qdrant_client(url=qdrant_url, timeout=qdrant_timeout)
                 logger.info("Подключено к Qdrant-серверу: %s", qdrant_url)
             else:
-                self.qdrant = QdrantClient(path=str(qdrant_path), timeout=qdrant_timeout)
+                self.qdrant = create_qdrant_client(path=qdrant_path, timeout=qdrant_timeout)
                 logger.info("Подключено к Qdrant локально: %s", qdrant_path)
             collection_info = self.qdrant.get_collection(self.collection_name)
             schema = getattr(collection_info, "payload_schema", None) or {}

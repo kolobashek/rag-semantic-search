@@ -27,7 +27,6 @@ from ._platform_compat import apply_windows_platform_workarounds
 
 apply_windows_platform_workarounds()
 
-from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
 
@@ -60,6 +59,7 @@ from .indexer_control import read_indexer_control
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .log_history import build_log_handler, install_env_log_handler
 from .ocr_runtime import resolve_ocr_runtime
+from .qdrant_connection import create_qdrant_client
 from .rag_core import load_config
 from .retrieval import prepare_passage_texts
 from .telemetry_db import TelemetryDB
@@ -543,12 +543,12 @@ class RAGIndexer:
         # Режим подключения: сервер (Docker) или локальный SQLite
         if qdrant_url:
             logger.info("Подключение к Qdrant серверу: %s", qdrant_url)
-            self.qdrant = QdrantClient(url=qdrant_url, timeout=self.qdrant_timeout_sec)
+            self.qdrant = create_qdrant_client(url=qdrant_url, timeout=self.qdrant_timeout_sec)
             # state БД рядом с qdrant_db_path и в серверном режиме тоже локально.
             self.qdrant_db_path.mkdir(parents=True, exist_ok=True)
         else:
             logger.info("Qdrant локальный режим: %s", qdrant_db_path)
-            self.qdrant = QdrantClient(path=str(self.qdrant_db_path), timeout=self.qdrant_timeout_sec)
+            self.qdrant = create_qdrant_client(path=self.qdrant_db_path, timeout=self.qdrant_timeout_sec)
         self.state_db = IndexStateDB(str(self.qdrant_db_path / "index_state.db"))
         legacy_state_file = self.qdrant_db_path / "index_state.json"
         imported = self.state_db.bootstrap_from_json(legacy_state_file)
