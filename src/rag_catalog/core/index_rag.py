@@ -885,6 +885,27 @@ class RAGIndexer:
             logical_path, logical_mtime = self._ocr_result_identity(filepath)
             cached = self.telemetry.get_ocr_file_result(logical_path, logical_mtime)
             if isinstance(cached, dict):
+                current_engine = str(getattr(self, "ocr_engine", "") or "tesseract").strip().lower()
+                requested_engine = str(cached.get("requested_engine") or "").strip().lower()
+                actual_engine = str(cached.get("engine") or "").strip().lower()
+                fail_closed_rapid = current_engine == "rapidocr" and not bool(
+                    getattr(self, "ocr_rapid_fallback_enabled", True)
+                )
+                incompatible_engine = bool(requested_engine and requested_engine != current_engine)
+                incompatible_fail_closed_cache = fail_closed_rapid and (
+                    requested_engine != "rapidocr"
+                    or actual_engine != "rapidocr"
+                    or bool(cached.get("fallback_used"))
+                )
+                if incompatible_engine or incompatible_fail_closed_cache:
+                    logger.info(
+                        "Повтор OCR из-за несовместимого кэша (%s -> %s, fallback=%s): %s",
+                        requested_engine or "unknown",
+                        actual_engine or "unknown",
+                        bool(cached.get("fallback_used")),
+                        logical_path,
+                    )
+                    return None
                 if str(cached.get("status") or "").lower() != "error":
                     return cached
                 logger.info("Повтор OCR после кэшированной ошибки: %s", logical_path)
