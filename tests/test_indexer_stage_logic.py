@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tarfile
 import threading
 import time
@@ -13,7 +14,7 @@ import pytest
 
 from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
 from rag_catalog.core.extractors import ExtractedDocument, TextBlock, document_from_legacy_text
-from rag_catalog.core.index_rag import _configure_forced_replacement
+from rag_catalog.core.index_rag import _configure_forced_replacement, _resolve_local_model_reference
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing import stage_runner
 from rag_catalog.core.indexing.stage_runner import (
@@ -37,6 +38,31 @@ class _FakeVec:
 class _FakeEmbedder:
     def encode(self, chunks, normalize_embeddings=True, batch_size=256, show_progress_bar=False):
         return [_FakeVec([0.1, 0.2, 0.3]) for _ in chunks]
+
+
+def test_embedding_model_reference_resolves_cached_snapshot(monkeypatch, tmp_path: Path) -> None:
+    cached = tmp_path / "snapshot"
+    cached.mkdir()
+    seen: dict[str, object] = {}
+
+    def _snapshot_download(**kwargs):
+        seen.update(kwargs)
+        return cached
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=_snapshot_download))
+
+    assert _resolve_local_model_reference("intfloat/multilingual-e5-small") == str(cached)
+    assert seen == {"repo_id": "intfloat/multilingual-e5-small", "local_files_only": True}
+
+
+def test_embedding_model_reference_never_falls_back_to_network(monkeypatch) -> None:
+    def _missing_snapshot(**_kwargs):
+        raise FileNotFoundError("not cached")
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=_missing_snapshot))
+
+    with pytest.raises(RuntimeError, match="сетевой fallback отключен"):
+        _resolve_local_model_reference("missing/model")
 
 
 def test_embedding_retries_transient_onnx_decode_error_with_smaller_batch(monkeypatch) -> None:

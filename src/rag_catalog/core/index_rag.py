@@ -132,6 +132,21 @@ class IndexerCancelled(RuntimeError):
     """Raised when cooperative indexer control requests cancellation."""
 
 
+def _resolve_local_model_reference(model_name: str) -> str:
+    """Resolve a cached Hugging Face model to a local path without network access."""
+    clean = str(model_name or "").strip()
+    if not clean or Path(clean).exists():
+        return clean
+    try:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+        return str(snapshot_download(repo_id=clean, local_files_only=True))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Модель эмбеддинга {clean!r} отсутствует в локальном кеше; сетевой fallback отключен"
+        ) from exc
+
+
 # ─────────────────────────── таблица синонимов ────────────────────────────────
 # Сокращение → список синонимов/расшифровок.
 # Встроенная база для строительной/горной техники; дополняется через config.json
@@ -511,6 +526,7 @@ class RAGIndexer:
             logger.info("Загрузка OllamaEmbedder: %s (%s)", ollama_model_name, ollama_url)
             self.embedder = OllamaEmbedder(model=ollama_model_name, ollama_url=ollama_url)
         elif use_onnx or str(embedding_backend or "").strip().lower() == "onnx":
+            local_embedding_model = _resolve_local_model_reference(embedding_model)
             model_kwargs = {
                 key: value
                 for key, value in {
@@ -527,7 +543,7 @@ class RAGIndexer:
             )
             try:
                 self.embedder = SentenceTransformer(
-                    embedding_model,
+                    local_embedding_model,
                     backend="onnx",
                     model_kwargs=model_kwargs,
                     local_files_only=True,
@@ -535,7 +551,7 @@ class RAGIndexer:
                 logger.info("ONNX backend загружен успешно")
             except Exception as exc:
                 logger.warning("ONNX backend недоступен (%s), использую PyTorch", exc)
-                self.embedder = SentenceTransformer(embedding_model, local_files_only=True)
+                self.embedder = SentenceTransformer(local_embedding_model, local_files_only=True)
         else:
             logger.info("Загрузка модели эмбеддинга: %s", embedding_model)
             self.embedder = SentenceTransformer(embedding_model)
