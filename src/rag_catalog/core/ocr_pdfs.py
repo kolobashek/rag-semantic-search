@@ -264,8 +264,8 @@ def find_pending_ocr_candidates_from_runtime(state_dir: Path, runtime_dir: Path)
                     path = line.strip()
                     if not path or path in seen:
                         continue
+                    seen.add(path)
                     if _state_entry_still_needs_ocr(conn, path):
-                        seen.add(path)
                         paths.append(path)
     except (OSError, sqlite3.Error) as exc:
         logger.warning("Не удалось восстановить OCR-кандидатов из runtime: %s", exc)

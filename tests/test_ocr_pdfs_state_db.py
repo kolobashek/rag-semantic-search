@@ -228,6 +228,28 @@ def test_find_pending_ocr_candidates_from_runtime_skips_completed_state_entries(
     assert find_pending_ocr_candidates_from_runtime(tmp_path, runtime_dir) == [r"O:\empty.pdf"]
 
 
+def test_find_pending_ocr_candidates_from_runtime_checks_duplicate_paths_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    IndexStateDB(str(tmp_path / "index_state.db"))
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    candidates = "\n".join([r"O:\done.pdf", r"O:\pending.pdf"]) + "\n"
+    (runtime_dir / "ocr_candidates_old.txt").write_text(candidates, encoding="utf-8")
+    (runtime_dir / "ocr_candidates_new.txt").write_text(candidates, encoding="utf-8")
+    checked: list[str] = []
+
+    def still_needs_ocr(_conn, path: str) -> bool:
+        checked.append(path)
+        return path.endswith("pending.pdf")
+
+    monkeypatch.setattr(ocr_pdfs, "_state_entry_still_needs_ocr", still_needs_ocr)
+
+    assert find_pending_ocr_candidates_from_runtime(tmp_path, runtime_dir) == [r"O:\pending.pdf"]
+    assert sorted(checked) == [r"O:\done.pdf", r"O:\pending.pdf"]
+
+
 def test_ensure_ocr_payload_indexes_creates_missing_qdrant_indexes(monkeypatch) -> None:
     class Info:
         payload_schema = {"type": object()}
