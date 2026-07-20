@@ -74,6 +74,9 @@ def test_config_override_applies_named_retrieval_preset() -> None:
 
     assert result["retrieval_pipeline"] == "v2"
     assert result["retrieval_bm25_enabled"] is True
+    assert result["retrieval_dense_min_term_coverage"] == 0.5
+    assert result["retrieval_require_dense_identifiers"] is True
+    assert result["retrieval_max_dense_only_results"] == 2
 
 
 def test_required_profile_values_are_typed() -> None:

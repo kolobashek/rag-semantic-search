@@ -538,6 +538,73 @@ def test_relevance_gate_requires_machine_document_evidence_after_fusion() -> Non
     ]
 
 
+def test_release_relevance_gate_requires_dense_evidence_and_caps_dense_only_results() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.84,
+        "retrieval_single_term_min_dense_score": 0.86,
+        "retrieval_min_content_chars": 120,
+        "retrieval_dense_min_term_coverage": 0.5,
+        "retrieval_require_dense_identifiers": True,
+        "retrieval_max_dense_only_results": 2,
+    }
+
+    def dense(filename: str, text: str, score: float = 0.90) -> dict[str, object]:
+        return {
+            "type": "pdf_content",
+            "filename": filename,
+            "text": text * 10,
+            "score": score,
+            "dense_score": score,
+            "retrieval_source": "dense",
+            "retrieval_sources": ["dense"],
+        }
+
+    missing_identifier = dense("unrelated.pdf", "Произвольный документ без модели. ")
+    first = dense("KOMATSU PC300-8.pdf", "Масса экскаватора PC300 указана в паспорте. ")
+    second = dense("PC300 service.pdf", "Технические характеристики PC300 и масса. ")
+    over_limit = dense("PC300 archive.pdf", "Архивные сведения о массе PC300. ")
+    lexical = {
+        "type": "file_metadata",
+        "filename": "PC300 каталог.pdf",
+        "text": "Файл: PC300 каталог.pdf",
+        "score": 1.0,
+        "retrieval_source": "lexical",
+        "retrieval_sources": ["lexical"],
+        "lexical_matched_terms": 3,
+        "lexical_query_terms": 3,
+    }
+    diagnostics: dict[str, object] = {}
+
+    assert s._apply_relevance_gate(
+        "сколько весит PC300",
+        [missing_identifier, first, second, over_limit, lexical],
+        diagnostics=diagnostics,
+    ) == [
+        {**first, "relevance_evidence": "dense", "relevance_floor": 0.84},
+        {**second, "relevance_evidence": "dense", "relevance_floor": 0.84},
+        {**lexical, "relevance_evidence": "lexical", "relevance_floor": 0.84},
+    ]
+    assert diagnostics["relevance_gate"] == {
+        "enabled": True,
+        "input_count": 5,
+        "output_count": 3,
+        "rejected_count": 2,
+        "rejected_by_reason": {
+            "missing_dense_identifier": 1,
+            "dense_only_limit": 1,
+        },
+        "dense_floor": 0.84,
+        "min_content_chars": 120,
+        "reranker_floor": -4.0,
+        "machine_document_intent": False,
+        "dense_min_term_coverage": 0.5,
+        "require_dense_identifiers": True,
+        "max_dense_only_results": 2,
+    }
+
+
 def test_rrf_recency_boost_is_relative_and_does_not_displace_exact_match() -> None:
     s = _make_searcher(connected=True)
     s.config = {"rank_recency_enabled": True, "rank_recency_max_boost": 0.03}

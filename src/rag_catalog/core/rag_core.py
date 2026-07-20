@@ -9,6 +9,7 @@ rag_core.py — Общее ядро RAG-системы.
 
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -146,6 +147,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retrieval_min_dense_score": 0.78,
     "retrieval_single_term_min_dense_score": 0.80,
     "retrieval_min_content_chars": 120,
+    "retrieval_dense_min_term_coverage": 0.0,
+    "retrieval_require_dense_identifiers": False,
+    "retrieval_max_dense_only_results": 0,
     "retrieval_reranker_enabled": False,
     "retrieval_reranker_fail_open": True,
     "retrieval_reranker_model": "",
@@ -242,6 +246,9 @@ RETRIEVAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "retrieval_min_dense_score": 0.78,
         "retrieval_single_term_min_dense_score": 0.80,
         "retrieval_min_content_chars": 120,
+        "retrieval_dense_min_term_coverage": 0.50,
+        "retrieval_require_dense_identifiers": True,
+        "retrieval_max_dense_only_results": 2,
         "numeric_exact_fs_fallback_enabled": False,
         # Reranker stays opt-in until latency and eval thresholds are agreed.
         "retrieval_reranker_enabled": False,
@@ -1863,8 +1870,20 @@ class RAGSearcher:
             )
         min_content_chars = max(20, int(self.config.get("retrieval_min_content_chars", 120) or 120))
         reranker_floor = float(self.config.get("retrieval_reranker_min_score", -4.0) or -4.0)
+        dense_min_term_coverage = max(
+            0.0,
+            min(1.0, float(self.config.get("retrieval_dense_min_term_coverage", 0.0) or 0.0)),
+        )
+        require_dense_identifiers = bool(
+            self.config.get("retrieval_require_dense_identifiers", False)
+        )
+        max_dense_only_results = max(
+            0,
+            int(self.config.get("retrieval_max_dense_only_results", 0) or 0),
+        )
         gated: List[Dict[str, Any]] = []
         rejected_by_reason: Dict[str, int] = {}
+        dense_only_results = 0
 
         def reject(reason: str) -> None:
             rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
@@ -1879,6 +1898,7 @@ class RAGSearcher:
             source = str(item.get("retrieval_source") or "").strip()
             if source:
                 sources.add(source)
+            dense_only = sources == {"dense"}
 
             if wants_machine_document:
                 document_evidence = " ".join(
@@ -1894,6 +1914,40 @@ class RAGSearcher:
                 if len(clean_text) < min_content_chars and "fulltext" not in sources:
                     reject("short_content")
                     continue
+
+            if dense_only and (dense_min_term_coverage > 0.0 or require_dense_identifiers):
+                dense_evidence = " ".join(
+                    str(item.get(key) or "")
+                    for key in ("filename", "path", "full_path", "text", "tags")
+                ).lower().replace("ё", "е")
+                evidence_terms = set(self._terms_from_text(dense_evidence))
+                identifier_terms = [
+                    term
+                    for term in query_terms
+                    if any(char.isdigit() for char in term)
+                    or (re.fullmatch(r"[a-z-]+", term) is not None and len(term.replace("-", "")) >= 8)
+                ]
+
+                def identifier_matches(term: str) -> bool:
+                    return any(
+                        variant in evidence_terms
+                        or any(token.startswith(f"{variant}-") for token in evidence_terms)
+                        for variant in self._term_variants(term)
+                    )
+
+                if require_dense_identifiers and identifier_terms and not all(
+                    identifier_matches(term) for term in identifier_terms
+                ):
+                    reject("missing_dense_identifier")
+                    continue
+                if dense_min_term_coverage > 0.0 and not identifier_terms:
+                    matched_terms = sum(
+                        1 for term in query_terms if self._term_matches(dense_evidence, term)
+                    )
+                    required_terms = math.ceil(len(query_terms) * dense_min_term_coverage)
+                    if matched_terms < required_terms:
+                        reject("insufficient_dense_term_coverage")
+                        continue
 
             fulltext_matched = int(item.get("fulltext_matched_terms") or 0)
             fulltext_total = int(item.get("fulltext_query_terms") or len(query_terms) or 0)
@@ -1932,12 +1986,17 @@ class RAGSearcher:
                 else:
                     reject("weak_dense")
                 continue
+            if dense_only and max_dense_only_results and dense_only_results >= max_dense_only_results:
+                reject("dense_only_limit")
+                continue
             updated = dict(item)
             updated["relevance_evidence"] = (
                 "lexical" if strong_lexical else "reranker" if reranker_pass else "dense"
             )
             updated["relevance_floor"] = dense_floor
             gated.append(updated)
+            if dense_only:
+                dense_only_results += 1
         gate_diagnostics = {
             "enabled": True,
             "input_count": len(results),
@@ -1949,6 +2008,14 @@ class RAGSearcher:
             "reranker_floor": reranker_floor,
             "machine_document_intent": wants_machine_document,
         }
+        if dense_min_term_coverage > 0.0 or require_dense_identifiers or max_dense_only_results:
+            gate_diagnostics.update(
+                {
+                    "dense_min_term_coverage": dense_min_term_coverage,
+                    "require_dense_identifiers": require_dense_identifiers,
+                    "max_dense_only_results": max_dense_only_results,
+                }
+            )
         if diagnostics is not None:
             diagnostics["relevance_gate"] = gate_diagnostics
         if rejected_by_reason:

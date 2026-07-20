@@ -141,6 +141,15 @@ def _build_evaluation_profile(config: Dict[str, Any], *, collection_name: str) -
         "single_term_min_dense_score": float(
             config.get("retrieval_single_term_min_dense_score") or 0.0
         ),
+        "dense_min_term_coverage": float(
+            config.get("retrieval_dense_min_term_coverage") or 0.0
+        ),
+        "require_dense_identifiers": bool(
+            config.get("retrieval_require_dense_identifiers")
+        ),
+        "max_dense_only_results": int(
+            config.get("retrieval_max_dense_only_results") or 0
+        ),
         "reranker_enabled": bool(config.get("retrieval_reranker_enabled")),
         "reranker_model": str(config.get("retrieval_reranker_model") or ""),
         "reranker_backend": str(config.get("retrieval_reranker_backend") or ""),
