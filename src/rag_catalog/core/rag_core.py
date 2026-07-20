@@ -360,6 +360,7 @@ class RAGSearcher:
                 self._embedder = OllamaEmbedder(model=ollama_model, ollama_url=ollama_url)
             else:
                 from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+                local_model_name = _local_model_reference(model_name)
                 backend = str(self.config.get("embedding_backend") or "").strip().lower()
                 if backend == "onnx":
                     model_kwargs = {
@@ -377,14 +378,14 @@ class RAGSearcher:
                         model_kwargs.get("file_name") or "auto",
                     )
                     self._embedder = SentenceTransformer(
-                        model_name,
+                        local_model_name,
                         backend="onnx",
                         model_kwargs=model_kwargs,
                         local_files_only=True,
                     )
                 else:
                     logger.info("Загрузка модели эмбеддинга: %s", model_name)
-                    self._embedder = SentenceTransformer(model_name, local_files_only=True)
+                    self._embedder = SentenceTransformer(local_model_name, local_files_only=True)
         return self._embedder
 
     @property
