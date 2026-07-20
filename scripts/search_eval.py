@@ -153,6 +153,10 @@ def _build_evaluation_profile(config: Dict[str, Any], *, collection_name: str) -
         "reranker_enabled": bool(config.get("retrieval_reranker_enabled")),
         "reranker_model": str(config.get("retrieval_reranker_model") or ""),
         "reranker_backend": str(config.get("retrieval_reranker_backend") or ""),
+        "reranker_top_n": int(config.get("retrieval_reranker_top_n") or 0),
+        "reranker_weight": float(config.get("retrieval_reranker_weight") or 0.0),
+        "reranker_max_length": int(config.get("retrieval_reranker_max_length") or 0),
+        "reranker_min_score": float(config.get("retrieval_reranker_min_score") or 0.0),
         "collection_name": str(collection_name or ""),
     }
 

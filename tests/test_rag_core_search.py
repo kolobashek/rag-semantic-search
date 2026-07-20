@@ -27,6 +27,8 @@ def test_apply_retrieval_release_preset_preserves_explicit_overrides() -> None:
     assert cfg["retrieval_bm25_enabled"] is True
     assert cfg["retrieval_final_top_k"] == 25
     assert cfg["retrieval_reranker_enabled"] is True
+    assert cfg["retrieval_reranker_top_n"] == 30
+    assert cfg["retrieval_reranker_max_length"] == 64
 
 
 def test_multilingual_e5_inputs_use_asymmetric_prefixes() -> None:
@@ -313,6 +315,42 @@ def test_search_retrieval_v2_uses_rrf_fusion() -> None:
     assert out[0]["fusion"] == "rrf"
 
 
+def test_search_retrieval_v2_applies_relevance_gate_before_reranking() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {"retrieval_pipeline": "v2", "retrieval_reranker_enabled": True}
+    s.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[  # type: ignore[method-assign]
+        SimpleNamespace(
+            score=0.90,
+            payload={
+                "type": "file_metadata",
+                "filename": "target.docx",
+                "path": "target.docx",
+                "full_path": r"O:\target.docx",
+            },
+        )
+    ])
+    s._numeric_exact_search = lambda **kwargs: []  # type: ignore[method-assign]
+    s._lexical_catalog_search = lambda **kwargs: []  # type: ignore[method-assign]
+    s._bm25_catalog_search = lambda **kwargs: []  # type: ignore[method-assign]
+    s._fulltext_content_search = lambda **kwargs: []  # type: ignore[method-assign]
+    calls: list[str] = []
+
+    def gate(_query, results, **_kwargs):
+        calls.append("gate")
+        return results
+
+    def rerank(_query, results, **_kwargs):
+        calls.append("rerank")
+        return results
+
+    s._apply_relevance_gate = gate  # type: ignore[method-assign]
+    s._rerank_results = rerank  # type: ignore[method-assign]
+
+    s.search("target", limit=1, source="test")
+
+    assert calls == ["gate", "rerank"]
+
+
 def test_fulltext_content_channel_returns_exact_russian_match() -> None:
     s = _make_searcher(connected=True)
     s.config = {"retrieval_fulltext_enabled": True}
@@ -592,7 +630,7 @@ def test_release_relevance_gate_requires_dense_evidence_and_caps_dense_only_resu
         "output_count": 3,
         "rejected_count": 2,
         "rejected_by_reason": {
-            "missing_dense_identifier": 1,
+            "missing_query_identifier": 1,
             "dense_only_limit": 1,
         },
         "dense_floor": 0.84,
@@ -758,6 +796,48 @@ def test_rerank_results_reorders_top_candidates_with_cross_encoder_scores() -> N
     assert out[0]["reranker_score"] == 10.0
 
 
+def test_rerank_results_keeps_unscored_fusion_tail_for_relevance_backfill() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+        "retrieval_reranker_weight": 1.0,
+        "retrieval_reranker_top_n": 2,
+    }
+    s._reranker = _FakeReranker()
+    results = [
+        {"filename": "first.docx", "text": "generic", "score": 0.99, "rank_score": 0.99},
+        {"filename": "target.docx", "text": "target answer", "score": 0.50, "rank_score": 0.50},
+        {"filename": "tail.docx", "text": "fallback", "score": 0.40, "rank_score": 0.40},
+    ]
+
+    out = s._rerank_results("target", results, limit=2)
+
+    assert [item["filename"] for item in out] == ["target.docx", "first.docx", "tail.docx"]
+    assert out[-1].get("retrieval_reranked") is None
+
+
+def test_rerank_results_normalizes_rrf_base_scores_before_blending() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+        "retrieval_reranker_weight": 0.35,
+        "retrieval_reranker_top_n": 2,
+    }
+    s._reranker = _FakeReranker()
+    results = [
+        {"filename": "first.docx", "text": "generic", "score": 0.03, "rank_score": 0.03},
+        {"filename": "target.docx", "text": "target answer", "score": 0.02, "rank_score": 0.02},
+    ]
+
+    out = s._rerank_results("target", results, limit=2)
+
+    assert [item["filename"] for item in out] == ["first.docx", "target.docx"]
+    assert out[0]["rank_score"] == 0.65
+    assert out[1]["rank_score"] == 0.35
+
+
 def test_reranker_eval_mode_raises_instead_of_silent_fallback() -> None:
     class FailingReranker:
         def predict(self, _pairs):
@@ -826,6 +906,7 @@ def test_onnx_reranker_uses_cached_local_snapshot(monkeypatch) -> None:
         "retrieval_reranker_backend": "onnx",
         "retrieval_reranker_onnx_provider": "CPUExecutionProvider",
         "retrieval_reranker_onnx_file_name": "onnx/model_qint8.onnx",
+        "retrieval_reranker_max_length": 128,
     }
     s._reranker = None
     monkeypatch.setattr(sentence_transformers, "CrossEncoder", FakeCrossEncoder, raising=False)
@@ -842,6 +923,7 @@ def test_onnx_reranker_uses_cached_local_snapshot(monkeypatch) -> None:
             "provider": "CPUExecutionProvider",
             "file_name": "onnx/model_qint8.onnx",
         },
+        "max_length": 128,
         "local_files_only": True,
     }
 

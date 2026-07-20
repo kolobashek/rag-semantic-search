@@ -98,5 +98,6 @@
   "retrieval_reranker_onnx_file_name": "",
   "retrieval_reranker_top_n": 30,
   "retrieval_reranker_weight": 0.65,
+  "retrieval_reranker_max_length": 512,
   "retrieval_reranker_min_score": -4.0
 }

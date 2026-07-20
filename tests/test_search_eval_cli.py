@@ -26,6 +26,10 @@ def test_evaluation_profile_records_query_and_index_embedding_runtime() -> None:
             "index_embedding_backend": "onnx",
             "index_embedding_onnx_provider": "DmlExecutionProvider",
             "index_embedding_onnx_file_name": "onnx/model.onnx",
+            "retrieval_reranker_top_n": 10,
+            "retrieval_reranker_weight": 0.35,
+            "retrieval_reranker_max_length": 128,
+            "retrieval_reranker_min_score": -2.0,
         },
         collection_name="catalog_v2_e5",
     )
@@ -35,6 +39,10 @@ def test_evaluation_profile_records_query_and_index_embedding_runtime() -> None:
     assert profile["index_embedding_backend"] == "onnx"
     assert profile["index_embedding_onnx_provider"] == "DmlExecutionProvider"
     assert profile["index_embedding_onnx_file_name"] == "onnx/model.onnx"
+    assert profile["reranker_top_n"] == 10
+    assert profile["reranker_weight"] == 0.35
+    assert profile["reranker_max_length"] == 128
+    assert profile["reranker_min_score"] == -2.0
     assert profile["collection_name"] == "catalog_v2_e5"
 
 

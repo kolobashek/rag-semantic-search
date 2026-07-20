@@ -158,6 +158,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retrieval_reranker_onnx_file_name": "",
     "retrieval_reranker_top_n": 30,
     "retrieval_reranker_weight": 0.65,
+    "retrieval_reranker_max_length": 512,
     "retrieval_reranker_min_score": -4.0,
 }
 
@@ -253,7 +254,8 @@ RETRIEVAL_PRESETS: Dict[str, Dict[str, Any]] = {
         # Reranker stays opt-in until latency and eval thresholds are agreed.
         "retrieval_reranker_enabled": False,
         "retrieval_reranker_top_n": 30,
-        "retrieval_reranker_weight": 0.65,
+        "retrieval_reranker_weight": 0.35,
+        "retrieval_reranker_max_length": 64,
     },
 }
 
@@ -405,6 +407,11 @@ class RAGSearcher:
             from sentence_transformers import CrossEncoder  # noqa: PLC0415
 
             backend = str(self.config.get("retrieval_reranker_backend") or "").strip().lower()
+            max_length = max(0, int(self.config.get("retrieval_reranker_max_length", 0) or 0))
+            cross_encoder_kwargs = {
+                "local_files_only": True,
+                **({"max_length": max_length} if max_length else {}),
+            }
             if backend == "onnx":
                 model_kwargs = {
                     key: value
@@ -424,11 +431,11 @@ class RAGSearcher:
                     _local_model_reference(model_name),
                     backend="onnx",
                     model_kwargs=model_kwargs,
-                    local_files_only=True,
+                    **cross_encoder_kwargs,
                 )
             else:
                 logger.info("Загрузка reranker-модели: %s", model_name)
-                self._reranker = CrossEncoder(model_name, local_files_only=True)
+                self._reranker = CrossEncoder(model_name, **cross_encoder_kwargs)
         return self._reranker
 
     # ── search ────────────────────────────────────────────────────────
@@ -681,8 +688,9 @@ class RAGSearcher:
                 "fulltext": len(fulltext_results),
             }
         }
+        relevance_gate_applied = False
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
-            rerank_top_n = max(limit, int(self.config.get("retrieval_reranker_top_n", max(limit * 3, 30)) or limit))
+            fusion_candidate_limit = max(limit * 3, 30)
             bm25_results = self._bm25_catalog_search(
                 query=lexical_query,
                 limit=int(self.config.get("retrieval_bm25_top_k", max(limit * 4, 40)) or max(limit * 4, 40)),
@@ -692,11 +700,22 @@ class RAGSearcher:
             )
             channels = [numeric_exact_results, lexical_results, bm25_results, fulltext_results, results]
             fused = rrf_fuse(channels, limit=max(limit * 4, 40))
-            results = self._merge_ranked_results([], fused, limit=rerank_top_n, query=query_used)
+            results = self._merge_ranked_results(
+                [],
+                fused,
+                limit=fusion_candidate_limit,
+                query=query_used,
+            )
             retrieval_diagnostics["channels"]["bm25"] = len(bm25_results)
             retrieval_diagnostics["channels"]["fused"] = len(results)
+            results = self._apply_relevance_gate(
+                lexical_query,
+                results,
+                diagnostics=retrieval_diagnostics,
+            )
+            relevance_gate_applied = True
             if bool(self.config.get("retrieval_reranker_enabled", False)):
-                results = self._rerank_results(query_used, results, limit=rerank_top_n)
+                results = self._rerank_results(query_used, results, limit=limit)
                 retrieval_diagnostics["channels"]["reranked"] = len(results)
         else:
             results = self._merge_ranked_results(
@@ -706,11 +725,12 @@ class RAGSearcher:
                 query=query_used,
             )
             retrieval_diagnostics["channels"]["merged"] = len(results)
-        results = self._apply_relevance_gate(
-            lexical_query,
-            results,
-            diagnostics=retrieval_diagnostics,
-        )
+        if not relevance_gate_applied:
+            results = self._apply_relevance_gate(
+                lexical_query,
+                results,
+                diagnostics=retrieval_diagnostics,
+            )
         results = results[:limit]
         results = [self._repair_result_display_fields(item) for item in results]
 
@@ -1849,7 +1869,7 @@ class RAGSearcher:
         *,
         diagnostics: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Drop weak dense-only candidates and malformed content fragments."""
+        """Drop candidates without sufficient query evidence or usable content."""
         if not bool(self.config.get("retrieval_relevance_gate_enabled", False)):
             if diagnostics is not None:
                 diagnostics["relevance_gate"] = {
@@ -1915,12 +1935,12 @@ class RAGSearcher:
                     reject("short_content")
                     continue
 
-            if dense_only and (dense_min_term_coverage > 0.0 or require_dense_identifiers):
-                dense_evidence = " ".join(
+            if dense_only and (require_dense_identifiers or dense_min_term_coverage > 0.0):
+                candidate_evidence = " ".join(
                     str(item.get(key) or "")
                     for key in ("filename", "path", "full_path", "text", "tags")
                 ).lower().replace("ё", "е")
-                evidence_terms = set(self._terms_from_text(dense_evidence))
+                evidence_terms = set(self._terms_from_text(candidate_evidence))
                 identifier_terms = [
                     term
                     for term in query_terms
@@ -1938,11 +1958,11 @@ class RAGSearcher:
                 if require_dense_identifiers and identifier_terms and not all(
                     identifier_matches(term) for term in identifier_terms
                 ):
-                    reject("missing_dense_identifier")
+                    reject("missing_query_identifier")
                     continue
-                if dense_min_term_coverage > 0.0 and not identifier_terms:
+                if dense_only and dense_min_term_coverage > 0.0 and not identifier_terms:
                     matched_terms = sum(
-                        1 for term in query_terms if self._term_matches(dense_evidence, term)
+                        1 for term in query_terms if self._term_matches(candidate_evidence, term)
                     )
                     required_terms = math.ceil(len(query_terms) * dense_min_term_coverage)
                     if matched_terms < required_terms:
@@ -2038,7 +2058,7 @@ class RAGSearcher:
         def fail_or_fallback(message: str, exc: Exception | None = None) -> List[Dict[str, Any]]:
             if fail_open:
                 logger.warning("%s; using fused ranking", message)
-                return results[:limit]
+                return results
             if exc is not None:
                 raise RuntimeError(message) from exc
             raise RuntimeError(message)
@@ -2050,7 +2070,9 @@ class RAGSearcher:
         if model is None:
             return fail_or_fallback("Reranker is enabled but no model is configured")
 
-        candidates = results[: max(limit, int(config.get("retrieval_reranker_top_n", limit) or limit))]
+        top_n = max(limit, int(config.get("retrieval_reranker_top_n", limit) or limit))
+        candidates = results[:top_n]
+        tail = results[len(candidates):]
         pairs = [(query, self._rerank_text(item)) for item in candidates]
         try:
             raw_scores = [float(score) for score in model.predict(pairs)]
@@ -2066,14 +2088,21 @@ class RAGSearcher:
         lo = min(raw_scores)
         hi = max(raw_scores)
         span = max(hi - lo, 1e-9)
+        base_scores = [float(item.get("rank_score", item.get("score") or 0) or 0) for item in candidates]
+        base_lo = min(base_scores)
+        base_hi = max(base_scores)
+        base_span = max(base_hi - base_lo, 1e-9)
         weight = max(0.0, min(1.0, float(config.get("retrieval_reranker_weight", 0.65) or 0.65)))
         reranked: List[Dict[str, Any]] = []
-        for item, raw_score in zip(candidates, raw_scores):
+        for item, raw_score, base_score in zip(candidates, raw_scores, base_scores):
             reranker_score = (raw_score - lo) / span
-            base_score = float(item.get("rank_score", item.get("score") or 0) or 0)
+            normalized_base_score = (base_score - base_lo) / base_span
             updated = dict(item)
             updated["reranker_score"] = round(raw_score, 6)
-            updated["rank_score"] = round((1.0 - weight) * base_score + weight * reranker_score, 6)
+            updated["rank_score"] = round(
+                (1.0 - weight) * normalized_base_score + weight * reranker_score,
+                6,
+            )
             updated["retrieval_reranked"] = True
             reranked.append(updated)
 
@@ -2085,7 +2114,7 @@ class RAGSearcher:
             ),
             reverse=True,
         )
-        return reranked[:limit]
+        return [*reranked, *tail]
 
     def _rerank_text(self, item: Dict[str, Any]) -> str:
         parts = [
