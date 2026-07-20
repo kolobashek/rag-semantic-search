@@ -1623,6 +1623,42 @@ def test_cloud_drive_preview_api_serves_inline_file(monkeypatch, tmp_path) -> No
     assert response.path.endswith("hello.txt")
     assert response.filename == "hello.txt"
     assert "inline" in response.headers["content-disposition"]
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_cloud_drive_preview_neutralizes_active_content(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    source_file = tmp_path / "attack.html"
+    source_file.write_text("<script>parent.document.body.textContent='owned'</script>", encoding="utf-8")
+    service.storage.put_file(source_file, "attack.html")
+    service.registry.upsert_file(
+        folder_id=root.id,
+        path="attack.html",
+        name="attack.html",
+        storage_key="attack.html",
+        mime_type="text/html",
+        size_bytes=source_file.stat().st_size,
+        checksum="active",
+        source_path="",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
+
+    response = api_cloud_drive_preview("attack.html")
+
+    assert response.media_type == "text/plain; charset=utf-8"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == "sandbox; default-src 'none'"
 
 
 def test_cloud_drive_download_requires_session(monkeypatch, tmp_path) -> None:
@@ -1973,6 +2009,79 @@ def test_view_file_requires_auth_and_catalog_path(monkeypatch, tmp_path) -> None
     with pytest.raises(HTTPException) as outside_exc:
         cloud_api.api_view_file(path=str(outside), authorization=f"Bearer {token}")
     assert outside_exc.value.status_code == 404
+
+    active_file = catalog / "active.html"
+    active_file.write_text("<script>alert(1)</script>", encoding="utf-8")
+    active_response = cloud_api.api_view_file(path=str(active_file), authorization=f"Bearer {token}")
+    assert active_response.media_type == "text/plain; charset=utf-8"
+    assert active_response.headers["x-content-type-options"] == "nosniff"
+    assert active_response.headers["content-security-policy"] == "sandbox; default-src 'none'"
+
+
+def test_view_file_enforces_registry_acl_for_catalog_sources(monkeypatch, tmp_path) -> None:
+    catalog = tmp_path / "catalog"
+    source_dir = catalog / "Private"
+    source_dir.mkdir(parents=True)
+    file_path = source_dir / "report.txt"
+    file_path.write_text("classified", encoding="utf-8")
+    cfg = {
+        "catalog_path": str(catalog),
+        "users_db_path": str(tmp_path / "users.db"),
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    auth_db = UserAuthDB(cfg["users_db_path"])
+    assert auth_db.admin_create_user(username="alice", password="8215", role="user", status="active")
+    assert auth_db.admin_create_user(username="bob", password="8215", role="user", status="active")
+    alice_token = auth_db.create_session(username="alice")
+    bob_token = auth_db.create_session(username="bob")
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path=str(catalog))
+    folder = service.registry.upsert_folder(
+        path="Private",
+        name="Private",
+        parent_id=root.id,
+        depth=1,
+        source_path=str(source_dir),
+    )
+    file_row = service.registry.upsert_file(
+        folder_id=folder.id,
+        path="Private/report.txt",
+        name="report.txt",
+        storage_key="Private/report.txt",
+        mime_type="text/plain",
+        size_bytes=file_path.stat().st_size,
+        checksum="private",
+        source_path=str(file_path),
+    )
+    service.registry.grant_permission(
+        subject_type="user",
+        subject_id="alice",
+        resource_type="file",
+        resource_id=file_row.id,
+        access_level="viewer",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+
+    response = cloud_api.api_view_file(path=str(file_path), authorization=f"Bearer {alice_token}")
+    assert str(response.path) == str(file_path)
+    with pytest.raises(HTTPException) as denied:
+        cloud_api.api_view_file(path=str(file_path), authorization=f"Bearer {bob_token}")
+    assert denied.value.status_code == 403
+
+
+def test_registry_acl_helper_fails_closed_on_registry_error() -> None:
+    class BrokenService:
+        def user_can_access(self, **_kwargs):
+            raise sqlite3.OperationalError("registry unavailable")
+
+    assert not ui_helpers._cd_registry_acl_allows(
+        {},
+        {"username": "user", "role": "user"},
+        "Private/report.txt",
+        service=BrokenService(),
+    )
 
 
 def test_cloud_drive_acl_allows_user_and_role_prefixes() -> None:

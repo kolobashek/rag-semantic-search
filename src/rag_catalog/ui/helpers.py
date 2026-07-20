@@ -1401,7 +1401,7 @@ def _cd_registry_acl_allows(
             )
         )
     except Exception:
-        return True
+        return False
 
 
 def _cd_registry_node_for_search_item(

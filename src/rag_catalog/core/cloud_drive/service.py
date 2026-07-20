@@ -922,7 +922,7 @@ class CloudDriveService:
 
     def list_changes(self, *, since: str = '', limit: int = 500) -> dict:
         changes = self.registry.list_changes(since=since, limit=limit)
-        next_cursor = changes[-1]['updated_at'] if changes else str(since or '')
+        next_cursor = self.registry.change_cursor(changes[-1]) if changes else str(since or '')
         return {
             'since': str(since or ''),
             'next_cursor': next_cursor,

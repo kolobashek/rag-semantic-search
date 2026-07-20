@@ -711,7 +711,70 @@ def test_service_lists_cloud_drive_changes_for_sync_clients(tmp_path: Path) -> N
     delta = service.list_changes(since=cursor)
 
     assert any(item['path'] == 'Folder A/hello.txt' and item['deleted_at'] for item in delta['changes'])
-    assert delta['next_cursor'] >= cursor
+    assert delta['next_cursor'] != cursor
+
+
+def test_service_change_cursor_pages_equal_timestamps_without_loss(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    service = CloudDriveService(registry=registry, storage=LocalStorageAdapter(str(tmp_path / 'storage')))
+    root = registry.ensure_root_folder(root_name='Обмен', source_path='')
+    folder = registry.upsert_folder(path='Folder A', name='Folder A', parent_id=root.id, depth=1, source_path='')
+    for index in range(4):
+        registry.upsert_file(
+            folder_id=folder.id,
+            path=f'Folder A/file-{index}.txt',
+            name=f'file-{index}.txt',
+            storage_key=f'Folder A/file-{index}.txt',
+            mime_type='text/plain',
+            size_bytes=index,
+            checksum=str(index),
+            source_path='',
+        )
+    same_timestamp = '2026-07-21T00:00:00+00:00'
+    with registry._connect() as conn:
+        conn.execute('UPDATE cloud_folders SET updated_at=?', (same_timestamp,))
+        conn.execute('UPDATE cloud_files SET updated_at=?', (same_timestamp,))
+
+    expected_ids = {item['id'] for item in registry.list_changes(limit=500)}
+    seen_ids: list[str] = []
+    cursor = ''
+    for _ in range(10):
+        page = service.list_changes(since=cursor, limit=2)
+        if not page['changes']:
+            break
+        seen_ids.extend(item['id'] for item in page['changes'])
+        assert page['next_cursor'] != cursor
+        cursor = page['next_cursor']
+    else:
+        pytest.fail('change cursor did not reach the end of the feed')
+
+    assert len(seen_ids) == len(set(seen_ids))
+    assert set(seen_ids) == expected_ids
+
+
+def test_sync_client_uses_server_cursor_even_for_empty_filtered_page() -> None:
+    import rag_sync_client
+
+    class FakeAPI:
+        def __init__(self) -> None:
+            self.since_values: list[str] = []
+
+        def get_changes(self, since: str):
+            self.since_values.append(since)
+            return {"changes": [], "next_cursor": f"cursor-{len(self.since_values)}"}
+
+    class TwoPolls:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _seconds: float) -> bool:
+            self.calls += 1
+            return self.calls > 2
+
+    api = FakeAPI()
+    rag_sync_client.changes_poll_loop(api, [], "client", TwoPolls())
+
+    assert api.since_values == ["", "cursor-1"]
 
 
 def test_cloud_drive_sync_clients_pairs_selective_and_conflicts(tmp_path: Path) -> None:

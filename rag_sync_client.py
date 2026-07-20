@@ -522,10 +522,9 @@ def changes_poll_loop(api: SyncAPIClient, pairs: List[Dict[str, Any]],
                 log.info("Получено изменений с сервера: %d", len(changes))
                 for change in changes:
                     _apply_change(api, change, pairs, client_id)
-                times = [c.get("updated_at") or c.get("created_at") or "" for c in changes]
-                new_cursor = max((t for t in times if t), default=cursor)
-                if new_cursor > cursor:
-                    cursor = new_cursor
+            next_cursor = str(result.get("next_cursor") or "").strip()
+            if next_cursor and next_cursor != cursor:
+                cursor = next_cursor
             consecutive_errors = 0
         except (requests.ConnectionError, requests.Timeout):
             consecutive_errors += 1

@@ -40,6 +40,17 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 _CORRELATION_ID: ContextVar[str] = ContextVar("rag_correlation_id", default="")
 _CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
+_ACTIVE_PREVIEW_SUFFIXES = {".css", ".htm", ".html", ".js", ".mjs", ".svg", ".xml", ".xhtml"}
+_ACTIVE_PREVIEW_MEDIA_TYPES = {
+    "application/javascript",
+    "application/xhtml+xml",
+    "application/xml",
+    "image/svg+xml",
+    "text/css",
+    "text/html",
+    "text/javascript",
+    "text/xml",
+}
 
 
 def _normalise_correlation_id(value: str) -> str:
@@ -190,6 +201,55 @@ def _require_cloud_drive_path_access(
         details.update(audit_details or {})
         _audit_cloud_drive_api_event(cfg, user, audit_action, ok=False, details=details)
         raise HTTPException(status_code=403, detail="Нет доступа к этому пути Cloud Drive.")
+
+
+def _safe_preview_response_options(path: str | Path, media_type: str) -> tuple[str, Dict[str, str]]:
+    """Prevent user-controlled active content from executing on the app origin."""
+    clean_media = str(media_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    active = Path(str(path or "")).suffix.lower() in _ACTIVE_PREVIEW_SUFFIXES
+    active = active or clean_media in _ACTIVE_PREVIEW_MEDIA_TYPES
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if active:
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+        return "text/plain; charset=utf-8", headers
+    return str(media_type or "application/octet-stream"), headers
+
+
+def _require_catalog_file_access(
+    cfg: Dict[str, Any], user: Dict[str, Any], resolved: Path
+) -> None:
+    """Apply Cloud Drive ACLs to catalog files that are exposed by the viewer route."""
+    if str(user.get("role") or "").strip().lower() == "admin":
+        return
+    if not str(cfg.get("cloud_drive_db_path") or "").strip():
+        return
+    try:
+        service = CloudDriveService.from_config(cfg)
+        node = service.registry.get_node_by_source_path(str(resolved))
+        if node is None:
+            catalog = Path(str(cfg.get("catalog_path") or "")).resolve()
+            relative = str(resolved.relative_to(catalog)).replace("\\", "/")
+            node = service.registry.get_node_by_path(relative)
+    except Exception:
+        node = None
+        service = None
+    if node is None or service is None:
+        _audit_cloud_drive_api_event(
+            cfg,
+            user,
+            "view_file",
+            ok=False,
+            details={"path": str(resolved), "error": "registry_node_unresolved"},
+        )
+        raise HTTPException(status_code=403, detail="Нет доступа к этому файлу каталога.")
+    _require_cloud_drive_path_access(
+        cfg,
+        user,
+        str(getattr(node, "path", "") or ""),
+        service=service,
+        audit_action="view_file",
+        audit_details={"source_path": str(resolved)},
+    )
 
 
 def _require_sync_client_access(
@@ -360,12 +420,14 @@ def api_device_token(device_code: str = "") -> Dict[str, Any]:
 @app.get("/api/view-file")
 def api_view_file(path: str, authorization: AuthHeader = "") -> FileResponse:
     cfg = load_config()
-    _require_cloud_drive_api_user(cfg, authorization=authorization)
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     resolved = _resolve_catalog_file(cfg, path)
     if resolved is None:
         raise HTTPException(status_code=404, detail="Файл не найден или недоступен")
+    _require_catalog_file_access(cfg, user, resolved)
     media_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
-    return FileResponse(str(resolved), media_type=media_type, filename=resolved.name)
+    media_type, headers = _safe_preview_response_options(resolved, media_type)
+    return FileResponse(str(resolved), media_type=media_type, filename=resolved.name, headers=headers)
 
 
 @app.get("/api/cloud-drive/bootstrap-status")
@@ -1711,11 +1773,16 @@ def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
         )
         raise HTTPException(status_code=501, detail="Этот storage backend пока не поддерживает preview.")
     _audit_cloud_drive_api_event(cfg, user, "preview", details={"path": path, "filename": descriptor.get("filename")})
+    media_type, headers = _safe_preview_response_options(
+        str(descriptor.get("filename") or path),
+        str(descriptor["mime_type"]),
+    )
     return FileResponse(
         path=str(descriptor["file_path"]),
-        media_type=str(descriptor["mime_type"]),
+        media_type=media_type,
         filename=str(descriptor["filename"]),
         content_disposition_type="inline",
+        headers=headers,
     )
 
 

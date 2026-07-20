@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import secrets
 import sqlite3
@@ -24,10 +25,40 @@ from .models import (
 )
 
 CLOUD_DRIVE_SCHEMA_VERSION = 8
+_CHANGE_CURSOR_PREFIX = "v1."
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _change_sort_key(row: Any) -> tuple[str, str, str, str]:
+    return (
+        str(row["updated_at"] or ""),
+        str(row["node_type"] or ""),
+        str(row["path"] or ""),
+        str(row["id"] or ""),
+    )
+
+
+def _encode_change_cursor(row: Any) -> str:
+    raw = json.dumps(_change_sort_key(row), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return _CHANGE_CURSOR_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_change_cursor(value: str) -> tuple[str, str, str, str] | None:
+    clean = str(value or "").strip()
+    if not clean.startswith(_CHANGE_CURSOR_PREFIX):
+        return None
+    encoded = clean[len(_CHANGE_CURSOR_PREFIX) :]
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        parsed = json.loads(base64.urlsafe_b64decode(encoded + padding).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Некорректный cursor Cloud Drive changes.") from exc
+    if not isinstance(parsed, list) or len(parsed) != 4:
+        raise RuntimeError("Некорректный cursor Cloud Drive changes.")
+    return tuple(str(part or "") for part in parsed)  # type: ignore[return-value]
 
 
 def _normalize_future_timestamp(value: str) -> str:
@@ -1488,9 +1519,14 @@ class CloudDriveRegistryDB:
     def list_changes(self, *, since: str = '', limit: int = 500) -> List[Dict[str, Any]]:
         """Return changed file/folder registry rows ordered by update time."""
         clean_since = str(since or '').strip()
+        cursor_key = _decode_change_cursor(clean_since)
         max_rows = max(1, min(int(limit or 500), 5000))
-        where = "WHERE updated_at > ?" if clean_since else ""
-        params: tuple[Any, ...] = (clean_since,) if clean_since else ()
+        timestamp_floor = cursor_key[0] if cursor_key is not None else clean_since
+        if cursor_key is not None:
+            where = "WHERE updated_at >= ?"
+        else:
+            where = "WHERE updated_at > ?" if clean_since else ""
+        params: tuple[Any, ...] = (timestamp_floor,) if timestamp_floor else ()
         with self._connect() as conn:
             folder_rows = conn.execute(
                 f"""
@@ -1509,7 +1545,9 @@ class CloudDriveRegistryDB:
                 params,
             ).fetchall()
         rows = [*folder_rows, *file_rows]
-        rows.sort(key=lambda row: (str(row['updated_at'] or ''), str(row['node_type']), str(row['path'] or '')))
+        rows.sort(key=_change_sort_key)
+        if cursor_key is not None:
+            rows = [row for row in rows if _change_sort_key(row) > cursor_key]
         return [
             {
                 'node_type': str(row['node_type']),
@@ -1520,8 +1558,12 @@ class CloudDriveRegistryDB:
                 'deleted_at': str(row['deleted_at'] or ''),
                 'current_version_id': str(row['current_version_id'] or ''),
             }
-            for row in rows[-max_rows:]
+            for row in rows[:max_rows]
         ]
+
+    @staticmethod
+    def change_cursor(change: Dict[str, Any]) -> str:
+        return _encode_change_cursor(change)
 
     def list_deleted_nodes(self, *, limit: int = 200) -> List[Dict[str, Any]]:
         """Return soft-deleted files and folders ordered by deletion time."""
