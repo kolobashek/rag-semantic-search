@@ -6,6 +6,7 @@ from .contract import (
     UnreadableSourceError,
     blocks_from_legacy_text,
     document_from_legacy_text,
+    is_unreadable_source_error,
 )
 from .files import (
     extract_csv,
@@ -33,6 +34,7 @@ __all__ = [
     "ExtractedDocument",
     "TextBlock",
     "UnreadableSourceError",
+    "is_unreadable_source_error",
     "blocks_from_legacy_text",
     "document_from_legacy_text",
     "extract_doc_meta",

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from rag_catalog.core import ocr_runtime
-from rag_catalog.core.extractors import UnreadableSourceError
+from rag_catalog.core.extractors import UnreadableSourceError, is_unreadable_source_error
 from rag_catalog.core.extractors.files import _iter_pdf_pages, extract_image, ocr_pdf
 from rag_catalog.core.extractors.ocr_rapid import (
     _ocr_image_rapid_impl,
@@ -87,6 +87,14 @@ def test_rapidocr_image_reports_unreadable_source(tmp_path: Path) -> None:
 
     with pytest.raises(UnreadableSourceError, match="unreadable image source"):
         ocr_image_rapid(source)
+
+
+def test_unreadable_source_recognizes_wrapped_worker_error() -> None:
+    source_error = UnreadableSourceError("unreadable image source")
+    try:
+        raise RuntimeError("worker failed") from source_error
+    except RuntimeError as wrapped:
+        assert is_unreadable_source_error(wrapped) is True
 
 
 def test_iter_pdf_pages_renders_bounded_batches(monkeypatch, tmp_path: Path) -> None:

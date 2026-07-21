@@ -19,7 +19,7 @@ from qdrant_client.models import PointStruct
 from tqdm import tqdm
 
 from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
-from ..extractors import ExtractedDocument, UnreadableSourceError, extract_doc_meta
+from ..extractors import ExtractedDocument, extract_doc_meta, is_unreadable_source_error
 from ..indexer_control import read_indexer_control
 from ..retrieval import prepare_passage_texts
 from .qdrant_writer import upsert_points
@@ -1023,7 +1023,7 @@ class IndexStageRunner:
                             self._logger.warning("Ошибка чтения %s: %s", relative_path.name, _buf[1])
                             full_text = ""
                             failure_error = str(_buf[1])
-                            unreadable_source = isinstance(_buf[1], UnreadableSourceError)
+                            unreadable_source = is_unreadable_source_error(_buf[1])
                         else:
                             if isinstance(_buf[0], ExtractedDocument):
                                 extracted_doc = _buf[0]
@@ -1383,12 +1383,21 @@ class IndexStageRunner:
                     and not result.get("source_has_content")
                     and not result.get("deferred_ocr")
                 ):
-                    self._logger.warning(
-                        "Этап %s: файл %s без контента, сохраняю stage=%s (будет повторная попытка)",
-                        stage,
-                        Path(str(result["file_key"])).name,
-                        file_stage,
-                    )
+                    if result.get("unreadable_source"):
+                        self._logger.warning(
+                            "Этап %s: файл %s поврежден или нечитаем, сохраняю status=unreadable "
+                            "без автоматического повтора",
+                            stage,
+                            Path(str(result["file_key"])).name,
+                        )
+                    else:
+                        self._logger.warning(
+                            "Этап %s: файл %s без контента, сохраняю stage=%s "
+                            "(будет повторная попытка)",
+                            stage,
+                            Path(str(result["file_key"])).name,
+                            file_stage,
+                        )
                 pending_states.append(
                     {
                         "full_path": result["file_key"],

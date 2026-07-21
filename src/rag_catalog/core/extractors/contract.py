@@ -11,6 +11,18 @@ class UnreadableSourceError(RuntimeError):
     """The source bytes cannot be decoded by the extractor's supported format."""
 
 
+def is_unreadable_source_error(exc: BaseException | None) -> bool:
+    """Recognize terminal source failures through wrapped worker exceptions."""
+    seen: set[int] = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, UnreadableSourceError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 @dataclass(frozen=True)
 class TextBlock:
     """A text fragment with source-local provenance."""

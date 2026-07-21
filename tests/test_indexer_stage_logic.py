@@ -525,7 +525,7 @@ def test_read_error_is_marked_error_and_backed_off(tmp_path: Path) -> None:
     assert stats_retry_wait["skipped_files"] == 1
 
 
-def test_unreadable_source_is_terminal_empty_without_retry(tmp_path: Path) -> None:
+def test_unreadable_source_is_terminal_empty_without_retry(tmp_path: Path, caplog) -> None:
     p = tmp_path / "broken.jpg"
     p.write_bytes(b"not an image")
     idx = _make_indexer(tmp_path, extracted_text="")
@@ -545,6 +545,8 @@ def test_unreadable_source_is_terminal_empty_without_retry(tmp_path: Path) -> No
     assert row["next_retry_at"] == 0
     assert str(p) not in idx.state_db.failures
     assert first["error_files"] == 0
+    assert "без автоматического повтора" in caplog.text
+    assert "будет повторная попытка" not in caplog.text
 
     second = idx.index_directory(stage="large")
     assert second["skipped_files"] == 1
