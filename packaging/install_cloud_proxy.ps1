@@ -45,6 +45,12 @@ if ($existingTask) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
+try {
+    & $caddyCommand.Source stop | Out-Null
+} catch {
+    Write-Verbose "Активный пользовательский экземпляр Caddy не найден."
+}
+
 Get-Process caddy -ErrorAction SilentlyContinue | Where-Object {
     $_.Path -eq $caddyExe
 } | Stop-Process -Force
