@@ -1669,6 +1669,8 @@ class CloudDriveService:
 
     def run_pending_reindex_jobs(self, *, index_config: Optional[Dict[str, object]] = None, limit: int = 5) -> list[CloudDriveJob]:
         completed: list[CloudDriveJob] = []
+        if not self.registry.list_pending_jobs(job_types=['reindex', 'cleanup'], limit=1):
+            return completed
         previous_shared = getattr(self, "_shared_reindex_indexer", None)
         self._shared_reindex_indexer = self._build_shared_reindex_indexer(index_config or {})
         try:

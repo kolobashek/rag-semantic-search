@@ -3452,6 +3452,16 @@ def _ui_session_https_only(cfg: Dict[str, Any]) -> bool:
     return bool(cfg.get("ui_session_https_only", False))
 
 
+def _start_search_warmup(cfg: Dict[str, Any]) -> None:
+    """Warm the shared searcher without delaying the HTTP server startup."""
+    threading.Thread(
+        target=_warm_searcher_cache,
+        args=(cfg,),
+        name="search-warmup",
+        daemon=True,
+    ).start()
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Запустить NiceGUI-интерфейс RAG Каталога.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -3472,7 +3482,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     _start_recovery_watchdog(cfg)
     _start_global_scheduler(cfg)
     if bool(cfg.get("search_warmup_enabled", True)):
-        _warm_searcher_cache(cfg)
+        _start_search_warmup(cfg)
     _configure_nicegui_transport(cfg)
     ui.run(
         title="RAG Каталог",

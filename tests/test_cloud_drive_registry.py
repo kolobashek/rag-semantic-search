@@ -1080,6 +1080,19 @@ def test_service_runs_pending_reindex_jobs_past_failed_job(tmp_path: Path, monke
     assert registry.get_job(completed[1].id).last_error
 
 
+def test_service_does_not_build_reindexer_without_pending_jobs(tmp_path: Path, monkeypatch) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    storage = LocalStorageAdapter(str(tmp_path / 'storage'))
+    service = CloudDriveService(registry=registry, storage=storage)
+
+    def _unexpected_build(_config):  # noqa: ANN001
+        raise AssertionError('reindexer must not be built for an empty queue')
+
+    monkeypatch.setattr(service, '_build_shared_reindex_indexer', _unexpected_build)
+
+    assert service.run_pending_reindex_jobs(index_config={'collection_name': 'catalog_v2'}) == []
+
+
 def test_service_reindex_job_rejects_remote_storage_without_local_source(tmp_path: Path) -> None:
     class _RemoteOnlyStorage:
         def __init__(self) -> None:

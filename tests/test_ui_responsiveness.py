@@ -242,6 +242,28 @@ def test_ui_socket_ping_timeout_tolerates_long_background_searches(monkeypatch) 
     assert core.sio.eio.ping_timeout == 75.0
 
 
+def test_search_warmup_starts_in_background(monkeypatch) -> None:
+    calls = []
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, name, daemon):  # noqa: ANN001
+            assert name == "search-warmup"
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    monkeypatch.setattr(nice_app.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(nice_app, "_warm_searcher_cache", lambda cfg: calls.append(cfg))
+
+    cfg = {"collection_name": "catalog_v2"}
+    nice_app._start_search_warmup(cfg)
+
+    assert calls == [cfg]
+
+
 def test_login_io_does_not_block_nicegui_event_loop() -> None:
     source = inspect.getsource(nice_app._build_page)
 
