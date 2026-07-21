@@ -1,0 +1,9 @@
+CfConnectSyncRoot
+CfCreatePlaceholders
+CfDisconnectSyncRoot
+CfExecute
+CfGetPlatformInfo
+CfRegisterSyncRoot
+CfSetInSyncState
+CfSetPinState
+CfUnregisterSyncRoot

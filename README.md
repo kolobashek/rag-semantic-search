@@ -301,6 +301,20 @@ DELETE /api/cloud-drive/share-links
 /api/cloud-drive/sync/*
 ```
 
+Windows Files On-Demand provider показывает в Проводнике весь доступный по ACL namespace,
+но загружает содержимое файла только при первом открытии. Провайдер требует Windows 10 1709+
+и NTFS. Он собирается как self-contained EXE:
+
+```powershell
+packaging\build_cloud_files.ps1
+packaging\install_cloud_files.ps1 -Server https://catalog.example.org
+```
+
+Одна и та же install-команда подходит для Intune/GPO/logon script: пользователю не нужно
+выбирать папки, а токен получается через device login и хранится с DPAPI текущего пользователя.
+Пилотная версия `0.1.x` монтирует файлы read-only; старый двусторонний sync client остаётся
+доступен отдельно до завершения тестов конфликтов записи.
+
 Если таблица `cloud_permissions` пуста, Cloud Drive сохраняет прежний open-access режим для совместимости.
 После первой grant-записи доступ к API проверяется по registry ACL с наследованием прав от папок.
 Разрешённые чувствительные операции и ACL-отказы записываются в audit telemetry; для публичных ссылок хранится только отпечаток токена, сам токен в журнал не попадает.
