@@ -264,6 +264,14 @@ def test_search_warmup_starts_in_background(monkeypatch) -> None:
     assert calls == [cfg]
 
 
+def test_cloud_drive_name_hints_are_opt_in() -> None:
+    source = inspect.getsource(nice_app._build_page)
+    hints = source[source.index("def _render_cd_search_hints"):source.index("def render_search_screen")]
+
+    assert 'state.cfg.get("ui_cloud_drive_search_hints_enabled", False)' in hints
+    assert hints.index("ui_cloud_drive_search_hints_enabled") < hints.index("_cd_get_service")
+
+
 def test_login_io_does_not_block_nicegui_event_loop() -> None:
     source = inspect.getsource(nice_app._build_page)
 

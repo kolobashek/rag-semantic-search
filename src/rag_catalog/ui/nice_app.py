@@ -2224,6 +2224,8 @@ def _build_page(initial_screen: str = "search") -> None:
 
     def _render_cd_search_hints(query: str) -> None:
         """Render a compact Cloud Drive registry section above main search results."""
+        if not bool(state.cfg.get("ui_cloud_drive_search_hints_enabled", False)):
+            return
         cd_svc = _cd_get_service(state.cfg)
         if cd_svc is None or not query:
             return
