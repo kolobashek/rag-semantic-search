@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 _TOKEN_RE = re.compile(r"[a-zа-яё0-9\-]{2,}", flags=re.IGNORECASE)
 _STOPWORDS = {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
@@ -109,7 +109,7 @@ def bm25_rank_items(
         # query-specific IDF each run, but avoids retokenizing tens of thousands of paths.
         cached_tokens = item.get("_bm25_tokens")
         if isinstance(cached_tokens, list):
-            tokens = [str(token) for token in cached_tokens]
+            tokens = cached_tokens
         else:
             filename = str(item.get("filename") or "")
             path = str(item.get("path") or "")
@@ -172,6 +172,103 @@ def bm25_rank_items(
         item["score"] = round(0.70 + 0.29 * normalized, 6)
         item["rank_reason"] = "BM25 совпадение в имени/пути"
 
+    scored.sort(
+        key=lambda item: (
+            float(item.get("bm25_score") or 0),
+            int(item.get("bm25_matched_terms") or 0),
+            1 if str(item.get("kind") or "") == "file" else 0,
+            -len(str(item.get("path") or "")),
+        ),
+        reverse=True,
+    )
+    return scored[: max(1, int(limit))]
+
+
+def bm25_rank_indexed_items(
+    items: Sequence[Dict[str, Any]],
+    candidate_indices: Sequence[int],
+    query_terms: Sequence[str],
+    *,
+    token_docs: Mapping[str, Sequence[int]],
+    sorted_tokens: Sequence[str],
+    limit: int = 50,
+    k1: float = 1.2,
+    b: float = 0.75,
+    corpus_size: int | None = None,
+    average_doc_length: float | None = None,
+) -> List[Dict[str, Any]]:
+    """Rank cached metadata through token postings instead of rescanning document tokens."""
+    query = [term.lower().replace("ё", "е") for term in query_terms if str(term or "").strip()]
+    if not query or not candidate_indices:
+        return []
+
+    allowed = set(candidate_indices)
+    total_docs = 0
+    total_doc_len = 0
+    doc_lengths: Dict[int, int] = {}
+    for item_index in candidate_indices:
+        tokens = items[item_index].get("_bm25_tokens")
+        if not isinstance(tokens, list) or not tokens:
+            continue
+        doc_length = len(tokens)
+        doc_lengths[item_index] = doc_length
+        total_docs += 1
+        total_doc_len += doc_length
+    if not total_docs:
+        return []
+
+    frequencies_by_doc: Dict[int, List[int]] = {}
+    df = [0] * len(query)
+    query_needles = [_needles(term) for term in query]
+    for term_index, needles in enumerate(query_needles):
+        frequencies: Dict[int, int] = {}
+        for token in sorted_tokens:
+            if not any(needle in token for needle in needles):
+                continue
+            for item_index in token_docs.get(token, ()):
+                if item_index in allowed:
+                    frequencies[item_index] = frequencies.get(item_index, 0) + 1
+        df[term_index] = len(frequencies)
+        for item_index, frequency in frequencies.items():
+            per_term = frequencies_by_doc.get(item_index)
+            if per_term is None:
+                per_term = [0] * len(query)
+                frequencies_by_doc[item_index] = per_term
+            per_term[term_index] = frequency
+
+    scoring_total_docs = max(total_docs, int(corpus_size or 0))
+    avgdl = float(average_doc_length or 0.0) or (total_doc_len / total_docs)
+    scored: List[Dict[str, Any]] = []
+    for item_index in sorted(frequencies_by_doc):
+        frequencies = frequencies_by_doc[item_index]
+        doc_len = doc_lengths.get(item_index, 0)
+        if not doc_len:
+            continue
+        score = 0.0
+        matched_terms = 0
+        for term_index, frequency in enumerate(frequencies):
+            if frequency <= 0:
+                continue
+            matched_terms += 1
+            idf = math.log(
+                1.0 + (scoring_total_docs - df[term_index] + 0.5) / (df[term_index] + 0.5)
+            )
+            denom = frequency + k1 * (1.0 - b + b * doc_len / max(avgdl, 1e-9))
+            score += idf * (frequency * (k1 + 1.0)) / max(denom, 1e-9)
+        if score <= 0.0:
+            continue
+        ranked = dict(items[item_index])
+        ranked["bm25_score"] = score
+        ranked["bm25_matched_terms"] = matched_terms
+        scored.append(ranked)
+
+    if not scored:
+        return []
+    max_score = max(float(item["bm25_score"]) for item in scored)
+    for item in scored:
+        normalized = float(item["bm25_score"]) / max(max_score, 1e-9)
+        item["score"] = round(0.70 + 0.29 * normalized, 6)
+        item["rank_reason"] = "BM25 совпадение в имени/пути"
     scored.sort(
         key=lambda item: (
             float(item.get("bm25_score") or 0),

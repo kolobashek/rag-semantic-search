@@ -283,8 +283,12 @@ def test_search_title_only_returns_only_metadata_points() -> None:
 
 def test_search_retrieval_v2_uses_rrf_fusion() -> None:
     s = _make_searcher(connected=True)
-    s.config = {"retrieval_pipeline": "v2"}
-    s.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[  # type: ignore[method-assign]
+    s.config = {"retrieval_pipeline": "v2", "retrieval_dense_top_k": 50}
+    qdrant_calls = []
+
+    def dense_search(**kwargs):
+        qdrant_calls.append(kwargs)
+        return SimpleNamespace(points=[
         SimpleNamespace(
             score=0.99,
             payload={
@@ -303,7 +307,9 @@ def test_search_retrieval_v2_uses_rrf_fusion() -> None:
                 "full_path": r"O:\both.docx",
             },
         ),
-    ])
+        ])
+
+    s.qdrant.query_points = dense_search  # type: ignore[method-assign]
     s._lexical_catalog_search = lambda **kwargs: [  # type: ignore[method-assign]
         {"type": "file_metadata", "filename": "both.docx", "path": "both.docx", "full_path": r"O:\both.docx", "score": 0.80},
         {"type": "file_metadata", "filename": "lexical.docx", "path": "lexical.docx", "full_path": r"O:\lexical.docx", "score": 0.75},
@@ -313,6 +319,51 @@ def test_search_retrieval_v2_uses_rrf_fusion() -> None:
 
     assert out[0]["filename"] == "both.docx"
     assert out[0]["fusion"] == "rrf"
+    assert qdrant_calls[0]["limit"] == 50
+
+
+def test_search_legacy_keeps_requested_dense_limit() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {"retrieval_pipeline": "legacy", "retrieval_dense_top_k": 50}
+
+    s.search("target", limit=3, source="test")
+
+    assert s.qdrant.last_kwargs["limit"] == 3
+
+
+def test_search_retrieval_v2_keeps_dense_depth_until_relevance_gate() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {"retrieval_pipeline": "v2", "retrieval_dense_top_k": 50}
+    s.qdrant.query_points = lambda **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        points=[
+            SimpleNamespace(
+                score=0.99 - index * 0.001,
+                payload={
+                    "type": "pdf_content",
+                    "filename": f"doc-{index}.pdf",
+                    "path": f"doc-{index}.pdf",
+                    "full_path": rf"O:\doc-{index}.pdf",
+                    "text": "relevant content",
+                    "chunk_index": 0,
+                },
+            )
+            for index in range(50)
+        ]
+    )
+    s._numeric_exact_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._lexical_catalog_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._bm25_catalog_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._fulltext_content_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    gated_inputs = []
+
+    def gate(_query, results, **_kwargs):
+        gated_inputs.extend(results)
+        return []
+
+    s._apply_relevance_gate = gate  # type: ignore[method-assign]
+
+    assert s.search("target", limit=10, source="test") == []
+    assert len(gated_inputs) == 50
 
 
 def test_search_retrieval_v2_applies_relevance_gate_before_reranking() -> None:

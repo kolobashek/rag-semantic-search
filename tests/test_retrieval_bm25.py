@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from rag_catalog.core.retrieval import bm25_rank_items, prepare_bm25_items, tokenize
+from rag_catalog.core.retrieval import (
+    bm25_rank_indexed_items,
+    bm25_rank_items,
+    prepare_bm25_items,
+    tokenize,
+)
 
 
 def test_tokenize_normalizes_russian_and_filters_stopwords() -> None:
@@ -115,3 +120,55 @@ def test_bm25_matches_technical_service_context() -> None:
     out = bm25_rank_items(items, ["реквизиты", "обслуживания", "технических", "услуг"], limit=2)
 
     assert out[0]["filename"] == "Карточка_предприятия_СРК.docx"
+
+
+def test_indexed_bm25_matches_document_scan_ranking() -> None:
+    items = [
+        {
+            "kind": "file",
+            "filename": "Карточка предприятия ООО ТСК.docx",
+            "path": r"Катя\ООО ТСК\Карточка предприятия ООО ТСК.docx",
+            "full_path": r"O:\Катя\ООО ТСК\Карточка предприятия ООО ТСК.docx",
+            "extension": ".docx",
+        },
+        {
+            "kind": "file",
+            "filename": "Акт сверки.docx",
+            "path": r"Карточки предприятий\ООО ТСК\Акт сверки.docx",
+            "full_path": r"O:\Карточки предприятий\ООО ТСК\Акт сверки.docx",
+            "extension": ".docx",
+        },
+        {
+            "kind": "folder",
+            "filename": "Карточки предприятий",
+            "path": "Карточки предприятий",
+            "full_path": r"O:\Карточки предприятий",
+            "extension": "",
+        },
+        {
+            "kind": "folder",
+            "filename": "Карточки предприятий",
+            "path": r"Архив\Карточки предприятий",
+            "full_path": r"O:\Архив\Карточки предприятий",
+            "extension": "",
+        },
+    ]
+    prepare_bm25_items(items)
+    token_docs: dict[str, list[int]] = {}
+    for item_index, item in enumerate(items):
+        for token in item["_bm25_tokens"]:
+            token_docs.setdefault(token, []).append(item_index)
+    terms = ["карточка", "предприятия", "тск"]
+
+    scanned = bm25_rank_items(items, terms, limit=3)
+    indexed = bm25_rank_indexed_items(
+        items,
+        tuple(range(len(items))),
+        terms,
+        token_docs=token_docs,
+        sorted_tokens=tuple(sorted(token_docs)),
+        limit=3,
+    )
+
+    assert [item["full_path"] for item in indexed] == [item["full_path"] for item in scanned]
+    assert [item["bm25_score"] for item in indexed] == [item["bm25_score"] for item in scanned]

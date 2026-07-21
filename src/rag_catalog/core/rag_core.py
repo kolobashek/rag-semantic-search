@@ -35,7 +35,14 @@ from .exact_tokens import (
 )
 from .index_state_db import IndexStateDB
 from .qdrant_connection import create_qdrant_client
-from .retrieval import bm25_rank_items, prepare_bm25_items, prepare_query_text, rrf_fuse, tokenize
+from .retrieval import (
+    bm25_rank_indexed_items,
+    bm25_rank_items,
+    prepare_bm25_items,
+    prepare_query_text,
+    rrf_fuse,
+    tokenize,
+)
 from .telemetry_db import TelemetryDB
 
 # SentenceTransformer импортируется ЛЕНИВО внутри RAGSearcher.embedder.
@@ -520,6 +527,9 @@ class RAGSearcher:
 
         lexical_query = query_original_used or raw_query
 
+        dense_limit = limit
+        if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
+            dense_limit = max(limit, int(self.config.get("retrieval_dense_top_k", limit) or limit))
         try:
             query_vector = self.embedder.encode(
                 prepare_query_text(
@@ -597,7 +607,7 @@ class RAGSearcher:
                 collection_name=self.collection_name,
                 query=query_vector,
                 query_filter=qdrant_filter,
-                limit=limit,
+                limit=dense_limit,
                 with_payload=True,
             )
             raw = response.points
@@ -690,7 +700,7 @@ class RAGSearcher:
         }
         relevance_gate_applied = False
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
-            fusion_candidate_limit = max(limit * 3, 30)
+            fusion_candidate_limit = max(limit * 5, 50)
             bm25_results = self._bm25_catalog_search(
                 query=lexical_query,
                 limit=int(self.config.get("retrieval_bm25_top_k", max(limit * 4, 40)) or max(limit * 4, 40)),
@@ -699,7 +709,7 @@ class RAGSearcher:
                 title_only=title_only,
             )
             channels = [numeric_exact_results, lexical_results, bm25_results, fulltext_results, results]
-            fused = rrf_fuse(channels, limit=max(limit * 4, 40))
+            fused = rrf_fuse(channels, limit=max(limit * 4, 40, fusion_candidate_limit))
             results = self._merge_ranked_results(
                 [],
                 fused,
@@ -1049,6 +1059,9 @@ class RAGSearcher:
     def _metadata_candidates(self, items: List[Dict[str, Any]], terms: List[str]) -> List[Dict[str, Any]]:
         if int(getattr(self, "_metadata_index_source", 0) or 0) != id(items):
             return items
+        return [items[index] for index in self._metadata_candidate_indices(terms)]
+
+    def _metadata_candidate_indices(self, terms: List[str]) -> tuple[int, ...]:
         token_docs = getattr(self, "_metadata_token_docs", {}) or {}
         sorted_tokens = getattr(self, "_metadata_sorted_tokens", ()) or tuple(sorted(token_docs))
         needle_docs = getattr(self, "_metadata_needle_docs", None)
@@ -1082,7 +1095,7 @@ class RAGSearcher:
                 else:
                     needle_docs.move_to_end(needle)
                 indices.update(matched)
-        return [items[index] for index in sorted(indices)]
+        return tuple(sorted(indices))
 
     def warm_retrieval_cache(self) -> int:
         """Prepare reusable metadata structures for warm-search latency."""
@@ -1204,7 +1217,13 @@ class RAGSearcher:
         if not terms:
             return []
         metadata_items = self._refresh_fs_cache()
-        indexed_candidates = self._metadata_candidates(metadata_items, terms) if not file_type else metadata_items
+        index_ready = int(getattr(self, "_metadata_index_source", 0) or 0) == id(metadata_items)
+        candidate_indices = self._metadata_candidate_indices(terms) if index_ready and not file_type else ()
+        indexed_candidates = (
+            [metadata_items[index] for index in candidate_indices]
+            if index_ready and not file_type
+            else metadata_items
+        )
         candidates: List[Dict[str, Any]] = []
         for item in indexed_candidates:
             if file_type and item.get("kind") == "folder":
@@ -1214,15 +1233,24 @@ class RAGSearcher:
             candidates.append(item)
 
         use_corpus_stats = not file_type and len(indexed_candidates) != len(metadata_items)
-        ranked = bm25_rank_items(
-            candidates,
-            terms,
-            limit=limit,
-            corpus_size=int(getattr(self, "_metadata_corpus_size", 0) or 0) if use_corpus_stats else None,
-            average_doc_length=(
+        rank_kwargs = {
+            "limit": limit,
+            "corpus_size": int(getattr(self, "_metadata_corpus_size", 0) or 0) if use_corpus_stats else None,
+            "average_doc_length": (
                 float(getattr(self, "_metadata_average_doc_length", 0.0) or 0.0) if use_corpus_stats else None
             ),
-        )
+        }
+        if candidate_indices and not file_type:
+            ranked = bm25_rank_indexed_items(
+                metadata_items,
+                candidate_indices,
+                terms,
+                token_docs=getattr(self, "_metadata_token_docs", {}) or {},
+                sorted_tokens=getattr(self, "_metadata_sorted_tokens", ()) or (),
+                **rank_kwargs,
+            )
+        else:
+            ranked = bm25_rank_items(candidates, terms, **rank_kwargs)
         out: List[Dict[str, Any]] = []
         for item in ranked:
             is_folder = item.get("kind") == "folder"
