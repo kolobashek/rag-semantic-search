@@ -31,7 +31,7 @@ from rag_catalog.core.rag_core import load_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
-from .helpers import _cd_registry_acl_allows, _resolve_catalog_file
+from .helpers import _cd_registry_acl_allows, _cd_registry_acl_filter, _resolve_catalog_file
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
 
@@ -408,10 +408,14 @@ def api_sync_client_version() -> Dict[str, Any]:
     packaging = root / "packaging" / "dist"
     has_exe = (packaging / "rag_sync_client.exe").is_file()
     has_msi = (packaging / "RAGSyncClient.msi").is_file()
+    has_cloud_files_exe = (packaging / "RagCloudFiles.exe").is_file()
     return {
         "version": _SYNC_CLIENT_VERSION,
         "has_exe": has_exe,
         "has_msi": has_msi,
+        "has_cloud_files_exe": has_cloud_files_exe,
+        "cloud_files_version": "0.1.0",
+        "cloud_files_download_url": "/api/cloud-drive/sync/client-download?format=cloud-files-exe",
         "download_url": "/api/cloud-drive/sync/client-download?format=exe",
     }
 
@@ -1359,15 +1363,27 @@ def api_cloud_drive_changes(since: str = "", limit: int = 500, authorization: Au
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
     result = service.list_changes(since=since, limit=max(1, min(int(limit or 500), 5000)))
-    changes = [
-        item
-        for item in result.get("changes", [])
-        if _cloud_drive_path_allowed(cfg, user, str(item.get("path") or ""), service=service)
-    ]
+    changes = _cd_registry_acl_filter(cfg, user, result.get("changes", []), service=service)
     result["changes"] = changes
     result["count"] = len(changes)
+    result["acl_revision"] = _cloud_drive_acl_revision(cfg, user, service)
     _audit_cloud_drive_api_event(cfg, user, "changes", details={"since": since, "count": len(changes)})
     return result
+
+
+def _cloud_drive_acl_revision(
+    cfg: Dict[str, Any], user: Dict[str, Any], service: CloudDriveService
+) -> str:
+    """Fingerprint visibility inputs so clients can promptly reconcile ACL revocations."""
+    payload = {
+        "config_acl": cfg.get("cloud_drive_acl") or {},
+        "username": str(user.get("username") or "").strip().lower(),
+        "role": str(user.get("role") or "").strip().lower(),
+        "groups": sorted(str(group_id) for group_id in (user.get("group_ids") or [])),
+        "permissions": service.list_permissions(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @app.get("/api/cloud-drive/sync/clients")
@@ -1457,6 +1473,10 @@ def api_cloud_drive_sync_client_download(
     if fmt == "py":
         candidates = [
             (root / "rag_sync_client.py", "text/x-python", "rag_sync_client.py"),
+        ]
+    elif fmt == "cloud-files-exe":
+        candidates = [
+            (packaging / "RagCloudFiles.exe", "application/octet-stream", "RagCloudFiles.exe"),
         ]
     elif fmt == "msi":
         candidates = [

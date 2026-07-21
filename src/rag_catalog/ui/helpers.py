@@ -1436,6 +1436,43 @@ def _cd_registry_acl_allows(
         return False
 
 
+def _cd_registry_acl_filter(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    items: List[Dict[str, Any]],
+    *,
+    service: CloudDriveService | None = None,
+    required_level: str = "viewer",
+) -> List[Dict[str, Any]]:
+    """Filter Cloud Drive rows with one registry ACL snapshot; fail closed."""
+    if not items:
+        return []
+    candidates = [item for item in items if _cd_acl_allows(cfg, user, str(item.get("path") or ""))]
+    if not candidates:
+        return []
+    try:
+        svc = service or _cd_cached_service(cfg)
+        if svc is None:
+            return []
+        nodes = [
+            (
+                str(item.get("path") or ""),
+                str(item.get("id") or "") if str(item.get("node_type") or "") == "file" else "",
+            )
+            for item in candidates
+        ]
+        decisions = svc.user_access_map(
+            username=str((user or {}).get("username") or ""),
+            role=str((user or {}).get("role") or ""),
+            groups=[str(group_id) for group_id in ((user or {}).get("group_ids") or [])],
+            nodes=nodes,
+            required_level=required_level,
+        )
+        return [item for item, node in zip(candidates, nodes) if decisions.get(node, False)]
+    except Exception:
+        return []
+
+
 def _cd_registry_node_for_search_item(
     cfg: Dict[str, Any],
     service: CloudDriveService,

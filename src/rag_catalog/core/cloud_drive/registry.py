@@ -1530,7 +1530,18 @@ class CloudDriveRegistryDB:
         with self._connect() as conn:
             folder_rows = conn.execute(
                 f"""
-                SELECT 'folder' AS node_type, id, path, name, updated_at, deleted_at, '' AS current_version_id
+                SELECT
+                    'folder' AS node_type,
+                    id,
+                    path,
+                    name,
+                    created_at,
+                    updated_at,
+                    deleted_at,
+                    '' AS current_version_id,
+                    '' AS mime_type,
+                    0 AS size_bytes,
+                    '' AS checksum
                 FROM cloud_folders
                 {where}
                 """,
@@ -1538,7 +1549,18 @@ class CloudDriveRegistryDB:
             ).fetchall()
             file_rows = conn.execute(
                 f"""
-                SELECT 'file' AS node_type, id, path, name, updated_at, deleted_at, current_version_id
+                SELECT
+                    'file' AS node_type,
+                    id,
+                    path,
+                    name,
+                    created_at,
+                    updated_at,
+                    deleted_at,
+                    current_version_id,
+                    mime_type,
+                    size_bytes,
+                    checksum
                 FROM cloud_files
                 {where}
                 """,
@@ -1554,9 +1576,13 @@ class CloudDriveRegistryDB:
                 'id': str(row['id']),
                 'path': str(row['path'] or ''),
                 'name': str(row['name'] or ''),
+                'created_at': str(row['created_at'] or ''),
                 'updated_at': str(row['updated_at'] or ''),
                 'deleted_at': str(row['deleted_at'] or ''),
                 'current_version_id': str(row['current_version_id'] or ''),
+                'mime_type': str(row['mime_type'] or ''),
+                'size_bytes': int(row['size_bytes'] or 0),
+                'checksum': str(row['checksum'] or ''),
             }
             for row in rows[:max_rows]
         ]

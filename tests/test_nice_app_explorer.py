@@ -2173,6 +2173,74 @@ def test_registry_acl_helper_fails_closed_on_registry_error() -> None:
     )
 
 
+def test_registry_acl_filter_uses_one_bulk_snapshot_and_fails_closed() -> None:
+    class BulkService:
+        def __init__(self, *, broken: bool = False) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.broken = broken
+
+        def user_access_map(self, **kwargs):
+            self.calls.append(kwargs)
+            if self.broken:
+                raise sqlite3.OperationalError("registry unavailable")
+            return {
+                ("Allowed", ""): True,
+                ("Allowed/report.txt", "file-1"): True,
+            }
+
+    items = [
+        {"node_type": "folder", "id": "folder-1", "path": "Allowed"},
+        {"node_type": "file", "id": "file-1", "path": "Allowed/report.txt"},
+        {"node_type": "file", "id": "file-2", "path": "Denied/secret.txt"},
+    ]
+    cfg = {"cloud_drive_acl": {"users": {"user": ["Allowed"]}}}
+    user = {"username": "user", "role": "user", "group_ids": ["group-1"]}
+    service = BulkService()
+
+    allowed = ui_helpers._cd_registry_acl_filter(cfg, user, items, service=service)
+
+    assert [item["path"] for item in allowed] == ["Allowed", "Allowed/report.txt"]
+    assert len(service.calls) == 1
+    assert service.calls[0]["nodes"] == [("Allowed", ""), ("Allowed/report.txt", "file-1")]
+    assert service.calls[0]["groups"] == ["group-1"]
+    assert ui_helpers._cd_registry_acl_filter(cfg, user, items, service=BulkService(broken=True)) == []
+
+
+def test_sync_client_version_advertises_files_on_demand_channel() -> None:
+    result = cloud_api.api_sync_client_version()
+
+    assert result["cloud_files_version"] == "0.1.0"
+    assert result["cloud_files_download_url"].endswith("format=cloud-files-exe")
+    assert isinstance(result["has_cloud_files_exe"], bool)
+
+
+def test_cloud_drive_acl_revision_tracks_permissions_and_groups() -> None:
+    class RevisionService:
+        def __init__(self, permissions):
+            self.permissions = permissions
+
+        def list_permissions(self):
+            return self.permissions
+
+    cfg = {"cloud_drive_acl": {"users": {"user": ["Allowed"]}}}
+    user = {"username": "user", "role": "viewer", "group_ids": ["group-1"]}
+    initial = cloud_api._cloud_drive_acl_revision(cfg, user, RevisionService([]))
+    permission_changed = cloud_api._cloud_drive_acl_revision(
+        cfg,
+        user,
+        RevisionService([{"id": "permission-1", "access_level": "viewer"}]),
+    )
+    group_changed = cloud_api._cloud_drive_acl_revision(
+        cfg,
+        {**user, "group_ids": ["group-2"]},
+        RevisionService([]),
+    )
+
+    assert len(initial) == 64
+    assert permission_changed != initial
+    assert group_changed != initial
+
+
 def test_cloud_drive_acl_allows_user_and_role_prefixes() -> None:
     cfg = {
         "cloud_drive_acl": {

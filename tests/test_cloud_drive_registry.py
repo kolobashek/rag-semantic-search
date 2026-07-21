@@ -705,6 +705,11 @@ def test_service_lists_cloud_drive_changes_for_sync_clients(tmp_path: Path) -> N
     paths = {item['path'] for item in initial['changes']}
     assert 'Folder A' in paths
     assert 'Folder A/hello.txt' in paths
+    file_change = next(item for item in initial['changes'] if item['path'] == 'Folder A/hello.txt')
+    assert file_change['size_bytes'] == 5
+    assert file_change['mime_type'] == 'text/plain'
+    assert file_change['checksum']
+    assert file_change['created_at']
     cursor = initial['next_cursor']
 
     service.delete_node('Folder A/hello.txt')
