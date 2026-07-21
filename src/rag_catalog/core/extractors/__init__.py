@@ -1,6 +1,12 @@
 """File text extractors used by indexing pipelines."""
 
-from .contract import ExtractedDocument, TextBlock, blocks_from_legacy_text, document_from_legacy_text
+from .contract import (
+    ExtractedDocument,
+    TextBlock,
+    UnreadableSourceError,
+    blocks_from_legacy_text,
+    document_from_legacy_text,
+)
 from .files import (
     extract_csv,
     extract_doc,
@@ -26,6 +32,7 @@ from .files import (
 __all__ = [
     "ExtractedDocument",
     "TextBlock",
+    "UnreadableSourceError",
     "blocks_from_legacy_text",
     "document_from_legacy_text",
     "extract_doc_meta",

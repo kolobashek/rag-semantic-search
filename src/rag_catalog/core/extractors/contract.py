@@ -7,6 +7,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
+class UnreadableSourceError(RuntimeError):
+    """The source bytes cannot be decoded by the extractor's supported format."""
+
+
 @dataclass(frozen=True)
 class TextBlock:
     """A text fragment with source-local provenance."""

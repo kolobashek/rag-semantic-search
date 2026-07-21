@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import types
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 from rag_catalog.core import ocr_runtime
+from rag_catalog.core.extractors import UnreadableSourceError
 from rag_catalog.core.extractors.files import _iter_pdf_pages, extract_image, ocr_pdf
-from rag_catalog.core.extractors.ocr_rapid import _ocr_pdf_rapid_impl
+from rag_catalog.core.extractors.ocr_rapid import (
+    _ocr_image_rapid_impl,
+    _ocr_pdf_rapid_impl,
+    ocr_image_rapid,
+)
 
 
 def test_resolve_ocr_runtime_uses_config_paths(tmp_path: Path) -> None:
@@ -59,6 +65,28 @@ def test_rapidocr_pdf_conversion_failure_is_not_reported_as_empty(monkeypatch, t
 
     with pytest.raises(RuntimeError, match="RapidOCR PDF conversion failed"):
         _ocr_pdf_rapid_impl(tmp_path / "broken.pdf")
+
+
+def test_rapidocr_worker_accepts_truncated_jpeg(monkeypatch, tmp_path: Path) -> None:
+    from PIL import Image, ImageFile
+
+    encoded = BytesIO()
+    Image.new("RGB", (64, 64), "white").save(encoded, format="JPEG")
+    source = tmp_path / "truncated.jpg"
+    source.write_bytes(encoded.getvalue()[:-10])
+    original_setting = bool(ImageFile.LOAD_TRUNCATED_IMAGES)
+    monkeypatch.setattr("rag_catalog.core.extractors.ocr_rapid._img_to_text", lambda _image: "recovered")
+
+    assert _ocr_image_rapid_impl(source) == "recovered"
+    assert bool(ImageFile.LOAD_TRUNCATED_IMAGES) is original_setting
+
+
+def test_rapidocr_image_reports_unreadable_source(tmp_path: Path) -> None:
+    source = tmp_path / "invalid.jpg"
+    source.write_bytes(b"not an image")
+
+    with pytest.raises(UnreadableSourceError, match="unreadable image source"):
+        ocr_image_rapid(source)
 
 
 def test_iter_pdf_pages_renders_bounded_batches(monkeypatch, tmp_path: Path) -> None:

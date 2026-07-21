@@ -215,6 +215,8 @@ def find_state_db_ocr_candidates(state_dir: Path, *, small_pdf_mb: float = 2.0) 
         path = str(row["full_path"] or "").strip()
         ext = str(row["extension"] or "").lower()
         status = str(row["status"] or "")
+        if status == "unreadable":
+            continue
         needs_content = (
             str(row["stage"] or "") != "content"
             or status in {"empty", "error", "deferred_ocr"}
@@ -243,6 +245,8 @@ def _state_entry_still_needs_ocr(conn: sqlite3.Connection, path: str) -> bool:
     stage = str(row["stage"] or "")
     indexed_stage = str(row["indexed_stage"] or "")
     status = str(row["status"] or "")
+    if status == "unreadable":
+        return False
     return stage != "content" or status in {"empty", "error"} or indexed_stage in {"", "metadata", "small"}
 
 
@@ -630,6 +634,28 @@ def main() -> int:
     if not telemetry_path:
         telemetry_path = str(Path(args.state_dir) / "rag_telemetry.db")
     telemetry = TelemetryDB(telemetry_path)
+
+    running_ocr_rows = telemetry.fetch_dicts(
+        "SELECT * FROM ocr_runs WHERE status='running' ORDER BY ts_started DESC LIMIT 20"
+    )
+    live_ocr = next(
+        (row for row in running_ocr_rows if _is_process_alive(int(row.get("worker_pid") or 0))),
+        None,
+    )
+    if live_ocr:
+        logger.warning(
+            "Найден активный OCR-проход (PID %s, run_id=%s). Новый проход не запущен.",
+            int(live_ocr.get("worker_pid") or 0),
+            str(live_ocr.get("ocr_run_id") or ""),
+        )
+        return 2
+    recovered_ocr_runs = telemetry.finalize_running_ocr_runs(
+        status="cancelled",
+        note="recovered_dead_worker_before_ocr_start",
+        skip_alive_pids=True,
+    )
+    if recovered_ocr_runs:
+        logger.warning("Восстановлено зависших OCR-run с мёртвыми PID: %d", recovered_ocr_runs)
 
     # Не запускаем OCR-проход поверх уже активной индексации, т.к. OCR внутри
     # сам запускает index_rag (stage=large).

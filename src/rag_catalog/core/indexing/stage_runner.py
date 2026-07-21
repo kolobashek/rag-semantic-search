@@ -19,7 +19,7 @@ from qdrant_client.models import PointStruct
 from tqdm import tqdm
 
 from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
-from ..extractors import ExtractedDocument, extract_doc_meta
+from ..extractors import ExtractedDocument, UnreadableSourceError, extract_doc_meta
 from ..indexer_control import read_indexer_control
 from ..retrieval import prepare_passage_texts
 from .qdrant_writer import upsert_points
@@ -878,6 +878,7 @@ class IndexStageRunner:
             extracted_doc: ExtractedDocument | None = None
             file_type = ""
             failure_error = ""
+            unreadable_source = False
 
             _buf: list = [None, None]  # [result_text, exception]
             _doc_fn = None
@@ -1022,6 +1023,7 @@ class IndexStageRunner:
                             self._logger.warning("Ошибка чтения %s: %s", relative_path.name, _buf[1])
                             full_text = ""
                             failure_error = str(_buf[1])
+                            unreadable_source = isinstance(_buf[1], UnreadableSourceError)
                         else:
                             if isinstance(_buf[0], ExtractedDocument):
                                 extracted_doc = _buf[0]
@@ -1216,6 +1218,7 @@ class IndexStageRunner:
                 "total_chunks": total_chunks,
                 "content_hash": content_hash,
                 "error": failure_error,
+                "unreadable_source": unreadable_source,
                 "deferred_ocr": deferred_ocr,
                 "skipped": False,
             }
@@ -1322,7 +1325,14 @@ class IndexStageRunner:
                 indexed_chunks = int(result.get("indexed_chunks") or 0)
                 total_chunks = int(result.get("total_chunks") or 0)
                 if result.get("error"):
-                    if result.get("preserve_existing_partial"):
+                    if result.get("unreadable_source"):
+                        file_stage = "empty"
+                        status = "unreadable"
+                        last_error = str(result.get("error") or "unreadable_source")
+                        next_retry_at = 0.0
+                        if hasattr(indexer, "state_db"):
+                            indexer.state_db.clear_failed_path(str(result["file_key"]))
+                    elif result.get("preserve_existing_partial"):
                         file_stage = "partial"
                         indexed_chunks = int(result.get("existing_indexed_chunks") or 0)
                         total_chunks = max(
@@ -1331,22 +1341,23 @@ class IndexStageRunner:
                         )
                     else:
                         file_stage = "error"
-                    status = "error"
-                    last_error = str(result.get("error") or "")
-                    next_retry_at = 0.0
-                    stage_stats["error_files"] += 1
-                    if hasattr(indexer, "state_db"):
-                        failed_row = indexer.state_db.record_failed_path(
-                            str(result["file_key"]),
-                            fingerprint=str(result["fingerprint"]),
-                            error=last_error,
-                        )
-                        try:
-                            next_retry_at = float(failed_row.get("next_retry_at") or 0.0)
-                        except (TypeError, ValueError):
-                            next_retry_at = 0.0
+                    if not result.get("unreadable_source"):
+                        status = "error"
+                        last_error = str(result.get("error") or "")
+                        next_retry_at = 0.0
+                        stage_stats["error_files"] += 1
+                        if hasattr(indexer, "state_db"):
+                            failed_row = indexer.state_db.record_failed_path(
+                                str(result["file_key"]),
+                                fingerprint=str(result["fingerprint"]),
+                                error=last_error,
+                            )
+                            try:
+                                next_retry_at = float(failed_row.get("next_retry_at") or 0.0)
+                            except (TypeError, ValueError):
+                                next_retry_at = 0.0
                 else:
-                    if hasattr(indexer, "state_db") and result.get("had_failure"):
+                    if hasattr(indexer, "state_db"):
                         indexer.state_db.clear_failed_path(str(result["file_key"]))
                     if stage == "metadata":
                         file_stage = "metadata"

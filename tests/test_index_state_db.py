@@ -288,6 +288,40 @@ def test_state_db_tracks_failed_paths_with_retry_backoff(tmp_path: Path) -> None
     assert db.get_failed_path("a.docx") is None
 
 
+def test_reconcile_stale_failed_paths_keeps_only_matching_error_state(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many(
+        [
+            {
+                "full_path": "failed.docx",
+                "fingerprint": "failed-v1",
+                "mtime": 1.0,
+                "stage": "error",
+                "indexed_stage": "large",
+                "status": "error",
+                "extension": ".docx",
+            },
+            {
+                "full_path": "recovered.docx",
+                "fingerprint": "recovered-v1",
+                "mtime": 1.0,
+                "stage": "content",
+                "indexed_stage": "large",
+                "status": "ok",
+                "extension": ".docx",
+            },
+        ]
+    )
+    db.record_failed_path("failed.docx", fingerprint="failed-v1", error="still broken")
+    db.record_failed_path("recovered.docx", fingerprint="recovered-v1", error="old failure")
+    db.record_failed_path("removed.docx", fingerprint="removed-v1", error="source removed")
+
+    assert db.reconcile_stale_failed_paths() == 2
+    assert db.get_failed_path("failed.docx") is not None
+    assert db.get_failed_path("recovered.docx") is None
+    assert db.get_failed_path("removed.docx") is None
+
+
 def test_index_queue_coalesces_and_leases_tasks(tmp_path: Path) -> None:
     db = IndexStateDB(str(tmp_path / "index_state.db"))
 

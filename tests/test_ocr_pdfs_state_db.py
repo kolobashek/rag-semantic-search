@@ -345,6 +345,77 @@ def test_ocr_main_creates_progress_row_before_qdrant_scan(monkeypatch, tmp_path:
     assert rows == [{"status": "completed", "note": "no_scanned_pdfs"}]
 
 
+def test_ocr_main_recovers_dead_running_telemetry_before_new_run(monkeypatch, tmp_path: Path) -> None:
+    telemetry_path = tmp_path / "rag_telemetry.db"
+    telemetry = TelemetryDB(str(telemetry_path))
+    stale_id = telemetry.start_ocr_run(worker_pid=999_999, note="stale")
+    cfg = {
+        "qdrant_db_path": str(tmp_path),
+        "qdrant_url": "http://localhost:6333",
+        "collection_name": "catalog",
+        "embedding_model": "",
+        "embedding_collection_versioning": False,
+        "embedding_collection_suffix": "",
+        "index_read_workers": 1,
+        "telemetry_db_path": str(telemetry_path),
+    }
+
+    monkeypatch.setattr(ocr_pdfs, "load_config", lambda: cfg)
+    monkeypatch.setattr(ocr_pdfs, "find_scanned_pdfs", lambda **_kwargs: [])
+    monkeypatch.setattr(ocr_pdfs, "_is_process_alive", lambda _pid: False)
+    monkeypatch.setattr(ocr_pdfs.sys, "argv", ["ocr_pdfs.py"])
+
+    assert ocr_pdfs.main() == 0
+    stale = telemetry.fetch_dicts("SELECT status, note FROM ocr_runs WHERE ocr_run_id=?", [stale_id])[0]
+    assert stale["status"] == "cancelled"
+    assert "recovered_dead_worker_before_ocr_start" in stale["note"]
+    assert telemetry.get_active_ocr_run() is None
+
+
+def test_ocr_main_rejects_live_duplicate_run(monkeypatch, tmp_path: Path) -> None:
+    telemetry_path = tmp_path / "rag_telemetry.db"
+    telemetry = TelemetryDB(str(telemetry_path))
+    live_id = telemetry.start_ocr_run(worker_pid=4321, note="live")
+    cfg = {
+        "qdrant_db_path": str(tmp_path),
+        "qdrant_url": "http://localhost:6333",
+        "collection_name": "catalog",
+        "embedding_model": "",
+        "embedding_collection_versioning": False,
+        "embedding_collection_suffix": "",
+        "index_read_workers": 1,
+        "telemetry_db_path": str(telemetry_path),
+    }
+
+    monkeypatch.setattr(ocr_pdfs, "load_config", lambda: cfg)
+    monkeypatch.setattr(ocr_pdfs, "_is_process_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr(ocr_pdfs.sys, "argv", ["ocr_pdfs.py"])
+
+    assert ocr_pdfs.main() == 2
+    assert telemetry.get_active_ocr_run()["ocr_run_id"] == live_id
+
+
+def test_unreadable_state_is_not_an_ocr_candidate(tmp_path: Path) -> None:
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    path = r"O:\broken.jpg"
+    db.upsert_many(
+        [
+            {
+                "full_path": path,
+                "fingerprint": "1",
+                "mtime": 1.0,
+                "stage": "empty",
+                "indexed_stage": "large",
+                "status": "unreadable",
+                "size_bytes": 10,
+                "extension": ".jpg",
+            }
+        ]
+    )
+
+    assert find_state_db_ocr_candidates(tmp_path) == []
+
+
 def test_ocr_main_passes_only_candidate_paths_to_indexer(monkeypatch, tmp_path: Path) -> None:
     telemetry_path = tmp_path / "rag_telemetry.db"
     candidate = r"O:\large-metadata.pdf"

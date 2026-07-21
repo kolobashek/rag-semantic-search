@@ -13,7 +13,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 from index_rag import PAYLOAD_SCHEMA_VERSION, RAGIndexer
-from rag_catalog.core.extractors import ExtractedDocument, TextBlock, document_from_legacy_text
+from rag_catalog.core.extractors import (
+    ExtractedDocument,
+    TextBlock,
+    UnreadableSourceError,
+    document_from_legacy_text,
+)
 from rag_catalog.core.index_rag import _configure_forced_replacement, _resolve_local_model_reference
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing import stage_runner
@@ -520,6 +525,32 @@ def test_read_error_is_marked_error_and_backed_off(tmp_path: Path) -> None:
     assert stats_retry_wait["skipped_files"] == 1
 
 
+def test_unreadable_source_is_terminal_empty_without_retry(tmp_path: Path) -> None:
+    p = tmp_path / "broken.jpg"
+    p.write_bytes(b"not an image")
+    idx = _make_indexer(tmp_path, extracted_text="")
+
+    def _raise(_path: Path) -> str:
+        raise UnreadableSourceError("unreadable image source")
+
+    idx._extract_image = _raise
+
+    first = idx.index_directory(stage="large")
+    row = idx.state_db.get_entry(str(p))
+
+    assert row["stage"] == "empty"
+    assert row["indexed_stage"] == "large"
+    assert row["status"] == "unreadable"
+    assert row["last_error"] == "unreadable image source"
+    assert row["next_retry_at"] == 0
+    assert str(p) not in idx.state_db.failures
+    assert first["error_files"] == 0
+
+    second = idx.index_directory(stage="large")
+    assert second["skipped_files"] == 1
+    assert second["error_files"] == 0
+
+
 def test_small_stage_file_with_content_becomes_content(tmp_path: Path) -> None:
     p = tmp_path / "b.docx"
     p.write_text("dummy", encoding="utf-8")
@@ -530,6 +561,19 @@ def test_small_stage_file_with_content_becomes_content(tmp_path: Path) -> None:
     assert row["stage"] == "content"
     assert row["indexed_stage"] == "small"
     assert row["status"] == "ok"
+
+
+def test_successful_indexing_clears_stale_failed_path_after_state_was_reset(tmp_path: Path) -> None:
+    p = tmp_path / "recovered.docx"
+    p.write_text("dummy", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="recovered content")
+    fingerprint, _mtime = idx._get_file_fingerprint(p)
+    idx.state_db.record_failed_path(str(p), fingerprint=fingerprint, error="old timeout")
+
+    idx.index_directory(stage="small")
+
+    assert str(p) not in idx.state_db.failures
+    assert idx.state_db.get_entry(str(p))["status"] == "ok"
 
 
 def test_small_stage_truncates_all_files_and_large_appends_remainder(tmp_path: Path) -> None:

@@ -373,6 +373,24 @@ class IndexStateDB:
                 cur = conn.execute("DELETE FROM failed_paths WHERE full_path=?", (key,))
                 return int(cur.rowcount or 0)
 
+    def reconcile_stale_failed_paths(self) -> int:
+        """Remove retry markers no longer backed by the same failed state entry."""
+        with self._lock:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    DELETE FROM failed_paths
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM state_entries
+                        WHERE state_entries.full_path = failed_paths.full_path
+                          AND state_entries.fingerprint = failed_paths.fingerprint
+                          AND state_entries.status = 'error'
+                    )
+                    """
+                )
+                return int(cur.rowcount or 0)
+
     def is_failed_retry_due(self, full_path: str, *, now: Optional[float] = None) -> bool:
         row = self.get_failed_path(full_path)
         if not row:

@@ -26,7 +26,7 @@ from openpyxl import load_workbook
 
 from rag_catalog.core.ocr_runtime import apply_tesseract_runtime
 
-from .contract import ExtractedDocument, TextBlock, document_from_legacy_text
+from .contract import ExtractedDocument, TextBlock, UnreadableSourceError, document_from_legacy_text
 
 logger = logging.getLogger(__name__)
 
@@ -991,6 +991,8 @@ def extract_image(
         try:
             from rag_catalog.core.extractors.ocr_rapid import ocr_image_rapid  # noqa: PLC0415
             return ocr_image_rapid(filepath, max_pages=max_pages, diagnostics=diagnostics)
+        except UnreadableSourceError:
+            raise
         except Exception as exc:
             if diagnostics is not None:
                 diagnostics["fallback_reason"] = str(exc)

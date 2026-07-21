@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 import numpy as np
 
+from .contract import UnreadableSourceError
+
 logger = logging.getLogger(__name__)
 
 _rapid_engine: Optional[Any] = None
@@ -254,10 +256,13 @@ def ocr_image_rapid(
     """OCR одного изображения через RapidOCR."""
     with _ocr_semaphore:
         try:
-            from PIL import Image  # noqa: PLC0415
+            from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
 
-            with Image.open(filepath) as image:
-                frame_count = min(int(getattr(image, "n_frames", 1) or 1), max(1, int(max_pages or 50)))
+            try:
+                with Image.open(filepath) as image:
+                    frame_count = min(int(getattr(image, "n_frames", 1) or 1), max(1, int(max_pages or 50)))
+            except UnidentifiedImageError as exc:
+                raise UnreadableSourceError(f"unreadable image source: {filepath}: {exc}") from exc
             parts: list[str] = []
             for first in range(1, frame_count + 1, _IMAGE_FRAMES_PER_PROCESS):
                 last = min(frame_count, first + _IMAGE_FRAMES_PER_PROCESS - 1)
@@ -267,6 +272,8 @@ def ocr_image_rapid(
             if diagnostics is not None:
                 diagnostics["pages"] = frame_count
             return "\n\n".join(parts)
+        except UnreadableSourceError:
+            raise
         except Exception as exc:
             logger.warning("RapidOCR изображение %s: %s", filepath, exc)
             raise RuntimeError(f"RapidOCR image failed for {filepath}: {exc}") from exc
@@ -280,8 +287,15 @@ def _ocr_image_rapid_impl(
     first_frame: int = 1,
     last_frame: int = 0,
 ) -> str:
+    previous_truncated_setting: bool | None = None
     try:
-        from PIL import Image  # noqa: PLC0415
+        from PIL import Image, ImageFile  # noqa: PLC0415
+
+        # This function runs in a bounded child process. Accepting truncated
+        # JPEG streams here salvages readable pixels without changing Pillow's
+        # process-global decoder policy in the parent indexer.
+        previous_truncated_setting = bool(ImageFile.LOAD_TRUNCATED_IMAGES)
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
         with Image.open(filepath) as img:
             n_frames: int = getattr(img, "n_frames", 1)
             parts: list[str] = []
@@ -308,6 +322,9 @@ def _ocr_image_rapid_impl(
     except Exception as exc:
         logger.warning("RapidOCR изображение %s: %s", filepath, exc)
         raise RuntimeError(f"RapidOCR image failed for {filepath}: {exc}") from exc
+    finally:
+        if previous_truncated_setting is not None:
+            ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated_setting
 
 
 # ───────────────────────── PDF OCR ──────────────────────────────────────────
@@ -318,6 +335,7 @@ def ocr_pdf_rapid(filepath: Path, *, poppler_bin: str = "", batch_pages: int = 8
         try:
             import pdf2image.pdf2image as pdf2image_impl  # noqa: PLC0415  # type: ignore
             from pdf2image import pdfinfo_from_path  # type: ignore  # noqa: PLC0415
+
             from rag_catalog.core.extractors.files import _patch_pdf2image_popen_for_windows  # noqa: PLC0415
 
             _patch_pdf2image_popen_for_windows(pdf2image_impl)

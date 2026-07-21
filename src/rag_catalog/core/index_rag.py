@@ -36,6 +36,7 @@ from .exact_tokens import add_numeric_tokens
 from .extractors import (
     ExtractedDocument,
     TextBlock,
+    UnreadableSourceError,
     blocks_from_legacy_text,
     document_from_legacy_text,
     extract_csv,
@@ -763,6 +764,8 @@ class RAGIndexer:
         existing_stage = str(existing.get("stage") or "content")  # backward compat
         existing_status = str(existing.get("status") or ("error" if existing_stage == "error" else "ok"))
         extension = str(existing.get("extension") or Path(file_key).suffix or "").lower()
+        if existing_status == "unreadable":
+            return True
         if (
             self.current_stage in {"small", "large"}
             and bool(getattr(self, "skip_ocr", False))
@@ -959,11 +962,12 @@ class RAGIndexer:
             )
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
+            result_status = "unreadable" if isinstance(exc, UnreadableSourceError) else "error"
             try:
                 self.telemetry.save_ocr_file_result(
                     logical_path,
                     logical_mtime,
-                    status="error",
+                    status=result_status,
                     error=str(exc),
                     requested_engine=str(diagnostics.get("requested_engine") or getattr(self, "ocr_engine", "")),
                     engine=str(diagnostics.get("engine") or getattr(self, "ocr_engine", "")),
