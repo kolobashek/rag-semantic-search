@@ -252,6 +252,14 @@ def test_login_io_does_not_block_nicegui_event_loop() -> None:
     assert 'login_button.props("loading")' in source
 
 
+def test_telegram_login_poll_awaits_session_completion() -> None:
+    source = inspect.getsource(nice_app._build_page)
+
+    assert "async def poll_tg_login()" in source
+    assert "await run.io_bound(auth_db.consume_confirmed_telegram_login, token=token)" in source
+    assert 'await _complete_login(user, event_type="telegram_web_login")' in source
+
+
 def test_forced_password_change_does_not_block_or_reload_page() -> None:
     source = inspect.getsource(nice_app._build_page)
 

@@ -2814,18 +2814,18 @@ def _build_page(initial_screen: str = "search") -> None:
             )
             ui.notify("Подтвердите вход в Telegram, затем вернитесь в браузер.", type="positive")
 
-        def poll_tg_login() -> None:
+        async def poll_tg_login() -> None:
             token = tg_login_token["value"]
             if not token or state.current_user is not None:
                 return
-            out = auth_db.consume_confirmed_telegram_login(token=token)
+            out = await run.io_bound(auth_db.consume_confirmed_telegram_login, token=token)
             if not out.get("ok"):
                 return
             tg_login_token["value"] = ""
             user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
             if not user:
                 return
-            _complete_login(user, event_type="telegram_web_login")
+            await _complete_login(user, event_type="telegram_web_login")
 
         def register_request() -> None:
             username = str(reg_username_input.value or "").strip().lower()
