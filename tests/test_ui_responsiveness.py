@@ -576,6 +576,20 @@ def test_explorer_keeps_recursive_folder_sizes_off_the_event_loop() -> None:
     assert "service.user_access_map" in helper_source
 
 
+def test_cloud_drive_explorer_bounds_each_interactive_render() -> None:
+    from rag_catalog.ui import explorer_view
+
+    source = inspect.getsource(explorer_view.render_explorer_screen)
+
+    assert explorer_view._EXPLORER_PAGE_SIZE <= 40
+    assert explorer_view._TREE_CHILD_LIMIT <= 24
+    assert 'entries: List[tuple[str, Any]]' in source
+    assert 'page_folders = [item for item_type, item in page_entries if item_type == "folder"]' in source
+    assert 'for folder in page_folders:' in source
+    assert 'children[:_TREE_CHILD_LIMIT]' in source
+    assert 'if is_open:\n                        children, _unused_files = _cd_list_children(' in source
+
+
 def test_cloud_drive_settings_exposes_import_sources_ui() -> None:
     source = inspect.getsource(settings_view.render_settings_screen)
 

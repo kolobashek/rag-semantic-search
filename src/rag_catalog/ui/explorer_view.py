@@ -49,6 +49,9 @@ from .state import (
     _username,
 )
 
+_EXPLORER_PAGE_SIZE = 40
+_TREE_CHILD_LIMIT = 24
+
 
 def render_explorer_screen(
     state: PageState,
@@ -1254,13 +1257,43 @@ def render_explorer_screen(
             child_folders = [f for f in child_folders if not _is_hidden("cd", f.path)]
             child_files = [f for f in child_files if not _is_hidden("cd", f.path)]
 
-        folder_size_ids = [str(folder.id) for folder in child_folders]
+        all_folder_ids = [str(folder.id) for folder in child_folders]
         cached_folder_sizes = dict(page_state.explorer_folder_sizes)
         child_folder_sizes = {
             folder_id: int(cached_folder_sizes[folder_id])
-            for folder_id in folder_size_ids
+            for folder_id in all_folder_ids
             if folder_id in cached_folder_sizes
         }
+
+        sort_key = page_state.explorer_sort
+        rev = page_state.explorer_desc
+        if sort_key == "По имени":
+            child_folders.sort(key=lambda x: x.name.lower(), reverse=rev)
+            child_files.sort(key=lambda x: x.name.lower(), reverse=rev)
+        elif sort_key == "По размеру":
+            child_folders.sort(key=lambda x: child_folder_sizes.get(x.id, 0), reverse=rev)
+            child_files.sort(key=lambda x: x.size_bytes, reverse=rev)
+        elif sort_key == "По дате":
+            child_files.sort(key=lambda x: x.updated_at, reverse=rev)
+
+        # Bound each NiceGUI render. Large folders otherwise block Socket.IO
+        # heartbeats while hundreds of interactive rows are constructed.
+        total_files = len(child_files)
+        page_size = _EXPLORER_PAGE_SIZE
+        entries: List[tuple[str, Any]] = [
+            *(("folder", folder) for folder in child_folders),
+            *(("file", file) for file in child_files),
+        ]
+        total_entries = len(entries)
+        page_count = max(1, (total_entries + page_size - 1) // page_size)
+        page_state.explorer_page = max(0, min(page_state.explorer_page, page_count - 1))
+        page_entries = entries[
+            page_state.explorer_page * page_size : (page_state.explorer_page + 1) * page_size
+        ]
+        page_folders = [item for item_type, item in page_entries if item_type == "folder"]
+        page_files = [item for item_type, item in page_entries if item_type == "file"]
+
+        folder_size_ids = [str(folder.id) for folder in page_folders]
         folder_size_labels: Dict[str, List[Any]] = {}
         now_monotonic = time.monotonic()
         folder_sizes_need_refresh = any(
@@ -1286,23 +1319,6 @@ def render_explorer_screen(
             if folder.id not in child_folder_sizes:
                 return "Считается..."
             return _cd_file_size(int(child_folder_sizes.get(folder.id, 0) or 0))
-
-        sort_key = page_state.explorer_sort
-        rev = page_state.explorer_desc
-        if sort_key == "По имени":
-            child_folders.sort(key=lambda x: x.name.lower(), reverse=rev)
-            child_files.sort(key=lambda x: x.name.lower(), reverse=rev)
-        elif sort_key == "По размеру":
-            child_folders.sort(key=lambda x: child_folder_sizes.get(x.id, 0), reverse=rev)
-            child_files.sort(key=lambda x: x.size_bytes, reverse=rev)
-        elif sort_key == "По дате":
-            child_files.sort(key=lambda x: x.updated_at, reverse=rev)
-
-        # pagination of files
-        total_files = len(child_files)
-        page_size = PAGE_SIZE
-        page_state.explorer_page = max(0, min(page_state.explorer_page, max(0, (total_files - 1) // page_size)))
-        page_files = child_files[page_state.explorer_page * page_size : (page_state.explorer_page + 1) * page_size]
 
         # Per-file job status map (single DB query for the current page)
         _page_file_ids = [f.id for f in page_files]
@@ -1433,11 +1449,25 @@ def render_explorer_screen(
                 def _render_tree_node_cd(folder: CloudDriveFolder, depth: int) -> None:
                     is_current = folder.path == cd_path or (not cd_path and folder.is_root)
                     is_ancestor = folder.path in ancestor_paths and not is_current
-                    children = svc.registry.list_child_folders(folder.id)
-                    if not page_state.explorer_show_hidden:
-                        children = [child for child in children if not _is_hidden("cd", child.path)]
-                    has_children = bool(children)
                     is_open = folder.path in open_paths
+                    children: List[CloudDriveFolder] = []
+                    omitted_children = 0
+                    if is_open:
+                        children, _unused_files = _cd_list_children(
+                            svc,
+                            folder.path,
+                            cfg=page_state.cfg,
+                            user=page_state.current_user,
+                        )
+                        if not page_state.explorer_show_hidden:
+                            children = [child for child in children if not _is_hidden("cd", child.path)]
+                        required_children = [child for child in children if child.path in ancestor_paths]
+                        visible_children = list(children[:_TREE_CHILD_LIMIT])
+                        visible_ids = {child.id for child in visible_children}
+                        visible_children.extend(child for child in required_children if child.id not in visible_ids)
+                        omitted_children = max(0, len(children) - len(visible_children))
+                        children = visible_children
+                    has_children = bool(children) if is_open else True
                     icon = "folder_open" if is_open or is_current else "folder"
                     label = "Корень" if folder.is_root else folder.name
                     row_classes = (
@@ -1469,6 +1499,8 @@ def render_explorer_screen(
                     if has_children and is_open:
                         for child in children:
                             _render_tree_node_cd(child, depth + 1)
+                        if omitted_children:
+                            ui.label(f"Ещё папок: {omitted_children}").classes("rag-meta text-xs ml-8")
 
                 _render_tree_node_cd(root_folder, 0)
 
@@ -1527,7 +1559,7 @@ def render_explorer_screen(
         # ── Main column ───────────────────────────────────────────────────
         with main_col:
             visible_keys = [
-                *[_selection_key("cd", folder.path) for folder in child_folders],
+                *[_selection_key("cd", folder.path) for folder in page_folders],
                 *[_selection_key("cd", f.path) for f in page_files],
             ]
             if _is_trash_view:
@@ -1603,9 +1635,9 @@ def render_explorer_screen(
             else:
                 # ── Список view ────────────────────────────────────────────
                 if page_state.explorer_view == "Список":
-                    if child_folders:
+                    if page_folders:
                         with ui.column().classes("rag-explorer-list w-full"):
-                            for folder in child_folders:
+                            for folder in page_folders:
                                 item_key = _selection_key("cd", folder.path)
                                 folder_row = ui.row().classes(
                                     "rag-explorer-item w-full p-2 items-center gap-3"
@@ -1730,7 +1762,7 @@ def render_explorer_screen(
                             ui.label("Автор").classes("rag-col-header")
                             ui.label("Индекс").classes("rag-col-header")
                             ui.element("div")
-                        for folder in child_folders:
+                        for folder in page_folders:
                             item_key = _selection_key("cd", folder.path)
                             folder_row_classes = (
                                 "rag-file-table-row"
@@ -1853,10 +1885,10 @@ def render_explorer_screen(
                                 _cd_hidden_action_buttons(f.path, is_folder=False, open_action=lambda fi=f: _cd_open_file(fi), download_url=download_url)
 
                 # Pagination
-                if total_files > page_size:
+                if total_entries > page_size:
                     with ui.row().classes("items-center gap-2 mt-2"):
                         ui.button("Назад", on_click=lambda: (setattr(page_state, "explorer_page", max(0, page_state.explorer_page - 1)), render_fn())).props("outline")
-                        ui.label(f"Стр. {page_state.explorer_page + 1} / {(total_files + page_size - 1) // page_size}").classes("rag-meta")
+                        ui.label(f"Стр. {page_state.explorer_page + 1} / {page_count}").classes("rag-meta")
                         ui.button("Вперёд", on_click=lambda: (setattr(page_state, "explorer_page", page_state.explorer_page + 1), render_fn())).props("outline")
 
                 # ── Drop zone ─────────────────────────────────────────────────
