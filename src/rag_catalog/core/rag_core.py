@@ -127,6 +127,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "cloud_drive_s3_region": "",
     "cloud_drive_s3_access_key": "",
     "cloud_drive_s3_secret_key": "",
+    "cloud_drive_max_upload_mb": 512,
     # ── LLM / Ollama ──────────────────────────────────────────────────────
     "ollama_url": "http://localhost:11434",
     "llm_enabled": False,            # включить RAG Q&A и расширение запроса

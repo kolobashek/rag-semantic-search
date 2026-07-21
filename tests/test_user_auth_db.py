@@ -75,6 +75,34 @@ def test_default_admin_can_be_disabled(tmp_path, monkeypatch) -> None:
     assert db.get_user(username="admin") is None
 
 
+def test_password_login_is_rate_limited_after_repeated_failures(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    for _ in range(5):
+        assert db.login_with_reason(username="admin", password="wrong")["reason"] == "invalid_credentials"
+        db.log_auth_event(username="admin", event_type="login_failed", ok=False, error="bad_credentials")
+
+    limited = db.login_with_reason(username="admin", password="admin")
+    assert limited["reason"] == "rate_limited"
+    assert 0 < limited["retry_after_seconds"] <= 15 * 60
+
+    with db._connect() as conn:
+        old = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+        conn.execute("UPDATE auth_events SET ts=? WHERE username='admin'", (old,))
+
+    assert db.login_with_reason(username="admin", password="admin")["reason"] == "ok"
+
+
+def test_successful_login_event_resets_failure_streak(tmp_path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    for _ in range(4):
+        db.log_auth_event(username="admin", event_type="login_failed", ok=False)
+    db.log_auth_event(username="admin", event_type="login", ok=True)
+    db.log_auth_event(username="admin", event_type="login_failed", ok=False)
+
+    status = db.login_throttle_status(username="admin")
+    assert status == {"limited": False, "retry_after_seconds": 0, "failures": 1}
+
+
 def test_session_token_restores_and_revokes_user(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     user = db.login(username="admin", password="admin")

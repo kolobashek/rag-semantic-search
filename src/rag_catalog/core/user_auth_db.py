@@ -26,6 +26,9 @@ SESSION_TTL_SETTING_KEY = "session_ttl_days"
 SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
 ANY_TELEGRAM_CHAT_ID = "*"
 SCHEMA_VERSION = 3
+LOGIN_MAX_FAILURES = 5
+LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
+LOGIN_LOCKOUT_SECONDS = 15 * 60
 
 
 def _utc_now() -> str:
@@ -1041,6 +1044,13 @@ class UserAuthDB:
         usr = (username or "").strip().lower()
         if not usr:
             return {"user": None, "reason": "not_found"}
+        throttle = self.login_throttle_status(username=usr)
+        if throttle["limited"]:
+            return {
+                "user": None,
+                "reason": "rate_limited",
+                "retry_after_seconds": throttle["retry_after_seconds"],
+            }
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
@@ -1063,6 +1073,50 @@ class UserAuthDB:
                 data["groups"] = self._list_user_groups_conn(conn, usr)
                 data["group_ids"] = [str(group["id"]) for group in data["groups"]]
         return {"user": data, "reason": "ok"}
+
+    def login_throttle_status(
+        self,
+        *,
+        username: str,
+        max_failures: int = LOGIN_MAX_FAILURES,
+        window_seconds: int = LOGIN_FAILURE_WINDOW_SECONDS,
+        lockout_seconds: int = LOGIN_LOCKOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        usr = (username or "").strip().lower()
+        if not usr:
+            return {"limited": False, "retry_after_seconds": 0, "failures": 0}
+        now = datetime.now(timezone.utc)
+        window_start = (now - timedelta(seconds=max(1, int(window_seconds)))).isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT ts, event_type, ok
+                    FROM auth_events
+                    WHERE username=? AND ts>=? AND event_type IN ('login', 'login_failed')
+                    ORDER BY id DESC
+                    """,
+                    (usr, window_start),
+                ).fetchall()
+        failures: list[datetime] = []
+        for row in rows:
+            if bool(row["ok"]) and str(row["event_type"]) == "login":
+                break
+            if not bool(row["ok"]) and str(row["event_type"]) == "login_failed":
+                try:
+                    failures.append(datetime.fromisoformat(str(row["ts"])))
+                except ValueError:
+                    continue
+        required = max(1, int(max_failures))
+        if len(failures) < required:
+            return {"limited": False, "retry_after_seconds": 0, "failures": len(failures)}
+        latest = max(failures)
+        retry_after = max(0, int((latest + timedelta(seconds=max(1, int(lockout_seconds))) - now).total_seconds()))
+        return {
+            "limited": retry_after > 0,
+            "retry_after_seconds": retry_after,
+            "failures": len(failures),
+        }
 
     def has_default_admin_password(self) -> bool:
         """Returns True if 'admin' user exists and still uses the default 'admin' password."""

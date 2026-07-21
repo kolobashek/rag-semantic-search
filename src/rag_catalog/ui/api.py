@@ -35,6 +35,31 @@ from .helpers import _cd_registry_acl_allows, _resolve_catalog_file
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
 
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+def _cloud_drive_max_upload_bytes(cfg: Dict[str, Any]) -> int:
+    try:
+        max_mb = int(cfg.get("cloud_drive_max_upload_mb") or 512)
+    except (TypeError, ValueError):
+        max_mb = 512
+    return max(1, min(max_mb, 102_400)) * 1024 * 1024
+
+
+async def _write_bounded_upload(file: UploadFile, target: Any, *, max_bytes: int) -> int:
+    written = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            return written
+        written += len(chunk)
+        if written > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Файл превышает допустимый размер {max_bytes // (1024 * 1024)} МБ.",
+            )
+        target.write(chunk)
+
 AuthHeader = Annotated[str, Header(alias="Authorization")]
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -1799,11 +1824,12 @@ async def api_cloud_drive_upload(
         cfg, user, parent_path, service=service, required_level="editor", audit_action="upload"
     )
     suffix = Path(str(file.filename or "")).suffix
+    max_upload_bytes = _cloud_drive_max_upload_bytes(cfg)
     tmp_path = ""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await file.read())
             tmp_path = tmp.name
+            await _write_bounded_upload(file, tmp, max_bytes=max_upload_bytes)
         result = service.upload_file(
             parent_path=parent_path,
             filename=str(file.filename or "").strip(),

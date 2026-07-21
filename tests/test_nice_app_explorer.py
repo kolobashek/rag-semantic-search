@@ -82,6 +82,7 @@ from rag_catalog.ui.helpers import (
     _cd_acl_allows,
     _file_icon_svg,
     _file_rows,
+    _filter_cd_name_matches,
     _filter_cloud_drive_search_results,
     _is_system_file,
     _normalize_search_results,
@@ -1743,6 +1744,94 @@ def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:
     assert result["node_type"] == "file"
     assert result["path"] == "Folder A/hello.txt"
     assert service.registry.get_file_by_path("Folder A/hello.txt") is not None
+
+
+def test_cloud_drive_upload_api_rejects_file_over_configured_limit(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+        "cloud_drive_max_upload_mb": 1,
+    }
+    service = CloudDriveService.from_config(cfg)
+    service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "admin", "role": "admin", "status": "active"},
+    )
+    buffer = SpooledTemporaryFile()
+    buffer.write(b"x" * (1024 * 1024 + 1))
+    buffer.seek(0)
+    upload = UploadFile(file=buffer, filename="large.bin")
+
+    import asyncio
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api_cloud_drive_upload(file=upload))
+
+    assert exc.value.status_code == 413
+    assert service.registry.get_file_by_path("large.bin") is None
+
+
+def test_cloud_drive_name_matches_filter_deleted_and_acl_nodes(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен")
+    visible = service.registry.upsert_folder(path="Visible", name="Visible", parent_id=root.id, depth=1)
+    hidden = service.registry.upsert_folder(path="Hidden", name="Hidden", parent_id=root.id, depth=1)
+    visible_file = service.registry.upsert_file(
+        folder_id=visible.id,
+        path="Visible/report.txt",
+        name="report.txt",
+        storage_key="visible",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="a",
+    )
+    hidden_file = service.registry.upsert_file(
+        folder_id=hidden.id,
+        path="Hidden/report.txt",
+        name="report.txt",
+        storage_key="hidden",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="b",
+    )
+    deleted = service.registry.upsert_file(
+        folder_id=visible.id,
+        path="Visible/deleted-report.txt",
+        name="deleted-report.txt",
+        storage_key="deleted",
+        mime_type="text/plain",
+        size_bytes=1,
+        checksum="c",
+    )
+    service.registry.delete_file(deleted.path)
+
+    _folders, files = ui_helpers._cd_search_by_name(service.registry, "report", max_folders=10, max_files=10)
+    assert deleted.id not in {item.id for item in files}
+
+    monkeypatch.setattr(
+        ui_helpers,
+        "_cd_registry_acl_allows",
+        lambda _cfg, _user, path, **_kwargs: str(path).startswith("Visible"),
+    )
+    allowed_folders, allowed_files = _filter_cd_name_matches(
+        cfg,
+        {"username": "alice", "role": "user"},
+        [visible, hidden],
+        [visible_file, hidden_file],
+        service=service,
+    )
+
+    assert [item.path for item in allowed_folders] == ["Visible"]
+    assert [item.path for item in allowed_files] == ["Visible/report.txt"]
 
 
 def test_cloud_drive_versions_api(monkeypatch, tmp_path) -> None:

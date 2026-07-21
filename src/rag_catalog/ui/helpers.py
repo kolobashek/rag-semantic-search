@@ -1287,11 +1287,11 @@ def _cd_search_by_name(
     try:
         with registry._connect() as conn:
             folder_rows = conn.execute(
-                "SELECT * FROM cloud_folders WHERE lower(name) LIKE ? AND is_root=0 LIMIT ?",
+                "SELECT * FROM cloud_folders WHERE lower(name) LIKE ? AND is_root=0 AND deleted_at='' LIMIT ?",
                 (pattern, max_folders),
             ).fetchall()
             file_rows = conn.execute(
-                "SELECT * FROM cloud_files WHERE lower(name) LIKE ? AND deleted_at IS NULL LIMIT ?",
+                "SELECT * FROM cloud_files WHERE lower(name) LIKE ? AND deleted_at='' LIMIT ?",
                 (pattern, max_files),
             ).fetchall()
         folders = [registry._folder_from_row(r) for r in folder_rows]
@@ -1299,6 +1299,38 @@ def _cd_search_by_name(
         return folders, files
     except Exception:
         return [], []
+
+
+def _filter_cd_name_matches(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    folders: list[Any],
+    files: list[Any],
+    *,
+    service: CloudDriveService,
+) -> tuple[list[Any], list[Any]]:
+    allowed_folders = [
+        folder
+        for folder in folders
+        if _cd_registry_acl_allows(
+            cfg,
+            user,
+            str(getattr(folder, "path", "") or ""),
+            service=service,
+        )
+    ]
+    allowed_files = [
+        file_row
+        for file_row in files
+        if _cd_registry_acl_allows(
+            cfg,
+            user,
+            str(getattr(file_row, "path", "") or ""),
+            file_id=str(getattr(file_row, "id", "") or ""),
+            service=service,
+        )
+    ]
+    return allowed_folders, allowed_files
 
 
 def _cd_file_jobs_map(registry: "Any", file_ids: "list[str]") -> "Dict[str, Dict[str, str]]":

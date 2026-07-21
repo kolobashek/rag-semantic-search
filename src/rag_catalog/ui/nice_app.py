@@ -53,6 +53,7 @@ from .helpers import (
     _directory_children,
     _ensure_searcher,
     _file_icon_svg,
+    _filter_cd_name_matches,
     _has_confident_numeric_exact_match,
     _highlight_query_terms,
     _is_admin,
@@ -2233,6 +2234,13 @@ def _build_page(initial_screen: str = "search") -> None:
             if root is None:
                 return
             matched_folders, matched_files = _cd_search_by_name(cd_svc.registry, q)
+            matched_folders, matched_files = _filter_cd_name_matches(
+                state.cfg,
+                state.current_user,
+                matched_folders,
+                matched_files,
+                service=cd_svc,
+            )
 
             if not matched_folders and not matched_files:
                 return
@@ -2732,6 +2740,21 @@ def _build_page(initial_screen: str = "search") -> None:
                     reason,
                     (_time.perf_counter() - started) * 1000,
                 )
+                if reason == "rate_limited":
+                    retry_after = max(1, int(result.get("retry_after_seconds") or 1))
+                    await run.io_bound(
+                        auth_db.log_auth_event,
+                        username=username,
+                        event_type="login_throttled",
+                        ok=False,
+                        error=f"retry_after={retry_after}",
+                    )
+                    ui.notify(
+                        f"Слишком много попыток входа. Повторите через {max(1, (retry_after + 59) // 60)} мин.",
+                        type="warning",
+                        timeout=6000,
+                    )
+                    return
                 if reason == "pending":
                     await run.io_bound(
                         auth_db.log_auth_event,
