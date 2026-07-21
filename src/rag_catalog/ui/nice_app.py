@@ -7,6 +7,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 import socket
 import sys
@@ -3436,6 +3437,21 @@ def device_auth_page() -> None:
                 ).classes("rag-meta text-xs")
 
 
+def _ui_storage_secret(cfg: Dict[str, Any]) -> str:
+    return str(
+        os.environ.get("RAG_UI_STORAGE_SECRET")
+        or cfg.get("ui_storage_secret")
+        or "rag-catalog-local-secret"
+    )
+
+
+def _ui_session_https_only(cfg: Dict[str, Any]) -> bool:
+    raw_env = str(os.environ.get("RAG_UI_SESSION_HTTPS_ONLY") or "").strip().lower()
+    if raw_env:
+        return raw_env in {"1", "true", "yes", "on"}
+    return bool(cfg.get("ui_session_https_only", False))
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Запустить NiceGUI-интерфейс RAG Каталога.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -3468,7 +3484,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         reconnect_timeout=_ui_reconnect_timeout_seconds(cfg),
         show=not args.no_show,
         dark=False,
-        storage_secret="rag-catalog-local-secret",
+        storage_secret=_ui_storage_secret(cfg),
+        session_middleware_kwargs={"https_only": _ui_session_https_only(cfg)},
     )
 
 

@@ -104,6 +104,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "qdrant_scroll_limit": 256,
     "search_warmup_enabled": True,
     "ui_llm_expand_max_quick_results": 3,
+    "ui_session_https_only": False,
+    "ui_storage_secret": "",
     "metadata_needle_cache_size": 512,
     "numeric_exact_fs_fallback_enabled": False,
     "ui_socket_ping_timeout_sec": 60,

@@ -1,0 +1,25 @@
+{
+	admin 127.0.0.1:2019
+}
+
+cloud.tsk-nsk.ru {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	log {
+		output file C:/ProgramData/RAGCatalog/caddy/access.log {
+			roll_size 10mb
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}

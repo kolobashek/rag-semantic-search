@@ -38,6 +38,8 @@
   "qdrant_scroll_limit": 256,
   "search_warmup_enabled": true,
   "ui_llm_expand_max_quick_results": 3,
+  "ui_session_https_only": false,
+  "ui_storage_secret": "",
   "metadata_needle_cache_size": 512,
   "numeric_exact_fs_fallback_enabled": false,
   "ui_reconnect_timeout_sec": 5,

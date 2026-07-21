@@ -315,6 +315,20 @@ packaging\install_cloud_files.ps1 -Server https://catalog.example.org
 Пилотная версия `0.1.x` монтирует файлы read-only; старый двусторонний sync client остаётся
 доступен отдельно до завершения тестов конфликтов записи.
 
+Для публикации Cloud Drive и поиска через единый HTTPS-домен на Windows-сервере используется
+Caddy. Скрипт устанавливает воспроизводимую конфигурацию, автозапуск от SYSTEM и входящие
+правила Windows Firewall для TCP 80/443:
+
+```powershell
+winget install --id CaddyServer.Caddy --exact
+pwsh -ExecutionPolicy Bypass -File packaging\install_cloud_proxy.ps1 `
+  -Domain cloud.tsk-nsk.ru `
+  -Upstream 127.0.0.1:8080
+```
+
+На пограничном маршрутизаторе TCP 80/443 должны быть направлены на Windows-сервер. Само
+приложение остаётся привязанным к loopback; TLS завершается на Caddy.
+
 Если таблица `cloud_permissions` пуста, Cloud Drive сохраняет прежний open-access режим для совместимости.
 После первой grant-записи доступ к API проверяется по registry ACL с наследованием прав от папок.
 Разрешённые чувствительные операции и ACL-отказы записываются в audit telemetry; для публичных ссылок хранится только отпечаток токена, сам токен в журнал не попадает.

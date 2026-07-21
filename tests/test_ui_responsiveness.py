@@ -8,6 +8,20 @@ from rag_catalog.ui import css, helpers, nice_app, settings_view
 from rag_catalog.ui import system as ui_system
 
 
+def test_ui_session_security_uses_config_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_UI_STORAGE_SECRET", raising=False)
+    monkeypatch.delenv("RAG_UI_SESSION_HTTPS_ONLY", raising=False)
+
+    assert nice_app._ui_storage_secret({"ui_storage_secret": "configured-secret"}) == "configured-secret"
+    assert nice_app._ui_session_https_only({"ui_session_https_only": True}) is True
+    assert nice_app._ui_session_https_only({}) is False
+
+    monkeypatch.setenv("RAG_UI_STORAGE_SECRET", "environment-secret")
+    monkeypatch.setenv("RAG_UI_SESSION_HTTPS_ONLY", "true")
+    assert nice_app._ui_storage_secret({"ui_storage_secret": "configured-secret"}) == "environment-secret"
+    assert nice_app._ui_session_https_only({"ui_session_https_only": False}) is True
+
+
 def test_primary_screen_registry_covers_all_route_pages() -> None:
     specs = list(nice_app.APP_SCREEN_SPECS)
     keys = {str(spec["key"]) for spec in specs}
