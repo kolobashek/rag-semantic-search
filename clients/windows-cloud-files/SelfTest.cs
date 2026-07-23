@@ -101,6 +101,39 @@ internal static class SelfTest
                         CancellationToken.None)
                     .GetAwaiter()
                     .GetResult());
+            string testLog = Path.Combine(temporary, "logs", "RagCloudFiles.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(testLog)!);
+            File.WriteAllText(testLog, "current log");
+            File.WriteAllText(
+                Path.Combine(Path.GetDirectoryName(testLog)!, "RagCloudFiles.1.log"),
+                "recent archive");
+            string expiredArchive = Path.Combine(
+                Path.GetDirectoryName(testLog)!,
+                "RagCloudFiles.2.log");
+            File.WriteAllText(expiredArchive, "expired archive");
+            File.SetLastWriteTimeUtc(expiredArchive, DateTime.UtcNow.AddDays(-31));
+            AppLog.MaintainFiles(
+                testLog,
+                maxFileBytes: 4,
+                maxArchiveFiles: 2,
+                archiveRetention: TimeSpan.FromDays(30),
+                now: DateTimeOffset.UtcNow);
+            Equal(false, File.Exists(testLog));
+            Equal(
+                "current log",
+                File.ReadAllText(Path.Combine(
+                    Path.GetDirectoryName(testLog)!,
+                    "RagCloudFiles.1.log")));
+            Equal(
+                "recent archive",
+                File.ReadAllText(Path.Combine(
+                    Path.GetDirectoryName(testLog)!,
+                    "RagCloudFiles.2.log")));
+            Equal(
+                false,
+                File.Exists(Path.Combine(
+                    Path.GetDirectoryName(testLog)!,
+                    "RagCloudFiles.3.log")));
             if (File.ReadAllText(store.ConfigPath).Contains("secret-device-token", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("Device token was stored in clear text.");
