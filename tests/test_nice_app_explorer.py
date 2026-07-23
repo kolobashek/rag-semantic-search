@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 import zipfile
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 import rag_catalog.ui.api as cloud_api
+import rag_catalog.ui.explorer_view as explorer_view
 import rag_catalog.ui.helpers as ui_helpers
 import rag_catalog.ui.state as ui_state
 import rag_catalog.ui.system as ui_system
@@ -2240,6 +2242,14 @@ def test_sync_client_version_advertises_files_on_demand_channel() -> None:
     assert result["cloud_files_version"] == "0.1.0"
     assert result["cloud_files_download_url"].endswith("format=cloud-files-exe")
     assert isinstance(result["has_cloud_files_exe"], bool)
+
+
+def test_explorer_exposes_files_on_demand_windows_client() -> None:
+    source = inspect.getsource(explorer_view.render_explorer_screen)
+
+    assert '"Приложение"' in source
+    assert "_cd_cloud_files_install_dialog" in source
+    assert explorer_view._CLOUD_FILES_DOWNLOAD_URL.endswith("format=cloud-files-exe")
 
 
 def test_cloud_drive_acl_revision_tracks_permissions_and_groups() -> None:

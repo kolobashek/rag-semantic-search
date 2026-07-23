@@ -52,6 +52,7 @@ from .state import (
 
 _EXPLORER_PAGE_SIZE = 40
 _TREE_CHILD_LIMIT = 24
+_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe"
 
 
 def _cloud_node_modified_timestamp(node: Any) -> float:
@@ -410,6 +411,31 @@ def render_explorer_screen(
                         "Закрыть", icon="check",
                         on_click=lambda: (dlg.close(), render_fn()),
                     ).props("unelevated dense")
+            dlg.open()
+
+        def _cd_cloud_files_install_dialog() -> None:
+            with ui.dialog() as dlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
+                with ui.row().classes("w-full items-center gap-3"):
+                    ui.icon("cloud_download", size="28px").classes("text-indigo-400")
+                    with ui.column().classes("flex-1 min-w-0 gap-0"):
+                        ui.label("Облако для Windows").classes("text-lg font-semibold")
+                        ui.label("Файлы по запросу").classes("rag-meta text-xs")
+                ui.label(
+                    "Приложение показывает в Проводнике Windows все доступные файлы. "
+                    "Содержимое скачивается только при первом открытии, поэтому весь диск "
+                    "не занимает место на компьютере."
+                ).classes("rag-meta text-sm")
+                ui.separator()
+                ui.link(
+                    "Скачать приложение для Windows",
+                    target=_CLOUD_FILES_DOWNLOAD_URL,
+                    new_tab=True,
+                ).classes("rag-path text-sm font-semibold")
+                ui.label(
+                    "После запуска войдите через браузер под своей корпоративной учётной записью."
+                ).classes("rag-meta text-xs")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Закрыть", on_click=dlg.close).props("flat dense")
             dlg.open()
 
         async def _cd_versions_dialog(file: "Any") -> None:
@@ -1457,6 +1483,12 @@ def render_explorer_screen(
                 folder_search.on("keydown.enter", _search_current_folder)
                 ui.button("Дерево", icon="account_tree", on_click=_cd_open_tree_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
                 ui.button("Фильтры", icon="filter_alt", on_click=_cd_open_filters_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
+                ui.button(
+                    "Приложение",
+                    icon="cloud_download",
+                    on_click=_cd_cloud_files_install_dialog,
+                    color=None,
+                ).props("outline dense no-caps").tooltip("Скачать Облако для Windows")
                 ui.button("Загрузить", icon="upload", on_click=_cd_upload_dialog, color=None).props("outline dense no-caps")
                 ui.button("Создать", icon="add", on_click=_cd_create_picker_dialog, color=None).props("flat dense no-caps")
                 if dict(getattr(page_state, "explorer_clipboard", {}) or {}).get("scope") == "cd":
