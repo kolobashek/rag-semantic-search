@@ -413,30 +413,30 @@ def render_explorer_screen(
                     ).props("unelevated dense")
             dlg.open()
 
-        def _cd_cloud_files_install_dialog() -> None:
-            with ui.dialog() as dlg, ui.card().classes("p-5 gap-4 w-full max-w-lg"):
-                with ui.row().classes("w-full items-center gap-3"):
-                    ui.icon("cloud_download", size="28px").classes("text-indigo-400")
-                    with ui.column().classes("flex-1 min-w-0 gap-0"):
-                        ui.label("Облако для Windows").classes("text-lg font-semibold")
-                        ui.label("Файлы по запросу").classes("rag-meta text-xs")
-                ui.label(
-                    "Приложение показывает в Проводнике Windows все доступные файлы. "
-                    "Содержимое скачивается только при первом открытии, поэтому весь диск "
-                    "не занимает место на компьютере."
-                ).classes("rag-meta text-sm")
-                ui.separator()
-                ui.link(
-                    "Скачать приложение для Windows",
-                    target=_CLOUD_FILES_DOWNLOAD_URL,
-                    new_tab=True,
-                ).classes("rag-path text-sm font-semibold")
-                ui.label(
-                    "После запуска войдите через браузер под своей корпоративной учётной записью."
-                ).classes("rag-meta text-xs")
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("Закрыть", on_click=dlg.close).props("flat dense")
-            dlg.open()
+        with ui.dialog() as cloud_files_install_dialog, ui.card().classes(
+            "p-5 gap-4 w-full max-w-lg"
+        ):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.icon("cloud_download", size="28px").classes("text-indigo-400")
+                with ui.column().classes("flex-1 min-w-0 gap-0"):
+                    ui.label("Облако для Windows").classes("text-lg font-semibold")
+                    ui.label("Файлы по запросу").classes("rag-meta text-xs")
+            ui.label(
+                "Приложение показывает в Проводнике Windows все доступные файлы. "
+                "Содержимое скачивается только при первом открытии, поэтому весь диск "
+                "не занимает место на компьютере."
+            ).classes("rag-meta text-sm")
+            ui.separator()
+            ui.link(
+                "Скачать приложение для Windows",
+                target=_CLOUD_FILES_DOWNLOAD_URL,
+                new_tab=False,
+            ).classes("rag-path text-sm font-semibold")
+            ui.label(
+                "После запуска войдите через браузер под своей корпоративной учётной записью."
+            ).classes("rag-meta text-xs")
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Закрыть", on_click=cloud_files_install_dialog.close).props("flat dense")
 
         async def _cd_versions_dialog(file: "Any") -> None:
             """Show version history for a Cloud Drive file."""
@@ -1486,7 +1486,7 @@ def render_explorer_screen(
                 ui.button(
                     "Приложение",
                     icon="cloud_download",
-                    on_click=_cd_cloud_files_install_dialog,
+                    on_click=cloud_files_install_dialog.open,
                     color=None,
                 ).props("outline dense no-caps").tooltip("Скачать Облако для Windows")
                 ui.button("Загрузить", icon="upload", on_click=_cd_upload_dialog, color=None).props("outline dense no-caps")

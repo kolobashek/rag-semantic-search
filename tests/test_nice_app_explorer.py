@@ -2289,7 +2289,9 @@ def test_explorer_exposes_files_on_demand_windows_client() -> None:
     source = inspect.getsource(explorer_view.render_explorer_screen)
 
     assert '"Приложение"' in source
-    assert "_cd_cloud_files_install_dialog" in source
+    assert "on_click=cloud_files_install_dialog.open" in source
+    assert "on_click=cloud_files_install_dialog.close" in source
+    assert "new_tab=False" in source
     assert "format=cloud-files-exe" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
     assert "v=0.3.3" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
 
