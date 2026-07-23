@@ -220,26 +220,19 @@ def test_ui_reconnect_timeout_preserves_short_lived_sessions() -> None:
     assert nice_app._ui_reconnect_timeout_seconds({"ui_reconnect_timeout_sec": "bad"}) == 5.0
 
     main_source = inspect.getsource(nice_app.main)
-    assert "reconnect_timeout=_ui_reconnect_timeout_seconds(cfg)" in main_source
+    assert "reconnect_timeout=_ui_transport_reconnect_timeout_seconds(cfg)" in main_source
 
 
-def test_ui_socket_ping_timeout_tolerates_long_background_searches(monkeypatch) -> None:
+def test_ui_socket_ping_timeout_tolerates_long_background_searches() -> None:
     assert nice_app._ui_socket_ping_timeout_seconds({}) == 60.0
     assert nice_app._ui_socket_ping_timeout_seconds({"ui_socket_ping_timeout_sec": "10"}) == 30.0
     assert nice_app._ui_socket_ping_timeout_seconds({"ui_socket_ping_timeout_sec": "180"}) == 120.0
     assert nice_app._ui_socket_ping_timeout_seconds({"ui_socket_ping_timeout_sec": "bad"}) == 60.0
+    assert nice_app._ui_transport_reconnect_timeout_seconds({}) == 150.0
+    assert nice_app._ui_transport_reconnect_timeout_seconds({"ui_socket_ping_timeout_sec": 30}) == 75.0
 
-    class Engine:
-        ping_timeout = 20.0
-
-    class Server:
-        eio = Engine()
-
-    from nicegui import core
-
-    monkeypatch.setattr(core, "sio", Server())
-    nice_app._configure_nicegui_transport({"ui_socket_ping_timeout_sec": 75})
-    assert core.sio.eio.ping_timeout == 75.0
+    main_source = inspect.getsource(nice_app.main)
+    assert "reconnect_timeout=_ui_transport_reconnect_timeout_seconds(cfg)" in main_source
 
 
 def test_search_warmup_starts_in_background(monkeypatch) -> None:
@@ -369,6 +362,17 @@ def test_search_keeps_websocket_responsive_while_semantic_pass_runs() -> None:
     assert "render_skip_client_dead" in source
     assert "run_exact_name_complete" in source
     assert "llm_expand_skipped" in source
+
+
+def test_navigation_telemetry_never_blocks_the_ui_loop() -> None:
+    source = inspect.getsource(nice_app._build_page)
+    refresh_source = source[source.index("async def refresh_nav_telemetry"):source.index("def update_nav")]
+    nav_source = source[source.index("def update_nav"):source.index("def render_safely")]
+
+    assert "await run.io_bound(_read_index_activity, state.cfg)" in refresh_source
+    assert "_read_index_telemetry" not in refresh_source
+    assert "_read_index_telemetry" not in nav_source
+    assert "schedule_nav_telemetry_refresh()" in nav_source
 
 
 def test_quick_search_uses_indexed_numeric_payload_without_source_scan() -> None:

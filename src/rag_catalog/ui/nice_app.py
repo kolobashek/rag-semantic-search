@@ -68,7 +68,7 @@ from .helpers import (
     _preview_file,
     _preview_office_file,
     _qdrant_http_ready,
-    _read_index_telemetry,
+    _read_index_activity,
     _remember_query,
     _resolve_catalog_file,
     _result_group,
@@ -437,10 +437,11 @@ def _ui_socket_ping_timeout_seconds(cfg: Dict[str, Any]) -> float:
     return max(30.0, min(120.0, raw))
 
 
-def _configure_nicegui_transport(cfg: Dict[str, Any]) -> None:
-    from nicegui import core  # noqa: PLC0415
-
-    core.sio.eio.ping_timeout = _ui_socket_ping_timeout_seconds(cfg)
+def _ui_transport_reconnect_timeout_seconds(cfg: Dict[str, Any]) -> float:
+    """Preserve the requested ping timeout after NiceGUI derives it at startup."""
+    requested_reconnect = _ui_reconnect_timeout_seconds(cfg)
+    requested_ping = _ui_socket_ping_timeout_seconds(cfg)
+    return max(requested_reconnect, requested_ping / 0.4)
 
 
 _IO_TIMEOUT = object()
@@ -661,6 +662,41 @@ def _build_page(initial_screen: str = "search") -> None:
         mark_screen_dirty("explorer")
         set_screen("explorer")
 
+    def apply_header_index_status(telemetry: Optional[Dict[str, Any]] = None) -> None:
+        header_status_chip.set_visibility(False)
+        if not state.current_user:
+            return
+        active_rows = list((telemetry or {}).get("active_stages") or [])
+        if (telemetry or {}).get("active_ocr"):
+            active_rows.append((telemetry or {}).get("active_ocr") or {})
+        if not active_rows:
+            return
+        row = active_rows[0]
+        processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
+        total = int(row.get("total_files") or row.get("found_scanned") or 0)
+        pct = min(100, max(0, round(processed * 100 / total))) if total > 0 else 0
+        header_status_chip.set_text(f"● {pct}% · индексация")
+        header_status_chip.set_visibility(True)
+
+    async def refresh_nav_telemetry() -> None:
+        try:
+            telemetry = await run.io_bound(_read_index_activity, state.cfg)
+            state._telemetry_nav_cache = telemetry
+            state._telemetry_nav_cache_ts = _time.monotonic()
+            if _client_alive():
+                apply_header_index_status(telemetry)
+        except Exception:
+            logger.exception("Failed to refresh navigation index activity")
+        finally:
+            state._telemetry_nav_refreshing = False
+            state._telemetry_nav_task = None
+
+    def schedule_nav_telemetry_refresh() -> None:
+        if state._telemetry_nav_refreshing:
+            return
+        state._telemetry_nav_refreshing = True
+        state._telemetry_nav_task = asyncio.create_task(refresh_nav_telemetry())
+
     def update_nav() -> None:
         is_admin = str((state.current_user or {}).get("role") or "") == "admin"
         nav_items = [
@@ -691,26 +727,9 @@ def _build_page(initial_screen: str = "search") -> None:
         header_user_label.set_visibility(bool(uname))
 
         # ── Header index status chip ────────────────────────
-        header_status_chip.set_visibility(False)
-        if state.current_user:
-            try:
-                _now = _time.monotonic()
-                if _now - state._telemetry_nav_cache_ts > 5.0:
-                    state._telemetry_nav_cache = _read_index_telemetry(state.cfg)
-                    state._telemetry_nav_cache_ts = _now
-                telemetry = state._telemetry_nav_cache or {}
-                active_rows = list(telemetry.get("active_stages") or [])
-                if telemetry.get("active_ocr"):
-                    active_rows.append(telemetry.get("active_ocr") or {})
-                if active_rows:
-                    row = active_rows[0]
-                    processed = int(row.get("processed_files") or row.get("processed_pdfs") or 0)
-                    total = int(row.get("total_files") or row.get("found_scanned") or 0)
-                    pct = min(100, max(0, round(processed * 100 / total))) if total > 0 else 0
-                    header_status_chip.set_text(f"● {pct}% · индексация")
-                    header_status_chip.set_visibility(True)
-            except Exception:
-                header_status_chip.set_visibility(False)
+        apply_header_index_status(state._telemetry_nav_cache)
+        if state.current_user and _time.monotonic() - state._telemetry_nav_cache_ts > 15.0:
+            schedule_nav_telemetry_refresh()
 
         # ── Left drawer nav (mobile / supplementary) ────────
         nav_area.clear()
@@ -3485,7 +3504,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     _start_global_scheduler(cfg)
     if bool(cfg.get("search_warmup_enabled", True)):
         _start_search_warmup(cfg)
-    _configure_nicegui_transport(cfg)
     ui.run(
         title="RAG Каталог",
         host=args.host,
@@ -3493,7 +3511,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         favicon=APP_ICON_PATH if APP_ICON_PATH.exists() else None,
         language="ru",
         reload=False,
-        reconnect_timeout=_ui_reconnect_timeout_seconds(cfg),
+        reconnect_timeout=_ui_transport_reconnect_timeout_seconds(cfg),
         show=not args.no_show,
         dark=False,
         storage_secret=_ui_storage_secret(cfg),

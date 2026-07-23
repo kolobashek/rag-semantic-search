@@ -2017,18 +2017,9 @@ def _read_ocr_inventory(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _read_index_activity(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return index/OCR activity without scanning the full OCR file inventory."""
     db_path = _telemetry_db_path(cfg)
-    last_run = _db_query_dicts(
-        db_path,
-        """
-        SELECT *,
-               CAST((julianday(COALESCE(ts_finished, CURRENT_TIMESTAMP)) - julianday(ts_started)) * 86400 AS INTEGER) AS duration_sec
-        FROM index_runs
-        ORDER BY ts_started DESC
-        LIMIT 1
-        """,
-    )
     active_runs = _db_query_dicts(
         db_path,
         """
@@ -2173,6 +2164,29 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         """,
     )
     active_ocr_row = active_ocr[0] if active_ocr else _find_headless_active_ocr(db_path)
+    return {
+        "active_runs": active_runs,
+        "active_stages": active_stages,
+        "latest_stages": latest_stages,
+        "stage_summary": stage_summary,
+        "overall": overall[0] if overall else {},
+        "active_ocr": active_ocr_row,
+    }
+
+
+def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    db_path = _telemetry_db_path(cfg)
+    activity = _read_index_activity(cfg)
+    last_run = _db_query_dicts(
+        db_path,
+        """
+        SELECT *,
+               CAST((julianday(COALESCE(ts_finished, CURRENT_TIMESTAMP)) - julianday(ts_started)) * 86400 AS INTEGER) AS duration_sec
+        FROM index_runs
+        ORDER BY ts_started DESC
+        LIMIT 1
+        """,
+    )
     last_ocr = _db_query_dicts(
         db_path,
         """
@@ -2197,12 +2211,12 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
     ocr_inventory = _read_ocr_inventory(cfg)
     return {
         "last_run": last_run[0] if last_run else None,
-        "active_runs": active_runs,
-        "active_stages": active_stages,
-        "latest_stages": latest_stages,
-        "stage_summary": stage_summary,
-        "overall": overall[0] if overall else {},
-        "active_ocr": active_ocr_row,
+        "active_runs": activity["active_runs"],
+        "active_stages": activity["active_stages"],
+        "latest_stages": activity["latest_stages"],
+        "stage_summary": activity["stage_summary"],
+        "overall": activity["overall"],
+        "active_ocr": activity["active_ocr"],
         "last_ocr": last_ocr[0] if last_ocr else None,
         "ocr_summary": ocr_summary[0] if ocr_summary else {},
         "ocr_inventory": ocr_inventory,

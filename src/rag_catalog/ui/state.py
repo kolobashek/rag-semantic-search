@@ -94,9 +94,11 @@ class PageState:
     activity_timer: Optional[Any] = None
     scheduler_timer: Optional[Any] = None
     cloud_drive_timer: Optional[Any] = None
-    # Cache for _read_index_telemetry() to avoid blocking event loop on every render
+    # Header activity is refreshed in a worker so navigation never blocks the UI loop.
     _telemetry_nav_cache: Optional[Dict[str, Any]] = None
     _telemetry_nav_cache_ts: float = 0.0
+    _telemetry_nav_refreshing: bool = False
+    _telemetry_nav_task: Optional[Any] = None
 
 
 def capture_screen_state(state: PageState, screen: Optional[str] = None) -> Dict[str, Any]:

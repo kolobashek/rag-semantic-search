@@ -87,6 +87,7 @@ from rag_catalog.ui.helpers import (
     _is_system_file,
     _normalize_search_results,
     _popular_query_terms,
+    _read_index_activity,
     _read_index_stats,
     _read_index_telemetry,
     _run_catalog_search,
@@ -393,6 +394,33 @@ def test_index_telemetry_reads_stage_and_ocr_progress(tmp_path) -> None:
     assert telemetry["active_runs"][0]["run_id"] == run_id
     assert telemetry["active_stages"][0]["processed_files"] == 4
     assert telemetry["active_ocr"]["processed_pdfs"] == 2
+
+
+def test_index_activity_skips_full_ocr_inventory(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "telemetry.db"
+    db = TelemetryDB(str(db_path))
+    run_id = db.start_index_run(catalog_path="O:\\Обмен", collection_name="catalog", recreate=False)
+    db.start_stage(run_id=run_id, stage="metadata", total_files=10)
+    db.update_stage(
+        run_id=run_id,
+        stage="metadata",
+        processed_files=4,
+        added_files=4,
+        updated_files=0,
+        skipped_files=0,
+        error_files=0,
+        points_added=4,
+    )
+    monkeypatch.setattr(
+        "rag_catalog.ui.helpers._read_ocr_inventory",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("navigation must not read OCR inventory")),
+    )
+
+    activity = _read_index_activity({"telemetry_db_path": str(db_path)})
+
+    assert activity["active_runs"][0]["run_id"] == run_id
+    assert activity["active_stages"][0]["processed_files"] == 4
+    assert activity["active_ocr"] is None
 
 
 def test_index_telemetry_reports_ocr_inventory(tmp_path) -> None:
