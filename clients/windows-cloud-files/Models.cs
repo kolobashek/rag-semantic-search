@@ -35,6 +35,12 @@ internal sealed class ProviderConfig
 
     [JsonPropertyName("start_with_windows")]
     public bool StartWithWindows { get; set; } = true;
+
+    [JsonPropertyName("mount_as_drive")]
+    public bool MountAsDrive { get; set; } = true;
+
+    [JsonPropertyName("drive_letter")]
+    public string DriveLetter { get; set; } = "R";
 }
 
 internal sealed class DeviceCodeResponse

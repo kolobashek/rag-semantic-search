@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Text;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.Storage.CloudFilters;
@@ -13,9 +12,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 {
     private const int Alignment = 4096;
     private const int TransferChunkBytes = 4 * 1024 * 1024;
-    private const int NotUnderSyncRootHResult = unchecked((int)0x80070186);
     private const int UnsuccessfulNtStatus = unchecked((int)0xC0000001);
-    private static readonly Guid ProviderId = new("8f734f08-90fd-4c31-a3e2-1edcad1693fb");
     private static CloudFilesProvider? _current;
 
     private readonly ProviderConfig _config;
@@ -27,6 +24,10 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private readonly Dictionary<string, CloudNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _hydrations = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _pendingLocalChanges =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _internalDeletePaths =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _explicitLocalDeletes =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _localSyncShutdown = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
@@ -57,10 +58,20 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     {
         _status.SetState(ClientRunState.Syncing, "Подготовка облачной папки…");
         Directory.CreateDirectory(_root);
-        if (!ConnectSyncRoot(allowUnregistered: true))
+        await SyncRootRegistrar.EnsureRegisteredAsync(_config, _root, cancellationToken);
+        ConnectSyncRoot();
+        if (_config.MountAsDrive)
         {
-            RegisterSyncRoot();
-            ConnectSyncRoot();
+            string driveLetter = VirtualDriveManager.EnsureMounted(_root, _config.DriveLetter);
+            if (!driveLetter.Equals(_config.DriveLetter, StringComparison.OrdinalIgnoreCase))
+            {
+                AppLog.Info(
+                    $"Preferred drive {_config.DriveLetter}: was unavailable; using {driveLetter}:.");
+            }
+        }
+        else
+        {
+            VirtualDriveManager.RemoveForRoot(_root);
         }
 
         await RefreshFullSnapshotAsync(cancellationToken);
@@ -86,7 +97,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             return;
         }
 
-        PInvoke.CfUnregisterSyncRoot(root).ThrowOnFailure();
+        SyncRootRegistrar.Unregister(root);
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -433,10 +444,10 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         };
         _watcher.Created += (_, eventArgs) => QueueLocalChange(eventArgs.FullPath);
         _watcher.Changed += (_, eventArgs) => QueueLocalChange(eventArgs.FullPath);
-        _watcher.Deleted += (_, eventArgs) => QueueLocalChange(eventArgs.FullPath);
+        _watcher.Deleted += (_, eventArgs) => QueueLocalChange(eventArgs.FullPath, deleted: true);
         _watcher.Renamed += (_, eventArgs) =>
         {
-            QueueLocalChange(eventArgs.OldFullPath);
+            QueueLocalChange(eventArgs.OldFullPath, deleted: true);
             QueueLocalChange(eventArgs.FullPath);
         };
         _watcher.Error += (_, eventArgs) =>
@@ -449,13 +460,30 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         _localSyncTask = Task.Run(() => LocalChangeLoopAsync(_localSyncShutdown.Token));
     }
 
-    private void QueueLocalChange(string localPath)
+    private void QueueLocalChange(string localPath, bool deleted = false)
     {
         if (!TryGetCloudPath(localPath, out string cloudPath))
         {
             return;
         }
 
+        if (deleted)
+        {
+            if (IsInternalDelete(cloudPath))
+            {
+                return;
+            }
+            _explicitLocalDeletes[cloudPath] = 0;
+        }
+        else
+        {
+            bool providerPlaceholder = (File.Exists(localPath) || Directory.Exists(localPath))
+                && CloudFilePinning.IsPlaceholder(localPath);
+            if (!providerPlaceholder)
+            {
+                _explicitLocalDeletes.TryRemove(cloudPath, out _);
+            }
+        }
         _pendingLocalChanges[cloudPath] = DateTimeOffset.UtcNow;
         _status.SetState(ClientRunState.Syncing, "Ожидание локальных изменений…");
     }
@@ -477,13 +505,14 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 {
                     continue;
                 }
+                bool explicitDelete = _explicitLocalDeletes.TryRemove(cloudPath, out _);
 
                 try
                 {
                     await _refreshLock.WaitAsync(cancellationToken);
                     try
                     {
-                        await SyncLocalPathAsync(cloudPath, cancellationToken);
+                        await SyncLocalPathAsync(cloudPath, explicitDelete, cancellationToken);
                         _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
                     }
                     finally
@@ -497,6 +526,10 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 }
                 catch (Exception exception)
                 {
+                    if (explicitDelete)
+                    {
+                        _explicitLocalDeletes[cloudPath] = 0;
+                    }
                     _pendingLocalChanges[cloudPath] = DateTimeOffset.UtcNow.AddSeconds(5);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
                     AppLog.Error($"Не удалось синхронизировать локальный путь {cloudPath}.", exception);
@@ -556,8 +589,17 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
     }
 
-    private async Task SyncLocalPathAsync(string cloudPath, CancellationToken cancellationToken)
+    private async Task SyncLocalPathAsync(
+        string cloudPath,
+        bool explicitDelete,
+        CancellationToken cancellationToken)
     {
+        if (explicitDelete && HasRemoteNode(cloudPath))
+        {
+            await SyncLocalDeletionAsync(cloudPath, explicitDelete: true, cancellationToken);
+            return;
+        }
+
         string localPath = CloudPath.LocalPath(_root, cloudPath);
         if (Directory.Exists(localPath))
         {
@@ -569,26 +611,39 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
         else
         {
-            await SyncLocalDeletionAsync(cloudPath, cancellationToken);
+            await SyncLocalDeletionAsync(cloudPath, explicitDelete, cancellationToken);
         }
     }
 
-    private async Task SyncLocalDeletionAsync(string cloudPath, CancellationToken cancellationToken)
+    private Task SyncLocalDeletionAsync(string cloudPath, CancellationToken cancellationToken) =>
+        SyncLocalDeletionAsync(cloudPath, explicitDelete: false, cancellationToken);
+
+    private async Task SyncLocalDeletionAsync(
+        string cloudPath,
+        bool explicitDelete,
+        CancellationToken cancellationToken)
     {
-        string target = _state.ManagedPaths
-            .Where(path => IsAtOrBelow(cloudPath, path))
-            .Where(path =>
-            {
-                string localPath = CloudPath.LocalPath(_root, path);
-                return !File.Exists(localPath) && !Directory.Exists(localPath);
-            })
-            .OrderBy(CloudPath.Depth)
-            .FirstOrDefault() ?? cloudPath;
-        if (!_state.ManagedPaths.Contains(target) || !HasRemoteNode(target))
+        string target = explicitDelete && HasRemoteNode(cloudPath)
+            ? cloudPath
+            : _state.ManagedPaths
+                .Where(path => IsAtOrBelow(cloudPath, path))
+                .Where(path =>
+                {
+                    string localPath = CloudPath.LocalPath(_root, path);
+                    return !File.Exists(localPath) && !Directory.Exists(localPath);
+                })
+                .OrderBy(CloudPath.Depth)
+                .FirstOrDefault() ?? cloudPath;
+        if ((!explicitDelete && !_state.ManagedPaths.Contains(target)) || !HasRemoteNode(target))
         {
             return;
         }
 
+        await DeleteRemoteNodeAsync(target, cancellationToken);
+    }
+
+    private async Task DeleteRemoteNodeAsync(string target, CancellationToken cancellationToken)
+    {
         Exception? transferError = null;
         _status.BeginTransfer(target);
         try
@@ -623,6 +678,54 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             _status.EndTransfer(target, transferError);
         }
+    }
+
+    private async Task HandleDeleteNotificationAsync(
+        DeletionRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _refreshLock.WaitAsync(cancellationToken);
+            try
+            {
+                if (HasRemoteNode(request.CloudPath))
+                {
+                    await DeleteRemoteNodeAsync(request.CloudPath, cancellationToken);
+                }
+            }
+            finally
+            {
+                _refreshLock.Release();
+            }
+
+            CompleteDelete(request, success: true);
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error($"Облачное удаление {request.CloudPath} отклонено.", exception);
+            try
+            {
+                CompleteDelete(request, success: false);
+            }
+            catch (Exception completionException)
+            {
+                AppLog.Error(
+                    $"Не удалось передать Windows отказ удаления {request.CloudPath}.",
+                    completionException);
+            }
+        }
+    }
+
+    private void QueueDeleteNotification(DeletionRequest request)
+    {
+        _ = Task.Run(async () =>
+        {
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                _localSyncShutdown.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(50));
+            await HandleDeleteNotificationAsync(request, timeout.Token);
+        });
     }
 
     private async Task SyncLocalDirectoryAsync(string cloudPath, CancellationToken cancellationToken)
@@ -976,16 +1079,20 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private void RemoveManagedPath(string cloudPath)
     {
         string localPath = CloudPath.LocalPath(_root, cloudPath);
+        bool deleted = false;
+        _internalDeletePaths[cloudPath] = DateTimeOffset.UtcNow.AddSeconds(5);
         try
         {
             if (File.Exists(localPath))
             {
                 File.SetAttributes(localPath, File.GetAttributes(localPath) & ~FileAttributes.ReadOnly);
                 File.Delete(localPath);
+                deleted = true;
             }
             else if (Directory.Exists(localPath))
             {
                 Directory.Delete(localPath, recursive: false);
+                deleted = true;
             }
         }
         catch (IOException)
@@ -996,53 +1103,31 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             // Preserve local data rather than forcing a destructive cleanup.
         }
-    }
-
-    private unsafe void RegisterSyncRoot()
-    {
-        const string providerName = "RAG Cloud Drive";
-        const string providerVersion = AppDefaults.Version;
-        byte[] rootIdentity = Encoding.UTF8.GetBytes("ragcf1\n" + _config.Server);
-
-        fixed (char* providerNamePointer = providerName)
-        fixed (char* providerVersionPointer = providerVersion)
-        fixed (byte* rootIdentityPointer = rootIdentity)
+        finally
         {
-            CF_SYNC_REGISTRATION registration = new()
+            if (!deleted)
             {
-                StructSize = (uint)sizeof(CF_SYNC_REGISTRATION),
-                ProviderName = providerNamePointer,
-                ProviderVersion = providerVersionPointer,
-                SyncRootIdentity = rootIdentityPointer,
-                SyncRootIdentityLength = (uint)rootIdentity.Length,
-                ProviderId = ProviderId,
-            };
-            CF_SYNC_POLICIES policies = new()
-            {
-                StructSize = (uint)sizeof(CF_SYNC_POLICIES),
-                Hydration = new CF_HYDRATION_POLICY
-                {
-                    Primary = CF_HYDRATION_POLICY_PRIMARY.CF_HYDRATION_POLICY_PARTIAL,
-                    Modifier = CF_HYDRATION_POLICY_MODIFIER.CF_HYDRATION_POLICY_MODIFIER_AUTO_DEHYDRATION_ALLOWED,
-                },
-                Population = new CF_POPULATION_POLICY
-                {
-                    Primary = CF_POPULATION_POLICY_PRIMARY.CF_POPULATION_POLICY_ALWAYS_FULL,
-                    Modifier = CF_POPULATION_POLICY_MODIFIER.CF_POPULATION_POLICY_MODIFIER_NONE,
-                },
-                InSync = CF_INSYNC_POLICY.CF_INSYNC_POLICY_TRACK_FILE_ALL,
-                HardLink = CF_HARDLINK_POLICY.CF_HARDLINK_POLICY_NONE,
-                PlaceholderManagement = CF_PLACEHOLDER_MANAGEMENT_POLICY.CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT,
-            };
-            PInvoke.CfRegisterSyncRoot(
-                _root,
-                registration,
-                policies,
-                CF_REGISTER_FLAGS.CF_REGISTER_FLAG_MARK_IN_SYNC_ON_ROOT).ThrowOnFailure();
+                _internalDeletePaths.TryRemove(cloudPath, out _);
+            }
         }
     }
 
-    private unsafe bool ConnectSyncRoot(bool allowUnregistered = false)
+    private bool IsInternalDelete(string cloudPath)
+    {
+        if (!_internalDeletePaths.TryGetValue(cloudPath, out DateTimeOffset expiresAt))
+        {
+            return false;
+        }
+        if (expiresAt >= DateTimeOffset.UtcNow)
+        {
+            return true;
+        }
+
+        _internalDeletePaths.TryRemove(cloudPath, out _);
+        return false;
+    }
+
+    private unsafe void ConnectSyncRoot()
     {
         if (_current is not null)
         {
@@ -1063,6 +1148,11 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             },
             new()
             {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_DELETE,
+                Callback = CallbackDelegates.NotifyDelete,
+            },
+            new()
+            {
                 Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NONE,
                 Callback = null!,
             },
@@ -1077,16 +1167,10 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         if (result.Failed)
         {
             _current = null;
-            if (allowUnregistered && result.Value == NotUnderSyncRootHResult)
-            {
-                return false;
-            }
-
             result.ThrowOnFailure();
         }
 
         _connected = true;
-        return true;
     }
 
     private void QueueHydration(HydrationRequest request)
@@ -1239,6 +1323,88 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
     }
 
+    private static unsafe void OnNotifyDelete(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
+    {
+        CloudFilesProvider? provider = _current;
+        if (provider is null || info is null || parameters is null)
+        {
+            return;
+        }
+
+        DeletionRequest request = new(
+            CloudPath: "",
+            info->ConnectionKey,
+            info->TransferKey,
+            info->RequestKey);
+        try
+        {
+            if (info->FileIdentity is null)
+            {
+                CompleteDelete(request, success: false);
+                return;
+            }
+
+            ReadOnlySpan<byte> identity = new(
+                info->FileIdentity,
+                checked((int)info->FileIdentityLength));
+            string cloudPath = FileIdentityCodec.Decode(identity);
+            request = request with { CloudPath = cloudPath };
+            bool undelete = parameters->Delete.Flags.HasFlag(
+                CF_CALLBACK_DELETE_FLAGS.CF_CALLBACK_DELETE_FLAG_IS_UNDELETE);
+            bool internalDelete = provider.IsInternalDelete(cloudPath);
+            if (!ShouldPropagateDelete(internalDelete, undelete, provider.HasRemoteNode(cloudPath)))
+            {
+                CompleteDelete(request, success: true);
+                return;
+            }
+
+            provider.QueueDeleteNotification(request);
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Некорректное CfAPI-уведомление об удалении.", exception);
+            try
+            {
+                CompleteDelete(request, success: false);
+            }
+            catch (Exception completionException)
+            {
+                AppLog.Error("Не удалось отклонить CfAPI-удаление.", completionException);
+            }
+        }
+    }
+
+    internal static bool ShouldPropagateDelete(
+        bool internalDelete,
+        bool undelete,
+        bool remoteExists) =>
+        !internalDelete && !undelete && remoteExists;
+
+    private static unsafe void CompleteDelete(DeletionRequest request, bool success)
+    {
+        CF_OPERATION_INFO operation = new()
+        {
+            StructSize = (uint)sizeof(CF_OPERATION_INFO),
+            Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_DELETE,
+            ConnectionKey = request.ConnectionKey,
+            TransferKey = request.TransferKey,
+            RequestKey = request.RequestKey,
+        };
+        CF_OPERATION_PARAMETERS parameters = new()
+        {
+            ParamSize = checked((uint)(
+                Marshal.OffsetOf<CF_OPERATION_PARAMETERS>(
+                    nameof(CF_OPERATION_PARAMETERS.Anonymous)).ToInt32()
+                + sizeof(CF_OPERATION_PARAMETERS._Anonymous_e__Union._AckDelete_e__Struct))),
+        };
+        parameters.AckDelete.Flags =
+            CF_OPERATION_ACK_DELETE_FLAGS.CF_OPERATION_ACK_DELETE_FLAG_NONE;
+        parameters.AckDelete.CompletionStatus = success
+            ? (NTSTATUS)0
+            : (NTSTATUS)UnsuccessfulNtStatus;
+        PInvoke.CfExecute(operation, ref parameters).ThrowOnFailure();
+    }
+
     private static Dictionary<string, CloudNode> BuildDesiredNodes(IEnumerable<CloudNode> source)
     {
         Dictionary<string, CloudNode> desired = new(StringComparer.OrdinalIgnoreCase);
@@ -1343,9 +1509,16 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         long TransferKey,
         long RequestKey);
 
+    private sealed record DeletionRequest(
+        string CloudPath,
+        CF_CONNECTION_KEY ConnectionKey,
+        long TransferKey,
+        long RequestKey);
+
     private static unsafe class CallbackDelegates
     {
         internal static readonly CF_CALLBACK FetchData = OnFetchData;
         internal static readonly CF_CALLBACK CancelFetchData = OnCancelFetchData;
+        internal static readonly CF_CALLBACK NotifyDelete = OnNotifyDelete;
     }
 }

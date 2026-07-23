@@ -55,6 +55,8 @@ internal sealed class ConfigStore
             saved.OfflinePaths ?? [],
             StringComparer.OrdinalIgnoreCase);
         config.StartWithWindows = saved.StartWithWindows;
+        config.MountAsDrive = saved.MountAsDrive;
+        config.DriveLetter = VirtualDriveManager.NormalizeDriveLetter(saved.DriveLetter);
         config.ProtectedToken = saved.ProtectedToken;
         config.Token = UnprotectToken(saved.ProtectedToken);
         return config;
@@ -121,6 +123,9 @@ internal sealed class ConfigStore
         }
         config.KeepAllOffline = Convert.ToInt32(key.GetValue("KeepAllOffline", 0)) != 0;
         config.StartWithWindows = Convert.ToInt32(key.GetValue("StartWithWindows", 1)) != 0;
+        config.MountAsDrive = Convert.ToInt32(key.GetValue("MountAsDrive", 1)) != 0;
+        config.DriveLetter = VirtualDriveManager.NormalizeDriveLetter(
+            Convert.ToString(key.GetValue("DriveLetter", "R")) ?? "R");
         return config;
     }
 

@@ -7,7 +7,9 @@ internal sealed record ClientSettingsSelection(
     string RootPath,
     bool KeepAllOffline,
     HashSet<string> OfflinePaths,
-    bool StartWithWindows);
+    bool StartWithWindows,
+    bool MountAsDrive,
+    string DriveLetter);
 
 internal sealed class SettingsForm : Form
 {
@@ -15,14 +17,16 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _keepAllOffline;
     private readonly CheckedListBox _offlineFolders;
     private readonly CheckBox _startWithWindows;
+    private readonly CheckBox _mountAsDrive;
+    private readonly ComboBox _driveLetter;
     private readonly HashSet<string> _nestedOfflinePaths;
 
     public SettingsForm(ProviderConfig config, IReadOnlyList<string> availableFolders)
     {
         Text = "Настройки RAG Cloud Files";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(600, 520);
-        ClientSize = new Size(600, 560);
+        MinimumSize = new Size(600, 580);
+        ClientSize = new Size(600, 620);
         Font = new Font("Segoe UI", 9F);
         Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "") ?? SystemIcons.Application;
         _nestedOfflinePaths = config.OfflinePaths
@@ -100,13 +104,35 @@ internal sealed class SettingsForm : Form
             Text = "Запускать вместе с Windows",
             Checked = config.StartWithWindows,
             AutoSize = true,
-            Location = new Point(24, 488),
+            Location = new Point(24, 532),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
         };
+        _mountAsDrive = new CheckBox
+        {
+            Text = "Показывать облако отдельным диском",
+            Checked = config.MountAsDrive,
+            AutoSize = true,
+            Location = new Point(24, 494),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+        };
+        _driveLetter = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(314, 489),
+            Size = new Size(70, 28),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+        };
+        foreach (char letter in "RSTUVWXYZDEFGHIJKLMNOPQ")
+        {
+            _driveLetter.Items.Add($"{letter}:");
+        }
+        _driveLetter.SelectedItem = VirtualDriveManager.NormalizeDriveLetter(config.DriveLetter) + ":";
+        _driveLetter.Enabled = _mountAsDrive.Checked;
+        _mountAsDrive.CheckedChanged += (_, _) => _driveLetter.Enabled = _mountAsDrive.Checked;
         Button save = new()
         {
             Text = "Сохранить",
-            Location = new Point(386, 516),
+            Location = new Point(386, 574),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             Size = new Size(94, 32),
         };
@@ -114,7 +140,7 @@ internal sealed class SettingsForm : Form
         {
             Text = "Отмена",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(490, 516),
+            Location = new Point(490, 574),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             Size = new Size(82, 32),
         };
@@ -136,6 +162,8 @@ internal sealed class SettingsForm : Form
             folderLabel,
             _offlineFolders,
             hint,
+            _mountAsDrive,
+            _driveLetter,
             _startWithWindows,
             save,
             cancel,
@@ -186,7 +214,10 @@ internal sealed class SettingsForm : Form
                 root,
                 _keepAllOffline.Checked,
                 offline,
-                _startWithWindows.Checked);
+                _startWithWindows.Checked,
+                _mountAsDrive.Checked,
+                VirtualDriveManager.NormalizeDriveLetter(
+                    Convert.ToString(_driveLetter.SelectedItem) ?? "R"));
             return true;
         }
         catch (Exception exception)

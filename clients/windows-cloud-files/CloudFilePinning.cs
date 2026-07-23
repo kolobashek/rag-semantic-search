@@ -18,7 +18,10 @@ internal static partial class CloudFilePinning
     private const uint OpenExisting = 3;
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint ShcneUpdateItem = 0x00002000;
+    private const uint ShcneUpdateDir = 0x00001000;
+    private const uint ShcneAttributes = 0x00000800;
     private const uint ShcnfPathW = 0x0005;
+    private const uint ShcnfFlushNoWait = 0x2000;
 
     public static bool IsPlaceholder(string path) => TryGetPlaceholderInfo(path, out _);
 
@@ -147,8 +150,16 @@ internal static partial class CloudFilePinning
         return handle;
     }
 
-    public static void RefreshShell(string path) =>
-        SHChangeNotify(ShcneUpdateItem, ShcnfPathW, Path.GetFullPath(path), 0);
+    public static void RefreshShell(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        uint eventId = Directory.Exists(fullPath) ? ShcneUpdateDir : ShcneUpdateItem;
+        SHChangeNotify(
+            eventId | ShcneAttributes,
+            ShcnfPathW | ShcnfFlushNoWait,
+            fullPath,
+            0);
+    }
 
     [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
     private static partial SafeFileHandle CreateFile(

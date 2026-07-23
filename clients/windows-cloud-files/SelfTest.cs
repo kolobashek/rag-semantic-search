@@ -16,6 +16,17 @@ internal static class SelfTest
         Equal(false, ClientUpdater.IsNewerVersion("0.3.0", "invalid"));
         Equal(true, ClientUpdater.IsValidSha256(new string('a', 64)));
         Equal(false, ClientUpdater.IsValidSha256("not-a-hash"));
+        Equal("R", VirtualDriveManager.NormalizeDriveLetter("r:"));
+        Equal("R", VirtualDriveManager.NormalizeDriveLetter("invalid"));
+        Equal("S", VirtualDriveManager.CandidateLetters("S").First());
+        Equal(
+            true,
+            SyncRootRegistrar.BuildSyncRootId("https://catalog.example")
+                .StartsWith("TSK.RagCloudFiles!S-", StringComparison.Ordinal));
+        Equal(true, CloudFilesProvider.ShouldPropagateDelete(false, false, true));
+        Equal(false, CloudFilesProvider.ShouldPropagateDelete(true, false, true));
+        Equal(false, CloudFilesProvider.ShouldPropagateDelete(false, true, true));
+        Equal(false, CloudFilesProvider.ShouldPropagateDelete(false, false, false));
 
         string unicodePath = "Документы/Смета 2026.xlsx";
         Equal(unicodePath, FileIdentityCodec.Decode(FileIdentityCodec.Encode(unicodePath)));
@@ -61,6 +72,8 @@ internal static class SelfTest
                 KeepAllOffline = true,
                 OfflinePaths = new HashSet<string>(["Документы"], StringComparer.OrdinalIgnoreCase),
                 StartWithWindows = false,
+                MountAsDrive = true,
+                DriveLetter = "S",
             };
             store.SaveConfig(config);
             Equal("device-1", store.LoadConfig().DeviceId);
@@ -68,6 +81,8 @@ internal static class SelfTest
             Equal(true, store.LoadConfig().KeepAllOffline);
             Equal(true, store.LoadConfig().OfflinePaths.Contains("документы"));
             Equal(false, store.LoadConfig().StartWithWindows);
+            Equal(true, store.LoadConfig().MountAsDrive);
+            Equal("S", store.LoadConfig().DriveLetter);
             string root = Path.Combine(temporary, "root");
             string localFile = Path.Combine(root, "Документы", "Смета 2026.xlsx");
             Directory.CreateDirectory(Path.GetDirectoryName(localFile)!);

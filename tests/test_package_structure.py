@@ -74,3 +74,19 @@ def test_cloud_files_executable_declares_windows_compatibility_and_uninstall() -
     assert "CurrentVersion\\Uninstall\\RAGCloudFiles" in bootstrap
     assert '"UninstallString"' in bootstrap
     assert "--apply-uninstall" in bootstrap
+
+
+def test_cloud_files_client_uses_shell_registration_and_confirmed_deletes() -> None:
+    client_dir = PROJECT_ROOT / "clients" / "windows-cloud-files"
+    registrar = (client_dir / "SyncRootRegistrar.cs").read_text(encoding="utf-8")
+    provider = (client_dir / "CloudFilesProvider.cs").read_text(encoding="utf-8")
+    virtual_drive = (client_dir / "VirtualDriveManager.cs").read_text(encoding="utf-8")
+
+    assert "StorageProviderSyncRootManager.Register(info)" in registrar
+    assert "StorageProviderHydrationPolicy.Partial" in registrar
+    assert "AllowPinning = true" in registrar
+    assert "CF_CALLBACK_TYPE_NOTIFY_DELETE" in provider
+    assert "CF_OPERATION_TYPE_ACK_DELETE" in provider
+    assert "ShouldPropagateDelete" in provider
+    assert "DefineDosDevice" in virtual_drive
+    assert "RemoveForRoot" in virtual_drive

@@ -8,18 +8,22 @@ internal sealed class SetupForm : Form
     private readonly TextBox _rootPath;
     private readonly CheckBox _keepAllOffline;
     private readonly CheckBox _startWithWindows;
+    private readonly CheckBox _mountAsDrive;
+    private readonly ComboBox _driveLetter;
 
     public SetupForm(
         string defaultRoot,
         bool keepAllOffline = false,
-        bool startWithWindows = true)
+        bool startWithWindows = true,
+        bool mountAsDrive = true,
+        string driveLetter = "R")
     {
         Text = "Установка RAG Cloud Files";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(560, 350);
+        ClientSize = new Size(560, 410);
         Font = new Font("Segoe UI", 9F);
         Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "") ?? SystemIcons.Application;
 
@@ -79,21 +83,41 @@ internal sealed class SetupForm : Form
             Text = "Запускать вместе с Windows",
             Checked = startWithWindows,
             AutoSize = true,
-            Location = new Point(30, 279),
+            Location = new Point(30, 337),
         };
+        _mountAsDrive = new CheckBox
+        {
+            Text = "Показывать облако отдельным диском",
+            Checked = mountAsDrive,
+            AutoSize = true,
+            Location = new Point(30, 282),
+        };
+        _driveLetter = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(320, 277),
+            Size = new Size(70, 28),
+        };
+        foreach (char letter in "RSTUVWXYZDEFGHIJKLMNOPQ")
+        {
+            _driveLetter.Items.Add($"{letter}:");
+        }
+        _driveLetter.SelectedItem = VirtualDriveManager.NormalizeDriveLetter(driveLetter) + ":";
+        _driveLetter.Enabled = _mountAsDrive.Checked;
+        _mountAsDrive.CheckedChanged += (_, _) => _driveLetter.Enabled = _mountAsDrive.Checked;
 
         Button install = new()
         {
             Text = "Установить",
             DialogResult = DialogResult.OK,
-            Location = new Point(350, 307),
+            Location = new Point(350, 365),
             Size = new Size(100, 32),
         };
         Button cancel = new()
         {
             Text = "Отмена",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(458, 307),
+            Location = new Point(458, 365),
             Size = new Size(74, 32),
         };
         install.Click += (_, _) =>
@@ -113,6 +137,8 @@ internal sealed class SetupForm : Form
             browse,
             _keepAllOffline,
             offlineHint,
+            _mountAsDrive,
+            _driveLetter,
             _startWithWindows,
             install,
             cancel,
@@ -127,6 +153,11 @@ internal sealed class SetupForm : Form
     public bool KeepAllOffline => _keepAllOffline.Checked;
 
     public bool StartWithWindows => _startWithWindows.Checked;
+
+    public bool MountAsDrive => _mountAsDrive.Checked;
+
+    public string DriveLetter => VirtualDriveManager.NormalizeDriveLetter(
+        Convert.ToString(_driveLetter.SelectedItem) ?? "R");
 
     private void BrowseForRoot()
     {

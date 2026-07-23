@@ -162,14 +162,22 @@ internal static class Program
                             selection.OfflinePaths,
                             StringComparer.OrdinalIgnoreCase);
                         config.StartWithWindows = selection.StartWithWindows;
+                        bool driveSettingsChanged = config.MountAsDrive != selection.MountAsDrive
+                            || !config.DriveLetter.Equals(
+                                selection.DriveLetter,
+                                StringComparison.OrdinalIgnoreCase);
+                        config.MountAsDrive = selection.MountAsDrive;
+                        config.DriveLetter = selection.DriveLetter;
                         store.SaveConfig(config);
                         WindowsBootstrap.SavePreferences(config);
 
                         if (!string.Equals(
                                 oldRoot,
                                 config.RootPath,
-                                StringComparison.OrdinalIgnoreCase))
+                                StringComparison.OrdinalIgnoreCase)
+                            || driveSettingsChanged)
                         {
+                            VirtualDriveManager.RemoveForRoot(oldRoot);
                             RequestStop(restart: true, oldRoot);
                             return;
                         }

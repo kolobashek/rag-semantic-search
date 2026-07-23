@@ -60,7 +60,9 @@ internal static class WindowsBootstrap
         using SetupForm setup = new(
             config.RootPath,
             config.KeepAllOffline,
-            config.StartWithWindows);
+            config.StartWithWindows,
+            config.MountAsDrive,
+            config.DriveLetter);
         if (setup.ShowDialog() != DialogResult.OK)
         {
             return false;
@@ -74,6 +76,8 @@ internal static class WindowsBootstrap
         config.RootPath = setup.RootPath;
         config.KeepAllOffline = setup.KeepAllOffline;
         config.StartWithWindows = setup.StartWithWindows;
+        config.MountAsDrive = setup.MountAsDrive;
+        config.DriveLetter = setup.DriveLetter;
         store.SaveConfig(config);
         SavePreferences(config);
 
@@ -150,6 +154,8 @@ internal static class WindowsBootstrap
             appKey.SetValue("RootPath", config.RootPath, RegistryValueKind.String);
             appKey.SetValue("KeepAllOffline", config.KeepAllOffline ? 1 : 0, RegistryValueKind.DWord);
             appKey.SetValue("StartWithWindows", config.StartWithWindows ? 1 : 0, RegistryValueKind.DWord);
+            appKey.SetValue("MountAsDrive", config.MountAsDrive ? 1 : 0, RegistryValueKind.DWord);
+            appKey.SetValue("DriveLetter", config.DriveLetter, RegistryValueKind.String);
             appKey.SetValue("DeviceId", config.DeviceId, RegistryValueKind.String);
             appKey.SetValue("Executable", InstalledExecutable, RegistryValueKind.String);
         }
