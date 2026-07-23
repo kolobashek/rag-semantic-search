@@ -1,0 +1,4 @@
+LIBRARY "RagCloudShell"
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="com desktop4 desktop5 uap uap10 rescap">
+  <Identity
+    Name="TSK.RAGCloudFiles.ShellExtension"
+    Publisher="CN=TSK-NSK"
+    Version="0.4.0.0"
+    ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>RAG Cloud Files Shell Extension</DisplayName>
+    <PublisherDisplayName>TSK-NSK</PublisherDisplayName>
+    <Description>RAG Cloud Files commands for File Explorer</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.17763.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="ru-ru" />
+  </Resources>
+  <Applications>
+    <Application
+      Id="RagCloudFiles"
+      Executable="RagCloudShellHost.exe"
+      uap10:RuntimeBehavior="win32App"
+      uap10:TrustLevel="mediumIL">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="RAG Cloud Files"
+        Description="RAG Cloud Files"
+        BackgroundColor="transparent"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        Square150x150Logo="Assets\Square150x150Logo.png" />
+      <Extensions>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="RAG Cloud Files commands">
+              <com:Class
+                Id="B732C5DB-B14F-4F22-A729-1DA4E430E1DD"
+                Path="RagCloudShell.dll"
+                ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb
+                Id="RagCloudFiles"
+                Clsid="B732C5DB-B14F-4F22-A729-1DA4E430E1DD" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb
+                Id="RagCloudFiles"
+                Clsid="B732C5DB-B14F-4F22-A729-1DA4E430E1DD" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

@@ -39,3 +39,23 @@ def test_entrypoint_shims_exist_for_backward_compatibility() -> None:
         "telegram_bot.py",
     ):
         assert (PROJECT_ROOT / filename).is_file()
+
+
+def test_windows_11_shell_package_is_fail_closed_and_uses_matching_com_class() -> None:
+    shell_source = (
+        PROJECT_ROOT / "clients" / "windows-shell-extension" / "RagCloudShell.cpp"
+    ).read_text(encoding="utf-8")
+    manifest = (
+        PROJECT_ROOT / "packaging" / "cloud-files-shell" / "AppxManifest.xml"
+    ).read_text(encoding="utf-8")
+    build_script = (
+        PROJECT_ROOT / "packaging" / "build_cloud_files_shell.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "IExplorerCommand" in shell_source
+    assert "windows.fileExplorerContextMenus" in manifest
+    assert "B732C5DB-B14F-4F22-A729-1DA4E430E1DD" in manifest
+    assert "0xb732c5db, 0xb14f, 0x4f22" in shell_source
+    assert "signtool.exe" in build_script.lower()
+    assert "verify /pa /v" in build_script
+    assert "$PackagePath.sha256" in build_script

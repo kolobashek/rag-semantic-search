@@ -6,6 +6,7 @@ namespace RagCloudFiles;
 
 internal static class WindowsBootstrap
 {
+    private const string ShellPackageName = "TSK.RAGCloudFiles.ShellExtension";
     private const string RegistryPath = @"Software\RAGCloudFiles";
     private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValueName = "RAGCloudFiles";
@@ -144,6 +145,7 @@ internal static class WindowsBootstrap
             appKey.SetValue("KeepAllOffline", config.KeepAllOffline ? 1 : 0, RegistryValueKind.DWord);
             appKey.SetValue("StartWithWindows", config.StartWithWindows ? 1 : 0, RegistryValueKind.DWord);
             appKey.SetValue("DeviceId", config.DeviceId, RegistryValueKind.String);
+            appKey.SetValue("Executable", InstalledExecutable, RegistryValueKind.String);
         }
         ApplyStartup(config.StartWithWindows);
         InstallClassicContextMenu(config.RootPath);
@@ -272,6 +274,37 @@ internal static class WindowsBootstrap
         }
     }
 
+    public static async Task<string> GetShellExtensionVersionAsync(
+        CancellationToken cancellationToken)
+    {
+        ProcessStartInfo start = PowerShellStartInfo(
+            $"(Get-AppxPackage -Name '{ShellPackageName}' | Select-Object -First 1 -ExpandProperty Version)");
+        using Process process = Process.Start(start)
+            ?? throw new InvalidOperationException("Не удалось проверить пакет интеграции Проводника.");
+        string output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+        return process.ExitCode == 0 ? output.Trim() : "";
+    }
+
+    public static async Task InstallShellExtensionAsync(
+        string packagePath,
+        CancellationToken cancellationToken)
+    {
+        string escapedPath = Path.GetFullPath(packagePath).Replace("'", "''", StringComparison.Ordinal);
+        ProcessStartInfo start = PowerShellStartInfo(
+            $"Add-AppxPackage -Path '{escapedPath}' -ForceUpdateFromAnyVersion -ForceApplicationShutdown");
+        using Process process = Process.Start(start)
+            ?? throw new InvalidOperationException("Не удалось запустить установку интеграции Проводника.");
+        string standardError = await process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Windows отклонила пакет интеграции Проводника: {standardError.Trim()}");
+        }
+        AppLog.Info($"Installed File Explorer shell package {Path.GetFileName(packagePath)}.");
+    }
+
     private static void ApplyStartup(bool enabled)
     {
         using RegistryKey runKey = Registry.CurrentUser.CreateSubKey(RunPath);
@@ -286,6 +319,25 @@ internal static class WindowsBootstrap
         {
             runKey.DeleteValue(RunValueName, throwOnMissingValue: false);
         }
+    }
+
+    private static ProcessStartInfo PowerShellStartInfo(string command)
+    {
+        ProcessStartInfo start = new("powershell.exe")
+        {
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            WindowStyle = ProcessWindowStyle.Hidden,
+        };
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-ExecutionPolicy");
+        start.ArgumentList.Add("Bypass");
+        start.ArgumentList.Add("-Command");
+        start.ArgumentList.Add(command);
+        return start;
     }
 
     private static void InstallClassicContextMenu(string rootPath)

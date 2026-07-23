@@ -2283,6 +2283,11 @@ def test_sync_client_version_advertises_files_on_demand_channel() -> None:
     assert result["cloud_files_channel"] == "stable"
     assert isinstance(result["cloud_files_size_bytes"], int)
     assert len(result["cloud_files_sha256"]) in {0, 64}
+    assert result["cloud_files_shell_version"] == "0.4.0"
+    assert "format=cloud-files-shell-msix" in result["cloud_files_shell_download_url"]
+    assert isinstance(result["has_cloud_files_shell_msix"], bool)
+    assert isinstance(result["cloud_files_shell_size_bytes"], int)
+    assert len(result["cloud_files_shell_sha256"]) in {0, 64}
 
 
 def test_explorer_exposes_files_on_demand_windows_client() -> None:

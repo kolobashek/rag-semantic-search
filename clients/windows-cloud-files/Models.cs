@@ -92,6 +92,21 @@ internal sealed class UpdateManifest
 
     [JsonPropertyName("cloud_files_channel")]
     public string Channel { get; set; } = "";
+
+    [JsonPropertyName("has_cloud_files_shell_msix")]
+    public bool HasShellPackage { get; set; }
+
+    [JsonPropertyName("cloud_files_shell_version")]
+    public string ShellVersion { get; set; } = "";
+
+    [JsonPropertyName("cloud_files_shell_download_url")]
+    public string ShellDownloadUrl { get; set; } = "";
+
+    [JsonPropertyName("cloud_files_shell_sha256")]
+    public string ShellSha256 { get; set; } = "";
+
+    [JsonPropertyName("cloud_files_shell_size_bytes")]
+    public long ShellSizeBytes { get; set; }
 }
 
 internal sealed class ChangePage

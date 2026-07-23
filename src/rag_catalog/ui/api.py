@@ -412,6 +412,7 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
 _CLOUD_FILES_VERSION = "0.4.0"
+_CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 
 def _cloud_files_release_metadata(packaging: Path) -> Dict[str, Any]:
@@ -429,6 +430,22 @@ def _cloud_files_release_metadata(packaging: Path) -> Dict[str, Any]:
     }
 
 
+def _cloud_files_shell_release_metadata(packaging: Path) -> Dict[str, Any]:
+    package = packaging / f"RagCloudFilesShell-{_CLOUD_FILES_SHELL_VERSION}.msix"
+    checksum_file = package.with_suffix(package.suffix + ".sha256")
+    checksum = ""
+    if package.is_file() and checksum_file.is_file():
+        candidate = checksum_file.read_text(encoding="ascii").split(maxsplit=1)[0].strip().lower()
+        if len(candidate) == 64 and all(character in "0123456789abcdef" for character in candidate):
+            checksum = candidate
+    return {
+        "available": package.is_file() and bool(checksum),
+        "path": package,
+        "sha256": checksum,
+        "size_bytes": package.stat().st_size if package.is_file() else 0,
+    }
+
+
 @app.get("/api/sync-client/version")
 def api_sync_client_version() -> Dict[str, Any]:
     """
@@ -440,6 +457,7 @@ def api_sync_client_version() -> Dict[str, Any]:
     has_exe = (packaging / "rag_sync_client.exe").is_file()
     has_msi = (packaging / "RAGSyncClient.msi").is_file()
     cloud_files_release = _cloud_files_release_metadata(packaging)
+    cloud_files_shell = _cloud_files_shell_release_metadata(packaging)
     return {
         "version": _SYNC_CLIENT_VERSION,
         "has_exe": has_exe,
@@ -452,6 +470,14 @@ def api_sync_client_version() -> Dict[str, Any]:
         "cloud_files_download_url": (
             "/api/cloud-drive/sync/client-download"
             f"?format=cloud-files-exe&v={_CLOUD_FILES_VERSION}"
+        ),
+        "has_cloud_files_shell_msix": cloud_files_shell["available"],
+        "cloud_files_shell_version": _CLOUD_FILES_SHELL_VERSION,
+        "cloud_files_shell_sha256": cloud_files_shell["sha256"],
+        "cloud_files_shell_size_bytes": cloud_files_shell["size_bytes"],
+        "cloud_files_shell_download_url": (
+            "/api/cloud-drive/sync/client-download"
+            f"?format=cloud-files-shell-msix&v={_CLOUD_FILES_SHELL_VERSION}"
         ),
         "download_url": "/api/cloud-drive/sync/client-download?format=exe",
     }
@@ -1520,6 +1546,19 @@ def api_cloud_drive_sync_client_download(
                 f"RagCloudFiles-{_CLOUD_FILES_VERSION}.exe",
             ),
         ]
+    elif fmt == "cloud-files-shell-msix":
+        shell_release = _cloud_files_shell_release_metadata(packaging)
+        candidates = (
+            [
+                (
+                    shell_release["path"],
+                    "application/msix",
+                    f"RagCloudFilesShell-{_CLOUD_FILES_SHELL_VERSION}.msix",
+                ),
+            ]
+            if shell_release["available"]
+            else []
+        )
     elif fmt == "msi":
         candidates = [
             (packaging / "RAGSyncClient.msi", "application/x-msi", "RAGSyncClient.msi"),

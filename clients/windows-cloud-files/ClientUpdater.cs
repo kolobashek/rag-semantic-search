@@ -47,6 +47,18 @@ internal sealed class ClientUpdater
         try
         {
             UpdateManifest manifest = await _api.GetUpdateManifestAsync(cancellationToken);
+            try
+            {
+                await EnsureShellExtensionAsync(manifest, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                AppLog.Error("Интеграция с меню Проводника не установлена.", exception);
+            }
             if (!manifest.HasCloudFilesExecutable ||
                 !IsNewerVersion(AppDefaults.Version, manifest.Version))
             {
@@ -106,6 +118,50 @@ internal sealed class ClientUpdater
         {
             _checkLock.Release();
         }
+    }
+
+    private async Task EnsureShellExtensionAsync(
+        UpdateManifest manifest,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ||
+            !manifest.HasShellPackage ||
+            !IsValidSha256(manifest.ShellSha256) ||
+            manifest.ShellSizeBytes <= 0 ||
+            manifest.ShellSizeBytes > MaximumUpdateBytes ||
+            !Version.TryParse(manifest.ShellVersion, out Version? shellVersion))
+        {
+            return;
+        }
+
+        string installedVersion = await WindowsBootstrap.GetShellExtensionVersionAsync(cancellationToken);
+        if (installedVersion.Length > 0 &&
+            !IsNewerVersion(installedVersion, shellVersion.ToString()))
+        {
+            return;
+        }
+
+        string finalPath = Path.Combine(
+            WindowsBootstrap.UpdateDirectory,
+            $"RagCloudFilesShell-{shellVersion}.msix");
+        string temporaryPath = finalPath + ".download";
+        Directory.CreateDirectory(WindowsBootstrap.UpdateDirectory);
+        File.Delete(temporaryPath);
+        File.Delete(finalPath);
+        _status.SetState(ClientRunState.Syncing, "Установка интеграции с Проводником…");
+        await _api.DownloadUpdateAsync(
+            manifest.ShellDownloadUrl,
+            temporaryPath,
+            manifest.ShellSizeBytes,
+            cancellationToken);
+        string actualHash = await ComputeSha256Async(temporaryPath, cancellationToken);
+        if (!actualHash.Equals(manifest.ShellSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"SHA-256 shell-пакета не совпал: ожидался {manifest.ShellSha256}, получен {actualHash}.");
+        }
+        File.Move(temporaryPath, finalPath);
+        await WindowsBootstrap.InstallShellExtensionAsync(finalPath, cancellationToken);
     }
 
     internal static bool IsNewerVersion(string current, string candidate) =>
