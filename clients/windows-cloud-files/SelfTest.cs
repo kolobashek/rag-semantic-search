@@ -6,6 +6,8 @@ internal static class SelfTest
 {
     public static void Run()
     {
+        Equal("https://cloud.tsk-nsk.ru", new ProviderConfig().Server);
+        Equal(false, WindowsBootstrap.IsInteractiveInstall(["--self-test"]));
         Equal("Folder/file.txt", CloudPath.Normalize("/Folder\\file.txt/"));
         Equal("Folder", CloudPath.Parent("Folder/file.txt"));
         Equal(2, CloudPath.Depth("Folder/file.txt"));

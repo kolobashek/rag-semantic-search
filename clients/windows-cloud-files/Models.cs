@@ -5,7 +5,7 @@ namespace RagCloudFiles;
 internal sealed class ProviderConfig
 {
     [JsonPropertyName("server")]
-    public string Server { get; set; } = "";
+    public string Server { get; set; } = AppDefaults.Server;
 
     [JsonIgnore]
     public string Token { get; set; } = "";

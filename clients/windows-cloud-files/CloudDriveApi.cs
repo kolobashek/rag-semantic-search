@@ -23,7 +23,7 @@ internal sealed class CloudDriveApi : IDisposable
             Timeout = TimeSpan.FromMinutes(10),
         };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("RAGCloudFiles/0.1");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd($"RAGCloudFiles/{AppDefaults.Version}");
     }
 
     public static async Task<DeviceTokenResponse> AuthorizeDeviceAsync(string server, CancellationToken cancellationToken)

@@ -2,12 +2,31 @@ namespace RagCloudFiles;
 
 internal static class Program
 {
+    private const string SingleInstanceName = @"Local\RAGCloudFiles.Provider";
+
+    [STAThread]
     private static async Task<int> Main(string[] args)
     {
+        ApplicationConfiguration.Initialize();
+
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 16299))
         {
-            Console.Error.WriteLine("RAG Cloud Files требует Windows 10 1709 или новее.");
+            WindowsBootstrap.ShowError("RAG Cloud Files требует Windows 10 1709 или новее.");
             return 2;
+        }
+
+        if (WindowsBootstrap.IsInteractiveInstall(args))
+        {
+            try
+            {
+                WindowsBootstrap.InstallAndLaunch();
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                WindowsBootstrap.ShowError("Не удалось установить RAG Cloud Files.", exception);
+                return 1;
+            }
         }
 
         Dictionary<string, string> options = ParseOptions(args);
@@ -37,8 +56,19 @@ internal static class Program
 
         if (config.Server.Length == 0)
         {
-            Console.Error.WriteLine("Укажите адрес сервера: RagCloudFiles.exe --server https://catalog.example.org");
+            WindowsBootstrap.ShowError("Не задан адрес сервера Cloud Drive.");
             return 2;
+        }
+
+        using EventWaitHandle singleInstance = new(
+            initialState: false,
+            EventResetMode.ManualReset,
+            SingleInstanceName,
+            out bool createdNew);
+        if (!createdNew)
+        {
+            WindowsBootstrap.OpenRoot(config.RootPath);
+            return 0;
         }
 
         using CancellationTokenSource shutdown = new();
@@ -50,6 +80,8 @@ internal static class Program
 
         try
         {
+            AppLog.Info($"Starting provider {AppDefaults.Version} for {config.Server}.");
+            bool firstAuthorization = config.Token.Length == 0;
             if (config.Token.Length == 0)
             {
                 DeviceTokenResponse auth = await CloudDriveApi.AuthorizeDeviceAsync(config.Server, shutdown.Token);
@@ -66,7 +98,12 @@ internal static class Program
 
             await using CloudFilesProvider provider = new(config, store, api);
             await provider.StartAsync(shutdown.Token);
+            AppLog.Info($"Provider ready at {Path.GetFullPath(config.RootPath)}.");
             Console.WriteLine($"RAG Cloud Drive готов: {Path.GetFullPath(config.RootPath)}");
+            if (firstAuthorization)
+            {
+                WindowsBootstrap.OpenRoot(config.RootPath);
+            }
             if (once)
             {
                 return 0;
@@ -87,7 +124,7 @@ internal static class Program
         }
         catch (Exception exception)
         {
-            Console.Error.WriteLine(exception);
+            WindowsBootstrap.ShowError("RAG Cloud Files остановлен из-за ошибки.", exception);
             return 1;
         }
     }
@@ -104,7 +141,7 @@ internal static class Program
             }
 
             string name = argument[2..];
-            if (name is "once" or "self-test" or "unregister")
+            if (name is "once" or "self-test" or "unregister" or "installed")
             {
                 result[name] = "true";
                 continue;

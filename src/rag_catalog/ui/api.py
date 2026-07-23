@@ -396,6 +396,7 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
+_CLOUD_FILES_VERSION = "0.2.0"
 
 
 @app.get("/api/sync-client/version")
@@ -414,8 +415,11 @@ def api_sync_client_version() -> Dict[str, Any]:
         "has_exe": has_exe,
         "has_msi": has_msi,
         "has_cloud_files_exe": has_cloud_files_exe,
-        "cloud_files_version": "0.1.0",
-        "cloud_files_download_url": "/api/cloud-drive/sync/client-download?format=cloud-files-exe",
+        "cloud_files_version": _CLOUD_FILES_VERSION,
+        "cloud_files_download_url": (
+            "/api/cloud-drive/sync/client-download"
+            f"?format=cloud-files-exe&v={_CLOUD_FILES_VERSION}"
+        ),
         "download_url": "/api/cloud-drive/sync/client-download?format=exe",
     }
 
@@ -1476,7 +1480,11 @@ def api_cloud_drive_sync_client_download(
         ]
     elif fmt == "cloud-files-exe":
         candidates = [
-            (packaging / "RagCloudFiles.exe", "application/octet-stream", "RagCloudFiles.exe"),
+            (
+                packaging / "RagCloudFiles.exe",
+                "application/octet-stream",
+                f"RagCloudFiles-{_CLOUD_FILES_VERSION}.exe",
+            ),
         ]
     elif fmt == "msi":
         candidates = [
@@ -1500,7 +1508,11 @@ def api_cloud_drive_sync_client_download(
                 path=str(path),
                 media_type=mime,
                 filename=filename,
-                headers={"Content-Disposition": f"attachment; filename={filename}"},
+                headers={
+                    "Cache-Control": "no-store, max-age=0",
+                    "Pragma": "no-cache",
+                    "Content-Disposition": f"attachment; filename={filename}",
+                },
             )
     raise HTTPException(
         status_code=404, detail="Sync-клиент не найден. Соберите установщик командой packaging/build.ps1."

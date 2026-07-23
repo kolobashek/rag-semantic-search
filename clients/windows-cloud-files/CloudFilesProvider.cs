@@ -308,7 +308,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private unsafe void RegisterSyncRoot()
     {
         const string providerName = "RAG Cloud Drive";
-        const string providerVersion = "0.1.0";
+        const string providerVersion = AppDefaults.Version;
         byte[] rootIdentity = Encoding.UTF8.GetBytes("ragcf1\n" + _config.Server);
 
         fixed (char* providerNamePointer = providerName)
