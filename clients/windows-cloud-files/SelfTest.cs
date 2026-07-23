@@ -71,6 +71,10 @@ internal static class SelfTest
                 {
                     [unicodePath] = "version-1",
                 },
+                LocalFingerprints = new Dictionary<string, string>
+                {
+                    [unicodePath] = "123:456",
+                },
             };
             store.SaveState(state);
             if (!store.LoadState().ManagedPaths.Contains(unicodePath.ToUpperInvariant()))
@@ -79,6 +83,7 @@ internal static class SelfTest
             }
             Equal(true, store.LoadState().AppliedOfflinePaths.Contains("документы"));
             Equal("version-1", store.LoadState().AppliedOfflineVersions[unicodePath.ToUpperInvariant()]);
+            Equal("123:456", store.LoadState().LocalFingerprints[unicodePath.ToUpperInvariant()]);
 
             ClientStatusModel status = new();
             status.BeginTransfer(unicodePath);

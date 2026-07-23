@@ -214,6 +214,59 @@ internal sealed class CloudDriveApi : IDisposable
             ?? throw new InvalidOperationException("Сервер вернул пустую страницу change feed.");
     }
 
+    public async Task<CloudNode> CreateFolderAsync(
+        string parentPath,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        string query = QueryString(new Dictionary<string, string>
+        {
+            ["parent_path"] = CloudPath.Normalize(parentPath),
+            ["name"] = name,
+        });
+        using HttpResponseMessage response = await _http.PostAsync(
+            "api/cloud-drive/folders?" + query,
+            null,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<CloudNode>(JsonOptions, cancellationToken)
+            ?? throw new InvalidOperationException("Сервер не вернул созданную папку.");
+    }
+
+    public async Task<CloudNode> UploadFileAsync(
+        string cloudPath,
+        string localPath,
+        CancellationToken cancellationToken)
+    {
+        string normalized = CloudPath.Normalize(cloudPath);
+        string fileName = Path.GetFileName(normalized.Replace('/', Path.DirectorySeparatorChar));
+        string parentPath = CloudPath.Parent(normalized);
+        await using FileStream source = new(
+            localPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1024 * 1024,
+            useAsync: true);
+        using MultipartFormDataContent form = new();
+        using StreamContent file = new(source);
+        file.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        form.Add(file, "file", fileName);
+        string path = "api/cloud-drive/upload?parent_path=" + Uri.EscapeDataString(parentPath);
+        using HttpResponseMessage response = await _http.PostAsync(path, form, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<CloudNode>(JsonOptions, cancellationToken)
+            ?? throw new InvalidOperationException("Сервер не вернул загруженный файл.");
+    }
+
+    public async Task DeleteNodeAsync(string cloudPath, CancellationToken cancellationToken)
+    {
+        string path = "api/cloud-drive/delete?path=" +
+            Uri.EscapeDataString(CloudPath.Normalize(cloudPath));
+        using HttpResponseMessage response = await _http.PostAsync(path, null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
+
     public async Task<byte[]> DownloadRangeAsync(
         string cloudPath,
         long offset,

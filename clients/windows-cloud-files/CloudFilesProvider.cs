@@ -25,8 +25,13 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private readonly object _nodesSync = new();
     private readonly Dictionary<string, CloudNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _hydrations = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _pendingLocalChanges =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly CancellationTokenSource _localSyncShutdown = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly string _root;
+    private FileSystemWatcher? _watcher;
+    private Task? _localSyncTask;
     private CF_CONNECTION_KEY _connectionKey;
     private bool _connected;
     private string _cursor = "";
@@ -59,6 +64,17 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         await RefreshFullSnapshotAsync(cancellationToken);
         await ApplyOfflinePolicyAsync(cancellationToken);
+        StartLocalChangeTracking();
+        await _refreshLock.WaitAsync(cancellationToken);
+        try
+        {
+            await RecoverLocalChangesAsync(cancellationToken);
+            _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
     }
 
     public static void Unregister(string rootPath)
@@ -247,6 +263,21 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _watcher?.Dispose();
+        _watcher = null;
+        _localSyncShutdown.Cancel();
+        if (_localSyncTask is not null)
+        {
+            try
+            {
+                await _localSyncTask;
+            }
+            catch (OperationCanceledException) when (_localSyncShutdown.IsCancellationRequested)
+            {
+                // Normal provider shutdown.
+            }
+        }
+
         await _refreshLock.WaitAsync();
         try
         {
@@ -271,6 +302,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         finally
         {
             _refreshLock.Release();
+            _localSyncShutdown.Dispose();
         }
     }
 
@@ -288,6 +320,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         _cursor = snapshot.Cursor;
         _aclRevision = snapshot.AclRevision;
+        await RecoverLocalChangesAsync(cancellationToken);
         ReconcileNamespace();
         _lastFullSnapshot = DateTimeOffset.UtcNow;
         _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
@@ -340,6 +373,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         if (changed)
         {
+            await RecoverLocalChangesAsync(cancellationToken);
             ReconcileNamespace();
         }
     }
@@ -379,7 +413,414 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         _state.ManagedPaths = nextManaged;
         _state.ManagedVersions = nextVersions;
+        _state.LocalFingerprints = _state.LocalFingerprints
+            .Where(pair => nextManaged.Contains(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         _store.SaveState(_state);
+        CloudFilePinning.RefreshShell(_root);
+    }
+
+    private void StartLocalChangeTracking()
+    {
+        _watcher = new FileSystemWatcher(_root)
+        {
+            IncludeSubdirectories = true,
+            NotifyFilter = NotifyFilters.FileName
+                | NotifyFilters.DirectoryName
+                | NotifyFilters.LastWrite
+                | NotifyFilters.Size,
+        };
+        _watcher.Created += (_, eventArgs) => QueueLocalChange(eventArgs.FullPath);
+        _watcher.Changed += (_, eventArgs) => QueueLocalChange(eventArgs.FullPath);
+        _watcher.Deleted += (_, eventArgs) => QueueLocalChange(eventArgs.FullPath);
+        _watcher.Renamed += (_, eventArgs) =>
+        {
+            QueueLocalChange(eventArgs.OldFullPath);
+            QueueLocalChange(eventArgs.FullPath);
+        };
+        _watcher.Error += (_, eventArgs) =>
+        {
+            Exception exception = eventArgs.GetException();
+            _status.SetState(ClientRunState.Error, "Ошибка наблюдения за папкой", exception.Message);
+            AppLog.Error("FileSystemWatcher пропустил локальные изменения.", exception);
+        };
+        _watcher.EnableRaisingEvents = true;
+        _localSyncTask = Task.Run(() => LocalChangeLoopAsync(_localSyncShutdown.Token));
+    }
+
+    private void QueueLocalChange(string localPath)
+    {
+        if (!TryGetCloudPath(localPath, out string cloudPath))
+        {
+            return;
+        }
+
+        _pendingLocalChanges[cloudPath] = DateTimeOffset.UtcNow;
+        _status.SetState(ClientRunState.Syncing, "Ожидание локальных изменений…");
+    }
+
+    private async Task LocalChangeLoopAsync(CancellationToken cancellationToken)
+    {
+        using PeriodicTimer timer = new(TimeSpan.FromMilliseconds(500));
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            DateTimeOffset readyBefore = DateTimeOffset.UtcNow.AddSeconds(-1);
+            string[] due = _pendingLocalChanges
+                .Where(pair => pair.Value <= readyBefore)
+                .OrderBy(pair => CloudPath.Depth(pair.Key))
+                .Select(pair => pair.Key)
+                .ToArray();
+            foreach (string cloudPath in due)
+            {
+                if (!_pendingLocalChanges.TryRemove(cloudPath, out _))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await _refreshLock.WaitAsync(cancellationToken);
+                    try
+                    {
+                        await SyncLocalPathAsync(cloudPath, cancellationToken);
+                        _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
+                    }
+                    finally
+                    {
+                        _refreshLock.Release();
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    _pendingLocalChanges[cloudPath] = DateTimeOffset.UtcNow.AddSeconds(5);
+                    _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
+                    AppLog.Error($"Не удалось синхронизировать локальный путь {cloudPath}.", exception);
+                }
+            }
+        }
+    }
+
+    private async Task RecoverLocalChangesAsync(CancellationToken cancellationToken)
+    {
+        foreach (string localDirectory in Directory
+                     .EnumerateDirectories(_root, "*", SearchOption.AllDirectories)
+                     .OrderBy(path => CloudPath.Depth(Path.GetRelativePath(_root, path))))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryGetCloudPath(localDirectory, out string cloudPath) && !HasRemoteNode(cloudPath))
+            {
+                try
+                {
+                    await SyncLocalDirectoryAsync(cloudPath, cancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    _status.SetState(ClientRunState.Error, "Не удалось синхронизировать папку", exception.Message);
+                    AppLog.Error($"Не удалось восстановить локальную папку {cloudPath}.", exception);
+                }
+            }
+        }
+
+        foreach (string localFile in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryGetCloudPath(localFile, out string cloudPath))
+            {
+                try
+                {
+                    await SyncLocalFileAsync(cloudPath, cancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
+                    AppLog.Error($"Не удалось восстановить локальный файл {cloudPath}.", exception);
+                }
+            }
+        }
+
+        foreach (string managedPath in _state.ManagedPaths
+                     .OrderBy(CloudPath.Depth)
+                     .ToArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string localPath = CloudPath.LocalPath(_root, managedPath);
+            if (!File.Exists(localPath) && !Directory.Exists(localPath) && HasRemoteNode(managedPath))
+            {
+                await SyncLocalDeletionAsync(managedPath, cancellationToken);
+            }
+        }
+    }
+
+    private async Task SyncLocalPathAsync(string cloudPath, CancellationToken cancellationToken)
+    {
+        string localPath = CloudPath.LocalPath(_root, cloudPath);
+        if (Directory.Exists(localPath))
+        {
+            await SyncLocalDirectoryAsync(cloudPath, cancellationToken);
+        }
+        else if (File.Exists(localPath))
+        {
+            await SyncLocalFileAsync(cloudPath, cancellationToken);
+        }
+        else
+        {
+            await SyncLocalDeletionAsync(cloudPath, cancellationToken);
+        }
+    }
+
+    private async Task SyncLocalDeletionAsync(string cloudPath, CancellationToken cancellationToken)
+    {
+        string target = _state.ManagedPaths
+            .Where(path => IsAtOrBelow(cloudPath, path))
+            .Where(path =>
+            {
+                string localPath = CloudPath.LocalPath(_root, path);
+                return !File.Exists(localPath) && !Directory.Exists(localPath);
+            })
+            .OrderBy(CloudPath.Depth)
+            .FirstOrDefault() ?? cloudPath;
+        if (!_state.ManagedPaths.Contains(target) || !HasRemoteNode(target))
+        {
+            return;
+        }
+
+        Exception? transferError = null;
+        _status.BeginTransfer(target);
+        try
+        {
+            await _api.DeleteNodeAsync(target, cancellationToken);
+            lock (_nodesSync)
+            {
+                foreach (string path in _nodes.Keys
+                             .Where(path => IsAtOrBelow(path, target))
+                             .ToArray())
+                {
+                    _nodes.Remove(path);
+                }
+            }
+
+            foreach (string path in _state.ManagedPaths
+                         .Where(path => IsAtOrBelow(path, target))
+                         .ToArray())
+            {
+                _state.ManagedPaths.Remove(path);
+                _state.ManagedVersions.Remove(path);
+                _state.LocalFingerprints.Remove(path);
+            }
+            _store.SaveState(_state);
+        }
+        catch (Exception exception)
+        {
+            transferError = exception;
+            throw;
+        }
+        finally
+        {
+            _status.EndTransfer(target, transferError);
+        }
+    }
+
+    private async Task SyncLocalDirectoryAsync(string cloudPath, CancellationToken cancellationToken)
+    {
+        string localPath = CloudPath.LocalPath(_root, cloudPath);
+        bool placeholder = CloudFilePinning.IsPlaceholder(localPath);
+        if (_state.ManagedPaths.Contains(cloudPath)
+            && !HasRemoteNode(cloudPath)
+            && placeholder
+            && CloudFilePinning.IsInSync(localPath))
+        {
+            return;
+        }
+
+        await EnsureRemoteFoldersAsync(cloudPath, cancellationToken);
+        if (!placeholder)
+        {
+            CloudFilePinning.ConvertToPlaceholder(localPath, cloudPath);
+        }
+        else if (!CloudFilePinning.IsInSync(localPath))
+        {
+            CloudFilePinning.MarkInSync(localPath);
+        }
+    }
+
+    private async Task EnsureRemoteFoldersAsync(string cloudPath, CancellationToken cancellationToken)
+    {
+        if (cloudPath.Length == 0)
+        {
+            return;
+        }
+
+        string current = "";
+        foreach (string segment in CloudPath.Normalize(cloudPath).Split('/'))
+        {
+            string parent = current;
+            current = current.Length == 0 ? segment : $"{current}/{segment}";
+            CloudNode? existing = GetRemoteNode(current);
+            if (existing is not null)
+            {
+                if (!existing.IsFolder)
+                {
+                    throw new IOException($"Облачный путь занят файлом: {current}");
+                }
+
+                continue;
+            }
+
+            CloudNode created = await _api.CreateFolderAsync(parent, segment, cancellationToken);
+            created.Path = CloudPath.Normalize(created.Path);
+            lock (_nodesSync)
+            {
+                _nodes[created.Path] = created;
+            }
+            _state.ManagedPaths.Add(created.Path);
+            _state.ManagedVersions[created.Path] = NodeSignature(created);
+            _store.SaveState(_state);
+        }
+    }
+
+    private async Task SyncLocalFileAsync(string cloudPath, CancellationToken cancellationToken)
+    {
+        string localPath = CloudPath.LocalPath(_root, cloudPath);
+        if (!File.Exists(localPath))
+        {
+            return;
+        }
+
+        bool managed = _state.ManagedPaths.Contains(cloudPath);
+        bool placeholder = CloudFilePinning.IsPlaceholder(localPath);
+        string fingerprint = LocalFingerprint(localPath);
+        if (managed && placeholder && CloudFilePinning.IsInSync(localPath))
+        {
+            return;
+        }
+        if (managed
+            && !placeholder
+            && _state.LocalFingerprints.GetValueOrDefault(cloudPath, "")
+                .Equals(fingerprint, StringComparison.Ordinal))
+        {
+            CloudFilePinning.ConvertToPlaceholder(localPath, cloudPath);
+            _state.LocalFingerprints[cloudPath] = LocalFingerprint(localPath);
+            _store.SaveState(_state);
+            return;
+        }
+        if (!managed && HasRemoteNode(cloudPath))
+        {
+            throw new IOException($"Локальный файл конфликтует с облачным объектом: {cloudPath}");
+        }
+
+        await EnsureRemoteFoldersAsync(CloudPath.Parent(cloudPath), cancellationToken);
+        await WaitForStableFileAsync(localPath, cancellationToken);
+        string uploadedFingerprint = LocalFingerprint(localPath);
+        Exception? transferError = null;
+        _status.BeginTransfer(cloudPath);
+        try
+        {
+            CloudNode uploaded = await _api.UploadFileAsync(cloudPath, localPath, cancellationToken);
+            uploaded.Path = CloudPath.Normalize(uploaded.Path);
+            if (!uploaded.Path.Equals(cloudPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Сервер сохранил файл по неожиданному пути: {uploaded.Path}");
+            }
+
+            lock (_nodesSync)
+            {
+                _nodes[cloudPath] = uploaded;
+            }
+            _state.ManagedPaths.Add(cloudPath);
+            _state.ManagedVersions[cloudPath] = NodeSignature(uploaded);
+            _state.LocalFingerprints[cloudPath] = uploadedFingerprint;
+            _store.SaveState(_state);
+
+            if (!LocalFingerprint(localPath).Equals(uploadedFingerprint, StringComparison.Ordinal))
+            {
+                throw new IOException($"Файл изменился во время загрузки и будет отправлен повторно: {cloudPath}");
+            }
+
+            if (placeholder)
+            {
+                CloudFilePinning.MarkInSync(localPath);
+            }
+            else
+            {
+                CloudFilePinning.ConvertToPlaceholder(localPath, cloudPath);
+            }
+            _state.LocalFingerprints[cloudPath] = LocalFingerprint(localPath);
+            _store.SaveState(_state);
+        }
+        catch (Exception exception)
+        {
+            transferError = exception;
+            throw;
+        }
+        finally
+        {
+            _status.EndTransfer(cloudPath, transferError);
+        }
+    }
+
+    private static async Task WaitForStableFileAsync(string path, CancellationToken cancellationToken)
+    {
+        string previous = "";
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string current;
+            try
+            {
+                current = LocalFingerprint(path);
+            }
+            catch (IOException) when (attempt < 7)
+            {
+                await Task.Delay(350, cancellationToken);
+                continue;
+            }
+
+            if (current == previous)
+            {
+                return;
+            }
+
+            previous = current;
+            await Task.Delay(350, cancellationToken);
+        }
+
+        throw new IOException($"Файл продолжает изменяться: {path}");
+    }
+
+    private bool TryGetCloudPath(string localPath, out string cloudPath)
+    {
+        string fullPath = Path.GetFullPath(localPath);
+        string fullRoot = _root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!fullPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            cloudPath = "";
+            return false;
+        }
+
+        return CloudPath.TryNormalize(Path.GetRelativePath(_root, fullPath), out cloudPath)
+            && cloudPath.Length > 0;
+    }
+
+    private bool HasRemoteNode(string cloudPath) => GetRemoteNode(cloudPath) is not null;
+
+    private CloudNode? GetRemoteNode(string cloudPath)
+    {
+        lock (_nodesSync)
+        {
+            return _nodes.GetValueOrDefault(cloudPath);
+        }
+    }
+
+    private static string LocalFingerprint(string localPath)
+    {
+        FileInfo info = new(localPath);
+        info.Refresh();
+        return $"{info.Length}:{info.LastWriteTimeUtc.Ticks}";
     }
 
     private void CreateMissingPlaceholders(
@@ -450,6 +891,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 {
                     nextManaged.Add(node.Path);
                     nextVersions[node.Path] = NodeSignature(node);
+                    CloudFilePinning.RefreshShell(CloudPath.LocalPath(_root, node.Path));
                 }
             }
         }
@@ -784,7 +1226,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                             LastAccessTime = updated,
                             LastWriteTime = updated,
                             ChangeTime = updated,
-                            FileAttributes = (uint)(node.IsFolder ? FileAttributes.Directory : FileAttributes.ReadOnly),
+                            FileAttributes = (uint)(node.IsFolder ? FileAttributes.Directory : FileAttributes.Archive),
                         },
                         FileSize = node.IsFolder ? 0 : Math.Max(0, node.SizeBytes),
                     },

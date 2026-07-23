@@ -155,6 +155,9 @@ internal sealed class ProviderState
     [JsonPropertyName("managed_versions")]
     public Dictionary<string, string> ManagedVersions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    [JsonPropertyName("local_fingerprints")]
+    public Dictionary<string, string> LocalFingerprints { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     [JsonPropertyName("applied_all_offline")]
     public bool AppliedAllOffline { get; set; }
 

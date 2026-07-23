@@ -21,10 +21,14 @@ FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
 FILE_ATTRIBUTE_PINNED = 0x00080000
 FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
 INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+CF_PLACEHOLDER_STATE_PLACEHOLDER = 0x00000001
+CF_PLACEHOLDER_STATE_IN_SYNC = 0x00000008
 
 
 class Handler(BaseHTTPRequestHandler):
     range_requests: list[str] = []
+    uploads: list[dict[str, object]] = []
+    deletes: list[str] = []
     content = CONTENT
     version = "version-1"
 
@@ -35,6 +39,51 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/cloud-drive/sync/heartbeat":
             self._json({"ok": True})
+            return
+        if path == "/api/cloud-drive/upload":
+            parsed = urlparse(self.path)
+            parent = parse_qs(parsed.query).get("parent_path", [""])[0]
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            content_type = self.headers.get("Content-Type", "")
+            boundary = content_type.split("boundary=", 1)[-1].strip().strip('"').encode()
+            parts = body.split(b"--" + boundary)
+            file_part = next(part for part in parts if b"filename=" in part)
+            headers, payload = file_part.split(b"\r\n\r\n", 1)
+            payload = payload.rsplit(b"\r\n", 1)[0]
+            disposition = next(
+                line for line in headers.split(b"\r\n") if line.lower().startswith(b"content-disposition:")
+            )
+            filename = (
+                disposition.split(b"filename=", 1)[1]
+                .split(b";", 1)[0]
+                .strip()
+                .strip(b'"')
+                .decode("utf-8")
+            )
+            cloud_path = f"{parent}/{filename}".strip("/")
+            Handler.uploads.append({"path": cloud_path, "content": payload})
+            self._json(
+                {
+                    "node_type": "file",
+                    "id": f"uploaded-{len(Handler.uploads)}",
+                    "path": cloud_path,
+                    "name": filename,
+                    "created_at": "2026-07-23T00:00:00+00:00",
+                    "updated_at": "2026-07-23T00:00:00+00:00",
+                    "deleted_at": "",
+                    "current_version_id": f"upload-version-{len(Handler.uploads)}",
+                    "mime_type": "application/octet-stream",
+                    "size_bytes": len(payload),
+                    "checksum": "uploaded",
+                }
+            )
+            return
+        if path == "/api/cloud-drive/delete":
+            parsed = urlparse(self.path)
+            cloud_path = parse_qs(parsed.query).get("path", [""])[0]
+            Handler.deletes.append(cloud_path)
+            self._json({"ok": True, "path": cloud_path})
             return
         self.send_error(404)
 
@@ -114,6 +163,97 @@ def file_attributes(path: Path) -> int:
     return int(value)
 
 
+def placeholder_state(path: Path) -> int:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        0x80,
+        0x1 | 0x2 | 0x4,
+        None,
+        3,
+        0x02000000,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        cldapi = ctypes.WinDLL("cldapi", use_last_error=True)
+        get_info = cldapi.CfGetPlaceholderInfo
+        get_info.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        get_info.restype = ctypes.c_long
+        buffer = ctypes.create_string_buffer(8192)
+        returned = ctypes.c_uint32()
+        result = get_info(handle, 0, buffer, len(buffer), ctypes.byref(returned))
+        if result < 0:
+            return 0
+        in_sync = int.from_bytes(buffer.raw[4:8], "little", signed=True)
+        state = CF_PLACEHOLDER_STATE_PLACEHOLDER
+        if in_sync == 1:
+            state |= CF_PLACEHOLDER_STATE_IN_SYNC
+        return state
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def wait_for_upload(
+    path: Path,
+    expected: bytes,
+    process: subprocess.Popen[str],
+    timeout: float = 20.0,
+) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"Provider exited before upload ({process.returncode}); uploads={Handler.uploads!r}.\n"
+                f"{stdout}\n{stderr}"
+            )
+        upload = next(
+            (
+                item
+                for item in reversed(Handler.uploads)
+                if item["path"] == "Demo/local.txt" and item["content"] == expected
+            ),
+            None,
+        )
+        if upload is not None:
+            state = placeholder_state(path)
+            if state & CF_PLACEHOLDER_STATE_PLACEHOLDER and state & CF_PLACEHOLDER_STATE_IN_SYNC:
+                return state
+        time.sleep(0.1)
+    raise TimeoutError(f"Local file was not uploaded and marked in sync: {path}")
+
+
+def wait_for_delete(cloud_path: str, process: subprocess.Popen[str], timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise RuntimeError(f"Provider exited before delete ({process.returncode}).\n{stdout}\n{stderr}")
+        if cloud_path in Handler.deletes:
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"Local deletion was not sent to the server: {cloud_path}")
+
+
 def wait_for_file(path: Path, process: subprocess.Popen[str], timeout: float = 20.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -171,7 +311,7 @@ def main() -> int:
 
     workspace = Path(tempfile.mkdtemp(prefix="rag-cfapi-smoke-"))
     root = workspace / "RAG Cloud Drive"
-    config = workspace / "config.json"
+    config = workspace / "main" / "config.json"
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -187,7 +327,7 @@ def main() -> int:
         "--root",
         str(root),
         "--run-seconds",
-        "5",
+        "12",
     ]
     process: subprocess.Popen[str] | None = None
     offline_process: subprocess.Popen[str] | None = None
@@ -195,10 +335,12 @@ def main() -> int:
     upgraded_process: subprocess.Popen[str] | None = None
     placeholder = root / "Demo" / "report.txt"
     offline_root = workspace / "RAG Cloud Drive Offline"
-    offline_config = workspace / "offline-config.json"
+    offline_config = workspace / "offline" / "config.json"
     upgrade_root = workspace / "RAG Cloud Drive Upgrade"
-    upgrade_config = workspace / "upgrade-config.json"
+    upgrade_config = workspace / "upgrade" / "config.json"
     try:
+        Handler.uploads.clear()
+        Handler.deletes.clear()
         upgrade_tested = False
         if previous_provider is not None:
             previous_command = [
@@ -241,17 +383,38 @@ def main() -> int:
         if placeholder.stat().st_size != len(CONTENT):
             raise AssertionError("Placeholder logical size is incorrect.")
         before = file_attributes(placeholder)
+        initial_state = placeholder_state(placeholder)
+        if not initial_state & CF_PLACEHOLDER_STATE_PLACEHOLDER:
+            stat_result = placeholder.lstat()
+            raise AssertionError(
+                "Server file is not a placeholder: "
+                f"state=0x{initial_state:08x}, "
+                f"attrs=0x{getattr(stat_result, 'st_file_attributes', 0):08x}, "
+                f"tag=0x{getattr(stat_result, 'st_reparse_tag', 0):08x}"
+            )
+        if not initial_state & CF_PLACEHOLDER_STATE_IN_SYNC:
+            raise AssertionError(f"Server file is not marked in sync: 0x{initial_state:08x}")
         recall_mask = FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
         if not before & recall_mask:
             raise AssertionError(f"Placeholder has no recall attribute before open: 0x{before:08x}")
         if Handler.range_requests:
             raise AssertionError("Content was downloaded before the first file open.")
 
+        local_content = b"Created locally and uploaded on demand\n"
+        local_file = root / "Demo" / "local.txt"
+        local_file.write_bytes(local_content)
+        local_state = wait_for_upload(local_file, local_content, process)
+        updated_local_content = b"Edited locally and uploaded again\n"
+        local_file.write_bytes(updated_local_content)
+        local_state = wait_for_upload(local_file, updated_local_content, process)
+        local_file.unlink()
+        wait_for_delete("Demo/local.txt", process)
+
         if placeholder.read_bytes() != CONTENT:
             raise AssertionError("Hydrated content does not match the server content.")
         if not Handler.range_requests or not Handler.range_requests[-1].startswith("bytes=0-"):
             raise AssertionError(f"Hydration did not use HTTP Range: {Handler.range_requests}")
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=20)
         if process.returncode != 0:
             raise RuntimeError(f"Provider did not shut down cleanly.\n{stdout}\n{stderr}")
 
@@ -266,7 +429,7 @@ def main() -> int:
             raise AssertionError("Updated hydrated content does not match the server content.")
         if not Handler.range_requests or not Handler.range_requests[-1].startswith("bytes=0-"):
             raise AssertionError(f"Updated hydration did not use HTTP Range: {Handler.range_requests}")
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=20)
         if process.returncode != 0:
             raise RuntimeError(f"Updated provider did not shut down cleanly.\n{stdout}\n{stderr}")
 
@@ -310,6 +473,10 @@ def main() -> int:
                     "placeholder": str(placeholder),
                     "logical_size": placeholder.stat().st_size,
                     "attributes_before": f"0x{before:08x}",
+                    "initial_placeholder_state": f"0x{initial_state:08x}",
+                    "local_upload_state": f"0x{local_state:08x}",
+                    "local_uploads": len(Handler.uploads),
+                    "local_deletes": len(Handler.deletes),
                     "updated_attributes_before": f"0x{updated_attributes:08x}",
                     "range_requests": Handler.range_requests,
                     "offline_hydrated": True,

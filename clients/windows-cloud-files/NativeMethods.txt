@@ -1,4 +1,6 @@
 CfConnectSyncRoot
+CfConvertToPlaceholder
+CfGetPlaceholderInfo
 CfCreatePlaceholders
 CfDisconnectSyncRoot
 CfExecute

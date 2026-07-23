@@ -77,6 +77,9 @@ internal sealed class ConfigStore
             ?? new ProviderState();
         state.ManagedPaths = new HashSet<string>(state.ManagedPaths, StringComparer.OrdinalIgnoreCase);
         state.ManagedVersions = new Dictionary<string, string>(state.ManagedVersions, StringComparer.OrdinalIgnoreCase);
+        state.LocalFingerprints = new Dictionary<string, string>(
+            state.LocalFingerprints ?? new Dictionary<string, string>(),
+            StringComparer.OrdinalIgnoreCase);
         state.AppliedOfflinePaths = new HashSet<string>(
             state.AppliedOfflinePaths ?? [],
             StringComparer.OrdinalIgnoreCase);

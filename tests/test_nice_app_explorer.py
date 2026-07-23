@@ -2239,9 +2239,9 @@ def test_registry_acl_filter_uses_one_bulk_snapshot_and_fails_closed() -> None:
 def test_sync_client_version_advertises_files_on_demand_channel() -> None:
     result = cloud_api.api_sync_client_version()
 
-    assert result["cloud_files_version"] == "0.3.1"
+    assert result["cloud_files_version"] == "0.3.2"
     assert "format=cloud-files-exe" in result["cloud_files_download_url"]
-    assert "v=0.3.1" in result["cloud_files_download_url"]
+    assert "v=0.3.2" in result["cloud_files_download_url"]
     assert isinstance(result["has_cloud_files_exe"], bool)
     assert result["cloud_files_channel"] == "stable"
     assert isinstance(result["cloud_files_size_bytes"], int)
@@ -2254,7 +2254,7 @@ def test_explorer_exposes_files_on_demand_windows_client() -> None:
     assert '"Приложение"' in source
     assert "_cd_cloud_files_install_dialog" in source
     assert "format=cloud-files-exe" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
-    assert "v=0.3.1" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
+    assert "v=0.3.2" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
 
 
 def test_cloud_drive_acl_revision_tracks_permissions_and_groups() -> None:
