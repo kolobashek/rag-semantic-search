@@ -481,11 +481,29 @@ def _client_alive() -> bool:
         return True  # assume alive if we can't inspect
 
 
-def _build_page(initial_screen: str = "search") -> None:
+def _build_page(
+    initial_screen: str = "search",
+    *,
+    cloud_path: str = "",
+    cloud_kind: str = "",
+    open_share: bool = False,
+) -> None:
     state = PageState(cfg=load_config())
     state.screen = initial_screen
     state.explorer_path = str(Path(str(state.cfg.get("catalog_path") or "")))
     restore_session(state, on_restored=_load_user_state)
+    requested_cloud_path = str(cloud_path or "").strip().replace("\\", "/").strip("/")
+    if initial_screen == "explorer" and requested_cloud_path:
+        if str(cloud_kind or "").strip().lower() == "folder":
+            state.explorer_cd_path = requested_cloud_path
+        else:
+            state.explorer_cd_path = (
+                requested_cloud_path.rsplit("/", 1)[0]
+                if "/" in requested_cloud_path
+                else ""
+            )
+        if open_share:
+            state.explorer_share_path = requested_cloud_path
     if initial_screen == "search":
         _restore_search_recovery(state)
     _install_css(state.theme)
@@ -3328,8 +3346,13 @@ def search_page() -> None:
 
 
 @ui.page("/explorer")
-def explorer_page() -> None:
-    _build_page("explorer")
+def explorer_page(request: Request) -> None:
+    _build_page(
+        "explorer",
+        cloud_path=str(request.query_params.get("path") or ""),
+        cloud_kind=str(request.query_params.get("kind") or ""),
+        open_share=str(request.query_params.get("share") or "") == "1",
+    )
 
 
 @ui.page("/index")

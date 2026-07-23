@@ -9,6 +9,13 @@ internal static class WindowsBootstrap
     private const string RegistryPath = @"Software\RAGCloudFiles";
     private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValueName = "RAGCloudFiles";
+    private const string CommandStorePath =
+        @"Software\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell";
+    private static readonly string[] ClassicShellTargets =
+    [
+        @"Software\Classes\*\shell\RAGCloudFiles",
+        @"Software\Classes\Directory\shell\RAGCloudFiles",
+    ];
 
     public static string InstallDirectory { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -139,6 +146,7 @@ internal static class WindowsBootstrap
             appKey.SetValue("DeviceId", config.DeviceId, RegistryValueKind.String);
         }
         ApplyStartup(config.StartWithWindows);
+        InstallClassicContextMenu(config.RootPath);
     }
 
     public static void RestartInstalled()
@@ -278,6 +286,44 @@ internal static class WindowsBootstrap
         {
             runKey.DeleteValue(RunValueName, throwOnMissingValue: false);
         }
+    }
+
+    private static void InstallClassicContextMenu(string rootPath)
+    {
+        string[] commandNames =
+        [
+            "RAGCloudFiles.Share",
+            "RAGCloudFiles.CopyLink",
+            "RAGCloudFiles.ManageAccess",
+            "RAGCloudFiles.KeepOffline",
+        ];
+        string appliesTo = $"System.ItemPathDisplay:~=\"{Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar)}\"";
+        foreach (string target in ClassicShellTargets)
+        {
+            using RegistryKey key = Registry.CurrentUser.CreateSubKey(target);
+            key.SetValue("MUIVerb", "RAG Cloud", RegistryValueKind.String);
+            key.SetValue("Icon", InstalledExecutable, RegistryValueKind.String);
+            key.SetValue("Position", "Top", RegistryValueKind.String);
+            key.SetValue("SubCommands", string.Join(';', commandNames), RegistryValueKind.String);
+            key.SetValue("AppliesTo", appliesTo, RegistryValueKind.String);
+        }
+
+        InstallClassicCommand(commandNames[0], "Поделиться…", "share");
+        InstallClassicCommand(commandNames[1], "Скопировать ссылку", "copy-link");
+        InstallClassicCommand(commandNames[2], "Управление доступом…", "manage-access");
+        InstallClassicCommand(commandNames[3], "Всегда хранить на этом устройстве", "keep-offline");
+    }
+
+    private static void InstallClassicCommand(string name, string label, string action)
+    {
+        using RegistryKey key = Registry.CurrentUser.CreateSubKey($@"{CommandStorePath}\{name}");
+        key.SetValue("", label, RegistryValueKind.String);
+        key.SetValue("Icon", InstalledExecutable, RegistryValueKind.String);
+        using RegistryKey command = key.CreateSubKey("command");
+        command.SetValue(
+            "",
+            $"\"{InstalledExecutable}\" --shell-command {action} --shell-path \"%1\"",
+            RegistryValueKind.String);
     }
 
     public static void ShowError(string message, Exception? exception = null)

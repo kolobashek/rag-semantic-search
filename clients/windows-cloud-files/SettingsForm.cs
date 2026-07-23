@@ -15,6 +15,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _keepAllOffline;
     private readonly CheckedListBox _offlineFolders;
     private readonly CheckBox _startWithWindows;
+    private readonly HashSet<string> _nestedOfflinePaths;
 
     public SettingsForm(ProviderConfig config, IReadOnlyList<string> availableFolders)
     {
@@ -24,6 +25,9 @@ internal sealed class SettingsForm : Form
         ClientSize = new Size(600, 560);
         Font = new Font("Segoe UI", 9F);
         Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "") ?? SystemIcons.Application;
+        _nestedOfflinePaths = config.OfflinePaths
+            .Where(path => !availableFolders.Contains(path, StringComparer.OrdinalIgnoreCase))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         Label locationLabel = new()
         {
@@ -177,6 +181,7 @@ internal sealed class SettingsForm : Form
                 .Select(item => Convert.ToString(item) ?? "")
                 .Where(item => item.Length > 0)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            offline.UnionWith(_nestedOfflinePaths);
             selection = new ClientSettingsSelection(
                 root,
                 _keepAllOffline.Checked,

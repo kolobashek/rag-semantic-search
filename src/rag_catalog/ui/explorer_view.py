@@ -52,7 +52,7 @@ from .state import (
 
 _EXPLORER_PAGE_SIZE = 40
 _TREE_CHILD_LIMIT = 24
-_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.3.3"
+_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.4.0"
 
 
 def _cloud_node_modified_timestamp(node: Any) -> float:
@@ -1230,6 +1230,18 @@ def render_explorer_screen(
                 ui.notify("Неизвестное действие.", type="warning")
 
         page_state._explorer_selection_action = _cd_selection_action
+
+        requested_share_path = str(page_state.explorer_share_path or "").strip()
+        if requested_share_path:
+            page_state.explorer_share_path = ""
+            ui.timer(
+                0.0,
+                lambda path=requested_share_path: _cd_share_paths(
+                    [path],
+                    verb="Управление доступом",
+                ),
+                once=True,
+            )
 
         cd_path = page_state.explorer_cd_path or ""
         _is_trash_view = cd_path == "__trash__"

@@ -24,6 +24,20 @@ internal static class Program
                 options.GetValueOrDefault("sha256", ""));
         }
 
+        ConfigStore store = new(options.GetValueOrDefault("config"));
+        if (ShellCommandHandler.IsRequested(options))
+        {
+            try
+            {
+                return await ShellCommandHandler.RunAsync(options, store, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                WindowsBootstrap.ShowError("Не удалось выполнить команду RAG Cloud Files.", exception);
+                return 1;
+            }
+        }
+
         if (WindowsBootstrap.IsInteractiveInstall(args))
         {
             try
@@ -42,12 +56,15 @@ internal static class Program
         {
             WindowsBootstrap.CleanupStagedUpdates();
         }
-        ConfigStore store = new(options.GetValueOrDefault("config"));
         ProviderConfig config = store.LoadConfig();
         config.Server = options.GetValueOrDefault("server", config.Server).TrimEnd('/');
         config.Token = options.GetValueOrDefault("token", config.Token);
         config.RootPath = options.GetValueOrDefault("root", config.RootPath);
         config.KeepAllOffline = options.ContainsKey("keep-all-offline") || config.KeepAllOffline;
+        if (WindowsBootstrap.IsRunningInstalled)
+        {
+            WindowsBootstrap.SavePreferences(config);
+        }
         bool once = options.ContainsKey("once");
         int runSeconds = options.TryGetValue("run-seconds", out string? runSecondsValue)
             ? int.Parse(runSecondsValue)

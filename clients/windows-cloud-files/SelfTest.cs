@@ -21,6 +21,15 @@ internal static class SelfTest
         Equal(unicodePath, FileIdentityCodec.Decode(FileIdentityCodec.Encode(unicodePath)));
         Throws<InvalidDataException>(() => CloudPath.Normalize("Folder/../secret.txt"));
         Throws<InvalidDataException>(() => FileIdentityCodec.Decode("bad"u8));
+        Equal(true, ShellCommandHandler.IsSupported("share"));
+        Equal(false, ShellCommandHandler.IsSupported("delete"));
+        Equal(
+            "https://catalog.example/explorer?path=%D0%94%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D1%8B%2F%D0%A1%D0%BC%D0%B5%D1%82%D0%B0%202026.xlsx&kind=file&share=1",
+            ShellCommandHandler.BuildExplorerUri(
+                "https://catalog.example/",
+                unicodePath,
+                isFolder: false,
+                openShare: true).AbsoluteUri);
 
         ChangePage page = JsonSerializer.Deserialize<ChangePage>("""
             {
@@ -59,6 +68,14 @@ internal static class SelfTest
             Equal(true, store.LoadConfig().KeepAllOffline);
             Equal(true, store.LoadConfig().OfflinePaths.Contains("документы"));
             Equal(false, store.LoadConfig().StartWithWindows);
+            string root = Path.Combine(temporary, "root");
+            string localFile = Path.Combine(root, "Документы", "Смета 2026.xlsx");
+            Directory.CreateDirectory(Path.GetDirectoryName(localFile)!);
+            File.WriteAllText(localFile, "test");
+            Equal(unicodePath, ShellCommandHandler.GetCloudPath(root, localFile));
+            Equal("", ShellCommandHandler.GetCloudPath(root, root));
+            Throws<InvalidDataException>(() =>
+                ShellCommandHandler.GetCloudPath(root, Path.Combine(temporary, "outside.txt")));
             if (File.ReadAllText(store.ConfigPath).Contains("secret-device-token", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("Device token was stored in clear text.");

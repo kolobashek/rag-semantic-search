@@ -380,6 +380,11 @@ def main() -> int:
 
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         wait_for_file(placeholder, process)
+        folder_state = placeholder_state(root / "Demo")
+        if not folder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER:
+            raise AssertionError(f"Server folder is not a placeholder: 0x{folder_state:08x}")
+        if not folder_state & CF_PLACEHOLDER_STATE_IN_SYNC:
+            raise AssertionError(f"Server folder is not marked in sync: 0x{folder_state:08x}")
         if placeholder.stat().st_size != len(CONTENT):
             raise AssertionError("Placeholder logical size is incorrect.")
         before = file_attributes(placeholder)
@@ -464,6 +469,11 @@ def main() -> int:
         offline_attributes = file_attributes(offline_placeholder)
         if not offline_attributes & FILE_ATTRIBUTE_PINNED:
             raise AssertionError(f"Offline placeholder is not pinned: 0x{offline_attributes:08x}")
+        offline_folder_attributes = file_attributes(offline_root / "Demo")
+        if not offline_folder_attributes & FILE_ATTRIBUTE_PINNED:
+            raise AssertionError(
+                f"Offline folder is not pinned: 0x{offline_folder_attributes:08x}"
+            )
         if offline_attributes & recall_mask:
             raise AssertionError(f"Offline placeholder still requires recall: 0x{offline_attributes:08x}")
         print(
@@ -474,6 +484,7 @@ def main() -> int:
                     "logical_size": placeholder.stat().st_size,
                     "attributes_before": f"0x{before:08x}",
                     "initial_placeholder_state": f"0x{initial_state:08x}",
+                    "folder_placeholder_state": f"0x{folder_state:08x}",
                     "local_upload_state": f"0x{local_state:08x}",
                     "local_uploads": len(Handler.uploads),
                     "local_deletes": len(Handler.deletes),
@@ -481,6 +492,7 @@ def main() -> int:
                     "range_requests": Handler.range_requests,
                     "offline_hydrated": True,
                     "offline_attributes": f"0x{offline_attributes:08x}",
+                    "offline_folder_attributes": f"0x{offline_folder_attributes:08x}",
                     "registration_upgrade": upgrade_tested,
                 },
                 ensure_ascii=False,

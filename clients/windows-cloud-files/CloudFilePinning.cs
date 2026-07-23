@@ -70,6 +70,7 @@ internal static partial class CloudFilePinning
             handle,
             pinned ? CF_PIN_STATE.CF_PIN_STATE_PINNED : CF_PIN_STATE.CF_PIN_STATE_UNPINNED,
             flags).ThrowOnFailure();
+        RefreshShell(path);
     }
 
     public static void HydrateFile(string path)
@@ -94,6 +95,7 @@ internal static partial class CloudFilePinning
             StartingOffset: 0,
             Length: -1,
             CF_HYDRATE_FLAGS.CF_HYDRATE_FLAG_NONE).ThrowOnFailure();
+        RefreshShell(path);
     }
 
     private static bool TryGetPlaceholderInfo(string path, out CF_IN_SYNC_STATE inSyncState)

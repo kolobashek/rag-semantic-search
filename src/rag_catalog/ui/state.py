@@ -68,6 +68,7 @@ class PageState:
     explorer_page: int = 0
     explorer_visible_count: int = 40
     explorer_cd_path: str = ""
+    explorer_share_path: str = ""
     explorer_tree_open: List[str] = field(default_factory=list)
     explorer_selected_paths: List[str] = field(default_factory=list)
     explorer_clipboard: Dict[str, Any] = field(default_factory=dict)
