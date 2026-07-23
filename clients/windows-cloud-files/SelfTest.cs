@@ -76,6 +76,31 @@ internal static class SelfTest
             Equal("", ShellCommandHandler.GetCloudPath(root, root));
             Throws<InvalidDataException>(() =>
                 ShellCommandHandler.GetCloudPath(root, Path.Combine(temporary, "outside.txt")));
+            CloudNode matchingRemote = new()
+            {
+                NodeType = "file",
+                Path = unicodePath,
+                SizeBytes = 4,
+                Checksum = "9f86d081884c7d659a2feaa0c55ad015"
+                    + "a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            };
+            Equal(
+                true,
+                CloudFilesProvider.RemoteContentMatchesAsync(
+                        matchingRemote,
+                        localFile,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult());
+            matchingRemote.Checksum = new string('0', 64);
+            Equal(
+                false,
+                CloudFilesProvider.RemoteContentMatchesAsync(
+                        matchingRemote,
+                        localFile,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult());
             if (File.ReadAllText(store.ConfigPath).Contains("secret-device-token", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("Device token was stored in clear text.");

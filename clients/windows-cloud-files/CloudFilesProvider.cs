@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Windows.Win32;
 using Windows.Win32.Foundation;
@@ -707,8 +708,19 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             _store.SaveState(_state);
             return;
         }
-        if (!managed && HasRemoteNode(cloudPath))
+        CloudNode? remote = managed ? null : GetRemoteNode(cloudPath);
+        if (remote is not null)
         {
+            if (await TryAdoptMatchingRemoteFileAsync(
+                    cloudPath,
+                    localPath,
+                    remote,
+                    placeholder,
+                    cancellationToken))
+            {
+                return;
+            }
+
             throw new IOException($"Локальный файл конфликтует с облачным объектом: {cloudPath}");
         }
 
@@ -761,6 +773,70 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             _status.EndTransfer(cloudPath, transferError);
         }
+    }
+
+    private async Task<bool> TryAdoptMatchingRemoteFileAsync(
+        string cloudPath,
+        string localPath,
+        CloudNode remote,
+        bool placeholder,
+        CancellationToken cancellationToken)
+    {
+        await WaitForStableFileAsync(localPath, cancellationToken);
+        if (!await RemoteContentMatchesAsync(remote, localPath, cancellationToken))
+        {
+            return false;
+        }
+
+        string fingerprint = LocalFingerprint(localPath);
+        _state.ManagedPaths.Add(cloudPath);
+        _state.ManagedVersions[cloudPath] = NodeSignature(remote);
+        _state.LocalFingerprints[cloudPath] = fingerprint;
+        _store.SaveState(_state);
+
+        if (placeholder)
+        {
+            CloudFilePinning.MarkInSync(localPath);
+        }
+        else
+        {
+            CloudFilePinning.ConvertToPlaceholder(localPath, cloudPath);
+        }
+        _state.LocalFingerprints[cloudPath] = LocalFingerprint(localPath);
+        _store.SaveState(_state);
+        AppLog.Info($"Recovered matching local and cloud file state for {cloudPath}.");
+        return true;
+    }
+
+    internal static async Task<bool> RemoteContentMatchesAsync(
+        CloudNode remote,
+        string localPath,
+        CancellationToken cancellationToken)
+    {
+        if (remote.IsFolder || remote.Checksum.Length != 64)
+        {
+            return false;
+        }
+
+        string before = LocalFingerprint(localPath);
+        FileInfo info = new(localPath);
+        info.Refresh();
+        if (info.Length != remote.SizeBytes)
+        {
+            return false;
+        }
+
+        await using FileStream source = new(
+            localPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1024 * 1024,
+            useAsync: true);
+        byte[] digest = await SHA256.HashDataAsync(source, cancellationToken);
+        string after = LocalFingerprint(localPath);
+        return before.Equals(after, StringComparison.Ordinal)
+            && Convert.ToHexString(digest).Equals(remote.Checksum, StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task WaitForStableFileAsync(string path, CancellationToken cancellationToken)
