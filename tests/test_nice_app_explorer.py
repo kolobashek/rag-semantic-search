@@ -1776,6 +1776,43 @@ def test_cloud_drive_upload_api(monkeypatch, tmp_path) -> None:
     assert service.registry.get_file_by_path("Folder A/hello.txt") is not None
 
 
+def test_cloud_drive_upload_api_decodes_dotnet_unicode_filename(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    root = service.registry.ensure_root_folder(root_name="Обмен", source_path="O:/Обмен")
+    service.registry.upsert_folder(
+        path="kris",
+        name="kris",
+        parent_id=root.id,
+        depth=1,
+        source_path="O:/Обмен/kris",
+    )
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(
+        cloud_api,
+        "_require_cloud_drive_api_user",
+        lambda *_args, **_kwargs: {"username": "user", "role": "user", "status": "active"},
+    )
+    encoded_name = "=?utf-8?B?0J3QvtCy0YvQuSDRgtC10LrRgdGC0L7QstGL0Lkg0LTQvtC60YPQvNC10L3Rgi50eHQ=?="
+    buffer = SpooledTemporaryFile()
+    buffer.write("данные".encode())
+    buffer.seek(0)
+    upload = UploadFile(file=buffer, filename=encoded_name, headers={"content-type": "text/plain"})
+
+    import asyncio
+
+    result = asyncio.run(api_cloud_drive_upload(parent_path="kris", file=upload))
+
+    expected_path = "kris/Новый текстовый документ.txt"
+    assert result["path"] == expected_path
+    assert service.registry.get_file_by_path(expected_path) is not None
+    assert service.registry.get_file_by_path(f"kris/{encoded_name}") is None
+
+
 def test_cloud_drive_upload_api_rejects_file_over_configured_limit(monkeypatch, tmp_path) -> None:
     cfg = {
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
@@ -2239,9 +2276,9 @@ def test_registry_acl_filter_uses_one_bulk_snapshot_and_fails_closed() -> None:
 def test_sync_client_version_advertises_files_on_demand_channel() -> None:
     result = cloud_api.api_sync_client_version()
 
-    assert result["cloud_files_version"] == "0.3.2"
+    assert result["cloud_files_version"] == "0.3.3"
     assert "format=cloud-files-exe" in result["cloud_files_download_url"]
-    assert "v=0.3.2" in result["cloud_files_download_url"]
+    assert "v=0.3.3" in result["cloud_files_download_url"]
     assert isinstance(result["has_cloud_files_exe"], bool)
     assert result["cloud_files_channel"] == "stable"
     assert isinstance(result["cloud_files_size_bytes"], int)
@@ -2254,7 +2291,7 @@ def test_explorer_exposes_files_on_demand_windows_client() -> None:
     assert '"Приложение"' in source
     assert "_cd_cloud_files_install_dialog" in source
     assert "format=cloud-files-exe" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
-    assert "v=0.3.2" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
+    assert "v=0.3.3" in explorer_view._CLOUD_FILES_DOWNLOAD_URL
 
 
 def test_cloud_drive_acl_revision_tracks_permissions_and_groups() -> None:

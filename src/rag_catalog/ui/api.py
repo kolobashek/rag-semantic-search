@@ -16,8 +16,10 @@ import mimetypes
 import re
 import tempfile
 import time
+import unicodedata
 import uuid
 from contextvars import ContextVar
+from email.header import decode_header, make_header
 from pathlib import Path
 from typing import Annotated, Any, Dict, List
 
@@ -36,6 +38,7 @@ from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
 
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+_RFC2047_FILENAME_PATTERN = re.compile(r"=\?[^?\s]+\?[bBqQ]\?[^?]*\?=")
 
 
 def _cloud_drive_max_upload_bytes(cfg: Dict[str, Any]) -> int:
@@ -59,6 +62,18 @@ async def _write_bounded_upload(file: UploadFile, target: Any, *, max_bytes: int
                 detail=f"Файл превышает допустимый размер {max_bytes // (1024 * 1024)} МБ.",
             )
         target.write(chunk)
+
+
+def _decode_upload_filename(value: str) -> str:
+    filename = str(value or "").strip()
+    if not filename or not _RFC2047_FILENAME_PATTERN.search(filename):
+        return filename
+    try:
+        filename = str(make_header(decode_header(filename))).strip()
+    except (LookupError, UnicodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Имя загружаемого файла имеет неверную кодировку.") from exc
+    return unicodedata.normalize("NFC", filename)
+
 
 AuthHeader = Annotated[str, Header(alias="Authorization")]
 logger = logging.getLogger(__name__)
@@ -396,7 +411,7 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.3.2"
+_CLOUD_FILES_VERSION = "0.3.3"
 
 
 def _cloud_files_release_metadata(packaging: Path) -> Dict[str, Any]:
@@ -1874,7 +1889,8 @@ def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
 async def api_cloud_drive_upload(
     parent_path: str = "", file: UploadFile = File(...), authorization: AuthHeader = ""
 ) -> Dict[str, Any]:
-    if file is None or not str(file.filename or "").strip():
+    filename = _decode_upload_filename(str(file.filename or "")) if file is not None else ""
+    if not filename:
         raise HTTPException(status_code=400, detail="Не передан файл для загрузки.")
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
@@ -1882,7 +1898,7 @@ async def api_cloud_drive_upload(
     _require_cloud_drive_path_access(
         cfg, user, parent_path, service=service, required_level="editor", audit_action="upload"
     )
-    suffix = Path(str(file.filename or "")).suffix
+    suffix = Path(filename).suffix
     max_upload_bytes = _cloud_drive_max_upload_bytes(cfg)
     tmp_path = ""
     try:
@@ -1891,7 +1907,7 @@ async def api_cloud_drive_upload(
             await _write_bounded_upload(file, tmp, max_bytes=max_upload_bytes)
         result = service.upload_file(
             parent_path=parent_path,
-            filename=str(file.filename or "").strip(),
+            filename=filename,
             source_path=tmp_path,
             mime_type=str(file.content_type or "").strip(),
         )
@@ -1908,7 +1924,7 @@ async def api_cloud_drive_upload(
             user,
             "upload",
             ok=False,
-            details={"parent_path": parent_path, "filename": str(file.filename or ""), "error": str(exc)},
+            details={"parent_path": parent_path, "filename": filename, "error": str(exc)},
         )
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
