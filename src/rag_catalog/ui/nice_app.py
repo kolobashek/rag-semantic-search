@@ -341,7 +341,7 @@ def _search_preset_items(state: PageState, *, limit: int = 8) -> List[tuple[str,
 APP_SCREEN_SPECS = (
     {"key": "search", "route": "/search", "title": "Поиск", "label": "Поиск", "icon": "search", "header": True, "drawer": True},
     {"key": "explorer", "route": "/explorer", "title": "Проводник", "label": "Файлы", "icon": "folder", "header": True, "drawer": True},
-    {"key": "jobs", "route": "/jobs", "title": "Задачи", "label": "Задачи", "icon": "queue", "header": True, "drawer": True},
+    {"key": "jobs", "route": "/jobs", "title": "Задачи", "label": "Задачи", "icon": "queue", "header": True, "drawer": True, "admin_only": True},
     {"key": "index", "route": "/index", "title": "Индекс", "label": "Индекс", "icon": "filter_center_focus", "drawer_icon": "analytics", "header": True, "drawer": True, "admin_only": True},
     {"key": "stats", "route": "/stats", "title": "Аналитика", "label": "Аналитика", "icon": "query_stats", "header": False, "drawer": True, "admin_only": True},
     {"key": "settings", "route": "/settings", "title": "Настройки", "label": "Настройки", "icon": "settings", "header": False, "drawer": False},
@@ -3064,7 +3064,11 @@ def _build_page(initial_screen: str = "search") -> None:
         )
 
     def render_jobs_screen() -> None:
-        _jobs_view.render_jobs_screen(state, render_fn=render)
+        _jobs_view.render_jobs_screen(
+            state,
+            render_fn=render,
+            access_denied=render_access_denied,
+        )
 
     def render() -> None:
         render_started = _time.perf_counter()

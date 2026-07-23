@@ -3,8 +3,9 @@ from __future__ import annotations
 import inspect
 import weakref
 from collections import deque
+from types import SimpleNamespace
 
-from rag_catalog.ui import css, helpers, nice_app, settings_view
+from rag_catalog.ui import css, helpers, jobs_view, nice_app, settings_view
 from rag_catalog.ui import system as ui_system
 
 
@@ -59,10 +60,24 @@ def test_navigation_registry_marks_admin_and_public_screens() -> None:
     header_keys = {key for key, spec in specs.items() if spec.get("header")}
     drawer_keys = {key for key, spec in specs.items() if spec.get("drawer")}
 
-    assert public_keys == {"search", "explorer", "jobs", "settings"}
-    assert admin_keys == {"index", "stats"}
+    assert public_keys == {"search", "explorer", "settings"}
+    assert admin_keys == {"jobs", "index", "stats"}
     assert header_keys == {"search", "explorer", "jobs", "index"}
     assert drawer_keys == {"search", "explorer", "jobs", "index", "stats"}
+
+
+def test_jobs_screen_rejects_regular_user_before_rendering() -> None:
+    denied: list[dict[str, str]] = []
+
+    jobs_view.render_jobs_screen(
+        SimpleNamespace(current_user={"role": "user"}),  # type: ignore[arg-type]
+        render_fn=lambda: None,
+        access_denied=lambda **kwargs: denied.append(kwargs),
+    )
+
+    assert denied == [{
+        "hint": "История индексации, OCR и Cloud Drive доступна только администраторам.",
+    }]
 
 
 def test_screen_transitions_have_busy_feedback_contract() -> None:

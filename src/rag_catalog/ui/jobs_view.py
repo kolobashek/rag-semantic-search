@@ -269,7 +269,12 @@ def render_jobs_screen(
     state: PageState,
     *,
     render_fn: Callable[..., None],
+    access_denied: Callable[..., None],
 ) -> None:
+    if str((state.current_user or {}).get("role") or "") != "admin":
+        access_denied(hint="История индексации, OCR и Cloud Drive доступна только администраторам.")
+        return
+
     _log_app_event(state, "navigation", "open_screen", details={"screen": "jobs"})
 
     active_badge_label: Optional[ui.label] = None
