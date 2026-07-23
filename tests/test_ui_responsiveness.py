@@ -5,6 +5,8 @@ import weakref
 from collections import deque
 from types import SimpleNamespace
 
+from starlette.requests import Request
+
 from rag_catalog.ui import css, helpers, jobs_view, nice_app, settings_view
 from rag_catalog.ui import system as ui_system
 
@@ -21,6 +23,18 @@ def test_ui_session_security_uses_config_and_environment(monkeypatch) -> None:
     monkeypatch.setenv("RAG_UI_SESSION_HTTPS_ONLY", "true")
     assert nice_app._ui_storage_secret({"ui_storage_secret": "configured-secret"}) == "environment-secret"
     assert nice_app._ui_session_https_only({"ui_session_https_only": False}) is True
+
+
+def test_device_auth_code_comes_from_request_query() -> None:
+    request = Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/auth/device",
+        "query_string": b"code=abcd-efgh",
+        "headers": [],
+    })
+
+    assert nice_app._device_auth_code_from_request(request) == "ABCD-EFGH"
 
 
 def test_primary_screen_registry_covers_all_route_pages() -> None:

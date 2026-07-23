@@ -35,6 +35,7 @@ internal static class WindowsBootstrap
             Environment.ProcessPath
             ?? throw new InvalidOperationException("Не удалось определить путь запущенного приложения."));
         Directory.CreateDirectory(InstallDirectory);
+        StopInstalledProvider();
         File.Copy(source, InstalledExecutable, overwrite: true);
 
         string rootPath = Path.Combine(
@@ -77,6 +78,40 @@ internal static class WindowsBootstrap
             AppDefaults.ProductName,
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
+    }
+
+    private static void StopInstalledProvider()
+    {
+        foreach (Process process in Process.GetProcessesByName("RagCloudFiles"))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.Id == Environment.ProcessId)
+                    {
+                        continue;
+                    }
+
+                    string path = process.MainModule?.FileName ?? "";
+                    if (!string.Equals(
+                            Path.GetFullPath(path),
+                            Path.GetFullPath(InstalledExecutable),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(10_000);
+                    AppLog.Info($"Stopped installed provider PID {process.Id} before update.");
+                }
+                catch (Exception exception)
+                {
+                    AppLog.Error($"Не удалось остановить установленный provider PID {process.Id}.", exception);
+                }
+            }
+        }
     }
 
     public static void OpenRoot(string rootPath)

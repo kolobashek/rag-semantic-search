@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
+from fastapi import Request
 from nicegui import app, events, run, ui
 
 from rag_catalog.core.log_history import install_env_log_handler
@@ -3356,8 +3357,12 @@ def cloud_page() -> None:
     ui.navigate.to("/explorer")
 
 
+def _device_auth_code_from_request(request: Request) -> str:
+    return str(request.query_params.get("code") or "").strip().upper()[:32]
+
+
 @ui.page("/auth/device")
-def device_auth_page() -> None:
+def device_auth_page(request: Request) -> None:
     """Browser approval page for sync client device auth flow."""
     from . import device_auth as _da
     from .state import PageState, _get_auth_db
@@ -3370,14 +3375,11 @@ def device_auth_page() -> None:
 
     _install_css()
 
-    # Pre-fill code from query string (?code=XXXX-YYYY)
-    code_param = ""
-    try:
-        request_url = str(ui.context.client.url or "")
-        if "code=" in request_url:
-            code_param = request_url.split("code=")[-1].split("&")[0].strip()
-    except Exception:
-        pass
+    code_param = _device_auth_code_from_request(request)
+    if code_param:
+        app.storage.user["pending_device_code"] = code_param
+    else:
+        code_param = str(app.storage.user.get("pending_device_code") or "").strip().upper()[:32]
 
     with ui.column().classes("items-center justify-center min-h-screen gap-4 p-4"):
         with ui.card().classes("p-8 gap-4 w-full max-w-sm"):
@@ -3422,7 +3424,7 @@ def device_auth_page() -> None:
                     f"Вы вошли как {user.get('display_name') or user.get('username')}."
                 ).classes("rag-meta text-sm")
                 ui.label(
-                    "Введите код, который показывает sync-клиент на вашем компьютере."
+                    "Подтвердите подключение этого компьютера к корпоративному облаку."
                 ).classes("text-sm")
                 ui.separator()
 
@@ -3443,6 +3445,7 @@ def device_auth_page() -> None:
                     username = str(user.get("username") or "")
                     ok = _da.approve_code(code, tok, username)
                     if ok:
+                        app.storage.user.pop("pending_device_code", None)
                         with result_row:
                             ui.icon("check_circle", size="20px").classes("text-positive")
                         result_lbl.set_text("Устройство подтверждено! Можете закрыть это окно.")

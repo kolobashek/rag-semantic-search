@@ -37,15 +37,19 @@ internal sealed class CloudDriveApi : IDisposable
             ? code.VerificationUriComplete
             : code.VerificationUri;
 
+        AppLog.Info($"Opening device authorization URL {verificationUrl}; code {code.UserCode}.");
         Console.WriteLine($"Откройте {verificationUrl}");
         Console.WriteLine($"Код подтверждения: {code.UserCode}");
         try
         {
             Process.Start(new ProcessStartInfo(verificationUrl) { UseShellExecute = true });
         }
-        catch
+        catch (Exception exception)
         {
-            // The URL remains visible for manual opening.
+            AppLog.Error("Не удалось открыть браузер для авторизации устройства.", exception);
+            WindowsBootstrap.ShowError(
+                $"Не удалось открыть браузер. Откройте ссылку вручную:\n{verificationUrl}",
+                exception);
         }
 
         DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(Math.Max(30, code.ExpiresIn));

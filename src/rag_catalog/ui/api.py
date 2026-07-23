@@ -396,7 +396,7 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.2.0"
+_CLOUD_FILES_VERSION = "0.2.1"
 
 
 @app.get("/api/sync-client/version")
