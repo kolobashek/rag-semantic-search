@@ -50,6 +50,11 @@ internal sealed class ConfigStore
         }
         config.ClientId = saved.ClientId;
         config.PollSeconds = saved.PollSeconds;
+        config.KeepAllOffline = saved.KeepAllOffline;
+        config.OfflinePaths = new HashSet<string>(
+            saved.OfflinePaths ?? [],
+            StringComparer.OrdinalIgnoreCase);
+        config.StartWithWindows = saved.StartWithWindows;
         config.ProtectedToken = saved.ProtectedToken;
         config.Token = UnprotectToken(saved.ProtectedToken);
         return config;
@@ -72,6 +77,12 @@ internal sealed class ConfigStore
             ?? new ProviderState();
         state.ManagedPaths = new HashSet<string>(state.ManagedPaths, StringComparer.OrdinalIgnoreCase);
         state.ManagedVersions = new Dictionary<string, string>(state.ManagedVersions, StringComparer.OrdinalIgnoreCase);
+        state.AppliedOfflinePaths = new HashSet<string>(
+            state.AppliedOfflinePaths ?? [],
+            StringComparer.OrdinalIgnoreCase);
+        state.AppliedOfflineVersions = new Dictionary<string, string>(
+            state.AppliedOfflineVersions ?? new Dictionary<string, string>(),
+            StringComparer.OrdinalIgnoreCase);
         return state;
     }
 
@@ -105,6 +116,8 @@ internal sealed class ConfigStore
         {
             config.DeviceId = deviceId;
         }
+        config.KeepAllOffline = Convert.ToInt32(key.GetValue("KeepAllOffline", 0)) != 0;
+        config.StartWithWindows = Convert.ToInt32(key.GetValue("StartWithWindows", 1)) != 0;
         return config;
     }
 

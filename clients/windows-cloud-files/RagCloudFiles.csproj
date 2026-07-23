@@ -12,6 +12,7 @@
     <CompilerGeneratedFilesOutputPath>$(BaseIntermediateOutputPath)Generated</CompilerGeneratedFilesOutputPath>
     <AssemblyName>RagCloudFiles</AssemblyName>
     <RootNamespace>RagCloudFiles</RootNamespace>
+    <ApplicationIcon>..\..\assets\brand\ico\app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

@@ -20,9 +20,12 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private readonly ProviderConfig _config;
     private readonly ConfigStore _store;
     private readonly CloudDriveApi _api;
+    private readonly ClientStatusModel _status;
     private readonly ProviderState _state;
+    private readonly object _nodesSync = new();
     private readonly Dictionary<string, CloudNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _hydrations = new();
+    private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly string _root;
     private CF_CONNECTION_KEY _connectionKey;
     private bool _connected;
@@ -30,21 +33,28 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private string _aclRevision = "";
     private DateTimeOffset _lastFullSnapshot = DateTimeOffset.MinValue;
 
-    public CloudFilesProvider(ProviderConfig config, ConfigStore store, CloudDriveApi api)
+    public CloudFilesProvider(
+        ProviderConfig config,
+        ConfigStore store,
+        CloudDriveApi api,
+        ClientStatusModel? status = null)
     {
         _config = config;
         _store = store;
         _api = api;
+        _status = status ?? new ClientStatusModel();
         _state = store.LoadState();
         _root = Path.GetFullPath(config.RootPath);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        _status.SetState(ClientRunState.Syncing, "Подготовка облачной папки…");
         Directory.CreateDirectory(_root);
         RegisterSyncRoot();
         ConnectSyncRoot();
         await RefreshFullSnapshotAsync(cancellationToken);
+        await ApplyOfflinePolicyAsync(cancellationToken);
     }
 
     public static void Unregister(string rootPath)
@@ -65,16 +75,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             try
             {
-                if (DateTimeOffset.UtcNow - _lastFullSnapshot >= TimeSpan.FromMinutes(30))
-                {
-                    await RefreshFullSnapshotAsync(cancellationToken);
-                }
-                else
-                {
-                    await ApplyIncrementalChangesAsync(cancellationToken);
-                }
-
-                await _api.HeartbeatAsync(_config.ClientId, cancellationToken);
+                await SyncNowAsync(cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -82,47 +83,210 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
             catch (Exception exception)
             {
+                _status.SetState(ClientRunState.Offline, "Нет связи с облаком", exception.Message);
+                AppLog.Error("Синхронизация namespace не выполнена.", exception);
                 Console.Error.WriteLine($"Синхронизация namespace не выполнена: {exception.Message}");
             }
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async Task SyncNowAsync(CancellationToken cancellationToken)
     {
-        foreach (CancellationTokenSource source in _hydrations.Values)
+        await _refreshLock.WaitAsync(cancellationToken);
+        try
         {
-            source.Cancel();
-            source.Dispose();
+            _status.SetState(ClientRunState.Syncing, "Проверка изменений…");
+            if (DateTimeOffset.UtcNow - _lastFullSnapshot >= TimeSpan.FromMinutes(30))
+            {
+                await RefreshFullSnapshotAsync(cancellationToken);
+            }
+            else
+            {
+                await ApplyIncrementalChangesAsync(cancellationToken);
+                _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
+            }
+            await _api.HeartbeatAsync(_config.ClientId, cancellationToken);
+        }
+        finally
+        {
+            _refreshLock.Release();
         }
 
-        _hydrations.Clear();
-        if (_connected)
+        if (_config.KeepAllOffline || _config.OfflinePaths.Count > 0)
         {
-            PInvoke.CfDisconnectSyncRoot(_connectionKey).ThrowOnFailure();
-            _connected = false;
+            await ApplyOfflinePolicyAsync(cancellationToken);
         }
+    }
 
-        if (ReferenceEquals(_current, this))
+    public IReadOnlyList<string> GetTopLevelFolders()
+    {
+        lock (_nodesSync)
         {
-            _current = null;
+            return _nodes.Values
+                .Where(node => node.IsFolder && CloudPath.Depth(node.Path) == 1)
+                .Select(node => node.Path)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.CurrentCultureIgnoreCase)
+                .ToList();
         }
+    }
 
-        return ValueTask.CompletedTask;
+    public async Task ApplyOfflinePolicyAsync(CancellationToken cancellationToken)
+    {
+        await _refreshLock.WaitAsync(cancellationToken);
+        try
+        {
+            _status.SetState(ClientRunState.Syncing, "Применение офлайн-настроек…");
+            HashSet<string> desired = new(_config.OfflinePaths, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> previous = new(_state.AppliedOfflinePaths, StringComparer.OrdinalIgnoreCase);
+            bool policyChanged = _state.AppliedAllOffline != _config.KeepAllOffline ||
+                !previous.SetEquals(desired);
+            await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_state.AppliedAllOffline && !_config.KeepAllOffline)
+                {
+                    CloudFilePinning.SetPinState(_root, pinned: false, recursive: true);
+                }
+
+                foreach (string removed in previous.Except(desired, StringComparer.OrdinalIgnoreCase))
+                {
+                    string localPath = CloudPath.LocalPath(_root, removed);
+                    if (Directory.Exists(localPath) || File.Exists(localPath))
+                    {
+                        CloudFilePinning.SetPinState(localPath, pinned: false, recursive: true);
+                    }
+                }
+
+                if (policyChanged && _config.KeepAllOffline)
+                {
+                    CloudFilePinning.SetPinState(_root, pinned: true, recursive: true);
+                }
+                else if (policyChanged)
+                {
+                    foreach (string cloudPath in desired)
+                    {
+                        string localPath = CloudPath.LocalPath(_root, cloudPath);
+                        if (Directory.Exists(localPath) || File.Exists(localPath))
+                        {
+                            CloudFilePinning.SetPinState(localPath, pinned: true, recursive: true);
+                        }
+                    }
+                }
+            }, cancellationToken);
+
+            IReadOnlyList<CloudNode> offlineFiles = GetOfflineFiles(desired);
+            IReadOnlyList<CloudNode> filesToHydrate = offlineFiles
+                .Where(node => !_state.AppliedOfflineVersions
+                    .GetValueOrDefault(node.Path, "")
+                    .Equals(NodeSignature(node), StringComparison.Ordinal))
+                .ToList();
+            if (filesToHydrate.Count > 0)
+            {
+                _status.SetState(
+                    ClientRunState.Syncing,
+                    $"Загрузка для офлайн-доступа: {filesToHydrate.Count:N0} файлов");
+                await Parallel.ForEachAsync(
+                    filesToHydrate,
+                    new ParallelOptions
+                    {
+                        CancellationToken = cancellationToken,
+                        MaxDegreeOfParallelism = 2,
+                    },
+                    async (node, token) =>
+                    {
+                        string localPath = CloudPath.LocalPath(_root, node.Path);
+                        if (node.SizeBytes <= 0 || !File.Exists(localPath))
+                        {
+                            return;
+                        }
+
+                        await Task.Run(() =>
+                        {
+                            CloudFilePinning.SetPinState(localPath, pinned: true, recursive: false);
+                            CloudFilePinning.HydrateFile(localPath);
+                        }, token);
+                    });
+            }
+
+            _state.AppliedAllOffline = _config.KeepAllOffline;
+            _state.AppliedOfflinePaths = desired;
+            _state.AppliedOfflineVersions = offlineFiles.ToDictionary(
+                node => node.Path,
+                NodeSignature,
+                StringComparer.OrdinalIgnoreCase);
+            _store.SaveState(_state);
+            _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
+    }
+
+    private IReadOnlyList<CloudNode> GetOfflineFiles(IReadOnlySet<string> desired)
+    {
+        lock (_nodesSync)
+        {
+            return _nodes.Values
+                .Where(node => !node.IsFolder && (
+                    _config.KeepAllOffline ||
+                    desired.Any(path => IsAtOrBelow(node.Path, path))))
+                .OrderBy(node => node.Path, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+    }
+
+    private static bool IsAtOrBelow(string candidate, string folder) =>
+        string.Equals(candidate, folder, StringComparison.OrdinalIgnoreCase) ||
+        candidate.StartsWith($"{folder}/", StringComparison.OrdinalIgnoreCase);
+
+    public async ValueTask DisposeAsync()
+    {
+        await _refreshLock.WaitAsync();
+        try
+        {
+            foreach (CancellationTokenSource source in _hydrations.Values)
+            {
+                source.Cancel();
+                source.Dispose();
+            }
+
+            _hydrations.Clear();
+            if (_connected)
+            {
+                PInvoke.CfDisconnectSyncRoot(_connectionKey).ThrowOnFailure();
+                _connected = false;
+            }
+
+            if (ReferenceEquals(_current, this))
+            {
+                _current = null;
+            }
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
     }
 
     private async Task RefreshFullSnapshotAsync(CancellationToken cancellationToken)
     {
         VisibleSnapshot snapshot = await _api.GetVisibleSnapshotAsync(cancellationToken);
-        _nodes.Clear();
-        foreach (CloudNode node in snapshot.Nodes)
+        lock (_nodesSync)
         {
-            _nodes[node.Path] = node;
+            _nodes.Clear();
+            foreach (CloudNode node in snapshot.Nodes)
+            {
+                _nodes[node.Path] = node;
+            }
         }
 
         _cursor = snapshot.Cursor;
         _aclRevision = snapshot.AclRevision;
         ReconcileNamespace();
         _lastFullSnapshot = DateTimeOffset.UtcNow;
+        _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
         Console.WriteLine($"Доступно объектов: {_nodes.Count:N0}; содержимое файлов остаётся в облаке до открытия.");
     }
 
@@ -137,25 +301,28 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 await RefreshFullSnapshotAsync(cancellationToken);
                 return;
             }
-            foreach (CloudNode node in page.Changes)
+            lock (_nodesSync)
             {
-                if (!CloudPath.TryNormalize(node.Path, out string path) || path.Length == 0)
+                foreach (CloudNode node in page.Changes)
                 {
-                    Console.Error.WriteLine($"Пропущен несовместимый с Windows путь: {node.Path}");
-                    continue;
-                }
+                    if (!CloudPath.TryNormalize(node.Path, out string path) || path.Length == 0)
+                    {
+                        Console.Error.WriteLine($"Пропущен несовместимый с Windows путь: {node.Path}");
+                        continue;
+                    }
 
-                node.Path = path;
-                if (node.DeletedAt.Length == 0)
-                {
-                    _nodes[path] = node;
-                }
-                else
-                {
-                    _nodes.Remove(path);
-                }
+                    node.Path = path;
+                    if (node.DeletedAt.Length == 0)
+                    {
+                        _nodes[path] = node;
+                    }
+                    else
+                    {
+                        _nodes.Remove(path);
+                    }
 
-                changed = true;
+                    changed = true;
+                }
             }
 
             string next = page.NextCursor ?? "";
@@ -175,7 +342,11 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private void ReconcileNamespace()
     {
-        Dictionary<string, CloudNode> desired = BuildDesiredNodes(_nodes.Values);
+        Dictionary<string, CloudNode> desired;
+        lock (_nodesSync)
+        {
+            desired = BuildDesiredNodes(_nodes.Values);
+        }
         HashSet<string> nextManaged = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, string> nextVersions = new(StringComparer.OrdinalIgnoreCase);
 
@@ -408,6 +579,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         _ = Task.Run(async () =>
         {
+            Exception? transferError = null;
+            _status.BeginTransfer(request.CloudPath);
             try
             {
                 await HydrateAsync(request, source.Token);
@@ -418,11 +591,14 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
             catch (Exception exception)
             {
+                transferError = exception;
+                AppLog.Error($"Не удалось загрузить {request.CloudPath}.", exception);
                 Console.Error.WriteLine($"Не удалось загрузить {request.CloudPath}: {exception.Message}");
                 CompleteTransferFailure(request);
             }
             finally
             {
+                _status.EndTransfer(request.CloudPath, transferError);
                 if (_hydrations.TryRemove(request.RequestKey, out CancellationTokenSource? removed))
                 {
                     removed.Dispose();
@@ -498,6 +674,14 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         + sizeof(CF_OPERATION_PARAMETERS._Anonymous_e__Union._TransferData_e__Struct)));
 
     private static long AlignUp(long value, int alignment) => checked((value + alignment - 1) / alignment * alignment);
+
+    private int GetObjectCount()
+    {
+        lock (_nodesSync)
+        {
+            return _nodes.Count;
+        }
+    }
 
     private static unsafe void OnFetchData(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
     {

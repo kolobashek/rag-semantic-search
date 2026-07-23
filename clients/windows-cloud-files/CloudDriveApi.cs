@@ -79,7 +79,12 @@ internal sealed class CloudDriveApi : IDisposable
             ["display_name"] = displayName,
             ["platform"] = "windows-cfapi",
             ["status"] = "online",
-            ["metadata_json"] = "{\"mode\":\"files-on-demand\",\"version\":\"0.1.0\"}",
+            ["metadata_json"] = JsonSerializer.Serialize(new
+            {
+                mode = "files-on-demand",
+                version = AppDefaults.Version,
+                update_channel = "stable",
+            }),
         });
         using HttpResponseMessage response = await _http.PostAsync("api/cloud-drive/sync/clients?" + query, null, cancellationToken);
         response.EnsureSuccessStatusCode();
@@ -97,6 +102,56 @@ internal sealed class CloudDriveApi : IDisposable
         });
         using HttpResponseMessage response = await _http.PostAsync("api/cloud-drive/sync/heartbeat?" + query, null, cancellationToken);
         response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<UpdateManifest> GetUpdateManifestAsync(CancellationToken cancellationToken)
+    {
+        using HttpResponseMessage response = await _http.GetAsync("api/sync-client/version", cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<UpdateManifest>(JsonOptions, cancellationToken)
+            ?? throw new InvalidOperationException("Сервер вернул пустой манифест обновления.");
+    }
+
+    public async Task DownloadUpdateAsync(
+        string downloadUrl,
+        string destination,
+        long expectedSize,
+        CancellationToken cancellationToken)
+    {
+        Uri baseUri = _http.BaseAddress
+            ?? throw new InvalidOperationException("Не задан адрес сервера обновлений.");
+        Uri uri = new(baseUri, downloadUrl);
+        if (!string.Equals(uri.Scheme, baseUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(uri.Host, baseUri.Host, StringComparison.OrdinalIgnoreCase) ||
+            uri.Port != baseUri.Port)
+        {
+            throw new InvalidDataException("Сервер обновлений вернул URL другого источника.");
+        }
+
+        using HttpResponseMessage response = await _http.GetAsync(
+            uri,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        await using (Stream source = await response.Content.ReadAsStreamAsync(cancellationToken))
+        await using (FileStream target = new(
+                         destination,
+                         FileMode.Create,
+                         FileAccess.Write,
+                         FileShare.None,
+                         bufferSize: 1024 * 1024,
+                         useAsync: true))
+        {
+            await source.CopyToAsync(target, cancellationToken);
+        }
+
+        long actualSize = new FileInfo(destination).Length;
+        if (expectedSize <= 0 || actualSize != expectedSize)
+        {
+            throw new InvalidDataException(
+                $"Размер обновления не совпал: ожидалось {expectedSize}, получено {actualSize}.");
+        }
     }
 
     public async Task<VisibleSnapshot> GetVisibleSnapshotAsync(CancellationToken cancellationToken)

@@ -18,6 +18,13 @@ internal static class WindowsBootstrap
         InstallDirectory,
         "RagCloudFiles.exe");
 
+    public static string UpdateDirectory { get; } = Path.Combine(InstallDirectory, "updates");
+
+    public static bool IsRunningInstalled => string.Equals(
+        Path.GetFullPath(Environment.ProcessPath ?? ""),
+        Path.GetFullPath(InstalledExecutable),
+        StringComparison.OrdinalIgnoreCase);
+
     public static bool IsInteractiveInstall(string[] args)
     {
         if (args.Length != 0)
@@ -29,41 +36,32 @@ internal static class WindowsBootstrap
         return !string.Equals(current, Path.GetFullPath(InstalledExecutable), StringComparison.OrdinalIgnoreCase);
     }
 
-    public static void InstallAndLaunch()
+    public static bool InstallAndLaunch()
     {
         string source = Path.GetFullPath(
             Environment.ProcessPath
             ?? throw new InvalidOperationException("Не удалось определить путь запущенного приложения."));
+        ConfigStore store = new();
+        ProviderConfig config = store.LoadConfig();
+        using SetupForm setup = new(
+            config.RootPath,
+            config.KeepAllOffline,
+            config.StartWithWindows);
+        if (setup.ShowDialog() != DialogResult.OK)
+        {
+            return false;
+        }
+
         Directory.CreateDirectory(InstallDirectory);
         StopInstalledProvider();
         File.Copy(source, InstalledExecutable, overwrite: true);
 
-        string rootPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            "RAG Cloud Drive");
-        using (RegistryKey appKey = Registry.CurrentUser.CreateSubKey(RegistryPath))
-        {
-            appKey.SetValue("Server", AppDefaults.Server, RegistryValueKind.String);
-            if (string.IsNullOrWhiteSpace(Convert.ToString(appKey.GetValue("RootPath"))))
-            {
-                appKey.SetValue("RootPath", rootPath, RegistryValueKind.String);
-            }
-            if (string.IsNullOrWhiteSpace(Convert.ToString(appKey.GetValue("DeviceId"))))
-            {
-                appKey.SetValue(
-                    "DeviceId",
-                    $"win-{Environment.MachineName}-{Guid.NewGuid():N}",
-                    RegistryValueKind.String);
-            }
-        }
-
-        using (RegistryKey runKey = Registry.CurrentUser.CreateSubKey(RunPath))
-        {
-            runKey.SetValue(
-                RunValueName,
-                $"\"{InstalledExecutable}\" --installed",
-                RegistryValueKind.String);
-        }
+        config.Server = AppDefaults.Server;
+        config.RootPath = setup.RootPath;
+        config.KeepAllOffline = setup.KeepAllOffline;
+        config.StartWithWindows = setup.StartWithWindows;
+        store.SaveConfig(config);
+        SavePreferences(config);
 
         AppLog.Info($"Installed {source} to {InstalledExecutable}.");
         Process.Start(new ProcessStartInfo(InstalledExecutable, "--installed")
@@ -78,6 +76,7 @@ internal static class WindowsBootstrap
             AppDefaults.ProductName,
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
+        return true;
     }
 
     private static void StopInstalledProvider()
@@ -126,6 +125,158 @@ internal static class WindowsBootstrap
         catch (Exception exception)
         {
             AppLog.Error("Не удалось открыть облачную папку.", exception);
+        }
+    }
+
+    public static void SavePreferences(ProviderConfig config)
+    {
+        using (RegistryKey appKey = Registry.CurrentUser.CreateSubKey(RegistryPath))
+        {
+            appKey.SetValue("Server", config.Server, RegistryValueKind.String);
+            appKey.SetValue("RootPath", config.RootPath, RegistryValueKind.String);
+            appKey.SetValue("KeepAllOffline", config.KeepAllOffline ? 1 : 0, RegistryValueKind.DWord);
+            appKey.SetValue("StartWithWindows", config.StartWithWindows ? 1 : 0, RegistryValueKind.DWord);
+            appKey.SetValue("DeviceId", config.DeviceId, RegistryValueKind.String);
+        }
+        ApplyStartup(config.StartWithWindows);
+    }
+
+    public static void RestartInstalled()
+    {
+        Process.Start(new ProcessStartInfo(InstalledExecutable, "--installed")
+        {
+            UseShellExecute = true,
+            WorkingDirectory = InstallDirectory,
+        });
+    }
+
+    public static void LaunchStagedUpdate(string stagedExecutable, string sha256)
+    {
+        ProcessStartInfo start = new(stagedExecutable)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = UpdateDirectory,
+        };
+        start.ArgumentList.Add("--apply-update");
+        start.ArgumentList.Add("--wait-pid");
+        start.ArgumentList.Add(Environment.ProcessId.ToString());
+        start.ArgumentList.Add("--sha256");
+        start.ArgumentList.Add(sha256);
+        _ = Process.Start(start)
+            ?? throw new InvalidOperationException("Не удалось запустить установщик обновления.");
+    }
+
+    public static async Task<int> ApplyStagedUpdateAsync(
+        int waitProcessId,
+        string expectedSha256)
+    {
+        try
+        {
+            string source = Path.GetFullPath(
+                Environment.ProcessPath
+                ?? throw new InvalidOperationException("Не удалось определить файл обновления."));
+            string allowedDirectory = Path.GetFullPath(UpdateDirectory)
+                .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!source.StartsWith(allowedDirectory, StringComparison.OrdinalIgnoreCase) ||
+                !ClientUpdater.IsValidSha256(expectedSha256))
+            {
+                throw new InvalidDataException("Недопустимый источник или SHA-256 обновления.");
+            }
+
+            string actualSha256 = await ClientUpdater.ComputeSha256Async(source, CancellationToken.None);
+            if (!actualSha256.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("Контрольная сумма файла обновления не совпала.");
+            }
+
+            if (waitProcessId > 0 && waitProcessId != Environment.ProcessId)
+            {
+                try
+                {
+                    using Process previous = Process.GetProcessById(waitProcessId);
+                    using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(2));
+                    await previous.WaitForExitAsync(timeout.Token);
+                }
+                catch (ArgumentException)
+                {
+                    // The previous client has already exited.
+                }
+            }
+
+            Directory.CreateDirectory(InstallDirectory);
+            Exception? lastError = null;
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                try
+                {
+                    File.Copy(source, InstalledExecutable, overwrite: true);
+                    lastError = null;
+                    break;
+                }
+                catch (IOException exception)
+                {
+                    lastError = exception;
+                    await Task.Delay(500);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    lastError = exception;
+                    await Task.Delay(500);
+                }
+            }
+            if (lastError is not null)
+            {
+                throw new IOException("Не удалось заменить установленный клиент.", lastError);
+            }
+
+            AppLog.Info($"Applied staged update {actualSha256}.");
+            RestartInstalled();
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            ShowError("Не удалось применить обновление RAG Cloud Files.", exception);
+            return 1;
+        }
+    }
+
+    public static void CleanupStagedUpdates()
+    {
+        if (!Directory.Exists(UpdateDirectory))
+        {
+            return;
+        }
+
+        foreach (string path in Directory.EnumerateFiles(UpdateDirectory))
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (IOException)
+            {
+                // A just-finished updater may still have its executable open.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Cleanup is best effort and will be retried on the next start.
+            }
+        }
+    }
+
+    private static void ApplyStartup(bool enabled)
+    {
+        using RegistryKey runKey = Registry.CurrentUser.CreateSubKey(RunPath);
+        if (enabled)
+        {
+            runKey.SetValue(
+                RunValueName,
+                $"\"{InstalledExecutable}\" --installed",
+                RegistryValueKind.String);
+        }
+        else
+        {
+            runKey.DeleteValue(RunValueName, throwOnMissingValue: false);
         }
     }
 

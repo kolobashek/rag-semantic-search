@@ -11,6 +11,11 @@ internal static class SelfTest
         Equal("Folder/file.txt", CloudPath.Normalize("/Folder\\file.txt/"));
         Equal("Folder", CloudPath.Parent("Folder/file.txt"));
         Equal(2, CloudPath.Depth("Folder/file.txt"));
+        Equal(true, ClientUpdater.IsNewerVersion("0.3.0", "0.3.1"));
+        Equal(false, ClientUpdater.IsNewerVersion("0.3.0", "0.3.0"));
+        Equal(false, ClientUpdater.IsNewerVersion("0.3.0", "invalid"));
+        Equal(true, ClientUpdater.IsValidSha256(new string('a', 64)));
+        Equal(false, ClientUpdater.IsValidSha256("not-a-hash"));
 
         string unicodePath = "Документы/Смета 2026.xlsx";
         Equal(unicodePath, FileIdentityCodec.Decode(FileIdentityCodec.Encode(unicodePath)));
@@ -44,19 +49,48 @@ internal static class SelfTest
                 Server = "https://catalog.example",
                 DeviceId = "device-1",
                 Token = "secret-device-token",
+                KeepAllOffline = true,
+                OfflinePaths = new HashSet<string>(["Документы"], StringComparer.OrdinalIgnoreCase),
+                StartWithWindows = false,
             };
             store.SaveConfig(config);
             Equal("device-1", store.LoadConfig().DeviceId);
             Equal("secret-device-token", store.LoadConfig().Token);
+            Equal(true, store.LoadConfig().KeepAllOffline);
+            Equal(true, store.LoadConfig().OfflinePaths.Contains("документы"));
+            Equal(false, store.LoadConfig().StartWithWindows);
             if (File.ReadAllText(store.ConfigPath).Contains("secret-device-token", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("Device token was stored in clear text.");
             }
-            ProviderState state = new() { ManagedPaths = new HashSet<string>([unicodePath]) };
+            ProviderState state = new()
+            {
+                ManagedPaths = new HashSet<string>([unicodePath]),
+                AppliedOfflinePaths = new HashSet<string>(["Документы"]),
+                AppliedOfflineVersions = new Dictionary<string, string>
+                {
+                    [unicodePath] = "version-1",
+                },
+            };
             store.SaveState(state);
             if (!store.LoadState().ManagedPaths.Contains(unicodePath.ToUpperInvariant()))
             {
                 throw new InvalidOperationException("State path comparer is not case-insensitive.");
+            }
+            Equal(true, store.LoadState().AppliedOfflinePaths.Contains("документы"));
+            Equal("version-1", store.LoadState().AppliedOfflineVersions[unicodePath.ToUpperInvariant()]);
+
+            ClientStatusModel status = new();
+            status.BeginTransfer(unicodePath);
+            Equal(1, status.Current.ActiveTransfers);
+            status.EndTransfer(unicodePath);
+            Equal(ClientRunState.UpToDate, status.Current.State);
+
+            using Icon baseIcon = (Icon)SystemIcons.Application.Clone();
+            foreach (ClientRunState runState in Enum.GetValues<ClientRunState>())
+            {
+                using Icon statusIcon = TrayIconFactory.Create(baseIcon, runState);
+                Equal(new Size(32, 32), statusIcon.Size);
             }
         }
         finally

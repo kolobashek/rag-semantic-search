@@ -26,6 +26,15 @@ internal sealed class ProviderConfig
 
     [JsonPropertyName("poll_seconds")]
     public int PollSeconds { get; set; } = 60;
+
+    [JsonPropertyName("keep_all_offline")]
+    public bool KeepAllOffline { get; set; }
+
+    [JsonPropertyName("offline_paths")]
+    public HashSet<string> OfflinePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    [JsonPropertyName("start_with_windows")]
+    public bool StartWithWindows { get; set; } = true;
 }
 
 internal sealed class DeviceCodeResponse
@@ -62,6 +71,27 @@ internal sealed class SyncClientResponse
 {
     [JsonPropertyName("id")]
     public string Id { get; set; } = "";
+}
+
+internal sealed class UpdateManifest
+{
+    [JsonPropertyName("has_cloud_files_exe")]
+    public bool HasCloudFilesExecutable { get; set; }
+
+    [JsonPropertyName("cloud_files_version")]
+    public string Version { get; set; } = "";
+
+    [JsonPropertyName("cloud_files_download_url")]
+    public string DownloadUrl { get; set; } = "";
+
+    [JsonPropertyName("cloud_files_sha256")]
+    public string Sha256 { get; set; } = "";
+
+    [JsonPropertyName("cloud_files_size_bytes")]
+    public long SizeBytes { get; set; }
+
+    [JsonPropertyName("cloud_files_channel")]
+    public string Channel { get; set; } = "";
 }
 
 internal sealed class ChangePage
@@ -124,4 +154,14 @@ internal sealed class ProviderState
 
     [JsonPropertyName("managed_versions")]
     public Dictionary<string, string> ManagedVersions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    [JsonPropertyName("applied_all_offline")]
+    public bool AppliedAllOffline { get; set; }
+
+    [JsonPropertyName("applied_offline_paths")]
+    public HashSet<string> AppliedOfflinePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    [JsonPropertyName("applied_offline_versions")]
+    public Dictionary<string, string> AppliedOfflineVersions { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
 }

@@ -3,6 +3,7 @@ CfCreatePlaceholders
 CfDisconnectSyncRoot
 CfExecute
 CfGetPlatformInfo
+CfHydratePlaceholder
 CfRegisterSyncRoot
 CfSetInSyncState
 CfSetPinState

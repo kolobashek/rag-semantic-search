@@ -396,7 +396,22 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.2.1"
+_CLOUD_FILES_VERSION = "0.3.0"
+
+
+def _cloud_files_release_metadata(packaging: Path) -> Dict[str, Any]:
+    executable = packaging / "RagCloudFiles.exe"
+    checksum_file = packaging / "RagCloudFiles.exe.sha256"
+    checksum = ""
+    if executable.is_file() and checksum_file.is_file():
+        candidate = checksum_file.read_text(encoding="ascii").split(maxsplit=1)[0].strip().lower()
+        if len(candidate) == 64 and all(character in "0123456789abcdef" for character in candidate):
+            checksum = candidate
+    return {
+        "available": executable.is_file() and bool(checksum),
+        "sha256": checksum,
+        "size_bytes": executable.stat().st_size if executable.is_file() else 0,
+    }
 
 
 @app.get("/api/sync-client/version")
@@ -409,13 +424,16 @@ def api_sync_client_version() -> Dict[str, Any]:
     packaging = root / "packaging" / "dist"
     has_exe = (packaging / "rag_sync_client.exe").is_file()
     has_msi = (packaging / "RAGSyncClient.msi").is_file()
-    has_cloud_files_exe = (packaging / "RagCloudFiles.exe").is_file()
+    cloud_files_release = _cloud_files_release_metadata(packaging)
     return {
         "version": _SYNC_CLIENT_VERSION,
         "has_exe": has_exe,
         "has_msi": has_msi,
-        "has_cloud_files_exe": has_cloud_files_exe,
+        "has_cloud_files_exe": cloud_files_release["available"],
         "cloud_files_version": _CLOUD_FILES_VERSION,
+        "cloud_files_sha256": cloud_files_release["sha256"],
+        "cloud_files_size_bytes": cloud_files_release["size_bytes"],
+        "cloud_files_channel": "stable",
         "cloud_files_download_url": (
             "/api/cloud-drive/sync/client-download"
             f"?format=cloud-files-exe&v={_CLOUD_FILES_VERSION}"
@@ -1479,6 +1497,7 @@ def api_cloud_drive_sync_client_download(
             (root / "rag_sync_client.py", "text/x-python", "rag_sync_client.py"),
         ]
     elif fmt == "cloud-files-exe":
+        release = _cloud_files_release_metadata(packaging)
         candidates = [
             (
                 packaging / "RagCloudFiles.exe",
@@ -1512,6 +1531,14 @@ def api_cloud_drive_sync_client_download(
                     "Cache-Control": "no-store, max-age=0",
                     "Pragma": "no-cache",
                     "Content-Disposition": f"attachment; filename={filename}",
+                    **(
+                        {
+                            "X-RAG-Cloud-Files-Version": _CLOUD_FILES_VERSION,
+                            "X-RAG-Cloud-Files-SHA256": str(release["sha256"]),
+                        }
+                        if fmt == "cloud-files-exe"
+                        else {}
+                    ),
                 },
             )
     raise HTTPException(

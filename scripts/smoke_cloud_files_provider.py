@@ -18,6 +18,7 @@ CONTENT = b"RAG Cloud Files hydration smoke test\n"
 CONTENT_V2 = b"RAG Cloud Files updated content\n"
 FILE_ATTRIBUTE_OFFLINE = 0x00001000
 FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
+FILE_ATTRIBUTE_PINNED = 0x00080000
 FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
 INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 
@@ -140,6 +141,22 @@ def wait_for_recall(path: Path, expected_size: int, process: subprocess.Popen[st
     raise TimeoutError(f"Updated placeholder was not dehydrated: {path}")
 
 
+def wait_for_background_hydration(
+    path: Path,
+    process: subprocess.Popen[str],
+    timeout: float = 20.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise RuntimeError(f"Offline provider exited early ({process.returncode}).\n{stdout}\n{stderr}")
+        if path.exists() and Handler.range_requests:
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"Pinned placeholder was not hydrated in background: {path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("provider", type=Path)
@@ -169,7 +186,10 @@ def main() -> int:
         "5",
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    offline_process: subprocess.Popen[str] | None = None
     placeholder = root / "Demo" / "report.txt"
+    offline_root = workspace / "RAG Cloud Drive Offline"
+    offline_config = workspace / "offline-config.json"
     try:
         wait_for_file(placeholder, process)
         if placeholder.stat().st_size != len(CONTENT):
@@ -203,6 +223,40 @@ def main() -> int:
         stdout, stderr = process.communicate(timeout=10)
         if process.returncode != 0:
             raise RuntimeError(f"Updated provider did not shut down cleanly.\n{stdout}\n{stderr}")
+
+        Handler.range_requests.clear()
+        offline_command = [
+            str(provider),
+            "--config",
+            str(offline_config),
+            "--server",
+            origin,
+            "--token",
+            "smoke-token",
+            "--root",
+            str(offline_root),
+            "--keep-all-offline",
+            "--run-seconds",
+            "5",
+        ]
+        offline_process = subprocess.Popen(
+            offline_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        offline_placeholder = offline_root / "Demo" / "report.txt"
+        wait_for_background_hydration(offline_placeholder, offline_process)
+        stdout, stderr = offline_process.communicate(timeout=10)
+        if offline_process.returncode != 0:
+            raise RuntimeError(f"Offline provider did not shut down cleanly.\n{stdout}\n{stderr}")
+        if offline_placeholder.read_bytes() != CONTENT_V2:
+            raise AssertionError("Pinned placeholder content does not match the server content.")
+        offline_attributes = file_attributes(offline_placeholder)
+        if not offline_attributes & FILE_ATTRIBUTE_PINNED:
+            raise AssertionError(f"Offline placeholder is not pinned: 0x{offline_attributes:08x}")
+        if offline_attributes & recall_mask:
+            raise AssertionError(f"Offline placeholder still requires recall: 0x{offline_attributes:08x}")
         print(
             json.dumps(
                 {
@@ -212,6 +266,8 @@ def main() -> int:
                     "attributes_before": f"0x{before:08x}",
                     "updated_attributes_before": f"0x{updated_attributes:08x}",
                     "range_requests": Handler.range_requests,
+                    "offline_hydrated": True,
+                    "offline_attributes": f"0x{offline_attributes:08x}",
                 },
                 ensure_ascii=False,
             )
@@ -225,9 +281,22 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+        if offline_process is not None and offline_process.poll() is None:
+            offline_process.terminate()
+            try:
+                offline_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                offline_process.kill()
+                offline_process.wait(timeout=5)
         time.sleep(1)
         subprocess.run(
             [str(provider), "--config", str(config), "--root", str(root), "--unregister"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [str(provider), "--config", str(offline_config), "--root", str(offline_root), "--unregister"],
             check=False,
             capture_output=True,
             text=True,
