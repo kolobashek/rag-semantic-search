@@ -23,8 +23,21 @@ internal static class Program
                 waitProcessId,
                 options.GetValueOrDefault("sha256", ""));
         }
+        if (options.ContainsKey("apply-uninstall"))
+        {
+            int waitProcessId = int.Parse(options.GetValueOrDefault("wait-pid", "0"));
+            return await WindowsBootstrap.ApplyUninstallAsync(
+                waitProcessId,
+                options.GetValueOrDefault("root", ""));
+        }
 
         ConfigStore store = new(options.GetValueOrDefault("config"));
+        if (options.ContainsKey("uninstall"))
+        {
+            ProviderConfig uninstallConfig = store.LoadConfig();
+            WindowsBootstrap.LaunchUninstall(uninstallConfig.RootPath);
+            return 0;
+        }
         if (ShellCommandHandler.IsRequested(options))
         {
             try
@@ -336,9 +349,11 @@ internal static class Program
             if (name is "once"
                 or "self-test"
                 or "unregister"
+                or "uninstall"
                 or "installed"
                 or "keep-all-offline"
-                or "apply-update")
+                or "apply-update"
+                or "apply-uninstall")
             {
                 result[name] = "true";
                 continue;

@@ -10,6 +10,8 @@ internal static class WindowsBootstrap
     private const string RegistryPath = @"Software\RAGCloudFiles";
     private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValueName = "RAGCloudFiles";
+    private const string UninstallPath =
+        @"Software\Microsoft\Windows\CurrentVersion\Uninstall\RAGCloudFiles";
     private const string CommandStorePath =
         @"Software\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell";
     private static readonly string[] ClassicShellTargets =
@@ -27,6 +29,10 @@ internal static class WindowsBootstrap
         "RagCloudFiles.exe");
 
     public static string UpdateDirectory { get; } = Path.Combine(InstallDirectory, "updates");
+
+    public static string ConfigDirectory { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "RAGCloudFiles");
 
     public static bool IsRunningInstalled => string.Equals(
         Path.GetFullPath(Environment.ProcessPath ?? ""),
@@ -149,6 +155,7 @@ internal static class WindowsBootstrap
         }
         ApplyStartup(config.StartWithWindows);
         InstallClassicContextMenu(config.RootPath);
+        RegisterInstalledApplication();
     }
 
     public static void RestartInstalled()
@@ -250,6 +257,98 @@ internal static class WindowsBootstrap
         }
     }
 
+    public static void LaunchUninstall(string rootPath)
+    {
+        DialogResult choice = MessageBox.Show(
+            "Удалить RAG Cloud Files с этого компьютера?\n\n"
+            + "Файлы, уже загруженные в облачную папку, останутся на диске.",
+            AppDefaults.ProductName,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question,
+            MessageBoxDefaultButton.Button2);
+        if (choice != DialogResult.Yes)
+        {
+            return;
+        }
+
+        StopInstalledProvider();
+        string temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "RAGCloudFiles-uninstall",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temporaryDirectory);
+        string temporaryExecutable = Path.Combine(temporaryDirectory, "RagCloudFiles.exe");
+        File.Copy(
+            Path.GetFullPath(
+                Environment.ProcessPath
+                ?? throw new InvalidOperationException("Не удалось определить файл удаления.")),
+            temporaryExecutable,
+            overwrite: true);
+
+        ProcessStartInfo start = new(temporaryExecutable)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = temporaryDirectory,
+        };
+        start.ArgumentList.Add("--apply-uninstall");
+        start.ArgumentList.Add("--wait-pid");
+        start.ArgumentList.Add(Environment.ProcessId.ToString());
+        start.ArgumentList.Add("--root");
+        start.ArgumentList.Add(rootPath);
+        _ = Process.Start(start)
+            ?? throw new InvalidOperationException("Не удалось запустить удаление приложения.");
+    }
+
+    public static async Task<int> ApplyUninstallAsync(int waitProcessId, string rootPath)
+    {
+        try
+        {
+            if (waitProcessId > 0 && waitProcessId != Environment.ProcessId)
+            {
+                try
+                {
+                    using Process previous = Process.GetProcessById(waitProcessId);
+                    using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(2));
+                    await previous.WaitForExitAsync(timeout.Token);
+                }
+                catch (ArgumentException)
+                {
+                    // The installed client has already exited.
+                }
+            }
+
+            if (rootPath.Length > 0)
+            {
+                try
+                {
+                    CloudFilesProvider.Unregister(rootPath);
+                }
+                catch (Exception exception)
+                {
+                    AppLog.Error($"Не удалось отменить регистрацию корня {rootPath}.", exception);
+                }
+            }
+
+            await RemoveShellExtensionAsync();
+            RemovePreferences();
+            DeleteLocalApplicationDirectory(InstallDirectory);
+            DeleteLocalApplicationDirectory(ConfigDirectory);
+
+            MessageBox.Show(
+                "RAG Cloud Files удалён. Содержимое облачной папки сохранено.",
+                AppDefaults.ProductName,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            ScheduleCurrentExecutableCleanup();
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            ShowError("Не удалось полностью удалить RAG Cloud Files.", exception);
+            return 1;
+        }
+    }
+
     public static void CleanupStagedUpdates()
     {
         if (!Directory.Exists(UpdateDirectory))
@@ -319,6 +418,107 @@ internal static class WindowsBootstrap
         {
             runKey.DeleteValue(RunValueName, throwOnMissingValue: false);
         }
+    }
+
+    private static void RegisterInstalledApplication()
+    {
+        using RegistryKey key = Registry.CurrentUser.CreateSubKey(UninstallPath);
+        key.SetValue("DisplayName", AppDefaults.ProductName, RegistryValueKind.String);
+        key.SetValue("DisplayVersion", AppDefaults.Version, RegistryValueKind.String);
+        key.SetValue("Publisher", "TSK-NSK", RegistryValueKind.String);
+        key.SetValue("InstallLocation", InstallDirectory, RegistryValueKind.String);
+        key.SetValue("DisplayIcon", InstalledExecutable, RegistryValueKind.String);
+        key.SetValue(
+            "UninstallString",
+            $"\"{InstalledExecutable}\" --uninstall",
+            RegistryValueKind.String);
+        key.SetValue("URLInfoAbout", AppDefaults.Server, RegistryValueKind.String);
+        key.SetValue("NoModify", 1, RegistryValueKind.DWord);
+        key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+        key.SetValue("InstallDate", DateTime.Now.ToString("yyyyMMdd"), RegistryValueKind.String);
+        if (File.Exists(InstalledExecutable))
+        {
+            long estimatedKilobytes = Math.Max(1, new FileInfo(InstalledExecutable).Length / 1024);
+            key.SetValue(
+                "EstimatedSize",
+                (int)Math.Min(int.MaxValue, estimatedKilobytes),
+                RegistryValueKind.DWord);
+        }
+    }
+
+    private static void RemovePreferences()
+    {
+        using (RegistryKey runKey = Registry.CurrentUser.CreateSubKey(RunPath))
+        {
+            runKey.DeleteValue(RunValueName, throwOnMissingValue: false);
+        }
+        foreach (string target in ClassicShellTargets)
+        {
+            Registry.CurrentUser.DeleteSubKeyTree(target, throwOnMissingSubKey: false);
+        }
+        foreach (string command in new[]
+                 {
+                     "RAGCloudFiles.Share",
+                     "RAGCloudFiles.CopyLink",
+                     "RAGCloudFiles.ManageAccess",
+                     "RAGCloudFiles.KeepOffline",
+                 })
+        {
+            Registry.CurrentUser.DeleteSubKeyTree(
+                $@"{CommandStorePath}\{command}",
+                throwOnMissingSubKey: false);
+        }
+        Registry.CurrentUser.DeleteSubKeyTree(UninstallPath, throwOnMissingSubKey: false);
+        Registry.CurrentUser.DeleteSubKeyTree(RegistryPath, throwOnMissingSubKey: false);
+    }
+
+    private static async Task RemoveShellExtensionAsync()
+    {
+        ProcessStartInfo start = PowerShellStartInfo(
+            $"Get-AppxPackage -Name '{ShellPackageName}' | Remove-AppxPackage");
+        using Process process = Process.Start(start)
+            ?? throw new InvalidOperationException("Не удалось запустить удаление интеграции Проводника.");
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+        {
+            AppLog.Error("Windows не смогла удалить пакет интеграции Проводника.");
+        }
+    }
+
+    private static void DeleteLocalApplicationDirectory(string path)
+    {
+        string localAppData = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
+            .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        string target = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+        if (!target.StartsWith(localAppData, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Отказано в удалении каталога вне LocalAppData: {target}");
+        }
+        if (Directory.Exists(target))
+        {
+            Directory.Delete(target, recursive: true);
+        }
+    }
+
+    private static void ScheduleCurrentExecutableCleanup()
+    {
+        string currentDirectory = Path.GetDirectoryName(
+            Path.GetFullPath(
+                Environment.ProcessPath
+                ?? throw new InvalidOperationException("Не удалось определить временный каталог.")))!;
+        string tempRoot = Path.GetFullPath(Path.GetTempPath())
+            .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!currentDirectory.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Временный деинсталлятор запущен вне TEMP.");
+        }
+
+        string escapedDirectory = currentDirectory.Replace("'", "''", StringComparison.Ordinal);
+        ProcessStartInfo cleanup = PowerShellStartInfo(
+            $"Wait-Process -Id {Environment.ProcessId}; "
+            + $"Remove-Item -LiteralPath '{escapedDirectory}' -Recurse -Force");
+        _ = Process.Start(cleanup);
     }
 
     private static ProcessStartInfo PowerShellStartInfo(string command)

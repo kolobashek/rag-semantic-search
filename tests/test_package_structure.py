@@ -59,3 +59,18 @@ def test_windows_11_shell_package_is_fail_closed_and_uses_matching_com_class() -
     assert "signtool.exe" in build_script.lower()
     assert "verify /pa /v" in build_script
     assert "$PackagePath.sha256" in build_script
+
+
+def test_cloud_files_executable_declares_windows_compatibility_and_uninstall() -> None:
+    client_dir = PROJECT_ROOT / "clients" / "windows-cloud-files"
+    project = (client_dir / "RagCloudFiles.csproj").read_text(encoding="utf-8")
+    manifest = (client_dir / "app.manifest").read_text(encoding="utf-8")
+    bootstrap = (client_dir / "WindowsBootstrap.cs").read_text(encoding="utf-8")
+
+    assert "<ApplicationManifest>app.manifest</ApplicationManifest>" in project
+    assert "TSK.RagCloudFiles" in manifest
+    assert "{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" in manifest
+    assert 'level="asInvoker"' in manifest
+    assert "CurrentVersion\\Uninstall\\RAGCloudFiles" in bootstrap
+    assert '"UninstallString"' in bootstrap
+    assert "--apply-uninstall" in bootstrap
