@@ -647,6 +647,7 @@ def _build_page(initial_screen: str = "search") -> None:
             p = Path(value)
             state.explorer_path = str(p.parent if p.is_file() else p)
             state.explorer_page = 0
+            state.explorer_visible_count = 40
             mark_screen_dirty("explorer")
         set_screen("explorer")
 
@@ -659,6 +660,7 @@ def _build_page(initial_screen: str = "search") -> None:
         else:
             state.explorer_cd_path = item_path.rsplit("/", 1)[0] if "/" in item_path else ""
         state.explorer_page = 0
+        state.explorer_visible_count = 40
         mark_screen_dirty("explorer")
         set_screen("explorer")
 
@@ -1983,6 +1985,7 @@ def _build_page(initial_screen: str = "search") -> None:
             else:
                 state.explorer_cd_path = item_path.rsplit("/", 1)[0] if "/" in item_path else ""
             state.explorer_page = 0
+            state.explorer_visible_count = 40
             state.screen = "explorer"
             ui.run_javascript("history.pushState(null, '', '/explorer')")
             render()

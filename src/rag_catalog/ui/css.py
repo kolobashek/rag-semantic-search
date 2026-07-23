@@ -1255,6 +1255,10 @@ def _install_css(initial_theme: str = "light") -> None:
           height: 26px;
           justify-content: flex-start;
         }
+        .rag-table-select-checkbox {
+          opacity: 1 !important;
+          pointer-events: auto !important;
+        }
         .rag-file-select-overlay {
           position: absolute;
           left: -2px;
@@ -1936,6 +1940,19 @@ def _install_css(initial_theme: str = "light") -> None:
           width: 100%;
           min-width: 0;
         }
+        .rag-file-table-name {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          overflow: hidden;
+        }
+        .rag-file-table-name .rag-file-icon,
+        .rag-file-table-name .rag-file-icon svg {
+          width: 28px;
+          min-width: 28px;
+          height: 28px;
+          flex-basis: 28px;
+        }
         .rag-file-table-name .q-btn__content {
           justify-content: flex-start !important;
           min-width: 0;
@@ -1971,6 +1988,22 @@ def _install_css(initial_theme: str = "light") -> None:
           text-transform: uppercase;
           letter-spacing: 0.06em;
           white-space: nowrap;
+        }
+        .rag-sort-header {
+          min-height: 26px !important;
+          padding: 0 3px !important;
+          color: var(--rag-muted) !important;
+          font-size: 11px !important;
+          font-weight: 600 !important;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          justify-content: flex-start;
+        }
+        .rag-sort-header.active {
+          color: var(--rag-accent) !important;
+        }
+        .rag-sort-header .q-icon {
+          font-size: 15px;
         }
         .rag-cd-mobile-count,
         .rag-cd-mobile-badge {

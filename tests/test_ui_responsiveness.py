@@ -594,6 +594,41 @@ def test_cloud_drive_explorer_bounds_each_interactive_render() -> None:
     assert 'if is_open:\n                        children, _unused_files = _cd_list_children(' in source
 
 
+def test_cloud_drive_explorer_uses_progressive_loading_and_interactive_sort_headers() -> None:
+    from rag_catalog.ui import explorer_view
+
+    source = inspect.getsource(explorer_view.render_explorer_screen)
+    cloud_source = source[source.index("def _render_cd_explorer"):source.index("# ── Explorer screen body")]
+
+    assert "page_entries = entries[:page_state.explorer_visible_count]" in cloud_source
+    assert '"load_more"' in cloud_source
+    assert "Загрузить ещё" in cloud_source
+    assert "def _render_sort_header" in cloud_source
+    assert '_render_sort_header("Имя", "По имени")' in cloud_source
+    assert '_render_sort_header("Изменён", "По дате")' in cloud_source
+    assert '_render_sort_header("Размер", "По размеру")' in cloud_source
+    assert "Общий размер с вложенными папками" in cloud_source
+    assert "render_fn()" in cloud_source[cloud_source.index("async def _load_folder_sizes"):]
+
+
+def test_cloud_drive_folder_modified_date_uses_source_timestamp() -> None:
+    from rag_catalog.core.cloud_drive.models import CloudDriveFolder
+    from rag_catalog.ui import explorer_view
+
+    folder = CloudDriveFolder(
+        id="folder-1",
+        parent_id=None,
+        name="Документы",
+        path="Документы",
+        depth=1,
+        source_mtime=1_700_000_000.0,
+        updated_at="2020-01-01T00:00:00+00:00",
+    )
+
+    assert explorer_view._cloud_node_modified_timestamp(folder) == 1_700_000_000.0
+    assert explorer_view._cloud_node_modified_label(folder) != "—"
+
+
 def test_cloud_drive_settings_exposes_import_sources_ui() -> None:
     source = inspect.getsource(settings_view.render_settings_screen)
 

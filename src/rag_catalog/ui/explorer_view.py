@@ -11,6 +11,7 @@ import html
 import json
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
@@ -51,6 +52,26 @@ from .state import (
 
 _EXPLORER_PAGE_SIZE = 40
 _TREE_CHILD_LIMIT = 24
+
+
+def _cloud_node_modified_timestamp(node: Any) -> float:
+    source_mtime = float(getattr(node, "source_mtime", 0.0) or 0.0)
+    if source_mtime > 0:
+        return source_mtime
+    raw = str(getattr(node, "updated_at", "") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError, OSError):
+        return 0.0
+
+
+def _cloud_node_modified_label(node: Any) -> str:
+    timestamp = _cloud_node_modified_timestamp(node)
+    if timestamp <= 0:
+        return "—"
+    return time.strftime("%d.%m.%Y %H:%M", time.localtime(timestamp))
 
 
 def render_explorer_screen(
@@ -213,24 +234,27 @@ def render_explorer_screen(
         refs["page_checkbox"] = checkbox
         _refresh_selection_bar(refs)
 
-    def _selection_checkbox(key: str, refs: dict[str, Any]) -> None:
+    def _selection_checkbox(key: str, refs: dict[str, Any]) -> Any:
         checkbox = ui.checkbox(
             value=key in _selected_set(),
             on_change=lambda e, k=key: (_set_key_selected(k, bool(e.value)), _refresh_selection_bar(refs)),
         ).props("dense").classes("rag-select-checkbox")
         refs.setdefault("checkboxes", {})[key] = checkbox
+        return checkbox
 
-    def _selection_badge(path_or_ext: str, kind: str, key: str, refs: dict[str, Any]) -> None:
+    def _selection_badge(_path_or_ext: str, _kind: str, key: str, refs: dict[str, Any]) -> None:
         with ui.element("div").classes("rag-file-select-icon"):
-            ui.html(_file_badge_html(path_or_ext, kind), sanitize=False)
-            with ui.element("div").classes("rag-file-select-overlay"):
-                _selection_checkbox(key, refs)
+            checkbox = _selection_checkbox(key, refs)
+            checkbox.classes(add="rag-table-select-checkbox")
 
     # ── Explorer / Cloud Drive screen ─────────────────────────────────────────
 
     def _render_cd_explorer(page_state: PageState, svc: "CloudDriveService") -> None:  # noqa: PLR0912,PLR0915
         """Registry-backed Cloud Drive explorer screen."""
         from rag_catalog.core.cloud_drive.models import CloudDriveFile, CloudDriveFolder  # noqa: PLC0415
+
+        if page_state.explorer_view not in {"Таблица", "Список"}:
+            page_state.explorer_view = "Таблица"
 
         try:
             fresh_user = _get_auth_db(page_state).get_user(username=_username(page_state))
@@ -253,6 +277,7 @@ def render_explorer_screen(
         def _cd_open_folder(cd_path: str) -> None:
             page_state.explorer_cd_path = cd_path
             page_state.explorer_page = 0
+            page_state.explorer_visible_count = _EXPLORER_PAGE_SIZE
             page_state.explorer_selected_paths = []
             _log_app_event(page_state, "cd_explorer", "open_folder", details={"cd_path": cd_path})
             render_fn()
@@ -310,6 +335,11 @@ def render_explorer_screen(
                     value=page_state.explorer_sort,
                     label="Сортировка",
                 ).props("dense outlined").classes("w-full")
+                sort_direction = ui.select(
+                    {"asc": "По возрастанию", "desc": "По убыванию"},
+                    value="desc" if page_state.explorer_desc else "asc",
+                    label="Направление",
+                ).props("dense outlined emit-value map-options").classes("w-full")
                 show_hidden_cb = ui.checkbox(
                     "Показать скрытые",
                     value=bool(page_state.explorer_show_hidden),
@@ -318,7 +348,9 @@ def render_explorer_screen(
                 def _apply_mobile_filters() -> None:
                     page_state.explorer_view = str(view_select.value or "Таблица")
                     page_state.explorer_sort = str(sort_select.value or "По имени")
+                    page_state.explorer_desc = str(sort_direction.value or "asc") == "desc"
                     page_state.explorer_show_hidden = bool(show_hidden_cb.value)
+                    page_state.explorer_visible_count = _EXPLORER_PAGE_SIZE
                     _save_explorer_settings(page_state)
                     dlg.close()
                     render_fn()
@@ -1245,6 +1277,11 @@ def render_explorer_screen(
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "hide")).props("data-rag-hide").classes("rag-context-action-hidden")
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "unhide")).props("data-rag-unhide").classes("rag-context-action-hidden")
 
+        # Preserve direct-child properties before UI filters are applied.
+        direct_folder_count = len(child_folders)
+        direct_file_count = len(child_files)
+        direct_file_size = sum(int(file.size_bytes or 0) for file in child_files)
+
         # filter & sort
         name_q = page_state.explorer_filter.strip().lower()
         ext_q = page_state.explorer_ext if page_state.explorer_ext != "Все" else ""
@@ -1258,6 +1295,8 @@ def render_explorer_screen(
             child_files = [f for f in child_files if not _is_hidden("cd", f.path)]
 
         all_folder_ids = [str(folder.id) for folder in child_folders]
+        current_folder = breadcrumbs[-1] if breadcrumbs else root_folder
+        current_folder_id = str(current_folder.id) if current_folder is not None else ""
         cached_folder_sizes = dict(page_state.explorer_folder_sizes)
         child_folder_sizes = {
             folder_id: int(cached_folder_sizes[folder_id])
@@ -1271,10 +1310,11 @@ def render_explorer_screen(
             child_folders.sort(key=lambda x: x.name.lower(), reverse=rev)
             child_files.sort(key=lambda x: x.name.lower(), reverse=rev)
         elif sort_key == "По размеру":
-            child_folders.sort(key=lambda x: child_folder_sizes.get(x.id, 0), reverse=rev)
+            child_folders.sort(key=lambda x: child_folder_sizes.get(str(x.id), 0), reverse=rev)
             child_files.sort(key=lambda x: x.size_bytes, reverse=rev)
         elif sort_key == "По дате":
-            child_files.sort(key=lambda x: x.updated_at, reverse=rev)
+            child_folders.sort(key=_cloud_node_modified_timestamp, reverse=rev)
+            child_files.sort(key=_cloud_node_modified_timestamp, reverse=rev)
 
         # Bound each NiceGUI render. Large folders otherwise block Socket.IO
         # heartbeats while hundreds of interactive rows are constructed.
@@ -1285,19 +1325,20 @@ def render_explorer_screen(
             *(("file", file) for file in child_files),
         ]
         total_entries = len(entries)
-        page_count = max(1, (total_entries + page_size - 1) // page_size)
-        page_state.explorer_page = max(0, min(page_state.explorer_page, page_count - 1))
-        page_entries = entries[
-            page_state.explorer_page * page_size : (page_state.explorer_page + 1) * page_size
-        ]
+        page_state.explorer_visible_count = max(
+            page_size,
+            min(int(page_state.explorer_visible_count or page_size), max(page_size, total_entries)),
+        )
+        page_entries = entries[:page_state.explorer_visible_count]
         page_folders = [item for item_type, item in page_entries if item_type == "folder"]
         page_files = [item for item_type, item in page_entries if item_type == "file"]
 
-        folder_size_ids = [str(folder.id) for folder in page_folders]
+        folder_size_ids = list(dict.fromkeys([*all_folder_ids, current_folder_id]))
+        folder_size_ids = [folder_id for folder_id in folder_size_ids if folder_id]
         folder_size_labels: Dict[str, List[Any]] = {}
         now_monotonic = time.monotonic()
         folder_sizes_need_refresh = any(
-            folder_id not in child_folder_sizes
+            folder_id not in cached_folder_sizes
             or now_monotonic - float(page_state.explorer_folder_size_cached_at.get(folder_id, 0.0)) > 60.0
             for folder_id in folder_size_ids
         )
@@ -1316,9 +1357,9 @@ def render_explorer_screen(
         def _cd_folder_size_label(folder: CloudDriveFolder) -> str:
             if not _cd_can_show_folder_size(folder):
                 return "—"
-            if folder.id not in child_folder_sizes:
+            if str(folder.id) not in child_folder_sizes:
                 return "Считается..."
-            return _cd_file_size(int(child_folder_sizes.get(folder.id, 0) or 0))
+            return _cd_file_size(int(child_folder_sizes.get(str(folder.id), 0) or 0))
 
         # Per-file job status map (single DB query for the current page)
         _page_file_ids = [f.id for f in page_files]
@@ -1358,6 +1399,35 @@ def render_explorer_screen(
                 if label_text:
                     ui.label(label_text)
                 ui.tooltip(tip)
+
+        def _set_cd_sort(value: str, *, toggle_if_active: bool = False) -> None:
+            value = value if value in {"По имени", "По размеру", "По дате"} else "По имени"
+            if toggle_if_active and page_state.explorer_sort == value:
+                page_state.explorer_desc = not bool(page_state.explorer_desc)
+            else:
+                page_state.explorer_sort = value
+                page_state.explorer_desc = False
+            page_state.explorer_visible_count = _EXPLORER_PAGE_SIZE
+            _save_explorer_settings(page_state)
+            render_fn()
+
+        def _toggle_cd_sort_direction() -> None:
+            page_state.explorer_desc = not bool(page_state.explorer_desc)
+            page_state.explorer_visible_count = _EXPLORER_PAGE_SIZE
+            _save_explorer_settings(page_state)
+            render_fn()
+
+        def _render_sort_header(label: str, sort_value: str) -> None:
+            active = page_state.explorer_sort == sort_value
+            icon = "arrow_downward" if page_state.explorer_desc else "arrow_upward"
+            button = ui.button(
+                label,
+                icon=icon if active else None,
+                on_click=lambda value=sort_value: _set_cd_sort(value, toggle_if_active=True),
+                color=None,
+            ).props("flat dense no-caps").classes("rag-sort-header" + (" active" if active else ""))
+            direction = "по убыванию" if page_state.explorer_desc else "по возрастанию"
+            button.tooltip(f"Сортировать {direction}" if active else f"Сортировать по полю «{label}»")
 
         # ── Explorer command bar (hi-fi top area) ─────────────────────────
         parent_path = breadcrumbs[-2].path if len(breadcrumbs) >= 2 else ""
@@ -1410,12 +1480,24 @@ def render_explorer_screen(
                 ui.select(
                     ["По имени", "По размеру", "По дате"],
                     value=page_state.explorer_sort,
-                    on_change=lambda e: (setattr(page_state, "explorer_sort", e.value), render_fn()),
+                    on_change=lambda e: _set_cd_sort(str(e.value or "По имени")),
                 ).props("dense outlined").classes("w-36")
+                ui.button(
+                    icon="arrow_downward" if page_state.explorer_desc else "arrow_upward",
+                    on_click=_toggle_cd_sort_direction,
+                    color=None,
+                ).props("flat round dense").classes("rag-explorer-iconbtn").tooltip(
+                    "По убыванию" if page_state.explorer_desc else "По возрастанию"
+                )
                 ui.select(
                     ["Таблица", "Список"],
                     value=page_state.explorer_view if page_state.explorer_view in ("Таблица", "Список") else "Таблица",
-                    on_change=lambda e: (setattr(page_state, "explorer_view", e.value), render_fn()),
+                    on_change=lambda e: (
+                        setattr(page_state, "explorer_view", e.value),
+                        setattr(page_state, "explorer_visible_count", _EXPLORER_PAGE_SIZE),
+                        _save_explorer_settings(page_state),
+                        render_fn(),
+                    ),
                 ).props("dense outlined").classes("w-32")
 
         # ── Layout skeleton ───────────────────────────────────────────────
@@ -1517,19 +1599,30 @@ def render_explorer_screen(
             trash_btn.tooltip("Удалённые файлы и папки. Можно восстановить, пока объект есть в реестре.")
 
         # ── Details column ────────────────────────────────────────────────
+        current_folder_size_labels: List[Any] = []
         with details_col:
             ui.label("Свойства").classes("font-semibold text-sm")
             if breadcrumbs:
                 current_node = breadcrumbs[-1]
                 ui.label(current_node.name or "Корень").classes("font-semibold truncate")
                 ui.label(current_node.path or "/").classes("rag-path text-xs")
+                ui.label(f"Изменена: {_cloud_node_modified_label(current_node)}").classes("rag-meta text-xs")
             else:
                 ui.label("Корень").classes("font-semibold")
-            total_size = sum(f.size_bytes for f in child_files)
-            ui.label(f"Папок: {len(child_folders)}").classes("rag-meta text-xs")
-            ui.label(f"Файлов: {total_files}").classes("rag-meta text-xs")
-            if total_size:
-                ui.label(f"Размер: {_cd_file_size(total_size)}").classes("rag-meta text-xs")
+            ui.label(f"На этом уровне: папки {direct_folder_count} · файлы {direct_file_count}").classes(
+                "rag-meta text-xs"
+            )
+            ui.label(
+                f"Файлы на этом уровне: {_cd_file_size(direct_file_size)}"
+            ).classes("rag-meta text-xs")
+            recursive_size = cached_folder_sizes.get(current_folder_id) if current_folder_id else None
+            recursive_size_text = (
+                _cd_file_size(int(recursive_size or 0)) if recursive_size is not None else "Считается..."
+            )
+            current_size_label = ui.label(
+                f"Общий размер с вложенными папками: {recursive_size_text}"
+            ).classes("rag-meta text-xs font-medium")
+            current_folder_size_labels.append(current_size_label)
             ui.separator()
             ui.label("Действия").classes("font-semibold text-sm")
             ui.button("Создать", icon="add", on_click=_cd_create_picker_dialog, color=None).props("flat dense no-caps align=left").classes("w-full")
@@ -1654,6 +1747,10 @@ def render_explorer_screen(
                                             on_click=lambda p=folder.path: _cd_open_folder(p),
                                             color=None,
                                         ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
+                                        ui.label(
+                                            f"Изменена: {_cloud_node_modified_label(folder)} · "
+                                            f"{_cd_folder_size_label(folder)}"
+                                        ).classes("rag-meta text-xs")
                                     _cd_hidden_action_buttons(folder.path, is_folder=True, open_action=lambda p=folder.path: _cd_open_folder(p))
                                     render_star(Path(folder.source_path or folder.path), item_type="folder")
                                     if not folder.is_root:
@@ -1697,6 +1794,9 @@ def render_explorer_screen(
                                             on_click=lambda fi=f: _cd_open_file(fi),
                                             color=None,
                                         ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
+                                        ui.label(
+                                            f"Изменён: {_cloud_node_modified_label(f)} · {_cd_file_size(f.size_bytes)}"
+                                        ).classes("rag-meta text-xs")
                                     _cd_hidden_action_buttons(f.path, is_folder=False, open_action=lambda fi=f: _cd_open_file(fi), download_url=download_url)
                                     ui.button(
                                         icon="history",
@@ -1749,13 +1849,13 @@ def render_explorer_screen(
                             with ui.element("div").classes("rag-file-select-icon header"):
                                 _selection_page_checkbox(selection_refs)
                             with ui.element("div").classes("rag-file-table-head-name min-w-0"):
-                                ui.label("Имя").classes("rag-col-header rag-col-name-title")
+                                _render_sort_header("Имя", "По имени")
                                 ui.label(f"Папок: {len(child_folders)} · Файлов: {total_files}").classes(
                                     "rag-path rag-cd-mobile-count"
                                 )
-                            ui.label("Изменён").classes("rag-col-header")
+                            _render_sort_header("Изменён", "По дате")
                             with ui.element("div").classes("rag-file-table-head-size min-w-0"):
-                                ui.label("Размер").classes("rag-col-header rag-col-size-title")
+                                _render_sort_header("Размер", "По размеру")
                                 with ui.element("span").classes("cd-status-badge cd-status-done text-xs rag-cd-mobile-badge"):
                                     ui.icon("cloud_done", size="14px")
                                     ui.label("Cloud Drive")
@@ -1774,12 +1874,13 @@ def render_explorer_screen(
                             with folder_row:
                                 _selection_badge(folder.name, "Каталог", item_key, selection_refs)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
+                                    ui.html(_file_badge_html(folder.name, "Каталог"), sanitize=False)
                                     ui.button(
                                         folder.name,
                                         on_click=lambda p=folder.path: _cd_open_folder(p),
                                         color=None,
                                     ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
-                                ui.label("—").classes("rag-meta text-xs")
+                                ui.label(_cloud_node_modified_label(folder)).classes("rag-meta text-xs")
                                 size_label = ui.label(_cd_folder_size_label(folder)).classes("rag-meta text-xs")
                                 folder_size_labels.setdefault(str(folder.id), []).append(size_label)
                                 ui.label("admin").classes("rag-meta text-xs")
@@ -1819,12 +1920,13 @@ def render_explorer_screen(
                             with file_row:
                                 _selection_badge(f.name, "Файл", item_key, selection_refs)
                                 with ui.element("div").classes("rag-file-table-name min-w-0"):
+                                    ui.html(_file_badge_html(f.name, "Файл"), sanitize=False)
                                     ui.button(
                                         f.name,
                                         on_click=lambda fi=f: _cd_open_file(fi),
                                         color=None,
                                     ).props("flat align=left no-caps dense data-rag-open").classes("rag-nav-button w-full")
-                                ui.label(f.updated_at[:10] if f.updated_at else "—").classes("rag-meta text-xs")
+                                ui.label(_cloud_node_modified_label(f)).classes("rag-meta text-xs")
                                 ui.label(_cd_file_size(f.size_bytes) if f.size_bytes else "—").classes("rag-meta text-xs")
                                 ui.label("admin").classes("rag-meta text-xs")
                                 with ui.element("div").classes("rag-file-table-index"):
@@ -1884,12 +1986,36 @@ def render_explorer_screen(
                                             ).classes("text-negative")
                                 _cd_hidden_action_buttons(f.path, is_folder=False, open_action=lambda fi=f: _cd_open_file(fi), download_url=download_url)
 
-                # Pagination
-                if total_entries > page_size:
-                    with ui.row().classes("items-center gap-2 mt-2"):
-                        ui.button("Назад", on_click=lambda: (setattr(page_state, "explorer_page", max(0, page_state.explorer_page - 1)), render_fn())).props("outline")
-                        ui.label(f"Стр. {page_state.explorer_page + 1} / {page_count}").classes("rag-meta")
-                        ui.button("Вперёд", on_click=lambda: (setattr(page_state, "explorer_page", page_state.explorer_page + 1), render_fn())).props("outline")
+                # Progressive loading keeps the first render bounded without forcing
+                # users through expensive full-screen page transitions.
+                visible_entry_count = len(page_entries)
+                remaining_entries = max(0, total_entries - visible_entry_count)
+                if remaining_entries:
+                    def _load_more_entries() -> None:
+                        page_state.explorer_visible_count = min(
+                            total_entries,
+                            visible_entry_count + _EXPLORER_PAGE_SIZE,
+                        )
+                        _log_app_event(
+                            page_state,
+                            "cd_explorer",
+                            "load_more",
+                            details={
+                                "path": cd_path,
+                                "visible": page_state.explorer_visible_count,
+                                "total": total_entries,
+                            },
+                        )
+                        render_fn()
+
+                    with ui.column().classes("w-full items-center gap-1 mt-2"):
+                        ui.button(
+                            f"Загрузить ещё ({min(_EXPLORER_PAGE_SIZE, remaining_entries)})",
+                            icon="expand_more",
+                            on_click=_load_more_entries,
+                            color=None,
+                        ).props("flat dense no-caps").classes("rag-explorer-load-more")
+                        ui.label(f"Показано {visible_entry_count} из {total_entries}").classes("rag-meta text-xs")
 
                 # ── Drop zone ─────────────────────────────────────────────────
                 with ui.element("div").classes("w-full mt-3"):
@@ -1955,8 +2081,16 @@ def render_explorer_screen(
                                     label.set_text(text)
                                 except RuntimeError:
                                     pass
-                        if page_state.explorer_sort == "По размеру":
-                            render_fn()
+                        if current_folder_id:
+                            total_text = _cd_file_size(
+                                int(page_state.explorer_folder_sizes.get(current_folder_id, 0) or 0)
+                            )
+                            for label in current_folder_size_labels:
+                                try:
+                                    label.set_text(f"Общий размер с вложенными папками: {total_text}")
+                                except RuntimeError:
+                                    pass
+                        render_fn()
                 except Exception as exc:
                     _log_app_event(
                         page_state,
@@ -2000,6 +2134,7 @@ def render_explorer_screen(
     def open_folder(path: Path) -> None:
         state.explorer_path = str(path)
         state.explorer_page = 0
+        state.explorer_visible_count = _EXPLORER_PAGE_SIZE
         state.explorer_selected_paths = []
         _get_auth_db(state).touch_favorite(username=_username(state), path=str(path))
         _log_app_event(state, "explorer", "open_folder", details={"path": str(path)})
@@ -2448,6 +2583,7 @@ def render_explorer_screen(
             def update_explorer_setting(attr: str, value: Any) -> None:
                 setattr(state, attr, value)
                 state.explorer_page = 0
+                state.explorer_visible_count = _EXPLORER_PAGE_SIZE
                 _save_explorer_settings(state)
                 _log_app_event(state, "explorer", "change_setting", details={attr: value})
                 render_fn()

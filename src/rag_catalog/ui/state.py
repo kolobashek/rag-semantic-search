@@ -66,6 +66,7 @@ class PageState:
     explorer_desc: bool = False
     explorer_view: str = "Таблица"
     explorer_page: int = 0
+    explorer_visible_count: int = 40
     explorer_cd_path: str = ""
     explorer_tree_open: List[str] = field(default_factory=list)
     explorer_selected_paths: List[str] = field(default_factory=list)
@@ -135,6 +136,7 @@ def capture_screen_state(state: PageState, screen: Optional[str] = None) -> Dict
             "explorer_desc": state.explorer_desc,
             "explorer_view": state.explorer_view,
             "explorer_page": state.explorer_page,
+            "explorer_visible_count": state.explorer_visible_count,
             "explorer_cd_path": state.explorer_cd_path,
             "explorer_tree_open": list(state.explorer_tree_open),
             "explorer_selected_paths": list(state.explorer_selected_paths),
@@ -184,6 +186,7 @@ def restore_screen_state(state: PageState, screen: Optional[str] = None) -> bool
         state.explorer_desc = bool(snapshot.get("explorer_desc"))
         state.explorer_view = str(snapshot.get("explorer_view") or "Таблица")
         state.explorer_page = int(snapshot.get("explorer_page") or 0)
+        state.explorer_visible_count = max(40, int(snapshot.get("explorer_visible_count") or 40))
         state.explorer_cd_path = str(snapshot.get("explorer_cd_path") or "")
         state.explorer_tree_open = list(snapshot.get("explorer_tree_open") or [])
         state.explorer_selected_paths = list(snapshot.get("explorer_selected_paths") or [])

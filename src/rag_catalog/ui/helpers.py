@@ -2533,6 +2533,7 @@ def _event_input_value(event: Any, fallback: Any = "") -> str:
 def _apply_explorer_filter_input(state: PageState, event: Any, fallback: Any = "") -> None:
     state.explorer_filter = _event_input_value(event, fallback)
     state.explorer_page = 0
+    state.explorer_visible_count = 40
 
 
 # ─────────────────────────── user state persistence ─────────────────────────
