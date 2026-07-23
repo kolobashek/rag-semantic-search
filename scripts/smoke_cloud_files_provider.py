@@ -160,10 +160,14 @@ def wait_for_background_hydration(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("provider", type=Path)
+    parser.add_argument("--previous-provider", type=Path)
     args = parser.parse_args()
     provider = args.provider.resolve()
     if not provider.is_file():
         raise FileNotFoundError(provider)
+    previous_provider = args.previous_provider.resolve() if args.previous_provider else None
+    if previous_provider is not None and not previous_provider.is_file():
+        raise FileNotFoundError(previous_provider)
 
     workspace = Path(tempfile.mkdtemp(prefix="rag-cfapi-smoke-"))
     root = workspace / "RAG Cloud Drive"
@@ -185,12 +189,54 @@ def main() -> int:
         "--run-seconds",
         "5",
     ]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process: subprocess.Popen[str] | None = None
     offline_process: subprocess.Popen[str] | None = None
+    previous_process: subprocess.Popen[str] | None = None
+    upgraded_process: subprocess.Popen[str] | None = None
     placeholder = root / "Demo" / "report.txt"
     offline_root = workspace / "RAG Cloud Drive Offline"
     offline_config = workspace / "offline-config.json"
+    upgrade_root = workspace / "RAG Cloud Drive Upgrade"
+    upgrade_config = workspace / "upgrade-config.json"
     try:
+        upgrade_tested = False
+        if previous_provider is not None:
+            previous_command = [
+                str(previous_provider),
+                "--config",
+                str(upgrade_config),
+                "--server",
+                origin,
+                "--token",
+                "smoke-token",
+                "--root",
+                str(upgrade_root),
+                "--run-seconds",
+                "2",
+            ]
+            previous_process = subprocess.Popen(
+                previous_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            wait_for_file(upgrade_root / "Demo" / "report.txt", previous_process)
+            stdout, stderr = previous_process.communicate(timeout=10)
+            if previous_process.returncode != 0:
+                raise RuntimeError(f"Previous provider failed.\n{stdout}\n{stderr}")
+
+            upgraded_process = subprocess.Popen(
+                [str(provider), *previous_command[1:]],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout, stderr = upgraded_process.communicate(timeout=15)
+            if upgraded_process.returncode != 0:
+                raise RuntimeError(f"Provider registration upgrade failed.\n{stdout}\n{stderr}")
+            upgrade_tested = True
+
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         wait_for_file(placeholder, process)
         if placeholder.stat().st_size != len(CONTENT):
             raise AssertionError("Placeholder logical size is incorrect.")
@@ -268,19 +314,29 @@ def main() -> int:
                     "range_requests": Handler.range_requests,
                     "offline_hydrated": True,
                     "offline_attributes": f"0x{offline_attributes:08x}",
+                    "registration_upgrade": upgrade_tested,
                 },
                 ensure_ascii=False,
             )
         )
         return 0
     finally:
-        if process.poll() is None:
-            process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        for upgrade_process in (previous_process, upgraded_process):
+            if upgrade_process is not None and upgrade_process.poll() is None:
+                upgrade_process.terminate()
+                try:
+                    upgrade_process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    upgrade_process.kill()
+                    upgrade_process.wait(timeout=5)
         if offline_process is not None and offline_process.poll() is None:
             offline_process.terminate()
             try:
@@ -297,6 +353,12 @@ def main() -> int:
         )
         subprocess.run(
             [str(provider), "--config", str(offline_config), "--root", str(offline_root), "--unregister"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [str(provider), "--config", str(upgrade_config), "--root", str(upgrade_root), "--unregister"],
             check=False,
             capture_output=True,
             text=True,

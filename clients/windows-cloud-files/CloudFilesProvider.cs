@@ -12,7 +12,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 {
     private const int Alignment = 4096;
     private const int TransferChunkBytes = 4 * 1024 * 1024;
-    private const int AlreadyExistsHResult = unchecked((int)0x800700B7);
+    private const int NotUnderSyncRootHResult = unchecked((int)0x80070186);
     private const int UnsuccessfulNtStatus = unchecked((int)0xC0000001);
     private static readonly Guid ProviderId = new("8f734f08-90fd-4c31-a3e2-1edcad1693fb");
     private static CloudFilesProvider? _current;
@@ -51,8 +51,12 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     {
         _status.SetState(ClientRunState.Syncing, "Подготовка облачной папки…");
         Directory.CreateDirectory(_root);
-        RegisterSyncRoot();
-        ConnectSyncRoot();
+        if (!ConnectSyncRoot(allowUnregistered: true))
+        {
+            RegisterSyncRoot();
+            ConnectSyncRoot();
+        }
+
         await RefreshFullSnapshotAsync(cancellationToken);
         await ApplyOfflinePolicyAsync(cancellationToken);
     }
@@ -512,22 +516,15 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 HardLink = CF_HARDLINK_POLICY.CF_HARDLINK_POLICY_NONE,
                 PlaceholderManagement = CF_PLACEHOLDER_MANAGEMENT_POLICY.CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT,
             };
-            CF_REGISTER_FLAGS flags = CF_REGISTER_FLAGS.CF_REGISTER_FLAG_MARK_IN_SYNC_ON_ROOT;
-            HRESULT result = PInvoke.CfRegisterSyncRoot(_root, registration, policies, flags);
-            if (result.Value == AlreadyExistsHResult)
-            {
-                result = PInvoke.CfRegisterSyncRoot(
-                    _root,
-                    registration,
-                    policies,
-                    flags | CF_REGISTER_FLAGS.CF_REGISTER_FLAG_UPDATE);
-            }
-
-            result.ThrowOnFailure();
+            PInvoke.CfRegisterSyncRoot(
+                _root,
+                registration,
+                policies,
+                CF_REGISTER_FLAGS.CF_REGISTER_FLAG_MARK_IN_SYNC_ON_ROOT).ThrowOnFailure();
         }
     }
 
-    private unsafe void ConnectSyncRoot()
+    private unsafe bool ConnectSyncRoot(bool allowUnregistered = false)
     {
         if (_current is not null)
         {
@@ -562,10 +559,16 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         if (result.Failed)
         {
             _current = null;
+            if (allowUnregistered && result.Value == NotUnderSyncRootHResult)
+            {
+                return false;
+            }
+
             result.ThrowOnFailure();
         }
 
         _connected = true;
+        return true;
     }
 
     private void QueueHydration(HydrationRequest request)

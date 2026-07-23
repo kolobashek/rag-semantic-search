@@ -52,7 +52,7 @@ from .state import (
 
 _EXPLORER_PAGE_SIZE = 40
 _TREE_CHILD_LIMIT = 24
-_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.3.0"
+_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.3.1"
 
 
 def _cloud_node_modified_timestamp(node: Any) -> float:
