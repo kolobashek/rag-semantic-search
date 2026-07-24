@@ -411,7 +411,7 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.5.0"
+_CLOUD_FILES_VERSION = "0.6.0"
 _CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 

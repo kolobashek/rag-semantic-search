@@ -7,6 +7,8 @@ internal sealed record ClientSettingsSelection(
     string RootPath,
     bool KeepAllOffline,
     HashSet<string> OfflinePaths,
+    int MaxCacheSizeGb,
+    int MinimumFreeSpaceGb,
     bool StartWithWindows,
     bool MountAsDrive,
     string DriveLetter);
@@ -16,6 +18,8 @@ internal sealed class SettingsForm : Form
     private readonly TextBox _rootPath;
     private readonly CheckBox _keepAllOffline;
     private readonly CheckedListBox _offlineFolders;
+    private readonly NumericUpDown _maxCacheSizeGb;
+    private readonly NumericUpDown _minimumFreeSpaceGb;
     private readonly CheckBox _startWithWindows;
     private readonly CheckBox _mountAsDrive;
     private readonly ComboBox _driveLetter;
@@ -25,8 +29,10 @@ internal sealed class SettingsForm : Form
     {
         Text = "Настройки RAG Cloud Files";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(600, 580);
-        ClientSize = new Size(600, 620);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ClientSize = new Size(620, 650);
         Font = new Font("Segoe UI", 9F);
         Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "") ?? SystemIcons.Application;
         _nestedOfflinePaths = config.OfflinePaths
@@ -43,14 +49,12 @@ internal sealed class SettingsForm : Form
         {
             Text = config.RootPath,
             Location = new Point(24, 47),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-            Size = new Size(456, 27),
+            Size = new Size(476, 27),
         };
         Button browse = new()
         {
             Text = "Обзор…",
-            Location = new Point(490, 45),
-            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Location = new Point(510, 45),
             Size = new Size(82, 30),
         };
         browse.Click += (_, _) => BrowseForRoot();
@@ -72,8 +76,7 @@ internal sealed class SettingsForm : Form
         {
             CheckOnClick = true,
             Location = new Point(24, 162),
-            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
-            Size = new Size(548, 285),
+            Size = new Size(568, 170),
             IntegralHeight = false,
         };
         foreach (string folder in availableFolders)
@@ -96,31 +99,90 @@ internal sealed class SettingsForm : Form
             Text = "Невыбранные папки остаются видимыми, но файлы загружаются только при открытии.",
             AutoSize = true,
             ForeColor = Color.DimGray,
-            Location = new Point(24, 458),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+            Location = new Point(24, 344),
+        };
+        Label cacheTitle = new()
+        {
+            Text = "Локальный кэш Files On-Demand",
+            Font = new Font(Font, FontStyle.Bold),
+            AutoSize = true,
+            Location = new Point(24, 376),
+        };
+        Label maxCacheLabel = new()
+        {
+            Text = "Максимальный объём кэша",
+            AutoSize = true,
+            Location = new Point(24, 409),
+        };
+        _maxCacheSizeGb = new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 2048,
+            Value = CachePolicy.NormalizeMaxCacheSizeGb(config.MaxCacheSizeGb),
+            Location = new Point(220, 404),
+            Size = new Size(86, 27),
+        };
+        Label maxCacheUnit = new()
+        {
+            Text = "ГБ",
+            AutoSize = true,
+            Location = new Point(314, 409),
+        };
+        Label freeSpaceLabel = new()
+        {
+            Text = "Оставлять свободными не менее",
+            AutoSize = true,
+            Location = new Point(24, 447),
+        };
+        _minimumFreeSpaceGb = new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 1024,
+            Value = CachePolicy.NormalizeMinimumFreeSpaceGb(config.MinimumFreeSpaceGb),
+            Location = new Point(250, 442),
+            Size = new Size(86, 27),
+        };
+        _maxCacheSizeGb.Enabled = !_keepAllOffline.Checked;
+        _minimumFreeSpaceGb.Enabled = !_keepAllOffline.Checked;
+        _keepAllOffline.CheckedChanged += (_, _) =>
+        {
+            _maxCacheSizeGb.Enabled = !_keepAllOffline.Checked;
+            _minimumFreeSpaceGb.Enabled = !_keepAllOffline.Checked;
+        };
+        Label freeSpaceUnit = new()
+        {
+            Text = "ГБ",
+            AutoSize = true,
+            Location = new Point(344, 447),
+        };
+        Label cacheHint = new()
+        {
+            Text = "Давно неиспользуемые файлы освобождаются автоматически. "
+                + "Закреплённые офлайн-папки не очищаются и могут превысить лимит.",
+            AutoSize = false,
+            ForeColor = Color.DimGray,
+            Location = new Point(24, 478),
+            Size = new Size(568, 40),
         };
         _startWithWindows = new CheckBox
         {
             Text = "Запускать вместе с Windows",
             Checked = config.StartWithWindows,
             AutoSize = true,
-            Location = new Point(24, 532),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+            Location = new Point(24, 563),
         };
         _mountAsDrive = new CheckBox
         {
             Text = "Показывать облако отдельным диском",
             Checked = config.MountAsDrive,
             AutoSize = true,
-            Location = new Point(24, 494),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+            Location = new Point(24, 528),
         };
         _driveLetter = new ComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
-            Location = new Point(314, 489),
+            Location = new Point(314, 523),
             Size = new Size(70, 28),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
         };
         foreach (char letter in "RSTUVWXYZDEFGHIJKLMNOPQ")
         {
@@ -132,16 +194,14 @@ internal sealed class SettingsForm : Form
         Button save = new()
         {
             Text = "Сохранить",
-            Location = new Point(386, 574),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Location = new Point(406, 602),
             Size = new Size(94, 32),
         };
         Button cancel = new()
         {
             Text = "Отмена",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(490, 574),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Location = new Point(510, 602),
             Size = new Size(82, 32),
         };
         save.Click += (_, _) =>
@@ -162,6 +222,14 @@ internal sealed class SettingsForm : Form
             folderLabel,
             _offlineFolders,
             hint,
+            cacheTitle,
+            maxCacheLabel,
+            _maxCacheSizeGb,
+            maxCacheUnit,
+            freeSpaceLabel,
+            _minimumFreeSpaceGb,
+            freeSpaceUnit,
+            cacheHint,
             _mountAsDrive,
             _driveLetter,
             _startWithWindows,
@@ -214,6 +282,8 @@ internal sealed class SettingsForm : Form
                 root,
                 _keepAllOffline.Checked,
                 offline,
+                decimal.ToInt32(_maxCacheSizeGb.Value),
+                decimal.ToInt32(_minimumFreeSpaceGb.Value),
                 _startWithWindows.Checked,
                 _mountAsDrive.Checked,
                 VirtualDriveManager.NormalizeDriveLetter(

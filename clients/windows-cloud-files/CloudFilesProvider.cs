@@ -29,6 +29,10 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _explicitLocalDeletes =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastAccessUtc =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, int> _openFiles =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _localSyncShutdown = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly string _root;
@@ -39,6 +43,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private string _cursor = "";
     private string _aclRevision = "";
     private DateTimeOffset _lastFullSnapshot = DateTimeOffset.MinValue;
+    private DateTimeOffset _nextCacheCheck = DateTimeOffset.MinValue;
+    private int _cacheCheckRequested = 1;
 
     public CloudFilesProvider(
         ProviderConfig config,
@@ -52,6 +58,13 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         _status = status ?? new ClientStatusModel();
         _state = store.LoadState();
         _root = Path.GetFullPath(config.RootPath);
+        foreach ((string path, string value) in _state.LastAccessedUtc)
+        {
+            if (DateTimeOffset.TryParse(value, out DateTimeOffset timestamp))
+            {
+                _lastAccessUtc[path] = timestamp.ToUniversalTime();
+            }
+        }
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -87,6 +100,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             _refreshLock.Release();
         }
+        await TryApplyCachePolicyAsync(cancellationToken);
     }
 
     public static void Unregister(string rootPath)
@@ -148,6 +162,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             await ApplyOfflinePolicyAsync(cancellationToken);
         }
+        await TryApplyCachePolicyAsync(cancellationToken, force: false);
     }
 
     public IReadOnlyList<string> GetTopLevelFolders()
@@ -273,6 +288,177 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         string.Equals(candidate, folder, StringComparison.OrdinalIgnoreCase) ||
         candidate.StartsWith($"{folder}/", StringComparison.OrdinalIgnoreCase);
 
+    public async Task ApplyCachePolicyAsync(
+        CancellationToken cancellationToken,
+        bool force = true)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        bool requested = Interlocked.Exchange(ref _cacheCheckRequested, 0) != 0;
+        if (!force && !requested && now < _nextCacheCheck)
+        {
+            return;
+        }
+        _nextCacheCheck = now.AddMinutes(10);
+
+        await _refreshLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_config.KeepAllOffline)
+            {
+                PersistLastAccesses();
+                return;
+            }
+
+            IReadOnlyList<CloudNode> files;
+            lock (_nodesSync)
+            {
+                files = _nodes.Values
+                    .Where(node => !node.IsFolder)
+                    .ToList();
+            }
+
+            List<CacheEntry> entries = [];
+            long allocatedBytes = 0;
+            foreach (CloudNode node in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string localPath = CloudPath.LocalPath(_root, node.Path);
+                if (!File.Exists(localPath))
+                {
+                    continue;
+                }
+
+                long allocated = CloudFilePinning.GetAllocatedSize(localPath);
+                allocatedBytes = checked(allocatedBytes + allocated);
+                bool protectedPath = _config.OfflinePaths.Any(path => IsAtOrBelow(node.Path, path));
+                bool inUse = _openFiles.GetValueOrDefault(node.Path, 0) > 0;
+                if (protectedPath || inUse || allocated <= 0 || !CloudFilePinning.IsInSync(localPath))
+                {
+                    continue;
+                }
+
+                DateTimeOffset lastAccess = _lastAccessUtc.GetValueOrDefault(
+                    node.Path,
+                    new DateTimeOffset(File.GetLastAccessTimeUtc(localPath)));
+                entries.Add(new CacheEntry(node.Path, allocated, lastAccess, protectedPath, inUse));
+            }
+
+            string root = Path.GetPathRoot(_root)
+                ?? throw new IOException($"Не удалось определить физический диск для {_root}.");
+            long availableFreeBytes = new DriveInfo(root).AvailableFreeSpace;
+            long bytesToReclaim = CachePolicy.CalculateBytesToReclaim(
+                allocatedBytes,
+                availableFreeBytes,
+                CachePolicy.BytesFromGb(CachePolicy.NormalizeMaxCacheSizeGb(_config.MaxCacheSizeGb)),
+                CachePolicy.BytesFromGb(
+                    CachePolicy.NormalizeMinimumFreeSpaceGb(_config.MinimumFreeSpaceGb)));
+            if (bytesToReclaim <= 0)
+            {
+                PersistLastAccesses();
+                _store.SaveState(_state);
+                return;
+            }
+
+            _status.SetState(ClientRunState.Syncing, "Освобождение места в локальном кэше…");
+            long plannedRemaining = bytesToReclaim;
+            long releasedBytes = 0;
+            int releasedFiles = 0;
+            foreach (CacheEntry entry in CachePolicy.SelectEvictionCandidates(entries, now))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (plannedRemaining <= 0)
+                {
+                    break;
+                }
+                if (_openFiles.GetValueOrDefault(entry.CloudPath, 0) > 0)
+                {
+                    continue;
+                }
+
+                string localPath = CloudPath.LocalPath(_root, entry.CloudPath);
+                if (!CloudFilePinning.IsInSync(localPath)
+                    || !CloudFilePinning.TryDehydrateFile(localPath, out long released))
+                {
+                    continue;
+                }
+
+                releasedFiles++;
+                releasedBytes = checked(releasedBytes + released);
+                plannedRemaining -= entry.AllocatedBytes;
+            }
+
+            PersistLastAccesses();
+            _store.SaveState(_state);
+            AppLog.Info(
+                $"Cache cleanup released {releasedBytes / 1024d / 1024d / 1024d:F2} GB "
+                + $"from {releasedFiles} files; requested {bytesToReclaim / 1024d / 1024d / 1024d:F2} GB.");
+            _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
+    }
+
+    private async Task TryApplyCachePolicyAsync(
+        CancellationToken cancellationToken,
+        bool force = true)
+    {
+        try
+        {
+            await ApplyCachePolicyAsync(cancellationToken, force);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Автоматическая очистка локального кэша не выполнена.", exception);
+            _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
+        }
+    }
+
+    private void PersistLastAccesses()
+    {
+        HashSet<string> currentPaths;
+        lock (_nodesSync)
+        {
+            currentPaths = _nodes.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+
+        _state.LastAccessedUtc = _lastAccessUtc
+            .Where(pair => currentPaths.Contains(pair.Key))
+            .ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.ToUniversalTime().ToString("O"),
+                StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void RecordFileOpen(string cloudPath)
+    {
+        _lastAccessUtc[cloudPath] = DateTimeOffset.UtcNow;
+        _openFiles.AddOrUpdate(cloudPath, 1, (_, count) => count + 1);
+    }
+
+    private void RecordFileClose(string cloudPath)
+    {
+        while (_openFiles.TryGetValue(cloudPath, out int count))
+        {
+            if (count <= 1)
+            {
+                if (_openFiles.TryRemove(cloudPath, out _))
+                {
+                    return;
+                }
+            }
+            else if (_openFiles.TryUpdate(cloudPath, count - 1, count))
+            {
+                return;
+            }
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         _watcher?.Dispose();
@@ -310,6 +496,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             {
                 _current = null;
             }
+            PersistLastAccesses();
+            _store.SaveState(_state);
         }
         finally
         {
@@ -1148,6 +1336,16 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             },
             new()
             {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION,
+                Callback = CallbackDelegates.NotifyFileOpen,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
+                Callback = CallbackDelegates.NotifyFileClose,
+            },
+            new()
+            {
                 Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_DELETE,
                 Callback = CallbackDelegates.NotifyDelete,
             },
@@ -1162,7 +1360,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             _root,
             callbacks,
             null,
-            CF_CONNECT_FLAGS.CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH,
+            CF_CONNECT_FLAGS.CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH
+                | CF_CONNECT_FLAGS.CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO,
             out _connectionKey);
         if (result.Failed)
         {
@@ -1203,6 +1402,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
             finally
             {
+                Interlocked.Exchange(ref _cacheCheckRequested, 1);
                 _status.EndTransfer(request.CloudPath, transferError);
                 if (_hydrations.TryRemove(request.RequestKey, out CancellationTokenSource? removed))
                 {
@@ -1322,6 +1522,67 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             source.Cancel();
         }
     }
+
+    private static unsafe void OnNotifyFileOpen(
+        CF_CALLBACK_INFO* info,
+        CF_CALLBACK_PARAMETERS* parameters)
+    {
+        CloudFilesProvider? provider = _current;
+        if (provider is null || info is null || IsCurrentProcess(info))
+        {
+            return;
+        }
+
+        if (TryDecodeCallbackPath(info, out string cloudPath))
+        {
+            provider.RecordFileOpen(cloudPath);
+        }
+    }
+
+    private static unsafe void OnNotifyFileClose(
+        CF_CALLBACK_INFO* info,
+        CF_CALLBACK_PARAMETERS* parameters)
+    {
+        CloudFilesProvider? provider = _current;
+        if (provider is null || info is null || IsCurrentProcess(info))
+        {
+            return;
+        }
+
+        if (TryDecodeCallbackPath(info, out string cloudPath))
+        {
+            provider.RecordFileClose(cloudPath);
+        }
+    }
+
+    private static unsafe bool TryDecodeCallbackPath(
+        CF_CALLBACK_INFO* info,
+        out string cloudPath)
+    {
+        cloudPath = "";
+        if (info->FileIdentity is null || info->FileIdentityLength == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            ReadOnlySpan<byte> identity = new(
+                info->FileIdentity,
+                checked((int)info->FileIdentityLength));
+            cloudPath = FileIdentityCodec.Decode(identity);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Некорректный CfAPI file identity.", exception);
+            return false;
+        }
+    }
+
+    private static unsafe bool IsCurrentProcess(CF_CALLBACK_INFO* info) =>
+        info->ProcessInfo is not null
+        && info->ProcessInfo->ProcessId == (uint)Environment.ProcessId;
 
     private static unsafe void OnNotifyDelete(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
     {
@@ -1519,6 +1780,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     {
         internal static readonly CF_CALLBACK FetchData = OnFetchData;
         internal static readonly CF_CALLBACK CancelFetchData = OnCancelFetchData;
+        internal static readonly CF_CALLBACK NotifyFileOpen = OnNotifyFileOpen;
+        internal static readonly CF_CALLBACK NotifyFileClose = OnNotifyFileClose;
         internal static readonly CF_CALLBACK NotifyDelete = OnNotifyDelete;
     }
 }

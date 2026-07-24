@@ -161,6 +161,10 @@ internal static class Program
                         config.OfflinePaths = new HashSet<string>(
                             selection.OfflinePaths,
                             StringComparer.OrdinalIgnoreCase);
+                        config.MaxCacheSizeGb = CachePolicy.NormalizeMaxCacheSizeGb(
+                            selection.MaxCacheSizeGb);
+                        config.MinimumFreeSpaceGb = CachePolicy.NormalizeMinimumFreeSpaceGb(
+                            selection.MinimumFreeSpaceGb);
                         config.StartWithWindows = selection.StartWithWindows;
                         bool driveSettingsChanged = config.MountAsDrive != selection.MountAsDrive
                             || !config.DriveLetter.Equals(
@@ -190,6 +194,7 @@ internal static class Program
                         if (provider is not null)
                         {
                             await provider.ApplyOfflinePolicyAsync(shutdown.Token);
+                            await provider.ApplyCachePolicyAsync(shutdown.Token);
                         }
                     },
                     requestRestart: () => RequestStop(restart: true),

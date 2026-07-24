@@ -7,6 +7,8 @@ internal sealed class SetupForm : Form
 {
     private readonly TextBox _rootPath;
     private readonly CheckBox _keepAllOffline;
+    private readonly NumericUpDown _maxCacheSizeGb;
+    private readonly NumericUpDown _minimumFreeSpaceGb;
     private readonly CheckBox _startWithWindows;
     private readonly CheckBox _mountAsDrive;
     private readonly ComboBox _driveLetter;
@@ -14,6 +16,8 @@ internal sealed class SetupForm : Form
     public SetupForm(
         string defaultRoot,
         bool keepAllOffline = false,
+        int maxCacheSizeGb = CachePolicy.DefaultMaxCacheSizeGb,
+        int minimumFreeSpaceGb = CachePolicy.DefaultMinimumFreeSpaceGb,
         bool startWithWindows = true,
         bool mountAsDrive = true,
         string driveLetter = "R")
@@ -23,7 +27,7 @@ internal sealed class SetupForm : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(560, 410);
+        ClientSize = new Size(560, 520);
         Font = new Font("Segoe UI", 9F);
         Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "") ?? SystemIcons.Application;
 
@@ -78,24 +82,71 @@ internal sealed class SetupForm : Form
             Location = new Point(50, 231),
             Size = new Size(475, 42),
         };
+        Label maxCacheLabel = new()
+        {
+            Text = "Максимальный локальный кэш",
+            AutoSize = true,
+            Location = new Point(30, 292),
+        };
+        _maxCacheSizeGb = new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 2048,
+            Value = CachePolicy.NormalizeMaxCacheSizeGb(maxCacheSizeGb),
+            Location = new Point(236, 287),
+            Size = new Size(82, 27),
+        };
+        Label maxCacheUnit = new()
+        {
+            Text = "ГБ",
+            AutoSize = true,
+            Location = new Point(326, 292),
+        };
+        Label freeSpaceLabel = new()
+        {
+            Text = "Резерв свободного места",
+            AutoSize = true,
+            Location = new Point(30, 330),
+        };
+        _minimumFreeSpaceGb = new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 1024,
+            Value = CachePolicy.NormalizeMinimumFreeSpaceGb(minimumFreeSpaceGb),
+            Location = new Point(236, 325),
+            Size = new Size(82, 27),
+        };
+        _maxCacheSizeGb.Enabled = !_keepAllOffline.Checked;
+        _minimumFreeSpaceGb.Enabled = !_keepAllOffline.Checked;
+        _keepAllOffline.CheckedChanged += (_, _) =>
+        {
+            _maxCacheSizeGb.Enabled = !_keepAllOffline.Checked;
+            _minimumFreeSpaceGb.Enabled = !_keepAllOffline.Checked;
+        };
+        Label freeSpaceUnit = new()
+        {
+            Text = "ГБ",
+            AutoSize = true,
+            Location = new Point(326, 330),
+        };
         _startWithWindows = new CheckBox
         {
             Text = "Запускать вместе с Windows",
             Checked = startWithWindows,
             AutoSize = true,
-            Location = new Point(30, 337),
+            Location = new Point(30, 420),
         };
         _mountAsDrive = new CheckBox
         {
             Text = "Показывать облако отдельным диском",
             Checked = mountAsDrive,
             AutoSize = true,
-            Location = new Point(30, 282),
+            Location = new Point(30, 375),
         };
         _driveLetter = new ComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
-            Location = new Point(320, 277),
+            Location = new Point(320, 370),
             Size = new Size(70, 28),
         };
         foreach (char letter in "RSTUVWXYZDEFGHIJKLMNOPQ")
@@ -110,14 +161,14 @@ internal sealed class SetupForm : Form
         {
             Text = "Установить",
             DialogResult = DialogResult.OK,
-            Location = new Point(350, 365),
+            Location = new Point(350, 466),
             Size = new Size(100, 32),
         };
         Button cancel = new()
         {
             Text = "Отмена",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(458, 365),
+            Location = new Point(458, 466),
             Size = new Size(74, 32),
         };
         install.Click += (_, _) =>
@@ -137,6 +188,12 @@ internal sealed class SetupForm : Form
             browse,
             _keepAllOffline,
             offlineHint,
+            maxCacheLabel,
+            _maxCacheSizeGb,
+            maxCacheUnit,
+            freeSpaceLabel,
+            _minimumFreeSpaceGb,
+            freeSpaceUnit,
             _mountAsDrive,
             _driveLetter,
             _startWithWindows,
@@ -151,6 +208,10 @@ internal sealed class SetupForm : Form
         Environment.ExpandEnvironmentVariables(_rootPath.Text.Trim()));
 
     public bool KeepAllOffline => _keepAllOffline.Checked;
+
+    public int MaxCacheSizeGb => decimal.ToInt32(_maxCacheSizeGb.Value);
+
+    public int MinimumFreeSpaceGb => decimal.ToInt32(_minimumFreeSpaceGb.Value);
 
     public bool StartWithWindows => _startWithWindows.Checked;
 

@@ -54,6 +54,8 @@ internal sealed class ConfigStore
         config.OfflinePaths = new HashSet<string>(
             saved.OfflinePaths ?? [],
             StringComparer.OrdinalIgnoreCase);
+        config.MaxCacheSizeGb = CachePolicy.NormalizeMaxCacheSizeGb(saved.MaxCacheSizeGb);
+        config.MinimumFreeSpaceGb = CachePolicy.NormalizeMinimumFreeSpaceGb(saved.MinimumFreeSpaceGb);
         config.StartWithWindows = saved.StartWithWindows;
         config.MountAsDrive = saved.MountAsDrive;
         config.DriveLetter = VirtualDriveManager.NormalizeDriveLetter(saved.DriveLetter);
@@ -87,6 +89,9 @@ internal sealed class ConfigStore
             StringComparer.OrdinalIgnoreCase);
         state.AppliedOfflineVersions = new Dictionary<string, string>(
             state.AppliedOfflineVersions ?? new Dictionary<string, string>(),
+            StringComparer.OrdinalIgnoreCase);
+        state.LastAccessedUtc = new Dictionary<string, string>(
+            state.LastAccessedUtc ?? new Dictionary<string, string>(),
             StringComparer.OrdinalIgnoreCase);
         return state;
     }
@@ -122,6 +127,12 @@ internal sealed class ConfigStore
             config.DeviceId = deviceId;
         }
         config.KeepAllOffline = Convert.ToInt32(key.GetValue("KeepAllOffline", 0)) != 0;
+        config.MaxCacheSizeGb = CachePolicy.NormalizeMaxCacheSizeGb(
+            Convert.ToInt32(key.GetValue("MaxCacheSizeGb", CachePolicy.DefaultMaxCacheSizeGb)));
+        config.MinimumFreeSpaceGb = CachePolicy.NormalizeMinimumFreeSpaceGb(
+            Convert.ToInt32(key.GetValue(
+                "MinimumFreeSpaceGb",
+                CachePolicy.DefaultMinimumFreeSpaceGb)));
         config.StartWithWindows = Convert.ToInt32(key.GetValue("StartWithWindows", 1)) != 0;
         config.MountAsDrive = Convert.ToInt32(key.GetValue("MountAsDrive", 1)) != 0;
         config.DriveLetter = VirtualDriveManager.NormalizeDriveLetter(

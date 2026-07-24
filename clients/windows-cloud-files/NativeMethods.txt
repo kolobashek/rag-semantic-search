@@ -2,6 +2,7 @@ CfConnectSyncRoot
 CfConvertToPlaceholder
 CfGetPlaceholderInfo
 CfCreatePlaceholders
+CfDehydratePlaceholder
 CfDisconnectSyncRoot
 CfExecute
 CfGetPlatformInfo

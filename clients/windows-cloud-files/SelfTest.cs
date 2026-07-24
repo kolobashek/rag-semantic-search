@@ -19,6 +19,35 @@ internal static class SelfTest
         Equal("R", VirtualDriveManager.NormalizeDriveLetter("r:"));
         Equal("R", VirtualDriveManager.NormalizeDriveLetter("invalid"));
         Equal("S", VirtualDriveManager.CandidateLetters("S").First());
+        Equal(20, CachePolicy.NormalizeMaxCacheSizeGb(0));
+        Equal(10, CachePolicy.NormalizeMinimumFreeSpaceGb(0));
+        Equal(
+            15L,
+            CachePolicy.CalculateBytesToReclaim(
+                allocatedBytes: 35,
+                availableFreeBytes: 100,
+                maximumCacheBytes: 20,
+                minimumFreeBytes: 10));
+        Equal(
+            7L,
+            CachePolicy.CalculateBytesToReclaim(
+                allocatedBytes: 10,
+                availableFreeBytes: 3,
+                maximumCacheBytes: 20,
+                minimumFreeBytes: 10));
+        DateTimeOffset cacheNow = DateTimeOffset.UtcNow;
+        IReadOnlyList<CacheEntry> evictionCandidates = CachePolicy.SelectEvictionCandidates(
+            [
+                new("recent.txt", 100, cacheNow.AddMinutes(-2), false, false),
+                new("pinned.txt", 100, cacheNow.AddDays(-3), true, false),
+                new("open.txt", 100, cacheNow.AddDays(-4), false, true),
+                new("older.txt", 100, cacheNow.AddDays(-2), false, false),
+                new("oldest.txt", 100, cacheNow.AddDays(-3), false, false),
+            ],
+            cacheNow);
+        Equal("oldest.txt", evictionCandidates[0].CloudPath);
+        Equal("older.txt", evictionCandidates[1].CloudPath);
+        Equal(2, evictionCandidates.Count);
         Equal(
             true,
             SyncRootRegistrar.BuildSyncRootId("https://catalog.example")
@@ -71,6 +100,8 @@ internal static class SelfTest
                 Token = "secret-device-token",
                 KeepAllOffline = true,
                 OfflinePaths = new HashSet<string>(["Документы"], StringComparer.OrdinalIgnoreCase),
+                MaxCacheSizeGb = 24,
+                MinimumFreeSpaceGb = 8,
                 StartWithWindows = false,
                 MountAsDrive = true,
                 DriveLetter = "S",
@@ -80,6 +111,8 @@ internal static class SelfTest
             Equal("secret-device-token", store.LoadConfig().Token);
             Equal(true, store.LoadConfig().KeepAllOffline);
             Equal(true, store.LoadConfig().OfflinePaths.Contains("документы"));
+            Equal(24, store.LoadConfig().MaxCacheSizeGb);
+            Equal(8, store.LoadConfig().MinimumFreeSpaceGb);
             Equal(false, store.LoadConfig().StartWithWindows);
             Equal(true, store.LoadConfig().MountAsDrive);
             Equal("S", store.LoadConfig().DriveLetter);
@@ -165,6 +198,10 @@ internal static class SelfTest
                 {
                     [unicodePath] = "123:456",
                 },
+                LastAccessedUtc = new Dictionary<string, string>
+                {
+                    [unicodePath] = cacheNow.ToString("O"),
+                },
             };
             store.SaveState(state);
             if (!store.LoadState().ManagedPaths.Contains(unicodePath.ToUpperInvariant()))
@@ -174,6 +211,9 @@ internal static class SelfTest
             Equal(true, store.LoadState().AppliedOfflinePaths.Contains("документы"));
             Equal("version-1", store.LoadState().AppliedOfflineVersions[unicodePath.ToUpperInvariant()]);
             Equal("123:456", store.LoadState().LocalFingerprints[unicodePath.ToUpperInvariant()]);
+            Equal(
+                cacheNow.ToString("O"),
+                store.LoadState().LastAccessedUtc[unicodePath.ToUpperInvariant()]);
 
             ClientStatusModel status = new();
             status.BeginTransfer(unicodePath);

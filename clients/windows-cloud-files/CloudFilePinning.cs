@@ -2,6 +2,7 @@ using Microsoft.Win32.SafeHandles;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Windows.Win32;
+using Windows.Win32.Foundation;
 using Windows.Win32.Storage.CloudFilters;
 
 namespace RagCloudFiles;
@@ -101,6 +102,52 @@ internal static partial class CloudFilePinning
         RefreshShell(path);
     }
 
+    public static long GetAllocatedSize(string path)
+    {
+        uint high;
+        Marshal.SetLastPInvokeError(0);
+        uint low = GetCompressedFileSize(Path.GetFullPath(path), out high);
+        int error = Marshal.GetLastPInvokeError();
+        if (low == uint.MaxValue && error != 0)
+        {
+            return 0;
+        }
+
+        return checked((long)(((ulong)high << 32) | low));
+    }
+
+    public static bool TryDehydrateFile(string path, out long releasedBytes)
+    {
+        releasedBytes = 0;
+        long before = GetAllocatedSize(path);
+        if (before <= 0)
+        {
+            return true;
+        }
+
+        try
+        {
+            using SafeFileHandle handle = OpenForPlaceholderManagement(path);
+            HRESULT result = PInvoke.CfDehydratePlaceholder(
+                handle,
+                StartingOffset: 0,
+                Length: -1,
+                CF_DEHYDRATE_FLAGS.CF_DEHYDRATE_FLAG_BACKGROUND);
+            if (result.Failed)
+            {
+                return false;
+            }
+
+            releasedBytes = Math.Max(0, before - GetAllocatedSize(path));
+            RefreshShell(path);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
     private static bool TryGetPlaceholderInfo(string path, out CF_IN_SYNC_STATE inSyncState)
     {
         inSyncState = CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_NOT_IN_SYNC;
@@ -170,6 +217,13 @@ internal static partial class CloudFilePinning
         uint creationDisposition,
         uint flagsAndAttributes,
         nint templateFile);
+
+    [LibraryImport(
+        "kernel32.dll",
+        EntryPoint = "GetCompressedFileSizeW",
+        SetLastError = true,
+        StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint GetCompressedFileSize(string fileName, out uint fileSizeHigh);
 
     [LibraryImport("shell32.dll", EntryPoint = "SHChangeNotify", StringMarshalling = StringMarshalling.Utf16)]
     private static partial void SHChangeNotify(uint eventId, uint flags, string item1, nint item2);

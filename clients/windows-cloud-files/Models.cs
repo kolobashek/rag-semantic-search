@@ -33,6 +33,12 @@ internal sealed class ProviderConfig
     [JsonPropertyName("offline_paths")]
     public HashSet<string> OfflinePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    [JsonPropertyName("max_cache_size_gb")]
+    public int MaxCacheSizeGb { get; set; } = 20;
+
+    [JsonPropertyName("minimum_free_space_gb")]
+    public int MinimumFreeSpaceGb { get; set; } = 10;
+
     [JsonPropertyName("start_with_windows")]
     public bool StartWithWindows { get; set; } = true;
 
@@ -187,5 +193,9 @@ internal sealed class ProviderState
 
     [JsonPropertyName("applied_offline_versions")]
     public Dictionary<string, string> AppliedOfflineVersions { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    [JsonPropertyName("last_accessed_utc")]
+    public Dictionary<string, string> LastAccessedUtc { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 }

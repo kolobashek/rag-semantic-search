@@ -88,5 +88,13 @@ def test_cloud_files_client_uses_shell_registration_and_confirmed_deletes() -> N
     assert "CF_CALLBACK_TYPE_NOTIFY_DELETE" in provider
     assert "CF_OPERATION_TYPE_ACK_DELETE" in provider
     assert "ShouldPropagateDelete" in provider
+    assert "CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION" in provider
+    assert "ApplyCachePolicyAsync" in provider
+    assert "CfDehydratePlaceholder" in (
+        client_dir / "NativeMethods.txt"
+    ).read_text(encoding="utf-8")
+    assert "MaxCacheSizeGb" in (
+        client_dir / "SettingsForm.cs"
+    ).read_text(encoding="utf-8")
     assert "DefineDosDevice" in virtual_drive
     assert "RemoveForRoot" in virtual_drive

@@ -61,6 +61,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 _config.RootPath,
                 _allOfflineItem.Checked,
                 new HashSet<string>(_config.OfflinePaths, StringComparer.OrdinalIgnoreCase),
+                _config.MaxCacheSizeGb,
+                _config.MinimumFreeSpaceGb,
                 _config.StartWithWindows,
                 _config.MountAsDrive,
                 _config.DriveLetter);
