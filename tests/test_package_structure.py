@@ -96,5 +96,8 @@ def test_cloud_files_client_uses_shell_registration_and_confirmed_deletes() -> N
     assert "MaxCacheSizeGb" in (
         client_dir / "SettingsForm.cs"
     ).read_text(encoding="utf-8")
+    tray = (client_dir / "TrayApplicationContext.cs").read_text(encoding="utf-8")
+    assert '"О программе…"' in tray
+    assert "AppDefaults.Version" in tray
     assert "DefineDosDevice" in virtual_drive
     assert "RemoveForRoot" in virtual_drive

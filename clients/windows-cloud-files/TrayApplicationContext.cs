@@ -82,6 +82,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add("Открыть журнал", null, (_, _) => OpenLog());
         menu.Items.Add("Перезапустить клиент", null, (_, _) => _requestRestart());
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("О программе…", null, (_, _) => ShowAbout());
         menu.Items.Add("Выход", null, (_, _) => _requestExit());
 
         _baseIcon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "")
@@ -272,5 +273,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             WindowsBootstrap.ShowError("Не удалось открыть журнал.", exception);
         }
+    }
+
+    private void ShowAbout()
+    {
+        MessageBox.Show(
+            $"{AppDefaults.ProductName}{Environment.NewLine}"
+            + $"Версия: {AppDefaults.Version}{Environment.NewLine}{Environment.NewLine}"
+            + $"Сервер: {_config.Server}{Environment.NewLine}"
+            + $"Локальная папка: {_config.RootPath}",
+            $"О программе {AppDefaults.ProductName}",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
     }
 }
