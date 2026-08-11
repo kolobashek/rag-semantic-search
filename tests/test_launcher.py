@@ -81,6 +81,42 @@ def test_start_bot_clears_stale_pid_before_spawn(monkeypatch, tmp_path: Path) ->
     assert launcher._read_pid_payload(pid_file)["pid"] == 2222
 
 
+def test_live_foreign_process_is_treated_as_stale_pid(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "web.pid"
+    launcher._write_pid(pid_file, 40580, {"module": launcher.WEB_MODULE})
+    monkeypatch.setattr(launcher, "_pid_alive", lambda pid: int(pid) == 40580)
+    monkeypatch.setattr(
+        launcher,
+        "_pid_commandline",
+        lambda _pid: r'"C:\Program Files\Yandex\browser.exe" --type=renderer',
+    )
+
+    note = launcher._stale_pid_note(pid_file, "web", launcher.WEB_MODULE)
+
+    assert note == "web.note: cleared stale pid 40580"
+    assert not pid_file.exists()
+
+
+def test_stop_web_never_kills_reused_foreign_pid(monkeypatch, tmp_path: Path) -> None:
+    cfg = {
+        "telemetry_db_path": str(tmp_path / "shared" / "rag_telemetry.db"),
+        "qdrant_db_path": str(tmp_path / "qdrant"),
+    }
+    pid_file = launcher._pid_file(cfg, "web")
+    launcher._write_pid(pid_file, 40580, {"module": launcher.WEB_MODULE})
+    killed: list[int] = []
+    monkeypatch.setattr(launcher, "load_config", lambda: cfg)
+    monkeypatch.setattr(launcher, "_pid_runs_module", lambda _pid, _module: False)
+    monkeypatch.setattr(launcher, "_find_python_module_pid", lambda _module: 0)
+    monkeypatch.setattr(launcher, "_kill_pid", lambda pid: killed.append(pid) or True)
+
+    result = launcher._stop_web()
+
+    assert result == "web=not-managed"
+    assert killed == []
+    assert not pid_file.exists()
+
+
 def test_start_bot_reports_recent_log_error_on_failure(monkeypatch, tmp_path: Path) -> None:
     cfg = {
         "telegram_enabled": True,
@@ -187,6 +223,7 @@ def test_start_web_waits_longer_than_ten_seconds_under_load(monkeypatch, tmp_pat
     monkeypatch.setattr(launcher, "_port_open", delayed_port)
     monkeypatch.setattr(launcher, "_spawn_python_module", lambda *_args, **_kwargs: 4242)
     monkeypatch.setattr(launcher, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(launcher, "_find_python_module_pid", lambda _module: 0)
     monkeypatch.setattr(launcher.time, "sleep", lambda _seconds: None)
 
     result = launcher._start_web(cfg, "127.0.0.1", 8080)

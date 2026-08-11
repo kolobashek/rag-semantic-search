@@ -28,6 +28,8 @@ from rag_catalog.core.log_history import last_error_from_history, open_run_log, 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "logs" / "runtime"
+WEB_MODULE = "rag_catalog.ui.nice_app"
+BOT_MODULE = "rag_catalog.integrations.telegram_bot"
 
 
 def load_config() -> Dict[str, Any]:
@@ -90,6 +92,12 @@ def _pid_alive(pid: int) -> bool:
 def _pid_commandline(pid: int) -> str:
     if int(pid or 0) <= 0:
         return ""
+    try:
+        commandline = psutil.Process(int(pid)).cmdline()
+        if commandline:
+            return subprocess.list2cmdline([str(part) for part in commandline])
+    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+        pass
     if os.name == "nt":
         try:
             cmd = (
@@ -106,6 +114,15 @@ def _pid_commandline(pid: int) -> str:
         except Exception:
             return ""
     return ""
+
+
+def _pid_runs_module(pid: int, module: str) -> bool:
+    """Return True only when pid is alive and still belongs to the expected service."""
+    if not _pid_alive(pid):
+        return False
+    commandline = _pid_commandline(pid).casefold()
+    expected = str(module or "").strip().casefold()
+    return bool(commandline and expected and expected in commandline)
 
 
 def _find_python_module_pid(module: str) -> int:
@@ -153,10 +170,10 @@ def _remove_pid(pid_path: Path) -> None:
         pass
 
 
-def _stale_pid_note(pid_path: Path, service: str) -> str:
+def _stale_pid_note(pid_path: Path, service: str, module: str) -> str:
     payload = _read_pid_payload(pid_path)
     pid = int(payload.get("pid") or 0)
-    if pid <= 0 or _pid_alive(pid):
+    if pid <= 0 or _pid_runs_module(pid, module):
         return ""
     _remove_pid(pid_path)
     return f"{service}.note: cleared stale pid {pid}"
@@ -335,20 +352,28 @@ def _stop_qdrant_if_managed() -> str:
 
 def _start_web(cfg: Dict[str, Any], host: str, port: int) -> str:
     web_pid_file = _pid_file(cfg, "web")
-    _stale_pid_note(web_pid_file, "web")
+    _stale_pid_note(web_pid_file, "web", WEB_MODULE)
     payload = _read_pid_payload(web_pid_file)
     pid = int(payload.get("pid") or 0)
-    if pid and _pid_alive(pid):
+    if pid and _pid_runs_module(pid, WEB_MODULE):
         return f"web=already-up (pid={pid}, {host}:{port})"
+    running_pid = _find_python_module_pid(WEB_MODULE)
+    if running_pid:
+        _write_pid(
+            web_pid_file,
+            running_pid,
+            {"host": host, "port": port, "module": WEB_MODULE, "discovered": True},
+        )
+        return f"web=already-up (pid={running_pid}, discovered)"
     if _port_open(host, port, timeout=1.0):
         return f"web=already-up (unmanaged process on {host}:{port})"
     new_pid = _spawn_python_module(
-        "rag_catalog.ui.nice_app",
+        WEB_MODULE,
         ["--host", host, "--port", str(port), "--no-show"],
         PROJECT_ROOT,
         "web.log",
     )
-    _write_pid(web_pid_file, new_pid, {"host": host, "port": port, "module": "rag_catalog.ui.nice_app"})
+    _write_pid(web_pid_file, new_pid, {"host": host, "port": port, "module": WEB_MODULE})
     try:
         ready_timeout = float(cfg.get("launcher_web_start_timeout_sec") or 30.0)
     except (TypeError, ValueError):
@@ -366,8 +391,11 @@ def _stop_web() -> str:
     web_pid_file = _pid_file(cfg, "web")
     payload = _read_pid_payload(web_pid_file)
     pid = int(payload.get("pid") or 0)
+    if pid > 0 and not _pid_runs_module(pid, WEB_MODULE):
+        _remove_pid(web_pid_file)
+        pid = 0
     if pid <= 0:
-        pid = _find_python_module_pid("rag_catalog.ui.nice_app")
+        pid = _find_python_module_pid(WEB_MODULE)
         if pid <= 0:
             return "web=not-managed"
     stopped = _kill_pid(pid)
@@ -378,7 +406,7 @@ def _stop_web() -> str:
 def _start_bot(enable_mode: str) -> str:
     cfg = load_config()
     bot_pid_file = _pid_file(cfg, "bot")
-    _stale_pid_note(bot_pid_file, "bot")
+    _stale_pid_note(bot_pid_file, "bot", BOT_MODULE)
     bot_enabled = bool(cfg.get("telegram_enabled"))
     token_set = bool(str(cfg.get("telegram_bot_token") or "").strip())
     q_mode = _qdrant_target(cfg).get("mode")
@@ -390,21 +418,21 @@ def _start_bot(enable_mode: str) -> str:
         return "bot=skipped (telegram_enabled=false or empty token)"
     payload = _read_pid_payload(bot_pid_file)
     pid = int(payload.get("pid") or 0)
-    if pid and _pid_alive(pid):
+    if pid and _pid_runs_module(pid, BOT_MODULE):
         return f"bot=already-up (pid={pid})"
-    running_pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+    running_pid = _find_python_module_pid(BOT_MODULE)
     if running_pid:
-        _write_pid(bot_pid_file, running_pid, {"module": "rag_catalog.integrations.telegram_bot", "discovered": True})
+        _write_pid(bot_pid_file, running_pid, {"module": BOT_MODULE, "discovered": True})
         return f"bot=already-up (pid={running_pid}, discovered)"
-    new_pid = _spawn_python_module("rag_catalog.integrations.telegram_bot", [], PROJECT_ROOT, "telegram_bot.log")
-    _write_pid(bot_pid_file, new_pid, {"module": "rag_catalog.integrations.telegram_bot"})
+    new_pid = _spawn_python_module(BOT_MODULE, [], PROJECT_ROOT, "telegram_bot.log")
+    _write_pid(bot_pid_file, new_pid, {"module": BOT_MODULE})
     for _ in range(12):
         time.sleep(0.5)
         if _pid_alive(new_pid):
             return f"bot=started (pid={new_pid})"
-        discovered_pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+        discovered_pid = _find_python_module_pid(BOT_MODULE)
         if discovered_pid:
-            _write_pid(bot_pid_file, discovered_pid, {"module": "rag_catalog.integrations.telegram_bot", "discovered": True})
+            _write_pid(bot_pid_file, discovered_pid, {"module": BOT_MODULE, "discovered": True})
             return f"bot=started (pid={discovered_pid}, discovered)"
     _remove_pid(bot_pid_file)
     error = _last_log_error("telegram_bot.log")
@@ -418,8 +446,11 @@ def _stop_bot() -> str:
     bot_pid_file = _pid_file(cfg, "bot")
     payload = _read_pid_payload(bot_pid_file)
     pid = int(payload.get("pid") or 0)
+    if pid > 0 and not _pid_runs_module(pid, BOT_MODULE):
+        _remove_pid(bot_pid_file)
+        pid = 0
     if pid <= 0:
-        pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+        pid = _find_python_module_pid(BOT_MODULE)
         if pid <= 0:
             return "bot=not-managed"
     stopped = _kill_pid(pid)
@@ -435,8 +466,8 @@ def _status(host: str, port: int) -> int:
     bot_payload = _read_pid_payload(bot_pid_file)
     web_pid = int(web_payload.get("pid") or 0)
     bot_pid = int(bot_payload.get("pid") or 0)
-    web_alive = _pid_alive(web_pid)
-    bot_alive = _pid_alive(bot_pid)
+    web_alive = _pid_runs_module(web_pid, WEB_MODULE)
+    bot_alive = _pid_runs_module(bot_pid, BOT_MODULE)
     notes: list[str] = []
     if web_pid and not web_alive:
         _remove_pid(_pid_file(cfg, "web"))
@@ -446,11 +477,23 @@ def _status(host: str, port: int) -> int:
         _remove_pid(bot_pid_file)
         notes.append(f"bot.note: cleared stale pid {bot_pid}")
         bot_pid = 0
+    web_discovered = False
+    if not web_alive:
+        discovered_pid = _find_python_module_pid(WEB_MODULE)
+        if discovered_pid:
+            _write_pid(
+                _pid_file(cfg, "web"),
+                discovered_pid,
+                {"host": host, "port": port, "module": WEB_MODULE, "discovered": True},
+            )
+            web_pid = discovered_pid
+            web_alive = True
+            web_discovered = True
     bot_discovered = False
     if not bot_alive:
-        discovered_pid = _find_python_module_pid("rag_catalog.integrations.telegram_bot")
+        discovered_pid = _find_python_module_pid(BOT_MODULE)
         if discovered_pid:
-            _write_pid(bot_pid_file, discovered_pid, {"module": "rag_catalog.integrations.telegram_bot", "discovered": True})
+            _write_pid(bot_pid_file, discovered_pid, {"module": BOT_MODULE, "discovered": True})
             bot_pid = discovered_pid
             bot_alive = True
             bot_discovered = True
@@ -458,6 +501,8 @@ def _status(host: str, port: int) -> int:
     print("Launcher status")
     web_port_open = _port_open(host, port)
     print(f"- web.process: {'up' if web_alive else 'down'} (pid={web_pid or '-'})")
+    if web_discovered:
+        print("- web.note: discovered running process from another worktree/runtime")
     print(f"- web.port: {'open' if web_port_open else 'closed'} ({host}:{port})")
     print(f"- web.managed: {'yes' if web_alive else 'no'}")
     if (not web_alive) and web_port_open:
