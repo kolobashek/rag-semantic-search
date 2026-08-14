@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -223,6 +224,18 @@ class S3StorageAdapter:
         return health
 
 
+def resolve_s3_credential(config: dict, key: str, env_name: str) -> str:
+    """Прочитать S3-креденшл из переменной окружения, иначе из config.
+
+    Переменные окружения имеют приоритет, чтобы в контейнерах не приходилось
+    держать секреты в config.json (который лежит в образе).
+    """
+    from_env = normalize_s3_credential(str(os.environ.get(env_name) or ''))
+    if from_env:
+        return from_env
+    return normalize_s3_credential(str(config.get(key) or ''))
+
+
 def resolve_storage_adapter(config: dict) -> StorageAdapter:
     kind = str(config.get('cloud_drive_storage') or 'local').strip().lower()
     if kind == 'local':
@@ -238,8 +251,12 @@ def resolve_storage_adapter(config: dict) -> StorageAdapter:
             bucket=bucket,
             endpoint_url=str(config.get('cloud_drive_s3_endpoint') or '').strip(),
             region=str(config.get('cloud_drive_s3_region') or '').strip(),
-            access_key=normalize_s3_credential(str(config.get('cloud_drive_s3_access_key') or '')),
-            secret_key=normalize_s3_credential(str(config.get('cloud_drive_s3_secret_key') or '')),
+            access_key=resolve_s3_credential(
+                config, 'cloud_drive_s3_access_key', 'RAG_CLOUD_DRIVE_S3_ACCESS_KEY'
+            ),
+            secret_key=resolve_s3_credential(
+                config, 'cloud_drive_s3_secret_key', 'RAG_CLOUD_DRIVE_S3_SECRET_KEY'
+            ),
         )
     raise RuntimeError(f'Неизвестный cloud_drive_storage: {kind}')
 

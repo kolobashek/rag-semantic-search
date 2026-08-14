@@ -520,14 +520,19 @@ docker compose --profile storage up -d minio minio-init
 
 Порты можно переопределить через `MINIO_PORT` и `MINIO_CONSOLE_PORT`.
 
-Шаблон `config.docker.example.json` уже настроен на MinIO (`cloud_drive_storage=s3`, endpoint `http://minio:9000`, bucket `rag-catalog`).
-Скопируй его в `config.docker.json` и при необходимости переопредели credentials через env vars:
+Шаблон `config.docker.example.json` уже настроен на MinIO (`cloud_drive_storage=s3`, endpoint `http://minio:9000`, bucket `rag-catalog`),
+но **без учётных данных**: секреты в поставке не едут. Скопируй `.env.example` в `.env` и задай значения — без них
+контейнер MinIO не стартует, а веб получит разовый секрет подписи cookie:
 
 ```powershell
-$env:MINIO_ROOT_USER = "minioadmin"
-$env:MINIO_ROOT_PASSWORD = "minioadmin123"
-$env:MINIO_BUCKET = "rag-catalog"
+Copy-Item .env.example .env
+# затем заполнить в .env:
+#   MINIO_ROOT_USER / MINIO_ROOT_PASSWORD — учётные данные объектного хранилища
+#   RAG_UI_STORAGE_SECRET — python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
+
+Креды S3 читаются из `RAG_CLOUD_DRIVE_S3_ACCESS_KEY` / `RAG_CLOUD_DRIVE_S3_SECRET_KEY` (compose передаёт их
+из `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`) и имеют приоритет над `config.json`.
 
 Telegram bot:
 

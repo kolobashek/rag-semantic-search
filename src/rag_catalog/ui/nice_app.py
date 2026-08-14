@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import sys
 import threading
@@ -22,7 +23,7 @@ from fastapi import Request
 from nicegui import app, events, run, ui
 
 from rag_catalog.core.log_history import install_env_log_handler
-from rag_catalog.core.rag_core import load_config
+from rag_catalog.core.rag_core import load_config, save_config
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
 from . import explorer_view as _explorer_view
@@ -3492,11 +3493,37 @@ def device_auth_page(request: Request) -> None:
 
 
 def _ui_storage_secret(cfg: Dict[str, Any]) -> str:
-    return str(
-        os.environ.get("RAG_UI_STORAGE_SECRET")
-        or cfg.get("ui_storage_secret")
-        or "rag-catalog-local-secret"
-    )
+    """Секрет подписи сессионных cookie.
+
+    Раньше здесь был литерал-фолбэк, одинаковый на всех установках и лежащий
+    в git: подпись cookie переставала что-либо гарантировать. Теперь секрет
+    берётся из окружения или config, а при их отсутствии генерируется
+    случайно и по возможности сохраняется в config.json.
+    """
+    from_env = str(os.environ.get("RAG_UI_STORAGE_SECRET") or "").strip()
+    if from_env:
+        return from_env
+    from_cfg = str(cfg.get("ui_storage_secret") or "").strip()
+    if from_cfg:
+        return from_cfg
+
+    generated = secrets.token_urlsafe(48)
+    try:
+        stored = load_config()
+        stored["ui_storage_secret"] = generated
+        save_config(stored)
+        cfg["ui_storage_secret"] = generated
+        logger.warning(
+            "ui_storage_secret не задан — сгенерирован новый и сохранён в config.json."
+        )
+    except Exception as exc:
+        logger.error(
+            "ui_storage_secret не задан и не сохраняется (%s). Использую разовый "
+            "секрет: после перезапуска все сессии в браузерах станут недействительны. "
+            "Задайте RAG_UI_STORAGE_SECRET, чтобы этого избежать.",
+            exc,
+        )
+    return generated
 
 
 def _ui_session_https_only(cfg: Dict[str, Any]) -> bool:
