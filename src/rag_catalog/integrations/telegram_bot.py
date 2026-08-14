@@ -37,6 +37,82 @@ SEARCH_SESSIONS: Dict[str, Dict[str, Any]] = {}
 PENDING_REFINEMENTS: Dict[str, str] = {}
 
 
+# ─── Cloud Drive ACL ──────────────────────────────────────────────────────────
+# Бот обязан применять ту же модель прав, что и веб-интерфейс. Без этого любой
+# привязанный пользователь получает весь индекс: поиск, «Каталог» и выдачу
+# файлов кнопкой — в обход настроенных ACL.
+
+def _cloud_drive_acl_active(cfg: Dict[str, Any]) -> bool:
+    return bool(str(cfg.get("cloud_drive_db_path") or "").strip())
+
+
+def acl_filter_results(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Отфильтровать результаты по правам Cloud Drive (тот же путь, что в вебе)."""
+    if not results or not _cloud_drive_acl_active(cfg):
+        return list(results or [])
+    try:
+        from rag_catalog.ui.helpers import _filter_cloud_drive_search_results
+    except Exception:
+        logger.exception("ACL Cloud Drive недоступен — выдача закрыта")
+        return []
+    try:
+        return list(_filter_cloud_drive_search_results(cfg, user, list(results)))
+    except Exception:
+        logger.exception("Ошибка проверки ACL Cloud Drive — выдача закрыта")
+        return []
+
+
+def acl_filter_paths(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    paths: List[str],
+) -> List[str]:
+    if not paths or not _cloud_drive_acl_active(cfg):
+        return list(paths or [])
+    allowed = acl_filter_results(cfg, user, [{"full_path": str(path)} for path in paths])
+    return [str(item.get("full_path") or "") for item in allowed if item.get("full_path")]
+
+
+def acl_allows_path(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) -> bool:
+    clean = str(path or "").strip()
+    if not clean:
+        return False
+    return bool(acl_filter_paths(cfg, user, [clean]))
+
+
+def _answer_source_paths(answer: Dict[str, Any]) -> List[str]:
+    sources: List[Dict[str, Any]] = list(answer.get("sources") or [])
+    single = answer.get("source")
+    if not sources and isinstance(single, dict):
+        sources = [single]
+    paths: List[str] = []
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        raw = str(src.get("full_path") or src.get("path") or "").strip()
+        if raw:
+            paths.append(raw)
+    return paths
+
+
+def acl_allows_answer(cfg: Dict[str, Any], user: Dict[str, Any] | None, answer: Dict[str, Any]) -> bool:
+    """LLM-ответ строится по всему индексу, поэтому проверяем каждый источник.
+
+    Если хотя бы один источник недоступен пользователю, ответ подавляется
+    целиком: пересказ закрытого документа — та же утечка, что и сам документ.
+    """
+    if not _cloud_drive_acl_active(cfg):
+        return True
+    paths = _answer_source_paths(answer)
+    if not paths:
+        return False
+    return len(acl_filter_paths(cfg, user, paths)) == len(paths)
+
+
 def _api_url(token: str, method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
 
@@ -624,17 +700,26 @@ def process_contact_message(
     }
 
 
-def process_query(searcher: RAGSearcher, text: str, source: str = "telegram_bot", username: str = "") -> str:
+def process_query(
+    searcher: RAGSearcher,
+    text: str,
+    source: str = "telegram_bot",
+    username: str = "",
+    *,
+    cfg: Dict[str, Any] | None = None,
+    user: Dict[str, Any] | None = None,
+) -> str:
     q = (text or "").strip()
     if not q:
         return "Пустой запрос."
+    acl_cfg: Dict[str, Any] = dict(cfg or {})
 
     try:
         fact = searcher.answer_fact_question(q, limit=30)
     except (ConnectionError, RuntimeError) as exc:
         return f"Ошибка инфраструктуры поиска: {exc}"
 
-    if fact.get("ok"):
+    if fact.get("ok") and acl_allows_answer(acl_cfg, user, fact):
         return format_fact_answer(fact)
 
     if _looks_like_question(q) and hasattr(searcher, "answer_documents"):
@@ -642,13 +727,14 @@ def process_query(searcher: RAGSearcher, text: str, source: str = "telegram_bot"
             answer = searcher.answer_documents(q, limit=20, source=source, username=username)
         except (ConnectionError, RuntimeError) as exc:
             return f"Ошибка инфраструктуры поиска: {exc}"
-        if isinstance(answer, dict) and answer.get("ok"):
+        if isinstance(answer, dict) and answer.get("ok") and acl_allows_answer(acl_cfg, user, answer):
             return format_rag_answer(answer)
 
     try:
         results = searcher.search(q, limit=3, content_only=False, source=source, username=username)
     except (ConnectionError, RuntimeError) as exc:
         return f"Ошибка инфраструктуры поиска: {exc}"
+    results = acl_filter_results(acl_cfg, user, [item for item in (results or []) if isinstance(item, dict)])
     if not results:
         return "Ничего не найдено."
 
@@ -743,6 +829,20 @@ def _cleanup_search_sessions() -> None:
     ]
     for sid in expired:
         SEARCH_SESSIONS.pop(sid, None)
+    # CATALOG_SESSIONS хранит полный список путей индекса (мегабайты на сессию),
+    # поэтому их тоже нужно вычищать по TTL, иначе память бота растёт до OOM.
+    expired_catalog = [
+        sid for sid, session in CATALOG_SESSIONS.items()
+        if now - float(session.get("created_at") or now) > SEARCH_SESSION_TTL_SEC
+    ]
+    for sid in expired_catalog:
+        CATALOG_SESSIONS.pop(sid, None)
+    expired_refinements = [
+        chat_id for chat_id, sid in PENDING_REFINEMENTS.items()
+        if sid not in SEARCH_SESSIONS
+    ]
+    for chat_id in expired_refinements:
+        PENDING_REFINEMENTS.pop(chat_id, None)
 
 
 def _filter_session_results(session: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -975,7 +1075,12 @@ def _send_catalog_view(token: str, chat_id: str, sid: str, session: Dict[str, An
     session["message_id"] = send_message(token, chat_id, text, keyboard)
 
 
-def open_catalog(token: str, cfg: Dict[str, Any], chat_id: str) -> None:
+def open_catalog(
+    token: str,
+    cfg: Dict[str, Any],
+    chat_id: str,
+    user: Dict[str, Any] | None = None,
+) -> None:
     root = str(cfg.get("catalog_path") or "").strip()
     if not root or not Path(root).exists():
         send_message(token, chat_id, "Каталог документов недоступен.")
@@ -983,6 +1088,12 @@ def open_catalog(token: str, cfg: Dict[str, Any], chat_id: str) -> None:
     all_paths = _catalog_load_paths(cfg)
     if not all_paths:
         send_message(token, chat_id, "Каталог пуст — индексация ещё не выполнялась.")
+        return
+    # Дерево строится из state БД индексатора, где нет никаких прав: без этого
+    # фильтра «Каталог» отдавал весь индекс любому привязанному пользователю.
+    all_paths = acl_filter_paths(cfg, user, all_paths)
+    if not all_paths:
+        send_message(token, chat_id, "Нет доступных вам документов.")
         return
     sid = _session_id()
     session: Dict[str, Any] = {
@@ -995,8 +1106,11 @@ def open_catalog(token: str, cfg: Dict[str, Any], chat_id: str) -> None:
         "offset": 0,
         "message_id": 0,
         "created_at": time.time(),
+        "cfg": cfg,
+        "user": user,
     }
     CATALOG_SESSIONS[sid] = session
+    _cleanup_search_sessions()
     _catalog_update_session(session, root)
     _send_catalog_view(token, chat_id, sid, session)
 
@@ -1030,6 +1144,11 @@ def _handle_catalog_callback(
                 _catalog_update_session(session, path)
                 _send_catalog_view(token, chat_id, sid, session)
             elif subaction == "f" and kind == "f":
+                # Повторная проверка прав перед выдачей: список в сессии мог
+                # устареть после отзыва доступа.
+                if not acl_allows_path(dict(session.get("cfg") or {}), session.get("user"), path):
+                    send_message(token, chat_id, "Файл недоступен: нет прав.", _main_menu(user))
+                    return
                 try:
                     with chat_action(token, chat_id, "upload_document"):
                         send_document(token, chat_id, path, caption=Path(path).name)
@@ -1048,6 +1167,8 @@ def send_search_results(
     query: str,
     username: str,
     previous_session_id: str = "",
+    cfg: Dict[str, Any] | None = None,
+    user: Dict[str, Any] | None = None,
 ) -> str:
     """Run search, send individual result messages + nav message. Returns session_id."""
     q = (query or "").strip()
@@ -1063,6 +1184,7 @@ def send_search_results(
         send_message(token, chat_id, f"Ошибка поиска: {exc}")
         return ""
     results = [item for item in (results or []) if isinstance(item, dict)]
+    results = acl_filter_results(dict(cfg or {}), user, results)
 
     sid = _session_id()
     SEARCH_SESSIONS[sid] = {
@@ -1076,6 +1198,8 @@ def send_search_results(
         "file_type": "",
         "date_sort": "",
         "telemetry": getattr(searcher, "telemetry", None),
+        "cfg": dict(cfg or {}),
+        "user": user,
         "result_message_ids": [],
         "nav_message_id": 0,
         "feedback_given": set(),
@@ -1203,6 +1327,9 @@ def handle_callback_query(
             rank=index + 1,
             reason="open_file",
         )
+        if not acl_allows_path(dict(session.get("cfg") or {}), session.get("user"), path):
+            send_message(token, chat_id, "Файл недоступен: нет прав.", _main_menu(user))
+            return
         try:
             with chat_action(token, chat_id, "upload_document"):
                 send_document(token, chat_id, path, caption=_result_title(result))
@@ -1322,6 +1449,7 @@ def process_message(
     bot_link: str = "",
     telegram_username: str = "",
     display_name: str = "",
+    cfg: Dict[str, Any] | None = None,
 ) -> str:
     raw = (text or "").strip()
     low = raw.lower()
@@ -1666,6 +1794,8 @@ def process_message(
         raw,
         source=f"telegram_bot:{chat_id}",
         username=username,
+        cfg=cfg,
+        user=user,
     )
 
 
@@ -1843,7 +1973,7 @@ def main() -> int:
                 if user and not _is_menu_or_command_text(text):
                     if text.strip().lower() == "каталог":
                         with chat_action(token, chat_id, "typing"):
-                            open_catalog(token, cfg, chat_id)
+                            open_catalog(token, cfg, chat_id, user=user)
                         _log_tg_message_event(
                             auth_db,
                             chat_id=chat_id,
@@ -1861,6 +1991,8 @@ def main() -> int:
                             query=text,
                             username=str(user.get("username") or ""),
                             previous_session_id=pending_sid,
+                            cfg=cfg,
+                            user=user,
                         )
                     _log_tg_message_event(
                         auth_db,
@@ -1882,6 +2014,7 @@ def main() -> int:
                         bot_link=app_auth_link,
                         telegram_username=telegram_username,
                         display_name=display_name,
+                        cfg=cfg,
                     )
                 try:
                     user = get_authorized_telegram_user(auth_db, chat_id)

@@ -1,3 +1,5 @@
+import time
+
 import pytest
 import requests
 
@@ -632,3 +634,152 @@ def test_format_fact_answer_no_newlines_in_path() -> None:
     lines = result.split("\n")
     file_line = next(l for l in lines if l.startswith("Файл:"))
     assert "\n" not in file_line
+
+
+# ─── Cloud Drive ACL в боте ───────────────────────────────────────────────────
+
+_ACL_CFG = {"cloud_drive_db_path": "cloud_drive.db", "catalog_path": r"O:\Обмен"}
+
+
+def _deny_all(monkeypatch) -> None:
+    import rag_catalog.ui.helpers as ui_helpers
+
+    monkeypatch.setattr(ui_helpers, "_filter_cloud_drive_search_results", lambda cfg, user, results: [])
+
+
+def _allow_only(monkeypatch, allowed_paths: set) -> None:
+    import rag_catalog.ui.helpers as ui_helpers
+
+    def _filter(cfg, user, results):
+        return [item for item in results if str(item.get("full_path") or "") in allowed_paths]
+
+    monkeypatch.setattr(ui_helpers, "_filter_cloud_drive_search_results", _filter)
+
+
+def test_bot_search_results_are_filtered_by_cloud_drive_acl(monkeypatch) -> None:
+    _deny_all(monkeypatch)
+    s = _FakeSearcher(
+        fact_result={"ok": False},
+        search_result=[{"filename": "зарплаты.xlsx", "score": 0.9, "full_path": r"O:\Обмен\Кадры\зарплаты.xlsx"}],
+    )
+
+    out = process_query(s, "зарплаты", cfg=_ACL_CFG, user={"username": "ivan", "role": "user"})
+
+    assert out == "Ничего не найдено."
+    assert "зарплаты.xlsx" not in out
+
+
+def test_bot_search_without_cloud_drive_keeps_results() -> None:
+    s = _FakeSearcher(
+        fact_result={"ok": False},
+        search_result=[{"filename": "паспорт.docx", "score": 0.8, "full_path": r"O:\Обмен\паспорт.docx"}],
+    )
+
+    out = process_query(s, "паспорт", cfg={}, user={"username": "ivan", "role": "user"})
+
+    assert "паспорт.docx" in out
+
+
+def test_bot_rag_answer_is_suppressed_when_source_is_restricted(monkeypatch) -> None:
+    _deny_all(monkeypatch)
+    s = _FakeSearcher(
+        fact_result={"ok": False},
+        answer_result={
+            "ok": True,
+            "answer": "Оклад директора — 500 000 ₽.",
+            "sources": [{"filename": "зарплаты.xlsx", "full_path": r"O:\Обмен\Кадры\зарплаты.xlsx"}],
+        },
+        search_result=[],
+    )
+
+    out = process_query(s, "какой оклад у директора?", cfg=_ACL_CFG, user={"username": "ivan", "role": "user"})
+
+    assert "500 000" not in out
+    assert out == "Ничего не найдено."
+
+
+def test_bot_fact_answer_is_suppressed_when_source_is_restricted(monkeypatch) -> None:
+    _deny_all(monkeypatch)
+    s = _FakeSearcher(
+        fact_result={
+            "ok": True,
+            "answer": "3400 кг согласно ПСМ",
+            "source": {"filename": "PC300.pdf", "full_path": r"O:\Обмен\Закрытая\PC300.pdf"},
+        },
+        search_result=[],
+    )
+
+    out = process_query(s, "сколько весит pc300", cfg=_ACL_CFG, user={"username": "ivan", "role": "user"})
+
+    assert "3400 кг" not in out
+
+
+def test_bot_catalog_hides_documents_without_access(monkeypatch, tmp_path) -> None:
+    _deny_all(monkeypatch)
+    root = tmp_path / "catalog"
+    (root / "Кадры").mkdir(parents=True)
+    secret = root / "Кадры" / "зарплаты.xlsx"
+    secret.write_text("secret", encoding="utf-8")
+
+    cfg = {"cloud_drive_db_path": "cloud_drive.db", "catalog_path": str(root)}
+    monkeypatch.setattr(telegram_bot, "_catalog_load_paths", lambda _cfg: [str(secret)])
+    sent = []
+    monkeypatch.setattr(
+        telegram_bot,
+        "send_message",
+        lambda token, chat_id, text, reply_markup=None: sent.append(text) or len(sent),
+    )
+
+    telegram_bot.open_catalog("token", cfg, "777", user={"username": "ivan", "role": "user"})
+
+    assert sent == ["Нет доступных вам документов."]
+    assert telegram_bot.CATALOG_SESSIONS == {}
+
+
+def test_bot_catalog_keeps_permitted_documents(monkeypatch, tmp_path) -> None:
+    root = tmp_path / "catalog"
+    root.mkdir(parents=True)
+    allowed = root / "план.docx"
+    allowed.write_text("plan", encoding="utf-8")
+    _allow_only(monkeypatch, {str(allowed)})
+
+    cfg = {"cloud_drive_db_path": "cloud_drive.db", "catalog_path": str(root)}
+    monkeypatch.setattr(telegram_bot, "_catalog_load_paths", lambda _cfg: [str(allowed)])
+    monkeypatch.setattr(
+        telegram_bot,
+        "send_message",
+        lambda token, chat_id, text, reply_markup=None: 1,
+    )
+
+    telegram_bot.CATALOG_SESSIONS.clear()
+    telegram_bot.open_catalog("token", cfg, "777", user={"username": "ivan", "role": "user"})
+
+    sessions = list(telegram_bot.CATALOG_SESSIONS.values())
+    assert len(sessions) == 1
+    assert sessions[0]["all_paths"] == [str(allowed)]
+    telegram_bot.CATALOG_SESSIONS.clear()
+
+
+def test_acl_filter_fails_closed_when_helper_raises(monkeypatch) -> None:
+    import rag_catalog.ui.helpers as ui_helpers
+
+    def _boom(cfg, user, results):
+        raise RuntimeError("registry down")
+
+    monkeypatch.setattr(ui_helpers, "_filter_cloud_drive_search_results", _boom)
+
+    assert telegram_bot.acl_filter_paths(_ACL_CFG, {"username": "ivan"}, [r"O:\Обмен\a.docx"]) == []
+
+
+def test_catalog_sessions_expire_by_ttl(monkeypatch) -> None:
+    telegram_bot.CATALOG_SESSIONS.clear()
+    telegram_bot.CATALOG_SESSIONS["old"] = {
+        "created_at": time.time() - telegram_bot.SEARCH_SESSION_TTL_SEC - 10,
+        "all_paths": ["x"],
+    }
+    telegram_bot.CATALOG_SESSIONS["fresh"] = {"created_at": time.time(), "all_paths": ["y"]}
+
+    telegram_bot._cleanup_search_sessions()
+
+    assert set(telegram_bot.CATALOG_SESSIONS) == {"fresh"}
+    telegram_bot.CATALOG_SESSIONS.clear()
