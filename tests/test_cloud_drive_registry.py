@@ -1580,3 +1580,103 @@ def test_registry_repairs_current_version_missing_source_mtime_columns(tmp_path:
 
     assert 'source_mtime' in folder_columns
     assert 'source_mtime' in file_columns
+
+
+def test_registry_acl_fails_closed_after_last_permission_is_revoked(tmp_path: Path) -> None:
+    """Отзыв последнего права обязан закрывать диск, а не открывать его всем."""
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен')
+    secret = registry.upsert_folder(path='Secret', name='Secret', parent_id=root.id, depth=1)
+    secret_file = registry.upsert_file(
+        folder_id=secret.id,
+        path='Secret/plan.txt',
+        name='plan.txt',
+        storage_key='objects/plan',
+        mime_type='text/plain',
+        size_bytes=5,
+    )
+
+    grant = registry.grant_permission(
+        subject_type='user',
+        subject_id='alice',
+        resource_type='path',
+        resource_id='Secret',
+        access_level='viewer',
+    )
+    assert registry.acl_is_bootstrapped()
+    assert registry.user_can_access(username='alice', role='user', path=secret_file.path)
+    assert not registry.user_can_access(username='bob', role='user', path=secret_file.path)
+
+    registry.revoke_permission(grant['id'])
+
+    assert registry.list_permissions() == []
+    assert not registry.user_can_access(username='bob', role='user', path=secret_file.path)
+    assert not registry.user_can_access(username='alice', role='user', path=secret_file.path)
+    assert registry.user_can_access(username='root', role='admin', path=secret_file.path)
+
+
+def test_registry_without_configured_acl_stays_open_for_fresh_installs(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен')
+    shared = registry.upsert_folder(path='Shared', name='Shared', parent_id=root.id, depth=1)
+    shared_file = registry.upsert_file(
+        folder_id=shared.id,
+        path='Shared/plan.txt',
+        name='plan.txt',
+        storage_key='objects/plan',
+        mime_type='text/plain',
+        size_bytes=5,
+    )
+
+    assert not registry.acl_is_bootstrapped()
+    assert registry.user_can_access(username='bob', role='user', path=shared_file.path)
+
+
+def _make_folder_with_file(registry, root, folder_name: str):
+    folder = registry.upsert_folder(path=folder_name, name=folder_name, parent_id=root.id, depth=1)
+    file_row = registry.upsert_file(
+        folder_id=folder.id,
+        path=f'{folder_name}/doc.txt',
+        name='doc.txt',
+        storage_key=f'objects/{folder_name}',
+        mime_type='text/plain',
+        size_bytes=5,
+    )
+    return folder, file_row
+
+
+def test_delete_folder_does_not_touch_wildcard_neighbours(tmp_path: Path) -> None:
+    """`_` и `%` легальны в именах папок и не должны работать как шаблон LIKE."""
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен')
+    _target, target_file = _make_folder_with_file(registry, root, 'report_2024')
+    _neighbour, neighbour_file = _make_folder_with_file(registry, root, 'reports2024')
+
+    registry.delete_folder('report_2024')
+
+    assert str(registry.get_file_by_path(target_file.path).deleted_at or '') != ''
+    survivor = registry.get_file_by_path(neighbour_file.path)
+    assert str(survivor.deleted_at or '') == '', "соседняя папка не должна попадать под LIKE-шаблон"
+
+
+def test_rename_folder_does_not_move_wildcard_neighbours(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен')
+    _target, _target_file = _make_folder_with_file(registry, root, 'plan_a')
+    _neighbour, neighbour_file = _make_folder_with_file(registry, root, 'planXa')
+
+    registry.rename_move_folder(source_path='plan_a', new_name='plan_renamed')
+
+    assert registry.get_file_by_path('plan_renamed/doc.txt') is not None
+    assert registry.get_file_by_path(neighbour_file.path) is not None
+
+
+def test_list_files_under_path_ignores_wildcard_neighbours(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
+    root = registry.ensure_root_folder(root_name='Обмен')
+    _make_folder_with_file(registry, root, 'team_a')
+    _make_folder_with_file(registry, root, 'teamXa')
+
+    paths = {item.path for item in registry.list_files_under_path('team_a')}
+
+    assert paths == {'team_a/doc.txt'}
