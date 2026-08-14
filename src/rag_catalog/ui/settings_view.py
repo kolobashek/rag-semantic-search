@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from nicegui import app, run, ui
+from nicegui import run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.cloud_drive.operations import cloud_drive_operations_health
@@ -22,6 +22,7 @@ from rag_catalog.core.cloud_drive.storage import normalize_s3_credential
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
+from .auth_session import apply_login_session, prepare_login_session
 from .helpers import (
     _cd_get_service,
     _telegram_deeplink,
@@ -2551,17 +2552,54 @@ def render_settings_screen(
             username_input = ui.input("Логин").props("dense outlined").classes("w-full")
             password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
 
-            def login() -> None:
-                user = auth_db.login(username=str(username_input.value or ""), password=str(password_input.value or ""))
-                if not user:
-                    ui.notify("Неверный логин или пароль.", type="negative")
+            async def login() -> None:
+                # Только login_with_reason: плейн login() обходит троттлинг
+                # (LOGIN_LOCKOUT_SECONDS) и не пишет события в аудит, превращая
+                # эту форму в неограниченный оракул для перебора паролей.
+                username = str(username_input.value or "").strip()
+                result = await run.io_bound(
+                    auth_db.login_with_reason,
+                    username=username,
+                    password=str(password_input.value or ""),
+                )
+                reason = str(result.get("reason") or "")
+                user = result.get("user")
+                if reason == "rate_limited":
+                    retry_after = max(1, int(result.get("retry_after_seconds") or 1))
+                    await run.io_bound(
+                        auth_db.log_auth_event,
+                        username=username,
+                        event_type="login_throttled",
+                        ok=False,
+                        error=f"retry_after={retry_after}",
+                    )
+                    ui.notify(
+                        f"Слишком много попыток входа. Повторите через {max(1, (retry_after + 59) // 60)} мин.",
+                        type="warning",
+                        timeout=6000,
+                    )
                     return
-                state.current_user = user
-                state.auth_token = auth_db.create_session(username=str(user.get("username") or ""))
-                try:
-                    app.storage.user["auth_token"] = state.auth_token
-                except Exception:
-                    pass
+                if reason == "pending" or reason == "blocked" or reason != "ok" or not user:
+                    # login_throttle_status считает именно события login_failed,
+                    # поэтому неудачу обязана фиксировать вызывающая сторона.
+                    await run.io_bound(
+                        auth_db.log_auth_event,
+                        username=username,
+                        event_type="login_failed",
+                        ok=False,
+                        error={"pending": "pending", "blocked": "blocked"}.get(reason, "bad_credentials"),
+                    )
+                    if reason == "pending":
+                        ui.notify("Аккаунт ещё не активирован администратором.", type="warning")
+                    elif reason == "blocked":
+                        ui.notify("Аккаунт заблокирован.", type="negative")
+                    else:
+                        ui.notify("Неверный логин или пароль.", type="negative")
+                    return
+                token = await run.io_bound(
+                    prepare_login_session, state, user, event_type="login"
+                )
+                apply_login_session(state, user, token)
                 ui.notify("Вход выполнен.", type="positive")
                 render_fn()
 
@@ -2570,7 +2608,7 @@ def render_settings_screen(
                 "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
                 "if(i>=0&&ins[i+1])ins[i+1].focus();"
             ))
-            password_input.on("keyup.enter", lambda _: login())
+            password_input.on("keyup.enter", login)
             ui.button("Войти", icon="login", on_click=login).props("unelevated")
         return
 

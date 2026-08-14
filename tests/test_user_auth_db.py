@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
+from rag_catalog.core.user_auth_db import LOGIN_MAX_FAILURES
 from user_auth_db import UserAuthDB
 
 
@@ -644,3 +646,40 @@ def test_auth_events_are_logged(tmp_path) -> None:
     assert [event["event_type"] for event in events] == ["login_failed", "login"]
     assert events[0]["ok"] == 0
     assert events[0]["error"] == "bad_credentials"
+
+
+def test_ui_login_forms_never_use_unthrottled_plain_login() -> None:
+    """Все формы входа обязаны идти через login_with_reason.
+
+    Плейн ``login()`` не проверяет login_throttle_status и не пишет события
+    ``login_failed``, поэтому любая форма на нём — неограниченный оракул для
+    перебора паролей и слепая зона аудита.
+    """
+    ui_dir = Path(__file__).resolve().parent.parent / "src" / "rag_catalog" / "ui"
+    offenders: list[str] = []
+    for source in sorted(ui_dir.rglob("*.py")):
+        for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
+            if "auth_db.login(" in line:
+                offenders.append(f"{source.name}:{number}: {line.strip()}")
+    assert offenders == [], "Формы входа должны использовать login_with_reason: " + "; ".join(offenders)
+
+
+def test_login_with_reason_locks_out_after_repeated_failures(tmp_path: Path) -> None:
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    db.admin_create_user(
+        username="alice",
+        display_name="Alice",
+        telegram_chat_id="",
+        password="correct-horse",
+        role="user",
+        status="active",
+        must_change_password=False,
+    )
+
+    for _ in range(LOGIN_MAX_FAILURES):
+        assert db.login_with_reason(username="alice", password="wrong")["reason"] == "invalid_credentials"
+        db.log_auth_event(username="alice", event_type="login_failed", ok=False, error="bad_credentials")
+
+    limited = db.login_with_reason(username="alice", password="correct-horse")
+    assert limited["reason"] == "rate_limited"
+    assert int(limited.get("retry_after_seconds") or 0) > 0

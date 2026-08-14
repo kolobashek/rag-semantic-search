@@ -473,7 +473,25 @@ def render_auth_gate(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             password = st.text_input("Пароль", type="password", key="login_password")
             submitted = st.form_submit_button("Войти", use_container_width=True)
         if submitted:
-            user = auth_db.login(username=username, password=password)
+            # login_with_reason, а не плейн login: иначе форма обходит троттлинг
+            # входа и не пишет неудачные попытки в аудит.
+            login_result = auth_db.login_with_reason(username=username, password=password)
+            login_reason = str(login_result.get("reason") or "")
+            user = login_result.get("user")
+            if login_reason == "rate_limited":
+                retry_after = max(1, int(login_result.get("retry_after_seconds") or 1))
+                auth_db.log_auth_event(
+                    username=username,
+                    event_type="login_throttled",
+                    ok=False,
+                    error=f"retry_after={retry_after}",
+                )
+                st.session_state.auth_status_level = "error"
+                st.session_state.auth_status_msg = (
+                    f"Слишком много попыток входа. Повторите через {max(1, (retry_after + 59) // 60)} мин."
+                )
+                _auth_status()
+                return None
             if user:
                 token = auth_db.create_session(username=str(user.get("username") or username))
                 st.session_state.auth_user = user
@@ -481,6 +499,12 @@ def render_auth_gate(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 st.session_state.auth_status_msg = ""
                 _set_query_param("session", token)
                 st.rerun()
+            auth_db.log_auth_event(
+                username=username,
+                event_type="login_failed",
+                ok=False,
+                error=login_reason or "bad_credentials",
+            )
             st.session_state.auth_status_level = "error"
             st.session_state.auth_status_msg = "Неверный логин/пароль или пользователь не подтверждён."
         _auth_status()
