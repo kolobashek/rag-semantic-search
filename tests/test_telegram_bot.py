@@ -48,8 +48,11 @@ class _FakeSearcher:
         self._search_exc = search_exc
         self._answer_result = answer_result
         self.last_search_kwargs = {}
+        self.fact_result_filter = None
+        self.answer_result_filter = None
 
-    def answer_fact_question(self, _q, limit=30):
+    def answer_fact_question(self, _q, limit=30, *, result_filter=None):
+        self.fact_result_filter = result_filter
         if self._fact_exc:
             raise self._fact_exc
         return self._fact_result if self._fact_result is not None else {"ok": False}
@@ -61,6 +64,7 @@ class _FakeSearcher:
         return self._search_result
 
     def answer_documents(self, *_args, **_kwargs):
+        self.answer_result_filter = _kwargs.get("result_filter")
         return self._answer_result if self._answer_result is not None else {"ok": False}
 
 

@@ -99,6 +99,20 @@ def _answer_source_paths(answer: Dict[str, Any]) -> List[str]:
     return paths
 
 
+def acl_result_filter(cfg: Dict[str, Any], user: Dict[str, Any] | None):
+    """Фильтр для передачи внутрь RAGSearcher: ответы строятся по своему поиску.
+
+    Возвращает None, если Cloud Drive не настроен — тогда ограничивать нечего.
+    """
+    if not _cloud_drive_acl_active(cfg):
+        return None
+
+    def _filter(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return acl_filter_results(cfg, user, results)
+
+    return _filter
+
+
 def acl_allows_answer(cfg: Dict[str, Any], user: Dict[str, Any] | None, answer: Dict[str, Any]) -> bool:
     """LLM-ответ строится по всему индексу, поэтому проверяем каждый источник.
 
@@ -714,8 +728,12 @@ def process_query(
         return "Пустой запрос."
     acl_cfg: Dict[str, Any] = dict(cfg or {})
 
+    # Фильтр уходит внутрь searcher: ответ строится только по разрешённым
+    # документам, а не подавляется целиком из-за одного закрытого источника.
+    result_filter = acl_result_filter(acl_cfg, user)
+    filter_kwargs: Dict[str, Any] = {"result_filter": result_filter} if result_filter else {}
     try:
-        fact = searcher.answer_fact_question(q, limit=30)
+        fact = searcher.answer_fact_question(q, limit=30, **filter_kwargs)
     except (ConnectionError, RuntimeError) as exc:
         return f"Ошибка инфраструктуры поиска: {exc}"
 
@@ -724,7 +742,9 @@ def process_query(
 
     if _looks_like_question(q) and hasattr(searcher, "answer_documents"):
         try:
-            answer = searcher.answer_documents(q, limit=20, source=source, username=username)
+            answer = searcher.answer_documents(
+                q, limit=20, source=source, username=username, **filter_kwargs
+            )
         except (ConnectionError, RuntimeError) as exc:
             return f"Ошибка инфраструктуры поиска: {exc}"
         if isinstance(answer, dict) and answer.get("ok") and acl_allows_answer(acl_cfg, user, answer):

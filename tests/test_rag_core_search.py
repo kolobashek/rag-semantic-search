@@ -1281,3 +1281,112 @@ def test_answer_fact_question_handles_search_error() -> None:
     assert out["ok"] is False
     assert "Ошибка поиска" in out["error"]
     assert s.telemetry.fact_calls[-1]["error"].startswith("fact_search_error")
+
+
+# ─── ACL-осведомлённые ответы (RAG строит собственный поиск) ──────────────────
+
+_OPEN_DOC = {
+    "full_path": r"O:\Обмен\Общее\план.docx",
+    "filename": "план.docx",
+    "text": "Плановый объём работ на квартал согласован с подрядчиком.",
+    "score": 0.9,
+}
+_SECRET_DOC = {
+    "full_path": r"O:\Обмен\Кадры\зарплаты.xlsx",
+    "filename": "зарплаты.xlsx",
+    "text": "Оклад директора 500000 рублей.",
+    "score": 0.95,
+}
+
+
+def _searcher_returning(results: list) -> RAGSearcher:
+    s = _make_searcher(connected=True)
+    s.config = {"llm_answer_top_k": 5}
+    s.search = lambda *_args, **_kwargs: [dict(item) for item in results]
+    return s
+
+
+def test_answer_documents_excludes_sources_the_user_cannot_read() -> None:
+    """RAG-ответ выполняет собственный поиск, поэтому ACL нужен внутри searcher."""
+    s = _searcher_returning([_SECRET_DOC, _OPEN_DOC])
+    captured: dict = {}
+
+    def _only_open(results: list) -> list:
+        captured["seen"] = [item["full_path"] for item in results]
+        return [item for item in results if "Кадры" not in str(item.get("full_path") or "")]
+
+    s._log_rag_answer = lambda *_a, **_k: None
+    s._verify_rag_answer = lambda answer, sources: {"ok": True}
+    s._grounded_fallback_answer = lambda verification: "нет данных"
+
+    import rag_catalog.core.llm as llm_module
+
+    original = getattr(llm_module, "rag_answer", None)
+    llm_module.rag_answer = lambda *_a, **_k: "Плановый объём согласован."
+    try:
+        out = s.answer_documents("что по планам?", result_filter=_only_open)
+    finally:
+        if original is not None:
+            llm_module.rag_answer = original
+
+    source_paths = [str(item.get("full_path") or "") for item in out.get("sources") or []]
+    assert all("Кадры" not in path for path in source_paths)
+    assert any("план.docx" in path for path in source_paths)
+    assert "зарплаты.xlsx" in " ".join(captured.get("seen") or []), "фильтр должен видеть сырую выдачу"
+
+
+def test_answer_documents_without_filter_keeps_previous_behaviour() -> None:
+    s = _searcher_returning([_OPEN_DOC])
+    s._log_rag_answer = lambda *_a, **_k: None
+    s._verify_rag_answer = lambda answer, sources: {"ok": True}
+    s._grounded_fallback_answer = lambda verification: "нет данных"
+
+    import rag_catalog.core.llm as llm_module
+
+    original = getattr(llm_module, "rag_answer", None)
+    llm_module.rag_answer = lambda *_a, **_k: "Ответ."
+    try:
+        out = s.answer_documents("что по планам?")
+    finally:
+        if original is not None:
+            llm_module.rag_answer = original
+
+    assert len(out.get("sources") or []) == 1
+
+
+def test_answer_documents_fails_closed_when_filter_raises() -> None:
+    s = _searcher_returning([_SECRET_DOC])
+
+    def _boom(_results: list) -> list:
+        raise RuntimeError("registry down")
+
+    s._log_rag_answer = lambda *_a, **_k: None
+
+    out = s.answer_documents("оклад директора", result_filter=_boom)
+
+    assert out["ok"] is False
+    assert out.get("sources") == []
+    assert "500000" not in str(out.get("answer") or "")
+
+
+def test_answer_fact_question_applies_result_filter() -> None:
+    """Фильтр обязан получить кандидатов обеих веток поиска — векторной и лексической."""
+    s = _searcher_returning([_SECRET_DOC])
+    s._discover_entity_aliases = lambda entities: []
+    s._lexical_catalog_search = lambda **_kwargs: [
+        {"type": "file_metadata", "full_path": _SECRET_DOC["full_path"]}
+    ]
+    s._content_chunks_for_paths = lambda paths, max_chunks=120: [dict(_SECRET_DOC)]
+    seen: list = []
+
+    def _deny_all(results: list) -> list:
+        seen.extend(str(item.get("full_path") or "") for item in results)
+        return []
+
+    out = s.answer_fact_question("оклад директора", result_filter=_deny_all)
+
+    assert seen, "фильтр не был вызван — ACL не применяется к фактическим ответам"
+    assert all("Кадры" in path for path in seen)
+    assert out["ok"] is False
+    assert out.get("error") == "Ничего не найдено"
+    assert "500000" not in str(out.get("answer") or "")

@@ -45,6 +45,8 @@ from .helpers import (
     OFFICE_PREVIEW_EXTENSIONS,
     _apply_query_operators,
     _cached_searcher_if_ready,
+    _cd_acl_allows_local_file,
+    _cd_acl_result_filter,
     _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
@@ -1264,6 +1266,7 @@ def _build_page(
                     ans = await run.io_bound(
                         searcher_for_answer.answer_documents,
                         query,
+                        result_filter=_cd_acl_result_filter(state.cfg, state.current_user),
                     )
                     if state.search_request_id != request_id:
                         return
@@ -1733,6 +1736,19 @@ def _build_page(
         candidate = _resolve_catalog_file(state.cfg, str(path_value or ""))
         if candidate is None:
             ui.notify("Файл недоступен для просмотра.", type="warning")
+            return
+        # Превью офисных и текстовых файлов читается на сервере и минует
+        # защищённый маршрут /api/view-file, поэтому права проверяем здесь —
+        # иначе просмотрщик отдаёт содержимое закрытых документов.
+        if not _cd_acl_allows_local_file(state.cfg, state.current_user, candidate):
+            _log_app_event(
+                state,
+                "search",
+                "preview_denied",
+                ok=False,
+                details={"path": str(candidate)},
+            )
+            ui.notify("Нет прав на просмотр этого файла.", type="negative")
             return
         viewer_url = _viewer_file_url(str(candidate))
         ext = candidate.suffix.lower()

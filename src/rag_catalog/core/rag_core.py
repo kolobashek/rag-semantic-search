@@ -18,7 +18,7 @@ from bisect import bisect_left
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ._platform_compat import apply_windows_platform_workarounds
 
@@ -2237,6 +2237,25 @@ class RAGSearcher:
             logger.error("Не удалось получить статистику: %s", exc)
             return {}
 
+    def _apply_result_filter(
+        self,
+        results: List[Dict[str, Any]],
+        result_filter: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]],
+    ) -> List[Dict[str, Any]]:
+        """Пропустить результаты через внешний фильтр доступа (fail-closed).
+
+        Ответы LLM строятся по собственному, независимому от UI поиску, поэтому
+        права должны применяться здесь: иначе пользователь получает пересказ и
+        цитаты из документов, которых он не имеет права видеть.
+        """
+        if result_filter is None:
+            return list(results)
+        try:
+            return list(result_filter(list(results)))
+        except Exception as exc:
+            logger.warning("Фильтр доступа к результатам не отработал (%s) — выдача закрыта", exc)
+            return []
+
     def answer_documents(
         self,
         question: str,
@@ -2244,6 +2263,7 @@ class RAGSearcher:
         limit: int = 20,
         source: str = "rag_answer",
         username: str = "",
+        result_filter: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
     ) -> Dict[str, Any]:
         """Generate a RAG answer with explicit source citations.
 
@@ -2258,10 +2278,13 @@ class RAGSearcher:
         if not self.connected:
             return {"ok": False, "answer": "Нет подключения к Qdrant.", "sources": [], "error": "not_connected"}
 
+        # При активном фильтре доступа берём запас кандидатов: часть отсеется,
+        # и без запаса ответ строился бы по обрезанному контексту.
+        retrieval_limit = min(limit * 3, 100) if result_filter is not None else limit
         try:
             results = self.search(
                 q,
-                limit=limit,
+                limit=retrieval_limit,
                 file_type=None,
                 content_only=True,
                 query_original=q,
@@ -2271,6 +2294,7 @@ class RAGSearcher:
         except Exception as exc:
             return {"ok": False, "answer": f"Ошибка поиска: {exc}", "sources": [], "error": f"search_error: {exc}"}
 
+        results = self._apply_result_filter(results, result_filter)[:limit]
         sources = self._rag_sources(results, max_sources=int(self.config.get("llm_answer_top_k", 5) or 5))
         if not sources:
             answer = "В документах не нашёл подтверждённого ответа."
@@ -2472,7 +2496,13 @@ class RAGSearcher:
             parts.append(f"chunk {chunk_index}")
         return " · ".join(parts)
 
-    def answer_fact_question(self, question: str, limit: int = 20) -> Dict[str, Any]:
+    def answer_fact_question(
+        self,
+        question: str,
+        limit: int = 20,
+        *,
+        result_filter: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
         """
         Извлечь факт-ответ из документов.
 
@@ -2506,9 +2536,10 @@ class RAGSearcher:
             )
             return {"ok": False, "error": "Пустой вопрос"}
 
+        retrieval_limit = min(limit * 3, 100) if result_filter is not None else limit
         try:
             candidates = self.search(
-                q, limit=limit, file_type=None, content_only=True, source="fact_search"
+                q, limit=retrieval_limit, file_type=None, content_only=True, source="fact_search"
             )
         except Exception as exc:
             self.telemetry.log_fact(
@@ -2539,6 +2570,9 @@ class RAGSearcher:
                 if x.get("type") == "file_metadata" and x.get("full_path")
             ]
             candidates.extend(self._content_chunks_for_paths(paths[:10], max_chunks=120))
+        # Фильтр применяем после обеих веток поиска: и векторной, и лексической
+        # догрузки чанков по путям — иначе закрытые документы приходят второй ветвью.
+        candidates = self._apply_result_filter(candidates, result_filter)
         if not candidates:
             self.telemetry.log_fact(
                 source="fact",

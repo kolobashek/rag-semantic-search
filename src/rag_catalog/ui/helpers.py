@@ -19,7 +19,7 @@ import urllib.request
 from collections import Counter
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 from nicegui import ui
@@ -1579,6 +1579,44 @@ def _filter_cloud_drive_search_results(
                 item.setdefault("cloud_file_id", cloud_file_id)
             filtered.append(item)
     return filtered
+
+
+def _cd_acl_allows_local_file(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+    path: Any,
+) -> bool:
+    """Разрешён ли пользователю просмотр файла каталога по правам Cloud Drive.
+
+    Просмотрщик читает офисные и текстовые файлы на сервере и отдаёт их
+    содержимое напрямую, минуя защищённый маршрут /api/view-file, поэтому
+    проверку прав нужно делать и здесь. Семантика совпадает с
+    ``_require_catalog_file_access``: при настроенном Cloud Drive файл без узла
+    в реестре доступен только администратору.
+    """
+    clean = str(path or "").strip()
+    if not clean:
+        return False
+    if not str(cfg.get("cloud_drive_db_path") or "").strip():
+        return True
+    return bool(_filter_cloud_drive_search_results(cfg, user, [{"full_path": clean}]))
+
+
+def _cd_acl_result_filter(
+    cfg: Dict[str, Any],
+    user: Dict[str, Any] | None,
+) -> Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    """Фильтр результатов по правам Cloud Drive для передачи внутрь RAGSearcher.
+
+    Нужен потому, что RAG-ответы (`answer_documents` / `answer_fact_question`)
+    выполняют собственный поиск и не проходят через фильтрацию слоя UI: без
+    этого пользователь получает пересказ и цитаты закрытых документов.
+    """
+
+    def _filter(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return _filter_cloud_drive_search_results(cfg, user, results)
+
+    return _filter
 
 
 def _run_authorized_quick_name_search(
