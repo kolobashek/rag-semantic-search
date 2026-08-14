@@ -1190,6 +1190,84 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         return $"{info.Length}:{info.LastWriteTimeUtc.Ticks}";
     }
 
+    /// <summary>
+    /// Есть ли на диске правки, которые ещё не доехали до облака.
+    /// </summary>
+    private bool HasUnsyncedLocalChanges(string cloudPath, string localPath)
+    {
+        if (!File.Exists(localPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (CloudFilePinning.IsPlaceholder(localPath) && CloudFilePinning.IsInSync(localPath))
+            {
+                return false;
+            }
+
+            string known = _state.LocalFingerprints.GetValueOrDefault(cloudPath, "");
+            if (known.Length == 0)
+            {
+                // Отпечатка нет — успешной выгрузки этого содержимого не было.
+                return true;
+            }
+
+            return !LocalFingerprint(localPath).Equals(known, StringComparison.Ordinal);
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Сохранить локальные правки рядом как *_CONFLICT_*, прежде чем заменять файл.
+    /// Копия не входит в ManagedPaths, поэтому следующий проход выгрузит её в облако
+    /// как отдельный файл, и пользователь ничего не теряет.
+    /// </summary>
+    private bool TryPreserveConflictCopy(string cloudPath, string localPath)
+    {
+        try
+        {
+            string directory = Path.GetDirectoryName(localPath) ?? _root;
+            string stem = Path.GetFileNameWithoutExtension(localPath);
+            string extension = Path.GetExtension(localPath);
+            string stamp = DateTimeOffset.Now.ToString("yyyyMMdd_HHmmss");
+            string candidate = Path.Combine(directory, $"{stem}_CONFLICT_{stamp}{extension}");
+            for (int attempt = 1; File.Exists(candidate) && attempt < 1000; attempt++)
+            {
+                candidate = Path.Combine(directory, $"{stem}_CONFLICT_{stamp}_{attempt}{extension}");
+            }
+
+            if (File.Exists(candidate))
+            {
+                return false;
+            }
+
+            File.SetAttributes(localPath, File.GetAttributes(localPath) & ~FileAttributes.ReadOnly);
+            File.Copy(localPath, candidate, overwrite: false);
+            AppLog.Warn(
+                $"Обнаружены несинхронизированные локальные правки {cloudPath}: сохранены как {candidate}.");
+            Console.Error.WriteLine($"Конфликт: локальная версия сохранена как {candidate}");
+            _status.SetState(
+                ClientRunState.Syncing,
+                "Сохранена конфликтная копия",
+                Path.GetFileName(candidate));
+            return true;
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error($"Не удалось сохранить конфликтную копию для {cloudPath}.", exception);
+            return false;
+        }
+    }
+
     private void CreateMissingPlaceholders(
         IEnumerable<CloudNode> nodes,
         HashSet<string> nextManaged,
@@ -1217,6 +1295,20 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                             signature,
                             StringComparison.Ordinal))
                     {
+                        // Облачная версия изменилась. Локальный файл здесь удаляется и
+                        // заменяется плейсхолдером новой версии, поэтому несохранённые
+                        // локальные правки (например, когда upload упал — файл был занят
+                        // Word или сервер ответил 403) исчезли бы без следа.
+                        if (HasUnsyncedLocalChanges(node.Path, localPath)
+                            && !TryPreserveConflictCopy(node.Path, localPath))
+                        {
+                            Console.Error.WriteLine(
+                                $"Локальные правки сохранены как есть, замена отложена: {localPath}");
+                            nextManaged.Add(node.Path);
+                            nextVersions[node.Path] = _state.ManagedVersions.GetValueOrDefault(node.Path, "");
+                            continue;
+                        }
+
                         RemoveManagedPath(node.Path);
                         exists = File.Exists(localPath) || Directory.Exists(localPath);
                     }

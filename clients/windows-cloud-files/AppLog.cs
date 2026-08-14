@@ -18,6 +18,8 @@ internal static class AppLog
 
     public static void Info(string message) => Write("INFO", message);
 
+    public static void Warn(string message) => Write("WARN", message);
+
     public static void Error(string message, Exception? exception = null)
     {
         Write("ERROR", exception is null ? message : $"{message}{Environment.NewLine}{exception}");
