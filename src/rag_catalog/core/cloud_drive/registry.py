@@ -26,6 +26,7 @@ from .models import (
 
 CLOUD_DRIVE_SCHEMA_VERSION = 8
 _CHANGE_CURSOR_PREFIX = "v1."
+ACL_BOOTSTRAP_META_KEY = "acl_bootstrapped"
 
 
 def _utc_now() -> str:
@@ -724,6 +725,16 @@ class CloudDriveRegistryDB:
         escaped = cls._escape_like(value)
         return f'%{escaped}%'
 
+    @classmethod
+    def _like_subtree(cls, path: str) -> str:
+        """Шаблон LIKE для поддерева пути.
+
+        Символы ``_`` и ``%`` легальны в именах папок, поэтому без экранирования
+        ``report_2024/%`` совпадал бы и с ``reports2024/...``: удаление одной
+        папки задевало чужие поддеревья в обход проверенных прав.
+        """
+        return f"{cls._escape_like(path)}/%"
+
     def search_nodes_page(
         self,
         *,
@@ -895,12 +906,12 @@ class CloudDriveRegistryDB:
         clean_path = self._normalize_path(path)
         if not clean_path:
             raise RuntimeError('Для корневого каталога используйте list_files_in_folder/root traversal.')
-        like_value = f"{clean_path}/%"
+        like_value = self._like_subtree(clean_path)
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM cloud_files
-                WHERE deleted_at='' AND (path=? OR path LIKE ?)
+                WHERE deleted_at='' AND (path=? OR path LIKE ? ESCAPE '\\')
                 ORDER BY path
                 """,
                 (clean_path, like_value),
@@ -911,6 +922,41 @@ class CloudDriveRegistryDB:
         with self._connect() as conn:
             row = conn.execute("SELECT 1 FROM cloud_permissions LIMIT 1").fetchone()
             return row is not None
+
+    @staticmethod
+    def _ensure_meta_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cloud_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    def _read_meta(self, conn: sqlite3.Connection, key: str) -> str:
+        self._ensure_meta_table(conn)
+        row = conn.execute("SELECT value FROM cloud_meta WHERE key=?", (str(key),)).fetchone()
+        return str(row["value"] or "") if row is not None else ""
+
+    def _write_meta(self, conn: sqlite3.Connection, key: str, value: str) -> None:
+        self._ensure_meta_table(conn)
+        conn.execute(
+            "INSERT INTO cloud_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(key), str(value)),
+        )
+
+    def acl_is_bootstrapped(self) -> bool:
+        """Whether an ACL has ever been configured on this registry.
+
+        Before the first grant the registry is treated as «ещё не настроен» and
+        stays open, so fresh installs keep working. After the first grant the
+        ACL is fail-closed: revoking the last permission must lock the drive
+        down, not open it to everyone.
+        """
+        with self._connect() as conn:
+            return self._read_meta(conn, ACL_BOOTSTRAP_META_KEY) == "1"
 
     @staticmethod
     def _access_rank(access_level: str) -> int:
@@ -958,6 +1004,7 @@ class CloudDriveRegistryDB:
                     """,
                     (clean_subject_type, clean_subject_id, clean_resource_type, clean_resource_id, clean_access),
                 ).fetchone()
+                self._write_meta(conn, ACL_BOOTSTRAP_META_KEY, "1")
                 if existing is not None:
                     return {
                         "id": str(existing["id"]),
@@ -1398,7 +1445,13 @@ class CloudDriveRegistryDB:
 
         with self._connect() as conn:
             if conn.execute("SELECT 1 FROM cloud_permissions LIMIT 1").fetchone() is None:
-                return {node: True for node in clean_nodes}
+                # Пустая таблица прав означает «доступ всем» только пока ACL ни разу
+                # не настраивали (свежая установка). Если права когда-то выдавались,
+                # их отзыв обязан закрывать диск, а не открывать его всем: дальше
+                # идём с пустым набором правил — разрешены только админ, домашняя
+                # папка пользователя и корень каталога.
+                if self._read_meta(conn, ACL_BOOTSTRAP_META_KEY) != "1":
+                    return {node: True for node in clean_nodes}
 
             permission_rows = conn.execute(
                 """
@@ -1446,6 +1499,9 @@ class CloudDriveRegistryDB:
                 ).fetchall()
                 folder_ids_by_path.update({self._normalize_path(str(row["path"] or "")): str(row["id"]) for row in rows})
 
+            # Узлы домашних папок намеренно видимы всем (см. тест
+            # test_registry_user_home_folder_is_visible_but_private): в корне
+            # каталога папка отображается, но её содержимое закрыто ACL.
             home_paths = {
                 self._normalize_path(str(row["folder_path"] or ""))
                 for row in conn.execute("SELECT folder_path FROM cloud_user_folders").fetchall()
@@ -1742,8 +1798,8 @@ class CloudDriveRegistryDB:
                     ),
                 )
                 folder_rows = conn.execute(
-                    "SELECT * FROM cloud_folders WHERE path LIKE ? ORDER BY depth ASC",
-                    (f"{old_prefix}/%",),
+                    "SELECT * FROM cloud_folders WHERE path LIKE ? ESCAPE '\\' ORDER BY depth ASC",
+                    (self._like_subtree(old_prefix),),
                 ).fetchall()
                 for row in folder_rows:
                     row_path = str(row['path'])
@@ -1772,8 +1828,8 @@ class CloudDriveRegistryDB:
                         ),
                     )
                 file_rows = conn.execute(
-                    "SELECT * FROM cloud_files WHERE deleted_at='' AND path LIKE ?",
-                    (f"{old_prefix}/%",),
+                    "SELECT * FROM cloud_files WHERE deleted_at='' AND path LIKE ? ESCAPE '\\'",
+                    (self._like_subtree(old_prefix),),
                 ).fetchall()
                 for row in file_rows:
                     row_path = str(row['path'])
@@ -1839,12 +1895,14 @@ class CloudDriveRegistryDB:
             with self._connect() as conn:
                 now = _utc_now()
                 conn.execute(
-                    "UPDATE cloud_files SET deleted_at=?, updated_at=? WHERE path LIKE ? OR path=?",
-                    (now, now, f"{clean_path}/%", clean_path),
+                    "UPDATE cloud_files SET deleted_at=?, updated_at=? "
+                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
+                    (now, now, self._like_subtree(clean_path), clean_path),
                 )
                 conn.execute(
-                    "UPDATE cloud_folders SET deleted_at=?, updated_at=? WHERE path LIKE ? OR path=?",
-                    (now, now, f"{clean_path}/%", clean_path),
+                    "UPDATE cloud_folders SET deleted_at=?, updated_at=? "
+                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
+                    (now, now, self._like_subtree(clean_path), clean_path),
                 )
                 saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
         assert saved is not None
@@ -1885,12 +1943,14 @@ class CloudDriveRegistryDB:
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
-                    "UPDATE cloud_folders SET deleted_at='', updated_at=? WHERE path LIKE ? OR path=?",
-                    (now, f"{clean_path}/%", clean_path),
+                    "UPDATE cloud_folders SET deleted_at='', updated_at=? "
+                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
+                    (now, self._like_subtree(clean_path), clean_path),
                 )
                 conn.execute(
-                    "UPDATE cloud_files SET deleted_at='', updated_at=? WHERE path LIKE ? OR path=?",
-                    (now, f"{clean_path}/%", clean_path),
+                    "UPDATE cloud_files SET deleted_at='', updated_at=? "
+                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
+                    (now, self._like_subtree(clean_path), clean_path),
                 )
                 saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
         assert saved is not None
