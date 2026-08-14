@@ -1179,3 +1179,45 @@ def test_chunk_text_has_overlap() -> None:
     out = idx._chunk_text("abcdefghij")
     assert out == ["abcde", "defgh", "ghij"]
 
+
+
+def _cleanup_recording_indexer(tmp_path: Path, calls: list) -> RAGIndexer:
+    idx = _make_indexer(tmp_path, extracted_text="Содержательный текст документа " * 8)
+
+    def _record(files):
+        calls.append([str(item) for item in files])
+        return 0
+
+    idx._cleanup_deleted_files = _record
+    return idx
+
+
+def test_metadata_stage_skips_phantom_cleanup_when_only_paths_active(tmp_path: Path) -> None:
+    """--only-paths-file усекает inventory: cleanup стёр бы весь остальной индекс."""
+    kept = tmp_path / "kept.txt"
+    kept.write_text("нужный файл", encoding="utf-8")
+    other = tmp_path / "other.txt"
+    other.write_text("посторонний файл", encoding="utf-8")
+
+    calls: list = []
+    idx = _cleanup_recording_indexer(tmp_path, calls)
+    idx.only_paths = {str(kept)}
+
+    idx.index_directory(stage="metadata")
+
+    assert calls == []
+
+
+def test_metadata_stage_cleans_phantoms_with_full_inventory(tmp_path: Path) -> None:
+    kept = tmp_path / "kept.txt"
+    kept.write_text("нужный файл", encoding="utf-8")
+    other = tmp_path / "other.txt"
+    other.write_text("посторонний файл", encoding="utf-8")
+
+    calls: list = []
+    idx = _cleanup_recording_indexer(tmp_path, calls)
+
+    idx.index_directory(stage="metadata")
+
+    assert len(calls) == 1
+    assert set(calls[0]) == {str(kept), str(other)}

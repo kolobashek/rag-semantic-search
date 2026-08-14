@@ -1444,8 +1444,22 @@ class IndexStageRunner:
         # Чистим «фантомы» только когда имеем полный список всех файлов на диске
         # (т.е. на этапах metadata и content). На small/large мы видим только
         # часть файлов и не должны по этому основанию удалять других.
+        #
+        # --only-paths-file усекает all_tasks до явно перечисленных путей, поэтому
+        # такой inventory тоже неполон: передать его в cleanup означало бы объявить
+        # «удалёнными» все остальные записи state и стереть индекс целиком.
         if stage in ("metadata", "content"):
-            indexer._run_deleted_files += indexer._cleanup_deleted_files([str(item["state_key"]) for item in all_tasks])
+            if only_paths:
+                self._logger.info(
+                    "Cleanup «фантомов» пропущен на этапе '%s': список файлов ограничен "
+                    "--only-paths-file (%d путей), inventory неполон",
+                    stage,
+                    len(only_paths),
+                )
+            else:
+                indexer._run_deleted_files += indexer._cleanup_deleted_files(
+                    [str(item["state_key"]) for item in all_tasks]
+                )
 
         info = indexer.qdrant.get_collection(indexer.collection_name)
         self._logger.info("Коллекция '%s': %d точек", indexer.collection_name, info.points_count)
