@@ -23,15 +23,14 @@ import tempfile
 import threading
 import time
 import uuid
+import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-import webbrowser
 
 import requests
 
 try:
-    from watchdog.events import FileSystemEventHandler, FileSystemEvent
+    from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
     HAS_WATCHDOG = True
 except ImportError:
@@ -107,8 +106,22 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 
 def save_config(path: Path, cfg: Dict[str, Any]) -> None:
+    """Сохранить конфиг агента, ограничив права доступа.
+
+    В конфиге лежит токен сессии — полноценный доступ ко всему Cloud Drive
+    пользователя, поэтому файл не должен быть доступен на чтение другим
+    учётным записям (Windows-клиент для этого использует DPAPI).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 # ─── Server availability ──────────────────────────────────────────────────────
 
@@ -221,6 +234,7 @@ class SyncAPIClient:
         self.token = token
         self.session = requests.Session()
         self.session.headers["Authorization"] = f"Bearer {token}"
+        self._ensured_folders: set[str] = set()
 
     def _get(self, path: str, **params: Any) -> Any:
         r = self.session.get(f"{self.base}{path}", params=params, timeout=REQUEST_TIMEOUT)
@@ -272,6 +286,40 @@ class SyncAPIClient:
             )
         r.raise_for_status()
         return r.json()
+
+    def create_folder(self, parent_path: str, name: str) -> Dict[str, Any]:
+        r = self.session.post(
+            f"{self.base}/api/cloud-drive/folders",
+            params={"parent_path": parent_path, "name": name},
+            timeout=REQUEST_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def ensure_remote_folders(self, cloud_parent_path: str) -> None:
+        """Создать недостающие облачные папки для пути выгрузки.
+
+        Без этого файл из нового локального подкаталога получал 400 от
+        /upload (родителя нет в реестре) и после 3 ретраев навсегда выпадал
+        из синхронизации.
+        """
+        clean = str(cloud_parent_path or "").strip().strip("/")
+        if not clean or clean in self._ensured_folders:
+            return
+        built = ""
+        for segment in clean.split("/"):
+            parent = built
+            built = f"{built}/{segment}".strip("/")
+            if built in self._ensured_folders:
+                continue
+            try:
+                self.create_folder(parent, segment)
+            except requests.HTTPError as exc:
+                status = getattr(exc.response, "status_code", 0)
+                # 409/400 — папка уже существует, это нормальный исход гонки.
+                if status not in (400, 409):
+                    raise
+            self._ensured_folders.add(built)
 
     def record_conflict(self, client_id: str, pair_id: str, path: str,
                         conflict_type: str, local_path: str = "", cloud_path: str = "") -> Dict[str, Any]:
@@ -326,11 +374,20 @@ def _cloud_to_local(pair: Dict[str, Any], cloud_path: str) -> Path:
 
 
 def _find_pair_for_cloud(pairs: List[Dict[str, Any]], cloud_path: str) -> Optional[Dict[str, Any]]:
+    """Подобрать пару синхронизации для облачного пути.
+
+    Пара с пустым ``cloud_path`` означает корень диска и обязана совпадать с
+    любым путём: именно такую пару клиент создаёт себе сам при первом запуске.
+    """
     best: Optional[Dict[str, Any]] = None
-    best_len = 0
+    best_len = -1
     for pair in pairs:
-        cloud_root = pair.get("cloud_path", "").rstrip("/")
-        if cloud_path == cloud_root or cloud_path.startswith(cloud_root + "/"):
+        cloud_root = str(pair.get("cloud_path") or "").strip().strip("/")
+        if not cloud_root:
+            matches = True
+        else:
+            matches = cloud_path == cloud_root or cloud_path.startswith(cloud_root + "/")
+        if matches:
             depth = len(cloud_root)
             if depth > best_len:
                 best = pair
@@ -394,6 +451,7 @@ class UploadQueue:
                 if not task.local_path.is_file():
                     continue
                 log.info("Загрузка: %s → %s", task.local_path.name, task.cloud_parent)
+                self._api.ensure_remote_folders(task.cloud_parent)
                 self._api.upload(task.local_path, task.cloud_parent)
             except (requests.ConnectionError, requests.Timeout):
                 # Server unavailable — re-queue with longer delay, no retry limit
@@ -423,18 +481,21 @@ class UploadQueue:
 
 # ─── Watchdog ─────────────────────────────────────────────────────────────────
 
-class _PairEventHandler(FileSystemEventHandler):
+_EventHandlerBase = FileSystemEventHandler if HAS_WATCHDOG else object
+
+
+class _PairEventHandler(_EventHandlerBase):  # type: ignore[misc,valid-type]
     def __init__(self, pair: Dict[str, Any], upload_q: UploadQueue) -> None:
         self._pair = pair
         self._upload_q = upload_q
 
-    def on_modified(self, event: FileSystemEvent) -> None:
+    def on_modified(self, event: Any) -> None:
         self._handle(event)
 
-    def on_created(self, event: FileSystemEvent) -> None:
+    def on_created(self, event: Any) -> None:
         self._handle(event)
 
-    def _handle(self, event: FileSystemEvent) -> None:
+    def _handle(self, event: Any) -> None:
         if event.is_directory:
             return
         local_path = Path(str(event.src_path))
@@ -462,10 +523,32 @@ def start_watchdog(pairs: List[Dict[str, Any]], upload_q: UploadQueue) -> Option
 
 # ─── Changes poller ───────────────────────────────────────────────────────────
 
+def classify_change(change: Dict[str, Any]) -> str:
+    """Определить тип изменения из записи фида /api/cloud-drive/changes.
+
+    Сервер отдаёт строки реестра с полями ``node_type`` и ``deleted_at`` — полей
+    ``type``/``change_type`` в фиде нет. Раньше клиент читал только их, поэтому
+    любое изменение молча отбрасывалось и направление «облако → локально»
+    не работало вовсе. Значения ``type``/``change_type`` продолжаем понимать
+    для совместимости, если сервер когда-нибудь начнёт их присылать.
+    """
+    explicit = str(change.get("type") or change.get("change_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    if str(change.get("deleted_at") or "").strip():
+        return "delete"
+    node_type = str(change.get("node_type") or "").strip().lower()
+    if node_type == "folder":
+        return "folder"
+    if node_type == "file":
+        return "upsert"
+    return ""
+
+
 def _apply_change(api: SyncAPIClient, change: Dict[str, Any],
                   pairs: List[Dict[str, Any]], client_id: str) -> None:
     cloud_path = str(change.get("path") or "")
-    change_type = str(change.get("type") or change.get("change_type") or "")
+    change_type = classify_change(change)
     if not cloud_path or change_type in ("", "version"):
         return
 
@@ -480,6 +563,13 @@ def _apply_change(api: SyncAPIClient, change: Dict[str, Any],
         if local_dest.is_file():
             local_dest.unlink(missing_ok=True)
             log.info("Удалён локально: %s", local_dest)
+        return
+
+    if change_type == "folder":
+        try:
+            local_dest.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("Не удалось создать каталог %s: %s", local_dest, exc)
         return
 
     # download (new / modified)
@@ -977,7 +1067,7 @@ def main() -> None:
     if args.status:
         print(f"Сервер:   {server}")
         print(f"Клиент:   {cfg['display_name']} ({client_id[:8]}...)")
-        print(f"Статус:   online")
+        print("Статус:   online")
         print(f"Пары ({len(pairs)}):")
         for p in pairs:
             print(f"  {p['local_path']} ↔ {p.get('cloud_path') or '(root)'} [{p.get('conflict_policy', 'ask')}]")
