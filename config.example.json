@@ -88,6 +88,7 @@
   "retrieval_fulltext_fail_open": true,
   "retrieval_fulltext_top_k": 100,
   "retrieval_final_top_k": 10,
+  "retrieval_collapse_duplicates": true,
   "retrieval_relevance_gate_enabled": true,
   "retrieval_min_dense_score": 0.78,
   "retrieval_single_term_min_dense_score": 0.80,
@@ -101,8 +102,8 @@
   "retrieval_reranker_backend": "",
   "retrieval_reranker_onnx_provider": "",
   "retrieval_reranker_onnx_file_name": "",
-  "retrieval_reranker_top_n": 30,
+  "retrieval_reranker_top_n": 0,
   "retrieval_reranker_weight": 0.65,
-  "retrieval_reranker_max_length": 512,
+  "retrieval_reranker_max_length": 256,
   "retrieval_reranker_min_score": -4.0
 }

@@ -3,55 +3,26 @@
 from __future__ import annotations
 
 import math
-import re
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
-_TOKEN_RE = re.compile(r"[a-zа-яё0-9\-]{2,}", flags=re.IGNORECASE)
-_STOPWORDS = {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
-_TERM_ALIASES = {
-    "touareg": ["туарег", "volkswagen", "фольксваген", "vw"],
-    "туарег": ["touareg", "volkswagen", "фольксваген", "vw"],
-    "volkswagen": ["фольксваген", "vw"],
-    "фольксваген": ["volkswagen", "vw"],
-    "обслуживания": ["обслуживание", "техническое обслуживание", "услуги", "ремонт", "сервис"],
-    "технических": ["технические", "техническое обслуживание", "услуги", "ремонт", "сервис"],
-    "vin": ["шильдик", "табличка", "заводская табличка"],
-}
+from .terms import STOPWORDS as _STOPWORDS
+from .terms import TERM_ALIASES as _TERM_ALIASES
+from .terms import TOKEN_RE as _TOKEN_RE
+from .terms import term_needles as _needles
+from .terms import term_variants as _term_variants
+from .terms import tokenize
 
-
-def tokenize(text: str) -> List[str]:
-    """Tokenize mixed Russian/Latin file metadata for lexical retrieval."""
-    terms: List[str] = []
-    seen: set[str] = set()
-    for raw in _TOKEN_RE.findall(text or ""):
-        term = raw.lower().replace("ё", "е")
-        if term in _STOPWORDS:
-            continue
-        if term not in seen:
-            terms.append(term)
-            seen.add(term)
-    return terms
-
-
-def _term_variants(term: str) -> List[str]:
-    clean = str(term or "").lower().replace("ё", "е")
-    variants = [clean]
-    for alias in _TERM_ALIASES.get(clean, []):
-        alias_norm = alias.lower().replace("ё", "е")
-        if alias_norm and alias_norm not in variants:
-            variants.append(alias_norm)
-    if "0" in clean or re.search(r"[oо].*\d|\d.*[oо]", clean, flags=re.IGNORECASE):
-        for src, dst in (("o", "0"), ("о", "0"), ("0", "o"), ("0", "о")):
-            alt = clean.replace(src, dst)
-            if alt and alt not in variants:
-                variants.append(alt)
-        for idx, char in enumerate(clean):
-            if char == "0":
-                for dst in ("o", "о"):
-                    alt = f"{clean[:idx]}{dst}{clean[idx + 1:]}"
-                    if alt and alt not in variants:
-                        variants.append(alt)
-    return variants
+__all__ = [
+    "_STOPWORDS",
+    "_TERM_ALIASES",
+    "_TOKEN_RE",
+    "_needles",
+    "_term_variants",
+    "bm25_rank_indexed_items",
+    "bm25_rank_items",
+    "prepare_bm25_items",
+    "tokenize",
+]
 
 
 def prepare_bm25_items(items: Iterable[Dict[str, Any]]) -> int:
@@ -65,18 +36,6 @@ def prepare_bm25_items(items: Iterable[Dict[str, Any]]) -> int:
         item["_bm25_tokens"] = tokenize(f"{filename} {filename} {path}")
         prepared += 1
     return prepared
-
-
-def _needles(term: str) -> tuple[str, ...]:
-    needles: list[str] = []
-    for variant in _term_variants(term):
-        if variant and variant not in needles:
-            needles.append(variant)
-        if len(variant) >= 5:
-            stem = variant.rstrip("аеиоуыьъйяю")
-            if len(stem) >= 4 and stem not in needles:
-                needles.append(stem)
-    return tuple(needles)
 
 
 def bm25_rank_items(

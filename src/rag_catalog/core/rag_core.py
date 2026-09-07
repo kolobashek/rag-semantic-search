@@ -36,11 +36,18 @@ from .exact_tokens import (
 from .index_state_db import IndexStateDB
 from .qdrant_connection import create_qdrant_client
 from .retrieval import (
+    TERM_ALIASES,
+    ParsedQuery,
+    apply_operator_filters,
     bm25_rank_indexed_items,
     bm25_rank_items,
+    collapse_duplicate_results,
+    parse_query,
     prepare_bm25_items,
     prepare_query_text,
     rrf_fuse,
+    term_matches,
+    term_variants,
     tokenize,
 )
 from .telemetry_db import TelemetryDB
@@ -147,13 +154,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rank_max_chunks_per_document": 3,
     "retrieval_pipeline": "legacy",  # legacy|v2
     "retrieval_dense_top_k": 50,
-    "retrieval_lexical_top_k": 50,
+    "retrieval_lexical_top_k": 50,   # глубина lexical/numeric-каналов (не меньше limit*4)
     "retrieval_bm25_enabled": True,
     "retrieval_bm25_top_k": 50,
     "retrieval_fulltext_enabled": True,
     "retrieval_fulltext_fail_open": True,
     "retrieval_fulltext_top_k": 100,
-    "retrieval_final_top_k": 10,
+    "retrieval_final_top_k": 10,     # размер выдачи, если вызывающий не задал limit (<=0)
+    "retrieval_collapse_duplicates": True,  # схлопывать копии с одинаковым content_hash
     "retrieval_relevance_gate_enabled": True,
     "retrieval_min_dense_score": 0.78,
     "retrieval_single_term_min_dense_score": 0.80,
@@ -167,11 +175,27 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retrieval_reranker_backend": "",
     "retrieval_reranker_onnx_provider": "",
     "retrieval_reranker_onnx_file_name": "",
-    "retrieval_reranker_top_n": 30,
+    # 0 = авто: max(limit*3, 30) кандидатов после fusion идут в cross-encoder.
+    "retrieval_reranker_top_n": 0,
     "retrieval_reranker_weight": 0.65,
-    "retrieval_reranker_max_length": 512,
+    "retrieval_reranker_max_length": 256,
     "retrieval_reranker_min_score": -4.0,
 }
+
+RERANKER_MIN_TOP_N = 30
+
+
+def reranker_top_n(config: Dict[str, Any], limit: int) -> int:
+    """Number of fused candidates the cross-encoder scores.
+
+    Explicit ``retrieval_reranker_top_n`` wins (never below ``limit``); otherwise
+    ``max(limit*3, 30)`` so the reranker can promote documents from deep in the list.
+    """
+    limit = max(1, int(limit or 0))
+    configured = int((config or {}).get("retrieval_reranker_top_n", 0) or 0)
+    if configured > 0:
+        return max(limit, configured)
+    return max(limit * 3, RERANKER_MIN_TOP_N)
 
 logger = logging.getLogger(__name__)
 MAX_QUERY_LEN = 2000
@@ -189,14 +213,8 @@ _MACHINE_DOCUMENT_EVIDENCE_MARKERS = (
     "стс",
     "свидетельство о регистрации",
 )
-_TERM_ALIASES = {
-    "touareg": ["туарег", "volkswagen", "фольксваген", "vw"],
-    "туарег": ["touareg", "volkswagen", "фольксваген", "vw"],
-    "volkswagen": ["фольксваген", "vw"],
-    "фольксваген": ["volkswagen", "vw"],
-    "обслуживания": ["обслуживание", "техническое обслуживание", "услуги", "ремонт", "сервис"],
-    "технических": ["технические", "техническое обслуживание", "услуги", "ремонт", "сервис"],
-}
+# Single source of truth lives in retrieval/terms.py; kept as an alias for callers.
+_TERM_ALIASES = TERM_ALIASES
 
 
 def _payload_index_type(schema: Any, field_name: str) -> str:
@@ -264,9 +282,10 @@ RETRIEVAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "numeric_exact_fs_fallback_enabled": False,
         # Reranker stays opt-in until latency and eval thresholds are agreed.
         "retrieval_reranker_enabled": False,
-        "retrieval_reranker_top_n": 30,
+        "retrieval_reranker_fail_open": True,
+        "retrieval_reranker_top_n": 0,
         "retrieval_reranker_weight": 0.35,
-        "retrieval_reranker_max_length": 64,
+        "retrieval_reranker_max_length": 256,
     },
 }
 
@@ -418,7 +437,16 @@ class RAGSearcher:
             from sentence_transformers import CrossEncoder  # noqa: PLC0415
 
             backend = str(self.config.get("retrieval_reranker_backend") or "").strip().lower()
-            max_length = max(0, int(self.config.get("retrieval_reranker_max_length", 0) or 0))
+            max_length = max(
+                0,
+                int(
+                    self.config.get(
+                        "retrieval_reranker_max_length",
+                        DEFAULT_CONFIG["retrieval_reranker_max_length"],
+                    )
+                    or 0
+                ),
+            )
             cross_encoder_kwargs = {
                 "local_files_only": True,
                 **({"max_length": max_length} if max_length else {}),
@@ -481,8 +509,20 @@ class RAGSearcher:
             score, type, text, filename, path, full_path, size_mb, modified, extension.
         """
         started = time.perf_counter()
-        raw_query = query or ""
-        raw_original = query_original if query_original else raw_query
+        if int(limit or 0) <= 0:
+            limit = max(1, int(self.config.get("retrieval_final_top_k", 10) or 10))
+        raw_query_input = query or ""
+        raw_original_input = query_original if query_original else raw_query_input
+        # Query operators ("phrase", -word, type:, path:, after:, before:) are
+        # stripped here; channels search the remaining text, filters are applied
+        # to their results below. Telemetry keeps the original typed string.
+        parsed_original = parse_query(raw_original_input[:MAX_QUERY_LEN])
+        parsed_query = parse_query(raw_query_input[:MAX_QUERY_LEN]) if query_original else parsed_original
+        operators = parsed_original if parsed_original.has_operators else parsed_query
+        raw_query = parsed_query.search_text if parsed_query.has_operators else raw_query_input
+        raw_original = parsed_original.search_text if parsed_original.has_operators else raw_original_input
+        if not file_type and operators.file_type:
+            file_type = operators.file_type
         if title_only and content_only:
             content_only = False
 
@@ -507,10 +547,10 @@ class RAGSearcher:
             query_used = query_with_aliases
         else:
             query_used = self._expand_query_for_search(query_with_aliases)[:MAX_QUERY_LEN]
-        query_original_used = raw_original
+        query_original_used = raw_original_input
         truncated_note = ""
-        if len(raw_query) > MAX_QUERY_LEN:
-            truncated_note = f"truncated_from={len(raw_query)}"
+        if len(raw_query_input) > MAX_QUERY_LEN:
+            truncated_note = f"truncated_from={len(raw_query_input)}"
 
         if not self.connected:
             self.telemetry.log_search(
@@ -529,7 +569,12 @@ class RAGSearcher:
             )
             raise ConnectionError("Нет подключения к Qdrant")
 
-        lexical_query = query_original_used or raw_query
+        lexical_query = raw_original or raw_query
+        lexical_limit = max(
+            limit * 4,
+            40,
+            int(self.config.get("retrieval_lexical_top_k", 0) or 0),
+        )
 
         dense_limit = limit
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
@@ -666,6 +711,9 @@ class RAGSearcher:
                     "row_start": payload.get("row_start"),
                     "row_end": payload.get("row_end"),
                     "provenance": payload.get("provenance") or {},
+                    "content_hash": payload.get("content_hash", ""),
+                    "is_duplicate": bool(payload.get("is_duplicate", False)),
+                    "duplicate_of": payload.get("duplicate_of", ""),
                     "dense_score": round(hit.score, 6),
                     "retrieval_source": "dense",
                 }
@@ -682,7 +730,7 @@ class RAGSearcher:
         )
         lexical_results = self._lexical_catalog_search(
             query=lexical_query,
-            limit=max(limit * 4, 40),
+            limit=lexical_limit,
             file_type=file_type,
             content_only=content_only,
             title_only=title_only,
@@ -702,9 +750,17 @@ class RAGSearcher:
                 "fulltext": len(fulltext_results),
             }
         }
+        operator_stats: Dict[str, int] = {}
+        if operators.has_result_filters:
+            results = self._apply_query_operators(operators, results, operator_stats)
+            numeric_exact_results = self._apply_query_operators(operators, numeric_exact_results, operator_stats)
+            lexical_results = self._apply_query_operators(operators, lexical_results, operator_stats)
+            fulltext_results = self._apply_query_operators(operators, fulltext_results, operator_stats)
         relevance_gate_applied = False
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
-            fusion_candidate_limit = max(limit * 5, 50)
+            reranker_enabled = bool(self.config.get("retrieval_reranker_enabled", False))
+            rerank_top_n = reranker_top_n(self.config, limit) if reranker_enabled else 0
+            fusion_candidate_limit = max(limit * 5, 50, rerank_top_n)
             bm25_results = self._bm25_catalog_search(
                 query=lexical_query,
                 limit=int(self.config.get("retrieval_bm25_top_k", max(limit * 4, 40)) or max(limit * 4, 40)),
@@ -712,6 +768,8 @@ class RAGSearcher:
                 content_only=content_only,
                 title_only=title_only,
             )
+            if operators.has_result_filters:
+                bm25_results = self._apply_query_operators(operators, bm25_results, operator_stats)
             channels = [numeric_exact_results, lexical_results, bm25_results, fulltext_results, results]
             fused = rrf_fuse(channels, limit=max(limit * 4, 40, fusion_candidate_limit))
             results = self._merge_ranked_results(
@@ -722,15 +780,20 @@ class RAGSearcher:
             )
             retrieval_diagnostics["channels"]["bm25"] = len(bm25_results)
             retrieval_diagnostics["channels"]["fused"] = len(results)
+            # Reranker runs BEFORE the relevance gate so the gate can use
+            # reranker_score as evidence and a document buried deep in the
+            # fused list can still be promoted into the top-``limit``.
+            if reranker_enabled:
+                results = self._rerank_results(query_used, results, limit=limit)
+                retrieval_diagnostics["channels"]["reranked"] = sum(
+                    1 for item in results if item.get("retrieval_reranked")
+                )
             results = self._apply_relevance_gate(
                 lexical_query,
                 results,
                 diagnostics=retrieval_diagnostics,
             )
             relevance_gate_applied = True
-            if bool(self.config.get("retrieval_reranker_enabled", False)):
-                results = self._rerank_results(query_used, results, limit=limit)
-                retrieval_diagnostics["channels"]["reranked"] = len(results)
         else:
             results = self._merge_ranked_results(
                 [*numeric_exact_results, *lexical_results, *fulltext_results],
@@ -745,6 +808,16 @@ class RAGSearcher:
                 results,
                 diagnostics=retrieval_diagnostics,
             )
+        if operators.has_operators:
+            retrieval_diagnostics["operators"] = {
+                **operators.as_dict(),
+                "rejected_by_reason": operator_stats,
+            }
+        if bool(self.config.get("retrieval_collapse_duplicates", True)):
+            before_collapse = len(results)
+            results = collapse_duplicate_results(results)
+            if len(results) != before_collapse:
+                retrieval_diagnostics["duplicates_collapsed"] = before_collapse - len(results)
         results = results[:limit]
         results = [self._repair_result_display_fields(item) for item in results]
 
@@ -794,20 +867,23 @@ class RAGSearcher:
             logger.warning("Core query expansion failed, using original query: %s", exc)
             return query
 
+    def _apply_query_operators(
+        self,
+        operators: ParsedQuery,
+        results: List[Dict[str, Any]],
+        stats: Dict[str, int],
+    ) -> List[Dict[str, Any]]:
+        """Post-filter channel results by "phrase", -word, path:, after:, before:."""
+        return apply_operator_filters(
+            operators,
+            results,
+            modified_to_dt=self._modified_to_naive_dt,
+            stats=stats,
+        )
+
     def _terms_from_text(self, text: str) -> List[str]:
-        terms = [
-            t.lower().replace("ё", "е")
-            for t in re.findall(r"[a-zа-яё0-9\-]{2,}", text or "", flags=re.IGNORECASE)
-        ]
-        stop = {"и", "или", "по", "на", "в", "во", "от", "для", "мне", "нужен", "нужна"}
-        out: List[str] = []
-        seen = set()
-        for term in terms:
-            if term in stop or term in seen:
-                continue
-            seen.add(term)
-            out.append(term)
-        return out
+        # Same tokenizer as BM25/fulltext channels (retrieval/terms.py).
+        return tokenize(text)
 
     def _query_terms(self, query: str) -> List[str]:
         expansion = self._search_alias_expansion(query)
@@ -815,34 +891,33 @@ class RAGSearcher:
         return self._terms_from_text(expanded_query)
 
     def _term_matches(self, haystack: str, term: str) -> bool:
-        for candidate in self._term_variants(term):
-            if candidate in haystack:
-                return True
-            if len(candidate) >= 5:
-                stem = candidate.rstrip("аеиоуыьъйяю")
-                if len(stem) >= 4 and stem in haystack:
-                    return True
-        return False
+        return term_matches(haystack, term)
 
     def _term_variants(self, term: str) -> List[str]:
-        clean = str(term or "").lower().replace("ё", "е")
-        variants = [clean]
-        for alias in _TERM_ALIASES.get(clean, []):
-            alias_norm = alias.lower().replace("ё", "е")
-            if alias_norm and alias_norm not in variants:
-                variants.append(alias_norm)
-        if "0" in clean or re.search(r"[oо].*\d|\d.*[oо]", clean, flags=re.IGNORECASE):
-            for src, dst in (("o", "0"), ("о", "0"), ("0", "o"), ("0", "о")):
-                alt = clean.replace(src, dst)
-                if alt and alt not in variants:
-                    variants.append(alt)
-            for idx, char in enumerate(clean):
-                if char == "0":
-                    for dst in ("o", "о"):
-                        alt = f"{clean[:idx]}{dst}{clean[idx + 1:]}"
-                        if alt and alt not in variants:
-                            variants.append(alt)
-        return variants
+        return term_variants(term)
+
+    def _modified_to_naive_dt(self, value: Any) -> Optional[datetime]:
+        """``modified`` payload → naive local datetime (ISO string or epoch timestamp)."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value))
+            except (OverflowError, OSError, ValueError):
+                return None
+        text = str(value).strip()
+        if re.fullmatch(r"\d{9,}(\.\d+)?", text):
+            try:
+                return datetime.fromtimestamp(float(text))
+            except (OverflowError, OSError, ValueError):
+                return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
 
     def _modified_to_ts(self, value: Any) -> Optional[float]:
         if value is None:
@@ -1617,6 +1692,9 @@ class RAGSearcher:
             "row_start": payload.get("row_start"),
             "row_end": payload.get("row_end"),
             "provenance": payload.get("provenance") or {},
+            "content_hash": payload.get("content_hash", ""),
+            "is_duplicate": bool(payload.get("is_duplicate", False)),
+            "duplicate_of": payload.get("duplicate_of", ""),
         }
         if rank_reason:
             result["rank_reason"] = rank_reason
@@ -2102,7 +2180,7 @@ class RAGSearcher:
         if model is None:
             return fail_or_fallback("Reranker is enabled but no model is configured")
 
-        top_n = max(limit, int(config.get("retrieval_reranker_top_n", limit) or limit))
+        top_n = reranker_top_n(config, limit)
         candidates = results[:top_n]
         tail = results[len(candidates):]
         pairs = [(query, self._rerank_text(item)) for item in candidates]

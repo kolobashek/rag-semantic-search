@@ -27,8 +27,23 @@ def test_apply_retrieval_release_preset_preserves_explicit_overrides() -> None:
     assert cfg["retrieval_bm25_enabled"] is True
     assert cfg["retrieval_final_top_k"] == 25
     assert cfg["retrieval_reranker_enabled"] is True
-    assert cfg["retrieval_reranker_top_n"] == 30
-    assert cfg["retrieval_reranker_max_length"] == 64
+    assert cfg["retrieval_reranker_top_n"] == 0  # auto: max(limit*3, 30)
+    assert cfg["retrieval_reranker_max_length"] == 256
+    assert cfg["retrieval_reranker_fail_open"] is True
+
+
+def test_reranker_defaults_are_consistent_between_default_config_and_preset() -> None:
+    from rag_catalog.core.rag_core import DEFAULT_CONFIG, RETRIEVAL_PRESETS, reranker_top_n
+
+    preset = RETRIEVAL_PRESETS["release_v2"]
+    assert DEFAULT_CONFIG["retrieval_reranker_max_length"] == 256
+    assert preset["retrieval_reranker_max_length"] == 256
+    assert DEFAULT_CONFIG["retrieval_reranker_fail_open"] is True
+    assert DEFAULT_CONFIG["retrieval_reranker_top_n"] == preset["retrieval_reranker_top_n"] == 0
+    assert reranker_top_n(DEFAULT_CONFIG, 10) == 30
+    assert reranker_top_n(DEFAULT_CONFIG, 20) == 60
+    assert reranker_top_n({"retrieval_reranker_top_n": 5}, 10) == 10
+    assert reranker_top_n({"retrieval_reranker_top_n": 40}, 10) == 40
 
 
 def test_multilingual_e5_inputs_use_asymmetric_prefixes() -> None:
@@ -366,7 +381,8 @@ def test_search_retrieval_v2_keeps_dense_depth_until_relevance_gate() -> None:
     assert len(gated_inputs) == 50
 
 
-def test_search_retrieval_v2_applies_relevance_gate_before_reranking() -> None:
+def test_search_retrieval_v2_reranks_before_relevance_gate() -> None:
+    """Reranker must run first so the gate actually sees reranker_score."""
     s = _make_searcher(connected=True)
     s.config = {"retrieval_pipeline": "v2", "retrieval_reranker_enabled": True}
     s.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[  # type: ignore[method-assign]
@@ -399,7 +415,93 @@ def test_search_retrieval_v2_applies_relevance_gate_before_reranking() -> None:
 
     s.search("target", limit=1, source="test")
 
-    assert calls == ["gate", "rerank"]
+    assert calls == ["rerank", "gate"]
+
+
+def _dense_points(count: int, *, target_index: int) -> list:
+    points = []
+    for index in range(count):
+        is_target = index == target_index
+        points.append(
+            SimpleNamespace(
+                score=0.95 - index * 0.001,
+                payload={
+                    "type": "pdf_content",
+                    "filename": ("target" if is_target else f"doc-{index}") + ".pdf",
+                    "path": f"docs/doc-{index}.pdf",
+                    "full_path": rf"O:\docs\doc-{index}.pdf",
+                    "text": (
+                        "target answer: полный текст договора с нужным номером " * 5
+                        if is_target
+                        else f"generic filler content number {index} " * 5
+                    ),
+                    "chunk_index": 0,
+                },
+            )
+        )
+    return points
+
+
+def test_search_v2_reranker_promotes_document_from_20th_fused_position() -> None:
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_pipeline": "v2",
+        "retrieval_dense_top_k": 50,
+        "retrieval_relevance_gate_enabled": True,
+        "retrieval_min_dense_score": 0.99,  # everything is weak dense -> only reranker can pass it
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+        "retrieval_reranker_weight": 1.0,
+        "retrieval_reranker_min_score": 5.0,
+    }
+    s._reranker = _FakeReranker()
+    s.qdrant.query_points = lambda **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        points=_dense_points(40, target_index=19)
+    )
+    s._numeric_exact_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._lexical_catalog_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._bm25_catalog_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._fulltext_content_search = lambda **_kwargs: []  # type: ignore[method-assign]
+
+    out = s.search("target", limit=5, source="test")
+
+    assert out and out[0]["filename"] == "target.pdf"
+    assert out[0]["reranker_score"] == 10.0
+    assert out[0]["relevance_evidence"] == "reranker"
+    # Weak-dense noise without reranker confirmation is filtered by the gate.
+    assert all(item["filename"] == "target.pdf" for item in out)
+    details = s.telemetry.search_calls[-1]["details"]
+    assert details["channels"]["reranked"] == 30
+    assert details["relevance_gate"]["rejected_by_reason"]["reranker_below_floor"] == 29
+    assert details["relevance_gate"]["rejected_by_reason"]["weak_dense"] == 10
+
+
+def test_search_v2_reranker_failure_fails_open_by_default(caplog) -> None:
+    class FailingReranker:
+        def predict(self, _pairs):
+            raise RuntimeError("onnx failed")
+
+    s = _make_searcher(connected=True)
+    s.config = {
+        "retrieval_pipeline": "v2",
+        "retrieval_reranker_enabled": True,
+        "retrieval_reranker_model": "fake",
+    }
+    s._reranker = FailingReranker()
+    s.qdrant.query_points = lambda **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        points=_dense_points(3, target_index=0)
+    )
+    s._numeric_exact_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._lexical_catalog_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._bm25_catalog_search = lambda **_kwargs: []  # type: ignore[method-assign]
+    s._fulltext_content_search = lambda **_kwargs: []  # type: ignore[method-assign]
+
+    with caplog.at_level("WARNING"):
+        out = s.search("target", limit=3, source="test")
+
+    assert [item["filename"] for item in out] == ["target.pdf", "doc-1.pdf", "doc-2.pdf"]
+    assert all(item.get("reranker_score") is None for item in out)
+    assert any("Reranker prediction failed" in record.message for record in caplog.records)
 
 
 def test_fulltext_content_channel_returns_exact_russian_match() -> None:
