@@ -233,6 +233,43 @@ STAGE_RANK = {name: i for i, name in enumerate(STAGES)}
 # Пороги размера сохраняются для OCR-кандидатов и совместимости старых тестов.
 DEFAULT_SMALL_OFFICE_MB = 20.0
 DEFAULT_SMALL_PDF_MB = 2.0
+DEFAULT_HEARTBEAT_PATH = "data/indexer_heartbeat.json"
+# Статусы state, при которых файл считается НЕ покрытым содержимым.
+UNCOVERED_STATUSES = ("empty", "deferred_ocr", "unreadable", "error", "reindexing")
+
+
+def resolve_read_workers(value: Any) -> int:
+    """index_read_workers: 0/None/отрицательное = auto = max(2, min(cpu_count, 12))."""
+    try:
+        workers = int(value or 0)
+    except (TypeError, ValueError):
+        workers = 0
+    if workers <= 0:
+        return max(2, min(int(os.cpu_count() or 4), 12))
+    return workers
+
+
+def resolve_ocr_mode(
+    cfg: Dict[str, Any],
+    *,
+    no_ocr: bool = False,
+    force_ocr: bool = False,
+) -> Tuple[bool, str]:
+    """Вернуть (skip_ocr, reason).
+
+    Базовое значение — cfg["index_skip_ocr"] (по умолчанию False = OCR включён).
+    --no-ocr принудительно выключает, --force-ocr принудительно включает.
+    Стадия индексирования на OCR НЕ влияет.
+    """
+    if force_ocr and no_ocr:
+        return False, "--force-ocr имеет приоритет над --no-ocr"
+    if force_ocr:
+        return False, "--force-ocr"
+    if no_ocr:
+        return True, "--no-ocr"
+    if bool(cfg.get("index_skip_ocr", False)):
+        return True, "config index_skip_ocr=true"
+    return False, "config index_skip_ocr=false (по умолчанию)"
 
 
 def _file_category(filepath: Path, small_office_mb: float, small_pdf_mb: float) -> str:
@@ -437,6 +474,7 @@ class RAGIndexer:
         embedding_backend: str = "",
         embedding_onnx_provider: str = "",
         embedding_onnx_file_name: str = "",
+        heartbeat_path: str = "",
     ) -> None:
         # current_stage выставляется при каждом запуске index_directory(stage=...)
         # и определяет поведение skip-логики и экстракции содержимого.
@@ -464,7 +502,7 @@ class RAGIndexer:
         self._ocr_context = threading.local()
         self.dry_run = False
         self.max_chunks_per_file = max_chunks_per_file  # 0 = без ограничений
-        self.read_workers = max(1, int(read_workers or 4))
+        self.read_workers = resolve_read_workers(read_workers)
         self.qdrant_timeout_sec = max(5, int(qdrant_timeout_sec or 60))
         self.exclude_patterns = self._normalize_exclude_patterns(exclude_patterns or [])
         self.only_paths = {str(path).strip() for path in (only_paths or set()) if str(path).strip()}
@@ -518,6 +556,7 @@ class RAGIndexer:
         self.telemetry = TelemetryDB(telemetry_path)
         self.run_id: str = ""
         self._run_deleted_files = 0
+        self.heartbeat_path = str(heartbeat_path or "").strip()
         self.payload_schema_version = PAYLOAD_SCHEMA_VERSION
 
         if embedding_model.startswith("ollama:"):
@@ -764,6 +803,10 @@ class RAGIndexer:
         existing_stage = str(existing.get("stage") or "content")  # backward compat
         existing_status = str(existing.get("status") or ("error" if existing_stage == "error" else "ok"))
         extension = str(existing.get("extension") or Path(file_key).suffix or "").lower()
+        if existing_status == "reindexing":
+            # Старые векторы удалены (или удалялись), новые не дописаны —
+            # прогон прервался в окне между delete и flush. Переиндексировать.
+            return False
         if existing_status == "unreadable":
             return True
         if (
@@ -815,7 +858,12 @@ class RAGIndexer:
     # ── Qdrant vector deletion ─────────────────────────────────────────
 
     def _delete_file_vectors(self, filepath: Path, *, payload_match: Optional[Dict[str, Any]] = None) -> None:
-        """Удалить все векторы в Qdrant, связанные с данным файлом или payload identity."""
+        """Удалить все векторы в Qdrant, связанные с данным файлом или payload identity.
+
+        Ошибка после ретраев (см. qdrant_writer.delete_file_vectors) пробрасывается
+        наверх: вызывающий код обязан пометить файл как error и НЕ записывать новые
+        точки, иначе в индексе останется смесь старых и новых чанков.
+        """
         try:
             delete_file_vectors(
                 self.qdrant,
@@ -826,7 +874,8 @@ class RAGIndexer:
             )
             logger.debug("Удалены старые векторы для: %s", filepath)
         except Exception as exc:
-            logger.warning("Не удалось удалить векторы для %s: %s", filepath, exc)
+            logger.error("Не удалось удалить векторы для %s: %s", filepath, exc)
+            raise
 
     # ── text extraction ────────────────────────────────────────────────
 
@@ -1553,17 +1602,30 @@ class RAGIndexer:
         by_stage = dict(stats.get("by_stage") or {})
         by_status = dict(stats.get("by_status") or {})
         by_indexed_stage = dict(stats.get("by_indexed_stage") or {})
-        content_files = int(by_stage.get("content") or 0)
         error_files = int((by_status.get("error") if by_status else by_stage.get("error")) or 0)
         empty_files = int((by_status.get("empty") if by_status else by_stage.get("empty")) or 0)
         metadata_files = int(by_stage.get("metadata") or 0)
+        # Покрытие содержимым: только stage=content/partial при status=ok.
+        # deferred_ocr / empty / unreadable / error / reindexing — НЕ покрыты.
+        try:
+            coverage = self.state_db.coverage_summary(top_folders=0)
+            covered_files = int(coverage.get("covered") or 0)
+            uncovered_by_status = dict(coverage.get("uncovered_by_status") or {})
+        except Exception:
+            covered_files = int(by_stage.get("content") or 0)
+            uncovered_by_status = {}
         report: Dict[str, Any] = {
             "total_files": total,
             "stage_distribution": by_stage,
             "status_distribution": by_status,
             "indexed_stage_distribution": by_indexed_stage,
             "by_extension": stats.get("by_ext") or {},
-            "content_coverage_pct": round((content_files / total) * 100, 2) if total else 0.0,
+            "content_coverage_pct": round((covered_files / total) * 100, 2) if total else 0.0,
+            "content_coverage": {
+                "covered": covered_files,
+                "uncovered": max(0, total - covered_files),
+                "uncovered_by_status": uncovered_by_status,
+            },
             "metadata_only_files": metadata_files,
             "empty_files": empty_files,
             "error_files": error_files,
@@ -1656,10 +1718,22 @@ class RAGIndexer:
         if not deleted_keys:
             return 0
         logger.info("Удаление %d удалённых файлов из индекса…", len(deleted_keys))
+        removed: List[str] = []
+        failed = 0
         for key in deleted_keys:
-            self._delete_file_vectors(Path(key))
-        self.state_db.delete_entries(deleted_keys)
-        return len(deleted_keys)
+            try:
+                self._delete_file_vectors(Path(key))
+            except Exception:
+                # Векторы остались в Qdrant — state тоже оставляем, чтобы
+                # следующий cleanup повторил попытку, а не потерял след.
+                failed += 1
+                continue
+            removed.append(key)
+        if failed:
+            logger.warning("Cleanup: %d записей не удалены из Qdrant и сохранены в state для повтора", failed)
+        if removed:
+            self.state_db.delete_entries(removed)
+        return len(removed)
 
     def process_index_queue_once(self, *, limit: int = 10, lease_seconds: int = 300) -> Dict[str, int]:
         """Process a small batch from durable index_queue."""
@@ -1822,6 +1896,119 @@ def _configure_forced_replacement(
         logger.info("Полная замена старых векторов включена для расширений: %s", sorted(forced_extensions))
 
 
+def _resolve_heartbeat_path(cfg: Dict[str, Any]) -> str:
+    """cfg["indexer_heartbeat_path"], по умолчанию data/indexer_heartbeat.json от корня проекта."""
+    raw = str(cfg.get("indexer_heartbeat_path") or DEFAULT_HEARTBEAT_PATH).strip()
+    if not raw:
+        return ""
+    path = Path(raw)
+    if not path.is_absolute():
+        from .rag_core import PROJECT_ROOT  # noqa: PLC0415
+
+        path = Path(PROJECT_ROOT) / path
+    return str(path)
+
+
+def _print_indexer_status(heartbeat_path: str) -> None:
+    from .indexing.heartbeat import describe_heartbeat, read_heartbeat  # noqa: PLC0415
+
+    hb = read_heartbeat(heartbeat_path) if heartbeat_path else None
+    print(f"heartbeat: {heartbeat_path or '(не настроен)'}")
+    print(describe_heartbeat(hb))
+    if hb:
+        print(json.dumps(hb, ensure_ascii=False, indent=2))
+
+
+def format_coverage_table(summary: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    total = int(summary.get("total") or 0)
+    lines.append(f"Всего записей: {total}")
+    lines.append(
+        f"С содержимым: {summary.get('covered', 0)} ({summary.get('coverage_pct', 0.0)}%), "
+        f"без содержимого: {summary.get('uncovered', 0)}"
+    )
+
+    def _section(title: str, rows: Dict[str, int]) -> None:
+        lines.append("")
+        lines.append(title)
+        for key, count in rows.items():
+            pct = round(count / total * 100, 1) if total else 0.0
+            lines.append(f"  {key:<18} {count:>10}  {pct:>5}%")
+
+    _section("По indexed_stage:", dict(summary.get("by_indexed_stage") or {}))
+    _section("По status:", dict(summary.get("by_status") or {}))
+    _section("Без содержимого — по расширениям:", dict(summary.get("uncovered_by_extension") or {}))
+    lines.append("")
+    lines.append("Без содержимого — топ папок:")
+    for row in list(summary.get("uncovered_top_folders") or []):
+        lines.append(f"  {int(row.get('files') or 0):>8}  {row.get('folder')}")
+    return "\n".join(lines)
+
+
+def _print_coverage_report(state_db: IndexStateDB) -> None:
+    summary = state_db.coverage_summary(top_folders=20)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print()
+    print(format_coverage_table(summary))
+
+
+def _write_coverage_list(state_db: IndexStateDB, target: Path) -> int:
+    rows = state_db.iter_uncovered_entries()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="") as fh:
+        fh.write("full_path\textension\tstage\tindexed_stage\tstatus\treason\tsize_bytes\n")
+        for row in rows:
+            status = str(row.get("status") or "")
+            reason = str(row.get("last_error") or "") or status
+            fh.write(
+                "\t".join(
+                    str(value).replace("\t", " ").replace("\n", " ")
+                    for value in (
+                        row.get("full_path"),
+                        row.get("extension"),
+                        row.get("stage"),
+                        row.get("indexed_stage"),
+                        status,
+                        reason,
+                        int(row.get("size_bytes") or 0),
+                    )
+                )
+                + "\n"
+            )
+    return len(rows)
+
+
+def _run_config_check(cfg: Dict[str, Any], args: argparse.Namespace) -> None:
+    """Валидация config.json: errors → exit 2 (кроме embedding-mismatch при --recreate)."""
+    from .config_check import EMBEDDING_MISMATCH_KEY, LEVEL_ERROR, LEVEL_WARNING, validate_config  # noqa: PLC0415
+
+    try:
+        issues = validate_config(
+            cfg,
+            state_db_path=Path(args.db) / "index_state.db",
+            collection_name=args.collection,
+            embedding_model=args.model,
+        )
+    except Exception as exc:
+        logger.warning("Валидация config не выполнена: %s", exc)
+        return
+    fatal = 0
+    for issue in issues:
+        if issue.level == LEVEL_ERROR:
+            if issue.key == EMBEDDING_MISMATCH_KEY and bool(args.recreate):
+                logger.warning("config: %s (проигнорировано из-за --recreate)", issue)
+                continue
+            fatal += 1
+            logger.error("config: %s", issue)
+        elif issue.level == LEVEL_WARNING:
+            logger.warning("config: %s", issue)
+        else:
+            logger.info("config: %s", issue)
+    if fatal:
+        logger.error("Старт отменён: %d ошибок конфигурации (см. выше). Обойти: --skip-config-check", fatal)
+        sys.exit(2)
+
+
 def main() -> None:
     cfg = load_config()
 
@@ -1847,6 +2034,13 @@ def main() -> None:
             "  --watch               — после первичного прохода следить за изменениями каталога\n"
             "  --recreate            — пересоздать коллекцию и очистить state\n"
             "  --cleanup             — только удалить из индекса файлы, которых нет на диске\n"
+            "  --status              — показать heartbeat текущего/последнего прогона и выйти\n"
+            "  --coverage-report     — отчёт «слепых зон» (файлы без содержимого) и выйти\n"
+            "\n"
+            "OCR: базовое значение берётся из config index_skip_ocr "
+            f"(сейчас: {'ВЫКЛЮЧЕН' if bool(cfg.get('index_skip_ocr', False)) else 'включён'}); "
+            "--no-ocr принудительно выключает, --force-ocr принудительно включает. "
+            "Этап (--stage) на OCR не влияет.\n"
         ),
     )
     parser.add_argument("--catalog", default=cfg["catalog_path"], help="Папка для индексирования")
@@ -1871,13 +2065,15 @@ def main() -> None:
         "--no-ocr",
         action="store_true",
         dest="no_ocr",
-        help="Пропускать OCR для сканированных PDF (быстрее, текст не извлекается)",
+        help="Принудительно выключить OCR сканов/картинок (быстрее, текст не извлекается). "
+        "Без флага действует config index_skip_ocr.",
     )
     parser.add_argument(
         "--force-ocr",
         action="store_true",
         dest="force_ocr",
-        help="Принудительно выполнять OCR, даже если в config включён index_skip_ocr.",
+        help="Принудительно включить OCR, даже если в config index_skip_ocr=true. "
+        "Имеет приоритет над --no-ocr.",
     )
     parser.add_argument(
         "--no-ocr-fallback",
@@ -1895,9 +2091,10 @@ def main() -> None:
     parser.add_argument(
         "--workers",
         type=int,
-        default=int(cfg.get("index_read_workers", 4)),
+        default=int(cfg.get("index_read_workers", 0) or 0),
         dest="workers",
-        help="Число параллельных потоков для чтения файлов (по умолчанию 4)",
+        help="Число параллельных потоков для чтения файлов. 0 = auto = max(2, min(cpu_count, 12)); "
+        f"сейчас auto даст {resolve_read_workers(0)}. Значение из config index_read_workers.",
     )
     parser.add_argument(
         "--onnx",
@@ -1975,19 +2172,57 @@ def main() -> None:
         dest="only_paths_file",
         help="Обработать только пути из UTF-8 файла (по одному full_path/state_key на строку).",
     )
+    parser.add_argument(
+        "--coverage-report",
+        action="store_true",
+        dest="coverage_report",
+        help="Отчёт «слепых зон»: JSON + таблица по статусам/расширениям/папкам без содержимого. Индексация не запускается.",
+    )
+    parser.add_argument(
+        "--coverage-list",
+        default="",
+        dest="coverage_list",
+        metavar="ПУТЬ",
+        help="Выгрузить TSV со списком файлов без содержимого и причиной (status/last_error). Индексация не запускается.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        dest="show_status",
+        help="Показать heartbeat индексатора (стадия, прогресс, возраст) и выйти.",
+    )
+    parser.add_argument(
+        "--skip-config-check",
+        action="store_true",
+        dest="skip_config_check",
+        help="Не выполнять валидацию config.json при старте (только для отладки).",
+    )
     args = parser.parse_args()
-    if args.force_ocr:
-        args.no_ocr = False
-    elif str(args.stage or "").lower() in {"all", "full", "small", "large"}:
-        args.no_ocr = True
-    elif bool(cfg.get("index_skip_ocr", False)) and "--no-ocr" not in sys.argv:
-        args.no_ocr = True
+    args.no_ocr, ocr_reason = resolve_ocr_mode(cfg, no_ocr=args.no_ocr, force_ocr=args.force_ocr)
+    logger.info("OCR %s (%s)", "ВЫКЛЮЧЕН" if args.no_ocr else "включён", ocr_reason)
     args.collection = resolve_embedding_collection_name(
         args.collection,
         args.model,
         enabled=bool(cfg.get("embedding_collection_versioning", False)),
         suffix=str(cfg.get("embedding_collection_suffix") or ""),
     )
+    heartbeat_path = _resolve_heartbeat_path(cfg)
+
+    # Лёгкие режимы: без загрузки модели и подключения к Qdrant.
+    if args.show_status:
+        _print_indexer_status(heartbeat_path)
+        return
+    if args.coverage_report or args.coverage_list:
+        state_db = IndexStateDB(str(Path(args.db) / "index_state.db"))
+        if args.coverage_report:
+            _print_coverage_report(state_db)
+        if args.coverage_list:
+            written = _write_coverage_list(state_db, Path(args.coverage_list))
+            logger.info("Список файлов без содержимого записан: %s (%d строк)", args.coverage_list, written)
+        return
+
+    if not args.skip_config_check:
+        _run_config_check(cfg, args)
 
     # Разбор stage и legacy-флагов
     metadata_only_extensions: set = set()
@@ -2068,7 +2303,9 @@ def main() -> None:
         ocr_max_image_pages=int(cfg.get("ocr_max_image_pages", MAX_IMAGE_PAGES) or MAX_IMAGE_PAGES),
         catalog_wait_attempts=int(cfg.get("catalog_wait_attempts", 10) or 10),
         catalog_wait_seconds=int(cfg.get("catalog_wait_seconds", 60) or 60),
+        heartbeat_path=heartbeat_path,
     )
+    logger.info("Потоков чтения: %d (index_read_workers=%s)", indexer.read_workers, cfg.get("index_read_workers"))
     if args.quality_report:
         print(json.dumps(indexer.quality_report(), ensure_ascii=False, indent=2))
         return

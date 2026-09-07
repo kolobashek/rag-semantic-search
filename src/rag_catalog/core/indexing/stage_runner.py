@@ -22,6 +22,10 @@ from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
 from ..extractors import ExtractedDocument, extract_doc_meta, is_unreadable_source_error
 from ..indexer_control import read_indexer_control
 from ..retrieval import prepare_passage_texts
+from .heartbeat import STATUS_FAILED as HEARTBEAT_FAILED
+from .heartbeat import STATUS_FINISHED as HEARTBEAT_FINISHED
+from .heartbeat import STATUS_RUNNING as HEARTBEAT_RUNNING
+from .heartbeat import write_heartbeat
 from .qdrant_writer import upsert_points
 
 _TAR_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz")
@@ -32,6 +36,11 @@ _WINDOWS_7Z_PATHS = (
     Path("C:/Program Files/7-Zip/7z.exe"),
     Path("C:/Program Files (x86)/7-Zip/7z.exe"),
 )
+# Пустое извлечение (не PDF/картинка): повторная попытка через 24 ч, не на каждом прогоне.
+EMPTY_RETRY_DELAY_SEC = 86_400
+EMPTY_RETRY_MAX_DELAY_SEC = 7 * 86_400
+# Если не прочитана большая доля inventory — cleanup «фантомов» слишком опасен.
+FAILED_INVENTORY_CLEANUP_SKIP_RATIO = 0.10
 
 
 def _encode_with_transient_retry(
@@ -333,6 +342,25 @@ class IndexStageRunner:
         self._logger = logger
 
     def run(self, stage: str = "content") -> Dict[str, int]:
+        """Запустить этап; при падении записать heartbeat status=failed и пробросить."""
+        self._stage_progress: Dict[str, int] = {}
+        try:
+            return self._run_stage(stage)
+        except BaseException:
+            heartbeat_path = str(getattr(self._indexer, "heartbeat_path", "") or "")
+            if heartbeat_path:
+                progress = self._stage_progress or {}
+                write_heartbeat(
+                    heartbeat_path,
+                    stage=stage,
+                    processed=int(progress.get("processed_files", 0)),
+                    total=int(progress.get("total_files", 0)),
+                    run_id=str(getattr(self._indexer, "run_id", "") or ""),
+                    status=HEARTBEAT_FAILED,
+                )
+            raise
+
+    def _run_stage(self, stage: str) -> Dict[str, int]:
         """
         Pipeline-индексирование на указанном этапе.
 
@@ -381,12 +409,18 @@ class IndexStageRunner:
         ]
         self._logger.info("Найдено файлов на диске: %d (поддерживаемые расширения)", len(all_files))
 
+        # Файлы/архивы, которые не удалось прочитать при построении inventory.
+        # Их записи в state НЕЛЬЗЯ считать «удалёнными с диска» — см. cleanup ниже.
+        # Для архива корень = "<archive_path>::", для обычного файла = сам путь.
+        failed_inventory_roots: set[str] = set()
+
         def _normal_task(filepath: Path) -> Dict[str, Any] | None:
             try:
                 fingerprint, mtime = indexer._get_file_fingerprint(filepath)
                 size_bytes = int(filepath.stat().st_size)
             except OSError:
                 self._logger.debug("Файл исчез во время сканирования, пропуск: %s", filepath)
+                failed_inventory_roots.add(str(filepath))
                 return None
             return {
                 "filepath": filepath,
@@ -448,11 +482,15 @@ class IndexStageRunner:
                 "archive_category": _archive_member_category(ext, int(size_bytes)),
             }
 
+        def _archive_read_failed(filepath: Path, label: str, exc: Exception) -> None:
+            failed_inventory_roots.add(f"{filepath}::")
+            self._logger.warning("%s %s не прочитан: %s", label, filepath, exc)
+
         def _zip_tasks(filepath: Path) -> List[Dict[str, Any]]:
             tasks: List[Dict[str, Any]] = []
-            archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
-            archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
             try:
+                archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
+                archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
                 with ZipFile(filepath, "r") as zf:
                     for info in zf.infolist():
                         if info.is_dir():
@@ -479,14 +517,15 @@ class IndexStageRunner:
                             tasks.append(task)
                 archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
             except Exception as exc:
-                self._logger.warning("ZIP %s не прочитан: %s", filepath, exc)
+                _archive_read_failed(filepath, "ZIP", exc)
+                return []
             return tasks
 
         def _tar_tasks(filepath: Path) -> List[Dict[str, Any]]:
             tasks: List[Dict[str, Any]] = []
-            archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
-            archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
             try:
+                archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
+                archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
                 with tarfile.open(filepath, "r:*") as tf:
                     for info in tf.getmembers():
                         if not info.isfile():
@@ -508,7 +547,8 @@ class IndexStageRunner:
                             tasks.append(task)
                 archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
             except Exception as exc:
-                self._logger.warning("TAR %s не прочитан: %s", filepath, exc)
+                _archive_read_failed(filepath, "TAR", exc)
+                return []
             return tasks
 
         def _seven_zip_tasks(filepath: Path) -> List[Dict[str, Any]]:
@@ -516,14 +556,15 @@ class IndexStageRunner:
             try:
                 import py7zr  # type: ignore[import-not-found]
             except Exception as exc:
-                self._logger.warning("7Z %s не прочитан: py7zr недоступен (%s)", filepath, exc)
+                _archive_read_failed(filepath, "7Z (py7zr недоступен)", exc)
                 return tasks
-            archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
-            archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
             try:
+                archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
+                archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
                 with py7zr.SevenZipFile(filepath, "r") as zf:
                     if zf.needs_password():
                         self._logger.warning("7Z %s пропущен: архив защищён паролем", filepath)
+                        failed_inventory_roots.add(f"{filepath}::")
                         return tasks
                     for info in zf.list():
                         if getattr(info, "is_directory", False) or not getattr(info, "is_file", True):
@@ -552,14 +593,15 @@ class IndexStageRunner:
                             tasks.append(task)
                 archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
             except Exception as exc:
-                self._logger.warning("7Z %s не прочитан: %s", filepath, exc)
+                _archive_read_failed(filepath, "7Z", exc)
+                return []
             return tasks
 
         def _command_archive_tasks(filepath: Path) -> List[Dict[str, Any]]:
             tasks: List[Dict[str, Any]] = []
-            archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
-            archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
             try:
+                archive_fingerprint, archive_mtime = indexer._get_file_fingerprint(filepath)
+                archive_rel = filepath.relative_to(indexer.catalog_path).as_posix()
                 tool_name, members = _list_command_archive_members(filepath)
                 for member_info in members:
                     raw_name = str(member_info.get("name") or "").strip()
@@ -583,7 +625,8 @@ class IndexStageRunner:
                         tasks.append(task)
                 archive_member_keys[str(filepath)] = {str(task["state_key"]) for task in tasks}
             except Exception as exc:
-                self._logger.warning("Архив %s не прочитан: %s", filepath, exc)
+                _archive_read_failed(filepath, "Архив", exc)
+                return []
             return tasks
 
         all_tasks: List[Dict[str, Any]] = []
@@ -609,9 +652,16 @@ class IndexStageRunner:
                 if not stale_keys:
                     continue
                 self._logger.info("ZIP cleanup: %s — удаляю %d устаревших entries", archive_path, len(stale_keys))
+                removed_keys: List[str] = []
                 for key in stale_keys:
-                    indexer._delete_file_vectors(Path(key))
-                indexer.state_db.delete_entries(stale_keys)
+                    try:
+                        indexer._delete_file_vectors(Path(key))
+                    except Exception:
+                        # Векторы не удалены — state оставляем, чтобы повторить позже.
+                        continue
+                    removed_keys.append(key)
+                if removed_keys:
+                    indexer.state_db.delete_entries(removed_keys)
 
         only_paths = {
             _normalize_only_path_key(path)
@@ -685,6 +735,7 @@ class IndexStageRunner:
             "error_files": 0,
             "points_added": 0,
         }
+        self._stage_progress = stage_stats
         if bool(getattr(indexer, "dry_run", False)):
             planned: List[Dict[str, str]] = []
             skipped = 0
@@ -701,11 +752,22 @@ class IndexStageRunner:
                     existing_stage = str(existing.get("stage") or "content")
                     existing_status = str(existing.get("status") or ("error" if existing_stage == "error" else "ok"))
                     existing_ext = str(existing.get("extension") or Path(file_key).suffix or "").lower()
-                    if existing_status == "error":
+                    if existing_status == "reindexing":
+                        reason = "reindexing_interrupted"
+                    elif existing_status == "error":
                         if hasattr(indexer, "state_db") and not indexer.state_db.is_failed_retry_due(file_key):
                             skipped += 1
                             continue
                         reason = "retry_error"
+                    elif (
+                        existing_status == "empty"
+                        and stage in ("small", "large")
+                        and hasattr(indexer, "state_db")
+                        and not indexer.state_db.is_failed_retry_due(file_key)
+                    ):
+                        # Пустое извлечение с отложенным повтором (см. empty backoff)
+                        skipped += 1
+                        continue
                     elif (
                         stage in ("small", "large")
                         and bool(getattr(indexer, "skip_ocr", False))
@@ -756,6 +818,30 @@ class IndexStageRunner:
         last_telemetry_push = time.monotonic()
         telemetry_push_interval_sec = 1.0
         telemetry_push_every_n = 25
+        heartbeat_every_n = 25
+        heartbeat_path = str(getattr(indexer, "heartbeat_path", "") or "")
+
+        def _write_stage_heartbeat(status: str = HEARTBEAT_RUNNING) -> None:
+            if not heartbeat_path:
+                return
+            write_heartbeat(
+                heartbeat_path,
+                stage=stage,
+                processed=stage_stats["processed_files"],
+                total=stage_stats["total_files"],
+                run_id=str(getattr(indexer, "run_id", "") or ""),
+                status=status,
+                extra={
+                    "error_files": stage_stats["error_files"],
+                    "points_added": stage_stats["points_added"],
+                },
+            )
+
+        def _maybe_heartbeat() -> None:
+            if heartbeat_path and stage_stats["processed_files"] % heartbeat_every_n == 0:
+                _write_stage_heartbeat()
+
+        _write_stage_heartbeat()
         if indexer.run_id:
             indexer.telemetry.start_stage(
                 run_id=indexer.run_id,
@@ -847,12 +933,18 @@ class IndexStageRunner:
             size_bytes = int(item.get("size_bytes") or 0)
 
             existing_entry = state_snapshot.get(file_key)
+            existing_status = str((existing_entry or {}).get("status") or (existing_entry or {}).get("stage") or "")
             if (
                 existing_entry
-                and str(existing_entry.get("status") or existing_entry.get("stage") or "") == "error"
+                and (
+                    existing_status == "error"
+                    or (existing_status == "empty" and stage in ("small", "large"))
+                )
                 and hasattr(indexer, "state_db")
                 and not indexer.state_db.is_failed_retry_due(file_key)
             ):
+                # error — backoff после ошибки; empty — отложенный повтор пустого
+                # извлечения (через 24 ч), а не на каждом прогоне.
                 return {"skipped": True}
 
             # Stage-aware skip:
@@ -1247,6 +1339,7 @@ class IndexStageRunner:
                     self._logger.error("Ошибка обработки %s: %s", fp, exc, exc_info=True)
                     stage_stats["error_files"] += 1
                     stage_stats["processed_files"] += 1
+                    _maybe_heartbeat()
                     indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
                     continue
 
@@ -1256,6 +1349,7 @@ class IndexStageRunner:
                 if result.get("skipped"):
                     stage_stats["skipped_files"] += 1
                     stage_stats["processed_files"] += 1
+                    _maybe_heartbeat()
                     if indexer.run_id and (
                         stage_stats["processed_files"] % telemetry_push_every_n == 0
                         or (time.monotonic() - last_telemetry_push) >= telemetry_push_interval_sec
@@ -1275,6 +1369,7 @@ class IndexStageRunner:
                     continue
 
                 stage_stats["processed_files"] += 1
+                _maybe_heartbeat()
                 indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
 
                 content_hash = str(result.get("content_hash") or "")
@@ -1309,7 +1404,55 @@ class IndexStageRunner:
                     and not result.get("append_only")
                     and not metadata_only_upgrade
                 ):
-                    indexer._delete_file_vectors(Path(result["file_key"]))
+                    # Окно между удалением старых векторов и flush() новых: синхронно
+                    # помечаем файл как reindexing, чтобы при обрыве прогона он не
+                    # считался готовым и был переиндексирован.
+                    existing_row = state_snapshot.get(str(result["file_key"]))
+                    if existing_row and hasattr(indexer, "state_db"):
+                        indexer.state_db.upsert_many(
+                            [{**existing_row, "status": "reindexing", "last_error": "", "next_retry_at": 0.0}]
+                        )
+                    try:
+                        indexer._delete_file_vectors(Path(result["file_key"]))
+                    except Exception as exc:
+                        # Старые векторы не удалены: новые точки НЕ пишем (иначе смесь
+                        # старых и новых чанков), файл помечаем как error с backoff.
+                        delete_error = f"qdrant_delete_failed: {exc}"
+                        self._logger.error(
+                            "Файл %s: не удалось удалить старые векторы, пропускаю запись: %s",
+                            Path(str(result["file_key"])).name,
+                            exc,
+                        )
+                        stage_stats["error_files"] += 1
+                        next_retry_at = 0.0
+                        if hasattr(indexer, "state_db"):
+                            failed_row = indexer.state_db.record_failed_path(
+                                str(result["file_key"]),
+                                fingerprint=str(result["fingerprint"]),
+                                error=delete_error,
+                            )
+                            try:
+                                next_retry_at = float(failed_row.get("next_retry_at") or 0.0)
+                            except (TypeError, ValueError):
+                                next_retry_at = 0.0
+                        pending_states.append(
+                            {
+                                "full_path": result["file_key"],
+                                "fingerprint": result["fingerprint"],
+                                "mtime": result["mtime"],
+                                "stage": "error",
+                                "indexed_stage": stage,
+                                "status": "error",
+                                "last_error": delete_error,
+                                "next_retry_at": next_retry_at,
+                                "size_bytes": int(result.get("size_bytes") or 0),
+                                "extension": str(result["meta_payload"].get("extension") or ""),
+                                "content_hash": "",
+                                "indexed_chunks": 0,
+                                "total_chunks": 0,
+                            }
+                        )
+                        continue
                 if result["was_indexed"]:
                     stage_stats["updated_files"] += 1
                 else:
@@ -1378,6 +1521,31 @@ class IndexStageRunner:
                     )
                     last_error = "deferred_ocr" if result.get("deferred_ocr") else ""
                     next_retry_at = 0.0
+                    result_ext = str(result["meta_payload"].get("extension") or "").lower()
+                    if (
+                        status == "empty"
+                        and stage in ("small", "large")
+                        and int(result.get("size_bytes") or 0) > 0
+                        and result_ext in self._supported_extensions
+                        and result_ext != ".pdf"
+                        and result_ext not in self._image_extensions
+                        and hasattr(indexer, "state_db")
+                    ):
+                        # Пустой ≠ сломанный: экстракторы возвращают "" и для пустого
+                        # документа, и при проглоченном исключении. Не решаем навсегда —
+                        # повторная попытка через 24 ч (далее backoff x2), а не на каждом прогоне.
+                        last_error = "empty_extraction"
+                        failed_row = indexer.state_db.record_failed_path(
+                            str(result["file_key"]),
+                            fingerprint=str(result["fingerprint"]),
+                            error=last_error,
+                            base_delay_seconds=EMPTY_RETRY_DELAY_SEC,
+                            max_delay_seconds=EMPTY_RETRY_MAX_DELAY_SEC,
+                        )
+                        try:
+                            next_retry_at = float(failed_row.get("next_retry_at") or 0.0)
+                        except (TypeError, ValueError):
+                            next_retry_at = 0.0
                 if (
                     stage in ("small", "large")
                     and not result.get("source_has_content")
@@ -1457,9 +1625,30 @@ class IndexStageRunner:
                     len(only_paths),
                 )
             else:
-                indexer._run_deleted_files += indexer._cleanup_deleted_files(
-                    [str(item["state_key"]) for item in all_tasks]
-                )
+                inventory_keys = [str(item["state_key"]) for item in all_tasks]
+                protected_keys = self._protected_inventory_keys(failed_inventory_roots)
+                failed_ratio = len(failed_inventory_roots) / max(1, len(all_files))
+                if failed_inventory_roots and failed_ratio > FAILED_INVENTORY_CLEANUP_SKIP_RATIO:
+                    self._logger.error(
+                        "Cleanup «фантомов» ПРОПУЩЕН на этапе '%s': не прочитано %d из %d файлов/архивов "
+                        "(%.1f%% > %.0f%%) — inventory ненадёжен, удаление из индекса отменено",
+                        stage,
+                        len(failed_inventory_roots),
+                        len(all_files),
+                        failed_ratio * 100,
+                        FAILED_INVENTORY_CLEANUP_SKIP_RATIO * 100,
+                    )
+                else:
+                    if protected_keys:
+                        self._logger.warning(
+                            "Cleanup: %d записей state защищены от удаления — %d файлов/архивов "
+                            "не удалось прочитать при сканировании",
+                            len(protected_keys),
+                            len(failed_inventory_roots),
+                        )
+                    indexer._run_deleted_files += indexer._cleanup_deleted_files(
+                        inventory_keys + sorted(protected_keys)
+                    )
 
         info = indexer.qdrant.get_collection(indexer.collection_name)
         self._logger.info("Коллекция '%s': %d точек", indexer.collection_name, info.points_count)
@@ -1475,4 +1664,19 @@ class IndexStageRunner:
                 error_files=stage_stats["error_files"],
                 points_added=stage_stats["points_added"],
             )
+        _write_stage_heartbeat(HEARTBEAT_FINISHED)
         return stage_stats
+
+    def _protected_inventory_keys(self, failed_roots: set[str]) -> set[str]:
+        """Ключи state, которые нельзя удалять: их источник не удалось прочитать."""
+        indexer = self._indexer
+        protected: set[str] = set()
+        if not failed_roots or not hasattr(indexer, "state_db"):
+            return protected
+        for root in failed_roots:
+            if root.endswith("::"):
+                protected.update(indexer.state_db.list_entries_by_prefix(root))
+            else:
+                protected.add(root)
+                protected.update(indexer.state_db.list_entries_by_prefix(f"{root}::"))
+        return protected

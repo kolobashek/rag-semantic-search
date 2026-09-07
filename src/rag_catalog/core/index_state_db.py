@@ -385,7 +385,7 @@ class IndexStateDB:
                         FROM state_entries
                         WHERE state_entries.full_path = failed_paths.full_path
                           AND state_entries.fingerprint = failed_paths.fingerprint
-                          AND state_entries.status = 'error'
+                          AND state_entries.status IN ('error', 'empty')
                     )
                     """
                 )
@@ -826,6 +826,88 @@ class IndexStateDB:
                     (len(value), value),
                 ).fetchall()
                 return [str(row["full_path"]) for row in rows]
+
+    # Условие «файл покрыт содержимым»: полный/частичный контент и статус ok.
+    _COVERED_SQL = "(stage IN ('content', 'partial') AND (status = '' OR status = 'ok'))"
+
+    def iter_uncovered_entries(self) -> List[Dict[str, Any]]:
+        """Записи без проиндексированного содержимого с причиной (status/last_error)."""
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT full_path, extension, stage, indexed_stage, status, last_error, size_bytes
+                    FROM state_entries
+                    WHERE NOT {self._COVERED_SQL}
+                    ORDER BY full_path
+                    """
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+    def coverage_summary(self, *, top_folders: int = 20) -> Dict[str, Any]:
+        """Отчёт «слепых зон» индекса.
+
+        total, by_indexed_stage, by_status, covered/uncovered, расширения и
+        топ папок среди файлов без содержимого.
+        """
+        with self._lock:
+            with self._connect() as conn:
+                total_row = conn.execute("SELECT COUNT(*) AS c FROM state_entries").fetchone()
+                covered_row = conn.execute(
+                    f"SELECT COUNT(*) AS c FROM state_entries WHERE {self._COVERED_SQL}"
+                ).fetchone()
+                indexed_stage_rows = conn.execute(
+                    """
+                    SELECT CASE WHEN indexed_stage = '' THEN '(unknown)' ELSE indexed_stage END AS k,
+                           COUNT(*) AS cnt
+                    FROM state_entries GROUP BY k ORDER BY cnt DESC
+                    """
+                ).fetchall()
+                status_rows = conn.execute(
+                    """
+                    SELECT CASE WHEN status = '' THEN 'ok' ELSE status END AS k, COUNT(*) AS cnt
+                    FROM state_entries GROUP BY k ORDER BY cnt DESC
+                    """
+                ).fetchall()
+                uncovered_status_rows = conn.execute(
+                    f"""
+                    SELECT CASE WHEN status = '' THEN 'ok' ELSE status END AS k, COUNT(*) AS cnt
+                    FROM state_entries WHERE NOT {self._COVERED_SQL}
+                    GROUP BY k ORDER BY cnt DESC
+                    """
+                ).fetchall()
+                uncovered_ext_rows = conn.execute(
+                    f"""
+                    SELECT CASE WHEN extension = '' THEN '(без расширения)' ELSE extension END AS k,
+                           COUNT(*) AS cnt
+                    FROM state_entries WHERE NOT {self._COVERED_SQL}
+                    GROUP BY k ORDER BY cnt DESC
+                    """
+                ).fetchall()
+                folder_counts: Dict[str, int] = {}
+                if top_folders > 0:
+                    for row in conn.execute(
+                        f"SELECT full_path FROM state_entries WHERE NOT {self._COVERED_SQL}"
+                    ):
+                        path = str(row["full_path"] or "")
+                        # Для элементов архива папкой считается папка самого архива.
+                        base = path.split("::", 1)[0]
+                        folder = str(Path(base).parent)
+                        folder_counts[folder] = folder_counts.get(folder, 0) + 1
+        total = int(total_row["c"] if total_row else 0)
+        covered = int(covered_row["c"] if covered_row else 0)
+        top = sorted(folder_counts.items(), key=lambda kv: (-kv[1], kv[0]))[: max(0, int(top_folders))]
+        return {
+            "total": total,
+            "covered": covered,
+            "uncovered": max(0, total - covered),
+            "coverage_pct": round(covered / total * 100, 2) if total else 0.0,
+            "by_indexed_stage": {str(r["k"]): int(r["cnt"]) for r in indexed_stage_rows},
+            "by_status": {str(r["k"]): int(r["cnt"]) for r in status_rows},
+            "uncovered_by_status": {str(r["k"]): int(r["cnt"]) for r in uncovered_status_rows},
+            "uncovered_by_extension": {str(r["k"]): int(r["cnt"]) for r in uncovered_ext_rows},
+            "uncovered_top_folders": [{"folder": folder, "files": count} for folder, count in top],
+        }
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:
