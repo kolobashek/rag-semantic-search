@@ -27,6 +27,12 @@ from openpyxl import load_workbook
 from rag_catalog.core.ocr_runtime import apply_tesseract_runtime
 
 from .contract import ExtractedDocument, TextBlock, UnreadableSourceError, document_from_legacy_text
+from .embedded_media import (
+    DEFAULT_MAX_IMAGES,
+    DEFAULT_OCR_LANG,
+    extract_embedded_media_blocks,
+    merge_diagnostics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,19 +124,173 @@ def _extract_xlsx_zip_fallback(filepath: Path, *, max_chars: int = 0) -> str:
     return "\n".join(parts)
 
 
-def extract_docx(filepath: Path) -> str:
-    """Extract text from DOCX paragraphs and table cells."""
+def _embedded_media_blocks(
+    filepath: Path,
+    *,
+    include_embedded: bool,
+    skip_ocr: bool,
+    tesseract_cmd: str,
+    ocr_lang: str,
+    tesseract_config: str,
+    max_embedded_images: int,
+    max_chars: int,
+    metadata: dict[str, Any],
+) -> list[TextBlock]:
+    """Shared tail for OOXML extractors: nested documents + OCR of pasted images."""
+    if not include_embedded:
+        return []
+    diagnostics: dict[str, Any] = {}
+    blocks = extract_embedded_media_blocks(
+        filepath,
+        tesseract_cmd=tesseract_cmd,
+        lang=ocr_lang or DEFAULT_OCR_LANG,
+        tesseract_config=tesseract_config,
+        max_images=max_embedded_images,
+        max_chars=max_chars,
+        skip_ocr=skip_ocr,
+        diagnostics=diagnostics,
+    )
+    merge_diagnostics(metadata, diagnostics)
+    return blocks
+
+
+def _docx_paragraph_texts(container: Any) -> list[str]:
+    parts = [p.text for p in container.paragraphs]
+    for table in container.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                parts.append(cell.text)
+    return parts
+
+
+def _docx_header_footer_blocks(doc: Any) -> list[TextBlock]:
+    """Headers/footers of every section (skipping ones linked to the previous section)."""
+    blocks: list[TextBlock] = []
+    seen: set[str] = set()
+    for section in doc.sections:
+        for kind, parts in (
+            ("header", (section.header, section.first_page_header, section.even_page_header)),
+            ("footer", (section.footer, section.first_page_footer, section.even_page_footer)),
+        ):
+            for part in parts:
+                try:
+                    if part.is_linked_to_previous:
+                        continue
+                    text = "\n".join(t for t in _docx_paragraph_texts(part) if t.strip()).strip()
+                except Exception as exc:
+                    logger.debug("DOCX %s: %s", kind, exc)
+                    continue
+                if text and text not in seen:
+                    seen.add(text)
+                    blocks.append(TextBlock(text=text, section=kind))
+    return blocks
+
+
+def _docx_textbox_texts(root: Any) -> list[str]:
+    """Text boxes (w:txbxContent) — Word stores them twice (DrawingML + VML), hence dedup."""
+    texts: list[str] = []
+    seen: set[str] = set()
+    w = f"{{{_W_NS}}}"
+    for content in root.iter(f"{w}txbxContent"):
+        paragraphs = []
+        for paragraph in content.iter(f"{w}p"):
+            line = "".join(node.text or "" for node in paragraph.iter(f"{w}t")).strip()
+            if line:
+                paragraphs.append(line)
+        text = "\n".join(paragraphs)
+        if text and text not in seen:
+            seen.add(text)
+            texts.append(text)
+    return texts
+
+
+def _docx_notes_text(filepath: Path, member: str) -> str:
+    """Footnotes/endnotes from word/footnotes.xml or word/endnotes.xml."""
+    w = f"{{{_W_NS}}}"
+    try:
+        with ZipFile(filepath, "r") as zf:
+            if member not in zf.namelist():
+                return ""
+            with zf.open(member) as fh:
+                root = ElementTree.parse(fh).getroot()
+    except Exception as exc:
+        logger.debug("DOCX %s: %s", member, exc)
+        return ""
+    lines: list[str] = []
+    for note in root:
+        note_id = note.attrib.get(f"{w}id", "")
+        if note_id in {"-1", "0"}:  # separator / continuation separator
+            continue
+        text = " ".join(node.text or "" for node in note.iter(f"{w}t")).strip()
+        if text:
+            lines.append(f"[{note_id}] {text}" if note_id else text)
+    return "\n".join(lines)
+
+
+def extract_docx_document(
+    filepath: Path,
+    *,
+    max_chars: int = 0,
+    include_embedded: bool = True,
+    skip_ocr: bool = False,
+    tesseract_cmd: str = "",
+    ocr_lang: str = DEFAULT_OCR_LANG,
+    tesseract_config: str = "",
+    max_embedded_images: int = DEFAULT_MAX_IMAGES,
+) -> ExtractedDocument:
+    """Extract DOCX as blocks: body, headers/footers, text boxes, notes, embedded media.
+
+    Embedded images are OCR'd unless ``skip_ocr``; in that case the number of
+    OCR-worthy images is reported in ``metadata["embedded_images"]`` together
+    with ``metadata["ocr_skipped"] = True`` so the indexer can defer the file.
+    """
+    metadata: dict[str, Any] = {}
+    blocks: list[TextBlock] = []
     try:
         doc = Document(filepath)
-        parts = [p.text for p in doc.paragraphs]
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    parts.append(cell.text)
-        return "\n".join(parts)
+        body = "\n".join(_docx_paragraph_texts(doc)).strip()
+        if max_chars:
+            body = body[:max_chars]
+        if body.strip():
+            blocks.append(TextBlock(text=body))
+        blocks.extend(_docx_header_footer_blocks(doc))
+        try:
+            for text in _docx_textbox_texts(doc.element):
+                blocks.append(TextBlock(text=text, section="textbox"))
+        except Exception as exc:
+            logger.debug("DOCX textbox %s: %s", filepath.name, exc)
+        for member, section in (("word/footnotes.xml", "footnotes"), ("word/endnotes.xml", "endnotes")):
+            text = _docx_notes_text(filepath, member)
+            if text:
+                blocks.append(TextBlock(text=text, section=section))
     except Exception as exc:
         logger.warning("Ошибка чтения DOCX %s: %s", filepath, exc)
-        return ""
+        return ExtractedDocument(blocks=())
+
+    blocks.extend(
+        _embedded_media_blocks(
+            filepath,
+            include_embedded=include_embedded,
+            skip_ocr=skip_ocr,
+            tesseract_cmd=tesseract_cmd,
+            ocr_lang=ocr_lang,
+            tesseract_config=tesseract_config,
+            max_embedded_images=max_embedded_images,
+            max_chars=max_chars,
+            metadata=metadata,
+        )
+    )
+    return ExtractedDocument(blocks=tuple(blocks), metadata=metadata)
+
+
+def extract_docx(filepath: Path, **kwargs: Any) -> str:
+    """Extract text from DOCX (legacy plain-text API; see extract_docx_document).
+
+    OCR of embedded images is off by default here because the plain-text API
+    cannot report diagnostics; pass ``skip_ocr=False`` explicitly to enable it.
+    """
+    kwargs.setdefault("skip_ocr", True)
+    return extract_docx_document(filepath, **kwargs).text
 
 
 def extract_rtf(filepath: Path, *, max_chars: int = 0) -> str:
@@ -185,8 +345,19 @@ def extract_pptx(filepath: Path, *, max_chars: int = 0) -> str:
         return ""
 
 
-def extract_pptx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocument:
-    """Extract slide text from PPTX as structured slide blocks."""
+def extract_pptx_document(
+    filepath: Path,
+    *,
+    max_chars: int = 0,
+    include_embedded: bool = True,
+    skip_ocr: bool = False,
+    tesseract_cmd: str = "",
+    ocr_lang: str = DEFAULT_OCR_LANG,
+    tesseract_config: str = "",
+    max_embedded_images: int = DEFAULT_MAX_IMAGES,
+) -> ExtractedDocument:
+    """Extract slide text from PPTX as structured slide blocks (+ embedded media)."""
+    metadata: dict[str, Any] = {}
     try:
         blocks: list[TextBlock] = []
         total = 0
@@ -207,10 +378,24 @@ def extract_pptx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDoc
                     total += len(slide_text)
                     if max_chars and total >= max_chars:
                         done = True
-        return ExtractedDocument(blocks=tuple(blocks))
     except Exception as exc:
         logger.warning("Ошибка чтения PPTX %s: %s", filepath, exc)
         return ExtractedDocument(blocks=())
+
+    blocks.extend(
+        _embedded_media_blocks(
+            filepath,
+            include_embedded=include_embedded,
+            skip_ocr=skip_ocr,
+            tesseract_cmd=tesseract_cmd,
+            ocr_lang=ocr_lang,
+            tesseract_config=tesseract_config,
+            max_embedded_images=max_embedded_images,
+            max_chars=max_chars,
+            metadata=metadata,
+        )
+    )
+    return ExtractedDocument(blocks=tuple(blocks), metadata=metadata)
 
 
 def _first_existing_tool(*paths: Path) -> str:
@@ -500,12 +685,22 @@ def extract_xlsx(filepath: Path, *, max_chars: int = 0) -> str:
                 pass
 
 
-def extract_xlsx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocument:
-    """Extract XLSX rows as structured sheet/row blocks."""
+def extract_xlsx_document(
+    filepath: Path,
+    *,
+    max_chars: int = 0,
+    include_embedded: bool = True,
+    skip_ocr: bool = False,
+    tesseract_cmd: str = "",
+    ocr_lang: str = DEFAULT_OCR_LANG,
+    tesseract_config: str = "",
+    max_embedded_images: int = DEFAULT_MAX_IMAGES,
+) -> ExtractedDocument:
+    """Extract XLSX rows as structured sheet/row blocks (+ embedded media)."""
     wb: Any | None = None
+    blocks: list[TextBlock] = []
     try:
         wb = _load_xlsx_workbook(filepath, read_only=True, data_only=True)
-        blocks: list[TextBlock] = []
         total_chars = 0
         done = False
         for ws in wb.worksheets:
@@ -521,18 +716,18 @@ def extract_xlsx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDoc
                 if max_chars and total_chars >= max_chars:
                     done = True
                     break
-        return ExtractedDocument(blocks=tuple(blocks))
     except KeyError as exc:
         if "xl/sharedStrings.xml" in str(exc):
             try:
                 text = _extract_xlsx_zip_fallback(filepath, max_chars=max_chars)
                 logger.warning("XLSX %s прочитан через fallback без sharedStrings.xml", filepath)
-                return document_from_legacy_text(text)
+                blocks = list(document_from_legacy_text(text).blocks)
             except Exception as fallback_exc:
                 logger.warning("Ошибка fallback-чтения XLSX %s: %s", filepath, fallback_exc)
                 return ExtractedDocument(blocks=())
-        logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
-        return ExtractedDocument(blocks=())
+        else:
+            logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
+            return ExtractedDocument(blocks=())
     except Exception as exc:
         logger.warning("Ошибка чтения XLSX %s: %s", filepath, exc)
         return ExtractedDocument(blocks=())
@@ -542,6 +737,22 @@ def extract_xlsx_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDoc
                 wb.close()
             except Exception:
                 pass
+
+    metadata: dict[str, Any] = {}
+    blocks.extend(
+        _embedded_media_blocks(
+            filepath,
+            include_embedded=include_embedded,
+            skip_ocr=skip_ocr,
+            tesseract_cmd=tesseract_cmd,
+            ocr_lang=ocr_lang,
+            tesseract_config=tesseract_config,
+            max_embedded_images=max_embedded_images,
+            max_chars=max_chars,
+            metadata=metadata,
+        )
+    )
+    return ExtractedDocument(blocks=tuple(blocks), metadata=metadata)
 
 
 def extract_xls(filepath: Path, *, max_chars: int = 0) -> str:
@@ -620,15 +831,20 @@ def extract_spreadsheet(filepath: Path, *, max_chars: int = 0) -> str:
     return ""
 
 
-def extract_spreadsheet_document(filepath: Path, *, max_chars: int = 0) -> ExtractedDocument:
-    """Route structured spreadsheet extraction by extension."""
+def extract_spreadsheet_document(filepath: Path, *, max_chars: int = 0, **embedded_kwargs: Any) -> ExtractedDocument:
+    """Route structured spreadsheet extraction by extension.
+
+    ``embedded_kwargs`` (skip_ocr, tesseract_cmd, ocr_lang, tesseract_config,
+    max_embedded_images, include_embedded) are forwarded to
+    :func:`extract_xlsx_document`; legacy XLS has no embedded media support.
+    """
     ext = filepath.suffix.lower()
     if ext == ".xls":
         logger.debug("Формат XLS — использую xlrd: %s", filepath.name)
         return extract_xls_document(filepath, max_chars=max_chars)
     if ext in {".xlsx", ".xlsm"}:
         logger.debug("Формат XLSX/XLSM — использую openpyxl: %s", filepath.name)
-        return extract_xlsx_document(filepath, max_chars=max_chars)
+        return extract_xlsx_document(filepath, max_chars=max_chars, **embedded_kwargs)
     logger.warning("Неизвестное табличное расширение: %s", ext)
     return ExtractedDocument(blocks=())
 

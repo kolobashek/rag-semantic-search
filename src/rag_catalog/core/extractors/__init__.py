@@ -8,11 +8,18 @@ from .contract import (
     document_from_legacy_text,
     is_unreadable_source_error,
 )
+from .embedded_media import (
+    extract_embedded_documents,
+    extract_embedded_media_blocks,
+    iter_embedded_images,
+    ocr_embedded_images,
+)
 from .files import (
     extract_csv,
     extract_doc,
     extract_doc_meta,
     extract_docx,
+    extract_docx_document,
     extract_html,
     extract_image,
     extract_pdf,
@@ -41,6 +48,11 @@ __all__ = [
     "extract_csv",
     "extract_doc",
     "extract_docx",
+    "extract_docx_document",
+    "extract_embedded_documents",
+    "extract_embedded_media_blocks",
+    "iter_embedded_images",
+    "ocr_embedded_images",
     "extract_html",
     "extract_image",
     "extract_pdf",
