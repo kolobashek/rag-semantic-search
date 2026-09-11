@@ -1990,11 +1990,11 @@ def render_indexing_tab(cfg: Dict[str, Any]) -> None:
             "# Крупные и сканированные PDF (долго)\n"
             "python index_rag.py --stage large\n\n"
             "# Все этапы последовательно (по умолчанию)\n"
-            "python index_rag.py\n\n"
+            "python -m rag_catalog.core.index_rag\n\n"
             "# Удалить удалённые файлы из индекса\n"
-            "python index_rag.py --cleanup\n\n"
+            "python -m rag_catalog.core.index_rag --cleanup\n\n"
             "# Пересоздать коллекцию с нуля\n"
-            "python index_rag.py --recreate",
+            "python -m rag_catalog.core.index_rag --recreate",
             language="bash",
         )
 
@@ -2023,7 +2023,7 @@ def render_telegram_tab(cfg: Dict[str, Any]) -> None:
         )
 
     st.markdown("**Запуск бота:**")
-    st.code("python telegram_bot.py", language="bash")
+    st.code("python -m rag_catalog.integrations.telegram_bot", language="bash")
     st.markdown("**Пример вопроса в Telegram:** `Сколько весит PC300`")
 
 
@@ -2046,6 +2046,12 @@ def main() -> None:
             st.success("Подключено")
         else:
             st.error("Не подключено")
+
+    st.warning(
+        "**Устаревший интерфейс.** Основной интерфейс — веб-приложение "
+        "(`python -m rag_catalog.ui.nice_app`). Эта Streamlit-версия дублирует "
+        "его частично, развивается только там и будет удалена."
+    )
 
     st.info(
         "Поиск по документам и извлечение фактов. "

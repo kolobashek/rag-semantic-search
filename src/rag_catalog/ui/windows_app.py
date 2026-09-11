@@ -11,7 +11,7 @@ import sys
 from collections import defaultdict
 from difflib import get_close_matches
 from pathlib import Path, PurePath
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QFont, QIcon
@@ -41,11 +41,13 @@ from PyQt6.QtWidgets import (
 
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
 
+from .desktop_auth import authenticate, build_result_filter
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 APP_TITLE = "RAG Каталог — Поиск по документам"
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.4"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 APP_ICON_PATH = PROJECT_ROOT / "icon.ico"
 
@@ -65,6 +67,7 @@ class SearchThread(QThread):
         limit: int,
         file_type: Optional[str],
         content_only: bool,
+        result_filter: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
     ) -> None:
         super().__init__()
         self.searcher = searcher
@@ -72,16 +75,24 @@ class SearchThread(QThread):
         self.limit = limit
         self.file_type = file_type
         self.content_only = content_only
+        # ACL Cloud Drive: без фильтра нативный клиент показывал документы,
+        # закрытые для текущего пользователя (веб их прячет).
+        self.result_filter = result_filter
 
     def run(self) -> None:
         try:
+            # Запас кандидатов: часть выдачи срежет ACL-фильтр.
+            retrieval_limit = min(self.limit * 3, 100) if self.result_filter else self.limit
             results = self.searcher.search(
                 self.query,
-                limit=self.limit,
+                limit=retrieval_limit,
                 file_type=self.file_type,
                 content_only=self.content_only,
                 source="windows_app",
             )
+            if self.result_filter is not None:
+                results = self.result_filter(results)
+            results = results[: self.limit]
             self.search_finished.emit(results)
         except Exception as exc:
             self.search_error.emit(str(exc))
@@ -579,12 +590,69 @@ class SettingsDialog(QDialog):
 
 # ════════════════════════════ RAGWindow ═════════════════════════════════
 
+class LoginDialog(QDialog):
+    """Вход перед открытием окна: те же учётные записи, что в вебе."""
+
+    def __init__(self, cfg: Dict[str, Any], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.cfg = cfg
+        self.user: Optional[Dict[str, Any]] = None
+        self.setWindowTitle("Вход — RAG Каталог")
+        self.setModal(True)
+        self.setMinimumWidth(380)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.username_edit = QLineEdit()
+        self.username_edit.setPlaceholderText("логин")
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_edit.setPlaceholderText("пароль")
+        form.addRow("Логин", self.username_edit)
+        form.addRow("Пароль", self.password_edit)
+        layout.addLayout(form)
+
+        self.error_lbl = QLabel("")
+        self.error_lbl.setWordWrap(True)
+        self.error_lbl.setStyleSheet("color:#c0392b")
+        self.error_lbl.setVisible(False)
+        layout.addWidget(self.error_lbl)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._try_login)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.password_edit.returnPressed.connect(self._try_login)
+        self.username_edit.returnPressed.connect(self.password_edit.setFocus)
+
+    def _try_login(self) -> None:
+        result = authenticate(
+            self.cfg,
+            self.username_edit.text(),
+            self.password_edit.text(),
+        )
+        if result.ok:
+            self.user = result.user
+            self.accept()
+            return
+        self.error_lbl.setText(result.message)
+        self.error_lbl.setVisible(True)
+        self.password_edit.clear()
+        self.password_edit.setFocus()
+
+
 class RAGWindow(QMainWindow):
     """Главное окно приложения."""
 
-    def __init__(self) -> None:
+    def __init__(self, user: Optional[Dict[str, Any]] = None) -> None:
         super().__init__()
         self.cfg = load_config()
+        # Выдача фильтруется правами Cloud Drive так же, как в вебе.
+        self.user: Optional[Dict[str, Any]] = dict(user) if user else None
+        self.result_filter = build_result_filter(self.cfg, self.user)
         self.searcher: Optional[RAGSearcher] = None
         self._search_thread: Optional[SearchThread] = None
         self._last_query: str = ""
@@ -1156,7 +1224,7 @@ class RAGWindow(QMainWindow):
         self.did_you_mean_lbl.setVisible(False)
 
         self._search_thread = SearchThread(
-            self.searcher, query, limit, file_type, content_only
+            self.searcher, query, limit, file_type, content_only, self.result_filter
         )
         self._search_thread.search_finished.connect(self._on_results)
         self._search_thread.search_error.connect(self._on_search_error)
@@ -1327,7 +1395,11 @@ def main() -> None:
     app = QApplication(sys.argv)
     if APP_ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
-    window = RAGWindow()
+    # Без входа окно не открывается: раньше .exe работал мимо всех прав.
+    login = LoginDialog(load_config())
+    if login.exec() != QDialog.DialogCode.Accepted or not login.user:
+        sys.exit(0)
+    window = RAGWindow(login.user)
     window.show()
     sys.exit(app.exec())
 
