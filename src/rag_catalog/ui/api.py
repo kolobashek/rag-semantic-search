@@ -29,10 +29,11 @@ from nicegui import app
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness, cloud_drive_operations_health
-from rag_catalog.core.rag_core import load_config
+from rag_catalog.core.rag_core import RAGSearcher, load_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
+from . import helpers as _helpers
 from .helpers import _cd_registry_acl_allows, _cd_registry_acl_filter, _resolve_catalog_file
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
@@ -520,6 +521,219 @@ def api_view_file(path: str, authorization: AuthHeader = "") -> FileResponse:
     media_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
     media_type, headers = _safe_preview_response_options(resolved, media_type)
     return FileResponse(str(resolved), media_type=media_type, filename=resolved.name, headers=headers)
+
+
+# ─────────────────────────── public search API ─────────────────────────────
+
+_API_SEARCH_MAX_LIMIT = 100
+_API_SEARCH_SNIPPET_CHARS = 300
+
+
+def _get_api_searcher(cfg: Dict[str, Any]) -> RAGSearcher:
+    """Return the shared RAGSearcher used by the web UI (same cache as helpers._ensure_searcher)."""
+    key = _helpers._searcher_cache_key(cfg)
+    searcher = _helpers._SEARCHER_CACHE.get(key)
+    if searcher is None or not searcher.connected:
+        if not _helpers._qdrant_http_ready(cfg):
+            raise HTTPException(status_code=503, detail="Qdrant недоступен. Повторите запрос позже.")
+        try:
+            searcher = RAGSearcher(cfg)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Поисковик не инициализирован: {exc}") from exc
+        _helpers._SEARCHER_CACHE[key] = searcher
+    if not searcher.connected:
+        raise HTTPException(status_code=503, detail="Нет подключения к Qdrant.")
+    return searcher
+
+
+def _api_run_search(
+    searcher: RAGSearcher,
+    *,
+    query: str,
+    query_original: str,
+    limit: int,
+    file_type: str | None,
+    content_only: bool,
+    title_only: bool,
+    username: str,
+) -> List[Dict[str, Any]]:
+    """Same retrieval path as helpers._run_catalog_search, but with telemetry source='api'."""
+    results = _helpers._normalize_search_results(
+        searcher.search(
+            query,
+            limit=limit,
+            file_type=file_type,
+            content_only=content_only,
+            title_only=title_only,
+            source="api",
+            username=username,
+            query_original=query_original,
+        )
+    )
+    if results or content_only or title_only:
+        return results
+    if _helpers._relevance_gate_enabled(searcher):
+        return []
+    try:
+        fallback = searcher._lexical_catalog_search(  # noqa: SLF001
+            query=query,
+            limit=max(limit, 10),
+            file_type=file_type,
+            content_only=False,
+            title_only=title_only,
+        )
+    except Exception:
+        return results
+    return _helpers._normalize_search_results(fallback)[:limit]
+
+
+def _api_search_snippet(item: Dict[str, Any]) -> str:
+    text = str(item.get("text") or item.get("chunk_text") or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > _API_SEARCH_SNIPPET_CHARS:
+        return text[: _API_SEARCH_SNIPPET_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _serialize_search_result(item: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        score = round(float(item.get("score") or 0.0), 4)
+    except (TypeError, ValueError):
+        score = 0.0
+    payload: Dict[str, Any] = {
+        "path": str(item.get("full_path") or item.get("path") or ""),
+        "filename": str(item.get("filename") or ""),
+        "score": score,
+        "snippet": _api_search_snippet(item),
+        "page": item.get("page"),
+        "sheet": str(item.get("sheet") or "") or None,
+        "type": str(item.get("type") or ""),
+        "extension": str(item.get("extension") or ""),
+        "modified": item.get("modified"),
+        "retrieval_source": str(item.get("retrieval_source") or ""),
+    }
+    for key in ("cloud_path", "cloud_file_id"):
+        if item.get(key):
+            payload[key] = str(item.get(key))
+    duplicates = item.get("duplicates")
+    if duplicates:
+        payload["duplicates"] = [str(value) for value in duplicates]
+    return payload
+
+
+def _api_search_diagnostics(
+    raw_results: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+    *,
+    parsed_query: Dict[str, Any],
+    duration_ms: int,
+) -> Dict[str, Any]:
+    channels: Dict[str, int] = {}
+    for item in results:
+        sources = list(item.get("retrieval_sources") or [])
+        if not sources and item.get("retrieval_source"):
+            sources = [item.get("retrieval_source")]
+        for source in sources:
+            name = str(source or "").strip()
+            if name:
+                channels[name] = channels.get(name, 0) + 1
+    diagnostics: Dict[str, Any] = {
+        "channels": channels,
+        "retrieved": len(raw_results),
+        "acl_filtered": max(0, len(raw_results) - len(results)),
+        "duplicates_collapsed": sum(int(item.get("duplicate_count") or 0) for item in results),
+        "duration_ms": duration_ms,
+    }
+    if parsed_query.get("has_operators"):
+        diagnostics["operators"] = {
+            key: parsed_query.get(key)
+            for key in (
+                "semantic_query",
+                "must_phrases",
+                "excluded_words",
+                "prefix_terms",
+                "file_type_filter",
+                "date_from",
+                "date_to",
+                "path_filter",
+            )
+            if parsed_query.get(key)
+        }
+    return diagnostics
+
+
+@app.get("/api/search")
+def api_search(
+    q: str = "",
+    limit: int = 10,
+    type: str = "",  # noqa: A002 - public query-string name
+    content_only: bool = False,
+    title_only: bool = False,
+    authorization: AuthHeader = "",
+) -> Dict[str, Any]:
+    """Public catalog search with the same retrieval and ACL filtering as the web UI."""
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    query = re.sub(r"\s+", " ", str(q or "")).strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Не задан параметр q.")
+    try:
+        clean_limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Параметр limit должен быть целым числом.") from exc
+    if clean_limit < 1 or clean_limit > _API_SEARCH_MAX_LIMIT:
+        raise HTTPException(
+            status_code=400, detail=f"Параметр limit должен быть в диапазоне 1..{_API_SEARCH_MAX_LIMIT}."
+        )
+    if content_only and title_only:
+        raise HTTPException(status_code=400, detail="content_only и title_only нельзя задавать одновременно.")
+    file_type = str(type or "").strip().lower()
+    if file_type and not file_type.startswith("."):
+        file_type = "." + file_type
+
+    parsed_query = _helpers._parse_search_query(query)
+    semantic_query = str(parsed_query.get("semantic_query") or query)
+    effective_file_type = str(parsed_query.get("file_type_filter") or file_type or "") or None
+    username = str(user.get("username") or "")
+
+    searcher = _get_api_searcher(cfg)
+    started = time.perf_counter()
+    try:
+        raw_results = _api_run_search(
+            searcher,
+            query=semantic_query,
+            query_original=query,
+            limit=clean_limit,
+            file_type=effective_file_type,
+            content_only=bool(content_only),
+            title_only=bool(title_only),
+            username=username,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).exception("api_search failed for %r", query)
+        _audit_cloud_drive_api_event(cfg, user, "api_search", ok=False, details={"query": query, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Ошибка поиска: {exc}") from exc
+    # ACL: the API must never return documents the user cannot open in the web UI.
+    allowed = _helpers._filter_cloud_drive_search_results(cfg, user, raw_results)
+    results = _helpers._apply_query_operators(allowed, parsed_query)[:clean_limit]
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    diagnostics = _api_search_diagnostics(
+        raw_results, results, parsed_query=parsed_query, duration_ms=duration_ms
+    )
+    _audit_cloud_drive_api_event(
+        cfg,
+        user,
+        "api_search",
+        details={"query": query, "results": len(results), "retrieved": len(raw_results), "duration_ms": duration_ms},
+    )
+    return {
+        "query": query,
+        "total": len(results),
+        "results": [_serialize_search_result(item) for item in results],
+        "diagnostics": diagnostics,
+    }
 
 
 @app.get("/api/cloud-drive/bootstrap-status")

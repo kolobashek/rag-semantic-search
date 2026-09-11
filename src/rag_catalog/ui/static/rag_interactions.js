@@ -276,14 +276,12 @@
       addButton(m, 'Вырезать', () => item.querySelector('[data-rag-cut]')?.click());
       addButton(m, 'Удалить', () => item.querySelector('[data-rag-delete]')?.click());
       addButton(m, 'Поделиться', () => item.querySelector('[data-rag-share]')?.click());
-      addButton(m, 'Отправить', () => item.querySelector('[data-rag-send]')?.click());
       addButton(m, 'Архивировать', () => item.querySelector('[data-rag-archive]')?.click());
       if (item.dataset.ragHidden === 'true') {
         addButton(m, 'Показать в интерфейсе', () => item.querySelector('[data-rag-unhide]')?.click());
       } else {
         addButton(m, 'Скрыть из интерфейса', () => item.querySelector('[data-rag-hide]')?.click());
       }
-      addButton(m, 'Показать в ОС', () => item.querySelector('[data-rag-os]')?.click());
       addButton(m, item.dataset.ragFavorite === 'true' ? 'Убрать из избранного' : 'Добавить в избранное', () => item.querySelector('[data-rag-favorite-button]')?.click());
       addButton(m, 'Поделиться путем', () => navigator.clipboard && navigator.clipboard.writeText(itemPath));
     } else {
