@@ -6,6 +6,7 @@ windows_app.py — Нативное Windows-приложение (PyQt6) для 
 """
 
 import logging
+import platform
 import re
 import sys
 from collections import defaultdict
@@ -39,6 +40,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from rag_catalog.core.client_logs import (
+    TelemetryLogHandler,
+    default_client_log_path,
+    install_local_file_log,
+)
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
 
 from .desktop_auth import authenticate, build_result_filter
@@ -1391,14 +1397,44 @@ class RAGWindow(QMainWindow):
 
 # ─────────────────────────── entry point ───────────────────────────────
 
+DESKTOP_LOG_PATH = default_client_log_path("RAGDesktop", "desktop.log")
+
+
+def _install_client_logging(cfg: Dict[str, Any], user: Optional[Dict[str, Any]]) -> None:
+    """Файл журнала рядом с клиентом + ошибки в телеметрию сервера.
+
+    До этого у нативного клиента не было ни файла, ни отправки: при поломке у
+    пользователя посмотреть было нечего.
+    """
+    install_local_file_log(DESKTOP_LOG_PATH)
+    try:
+        from rag_catalog.core.telemetry_db import TelemetryDB  # noqa: PLC0415
+
+        from .system import _telemetry_db_path  # noqa: PLC0415
+
+        handler = TelemetryLogHandler(
+            TelemetryDB(str(_telemetry_db_path(cfg))),
+            client="desktop",
+            username=str((user or {}).get("username") or ""),
+            device_id=platform.node(),
+            app_version=APP_VERSION,
+        )
+        handler.start()
+        logging.getLogger().addHandler(handler)
+    except Exception:
+        logger.debug("Телеметрия клиента недоступна", exc_info=True)
+
+
 def main() -> None:
     app = QApplication(sys.argv)
     if APP_ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
+    cfg = load_config()
     # Без входа окно не открывается: раньше .exe работал мимо всех прав.
-    login = LoginDialog(load_config())
+    login = LoginDialog(cfg)
     if login.exec() != QDialog.DialogCode.Accepted or not login.user:
         sys.exit(0)
+    _install_client_logging(cfg, login.user)
     window = RAGWindow(login.user)
     window.show()
     sys.exit(app.exec())

@@ -7,11 +7,13 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from nicegui import run, ui
 
+from rag_catalog.core.client_logs import CLIENT_FEATURE
 from rag_catalog.core.search_eval import evaluate_search, load_golden_queries
 
 from .helpers import (
@@ -38,6 +40,21 @@ SEARCH_START_ACTION = "run_start"
 SEARCH_FULL_ACTION = "run_full"
 # Cloud Drive операции: настройки пишут feature='cloud_drive', проводник — 'cd_explorer'.
 CLOUD_DRIVE_FEATURES = ("cloud_drive", "cd_explorer")
+
+
+def _client_event_message(row: Dict[str, Any]) -> str:
+    """Сообщение клиента из details_json; при поломке JSON — пустая строка."""
+    raw = row.get("details") if isinstance(row.get("details"), dict) else None
+    if raw is None:
+        try:
+            raw = json.loads(str(row.get("details_json") or "{}"))
+        except (TypeError, ValueError):
+            return ""
+    if not isinstance(raw, dict):
+        return ""
+    message = str(raw.get("message") or "")
+    device = str(raw.get("device_id") or "")
+    return f"{message} · {device}" if device else message
 
 
 def render_stats_screen(
@@ -673,6 +690,50 @@ def render_stats_screen(
 
                 cd_action_filter.on_value_change(lambda e: refresh_cd_audit())
                 cd_user_filter2.on_value_change(lambda e: refresh_cd_audit())
+
+            # ── Ошибки установленных клиентов ──────────────────────────
+            ui.separator().classes("my-2")
+            ui.label("Клиенты — ошибки и предупреждения").classes("font-semibold text-sm")
+            ui.label(
+                "Приходят с sync-агента и нативного окна (POST /api/client-logs). "
+                "Cloud Files провайдер пока пишет только локальный файл."
+            ).classes("rag-meta text-xs mb-2")
+
+            tdb_client = _get_telemetry(state)
+            client_events: list = []
+            if tdb_client:
+                client_events = [
+                    row
+                    for row in tdb_client.list_app_events(feature=CLIENT_FEATURE, limit=200)
+                    if str(row.get("action") or "") != "client_info"
+                ]
+
+            if not client_events:
+                with ui.element("div").classes("cd-empty-state py-4"):
+                    ui.icon("devices", size="28px").classes("opacity-30")
+                    ui.label("Ошибок от клиентов не поступало.").classes("text-xs")
+            else:
+                client_rows = [
+                    {
+                        "ts": row.get("ts"),
+                        "client": row.get("screen"),
+                        "username": row.get("username"),
+                        "level": str(row.get("action") or "").replace("client_", "").upper(),
+                        "message": _client_event_message(row),
+                    }
+                    for row in client_events
+                ]
+                ui.table(
+                    rows=client_rows,
+                    columns=[
+                        {"name": "ts", "label": "Время", "field": "ts", "sortable": True},
+                        {"name": "client", "label": "Клиент", "field": "client"},
+                        {"name": "username", "label": "Пользователь", "field": "username"},
+                        {"name": "level", "label": "Уровень", "field": "level"},
+                        {"name": "message", "label": "Сообщение", "field": "message"},
+                    ],
+                    pagination=15,
+                ).classes("w-full")
 
         # ── Cloud Drive — аналитика ───────────────────────────────────────
         if tab_cd is not None:

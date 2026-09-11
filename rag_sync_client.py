@@ -258,6 +258,15 @@ class SyncAPIClient:
     def heartbeat(self, client_id: str, status: str = "online") -> None:
         self._post("/api/cloud-drive/sync/heartbeat", client_id=client_id, status=status)
 
+    def send_client_logs(self, payload: Dict[str, Any]) -> None:
+        """Отправляет пачку ошибок на сервер (см. /api/client-logs).
+
+        Отдельный короткий таймаут: выгрузка журнала не должна тормозить
+        синхронизацию, если сервер отвечает медленно.
+        """
+        r = self.session.post(f"{self.base}/api/client-logs", json=payload, timeout=10)
+        r.raise_for_status()
+
     def get_pairs(self, client_id: str) -> List[Dict[str, Any]]:
         return self._get("/api/cloud-drive/sync/pairs", client_id=client_id, enabled_only=True)
 
@@ -928,6 +937,33 @@ def _setup_logging(verbose: bool, log_file: Optional[str]) -> None:
         logging.getLogger().addHandler(fh)
 
 
+def _attach_log_uploader(api: "SyncAPIClient", cfg: Dict[str, Any]) -> None:
+    """Шлёт предупреждения и ошибки на сервер — иначе они видны только здесь.
+
+    Клиент устанавливается на чужую машину: без этого единственный способ
+    разобрать поломку — просить пользователя найти и прислать файл журнала.
+    Отключается ключом ``send_logs: false`` в конфиге клиента.
+    """
+    if not bool(cfg.get("send_logs", True)):
+        return
+    try:
+        from rag_catalog.core.client_logs import ClientLogUploader
+    except Exception:
+        # Клиент распространяется отдельным exe и может быть собран без пакета.
+        return
+    try:
+        handler = ClientLogUploader(
+            api.send_client_logs,
+            client="sync",
+            device_id=str(cfg.get("device_id") or ""),
+            app_version=CLIENT_VERSION,
+        )
+        handler.start()
+        logging.getLogger().addHandler(handler)
+    except Exception:
+        pass
+
+
 def main() -> None:
     args = parse_args()
     _setup_logging(args.verbose, args.log_file)
@@ -991,6 +1027,7 @@ def main() -> None:
         token = _do_device_auth()
 
     api = SyncAPIClient(server, token)
+    _attach_log_uploader(api, cfg)
 
     # ── Register — retry auth on 401, retry connection on network error ───────
     log.info("Подключение к серверу %s ...", server)

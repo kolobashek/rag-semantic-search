@@ -27,6 +27,7 @@ from fastapi import File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from nicegui import app
 
+from rag_catalog.core.client_logs import MAX_EVENTS_PER_BATCH, ingest_client_events
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness, cloud_drive_operations_health
 from rag_catalog.core.rag_core import RAGSearcher, load_config
@@ -408,6 +409,47 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
     except Exception:
         pass
     return {"ok": True}
+
+
+@app.post("/api/client-logs")
+async def api_client_logs(request: Request, authorization: AuthHeader = "") -> Dict[str, Any]:
+    """Журналы установленных клиентов (sync-агент, нативное окно, Cloud Files).
+
+    До этого ошибки клиентов оставались в ``%LOCALAPPDATA%`` на машине
+    пользователя, и сервер знал только «online/offline». События кладутся в ту
+    же таблицу, что и браузерная диагностика, с ``feature='client'``.
+
+    Имя пользователя берётся из токена, а не из тела запроса: клиент не может
+    записать событие от чужого имени.
+    """
+    cfg = load_config()
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Ожидается JSON.") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Ожидается объект JSON.")
+
+    events = payload.get("events")
+    if not isinstance(events, list) or not events:
+        raise HTTPException(status_code=400, detail="Пустой список events.")
+    if len(events) > MAX_EVENTS_PER_BATCH:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Слишком большая пачка: максимум {MAX_EVENTS_PER_BATCH} событий за запрос.",
+        )
+
+    stored = ingest_client_events(
+        TelemetryDB(str(_telemetry_db_path(cfg))),
+        username=str(user.get("username") or ""),
+        client=str(payload.get("client") or ""),
+        device_id=str(payload.get("device_id") or ""),
+        events=events,
+        client_host=request.client.host if request.client else "",
+        app_version=str(payload.get("app_version") or ""),
+    )
+    return {"ok": True, "stored": stored, "received": len(events)}
 
 
 # Bump this whenever packaging/build.ps1 produces a new exe
