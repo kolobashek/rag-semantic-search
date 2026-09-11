@@ -105,6 +105,11 @@ class CloudDriveSyncClient:
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
+    # Клиент шлёт «offline» только при корректном завершении: если машину
+    # выключили или процесс упал, в БД навсегда остаётся «online». Поэтому
+    # статус пересчитывается по свежести last_seen_at, а stale показывает,
+    # что запись протухла, а не что клиент честно отключился.
+    stale: bool = False
 
 
 @dataclass(slots=True)

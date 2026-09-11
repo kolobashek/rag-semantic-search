@@ -28,9 +28,41 @@ CLOUD_DRIVE_SCHEMA_VERSION = 8
 _CHANGE_CURSOR_PREFIX = "v1."
 ACL_BOOTSTRAP_META_KEY = "acl_bootstrapped"
 
+# Sync-клиент шлёт heartbeat раз в 60 с (rag_sync_client.HEARTBEAT_INTERVAL).
+# Пять пропущенных подряд — считаем, что связи нет.
+SYNC_CLIENT_OFFLINE_AFTER_SECONDS = 300
+# Статусы, которые клиент выставляет сам и которые поэтому могут «залипнуть».
+_SYNC_LIVE_STATUSES = frozenset({"online", "paused", "error"})
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def sync_client_heartbeat_is_stale(
+    last_seen_at: str,
+    *,
+    now: Optional[datetime] = None,
+    max_age_seconds: int = SYNC_CLIENT_OFFLINE_AFTER_SECONDS,
+) -> bool:
+    """Давно ли клиент не подавал признаков жизни.
+
+    Пустое или неразборчивое время считаем протухшим: клиент, о котором мы
+    ничего не знаем, не должен показываться работающим.
+    """
+    raw = str(last_seen_at or "").strip()
+    if not raw:
+        return True
+    try:
+        seen = datetime.fromisoformat(raw)
+    except ValueError:
+        return True
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return (current - seen).total_seconds() > max(1, int(max_age_seconds))
 
 
 def _change_sort_key(row: Any) -> tuple[str, str, str, str]:
@@ -2360,7 +2392,12 @@ class CloudDriveRegistryDB:
                     "SELECT * FROM cloud_sync_clients WHERE status!='offline' ORDER BY updated_at DESC LIMIT ?",
                     (max_rows,),
                 ).fetchall()
-        return [self._sync_client_from_row(row) for row in rows]
+        clients = [self._sync_client_from_row(row) for row in rows]
+        if not include_offline:
+            # SQL фильтрует по сохранённому статусу, а он «залипает» на online;
+            # протухших отсеиваем уже после пересчёта.
+            clients = [client for client in clients if client.status != 'offline']
+        return clients
 
     def upsert_sync_pair(
         self,
@@ -2966,17 +3003,21 @@ class CloudDriveRegistryDB:
             metadata = json.loads(str(row['metadata_json'] or '{}'))
         except json.JSONDecodeError:
             metadata = {}
+        stored_status = str(row['status'] or 'offline')
+        last_seen = str(row['last_seen_at'] or '')
+        stale = stored_status in _SYNC_LIVE_STATUSES and sync_client_heartbeat_is_stale(last_seen)
         return CloudDriveSyncClient(
             id=str(row['id']),
             username=str(row['username']),
             device_id=str(row['device_id']),
             display_name=str(row['display_name'] or ''),
             platform=str(row['platform'] or ''),
-            status=str(row['status'] or 'offline'),
-            last_seen_at=str(row['last_seen_at'] or ''),
+            status='offline' if stale else stored_status,
+            last_seen_at=last_seen,
             metadata=dict(metadata or {}),
             created_at=str(row['created_at'] or ''),
             updated_at=str(row['updated_at'] or ''),
+            stale=stale,
         )
 
     def _sync_pair_from_row(self, row: sqlite3.Row) -> CloudDriveSyncPair:
