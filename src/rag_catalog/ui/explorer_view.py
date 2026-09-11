@@ -34,11 +34,9 @@ from .helpers import (
     _format_file_size,
     _is_admin,
     _is_system_file,
-    _open_os_path,
     _safe_explorer_path,
     _save_explorer_settings,
     _save_ui_settings,
-    _select_in_os_explorer,
     _viewer_file_url,
 )
 from .state import (
@@ -160,6 +158,8 @@ def render_explorer_screen(
         state.explorer_selected_paths = []
 
     def _refresh_selection_bar(refs: dict[str, Any]) -> None:
+        if refs.get("bar") is None:
+            return
         scope = str(refs.get("scope") or "")
         selected = [key for key in state.explorer_selected_paths if key.startswith(f"{scope}:")]
         visible = set(refs.get("visible_keys") or [])
@@ -198,12 +198,21 @@ def render_explorer_screen(
             return
         ui.notify("Действие для этого режима пока недоступно.", type="warning")
 
+    def _selection_actions_available(scope: str) -> bool:
+        """Панель действий над выделением есть только там, где задан обработчик (Cloud Drive)."""
+        return scope == "cd" and callable(getattr(state, "_explorer_selection_action", None))
+
     def _render_selection_bar(*, scope: str, visible_keys: List[str]) -> dict[str, Any]:
         refs: dict[str, Any] = {
             "scope": scope,
             "visible_keys": list(visible_keys),
             "checkboxes": {},
+            "bar": None,
+            "label": None,
         }
+        if not _selection_actions_available(scope):
+            # FS-режим: обработчика нет, каждая кнопка отвечала бы «недоступно» — панель не рисуем.
+            return refs
         refs["bar"] = ui.row().classes("rag-selection-bar w-full items-center gap-1")
         with refs["bar"]:
             ui.icon("checklist", size="18px")
@@ -212,7 +221,6 @@ def render_explorer_screen(
             ui.button(icon="content_cut", on_click=lambda: _selection_action(scope, "cut"), color=None).props("flat round dense").tooltip("Вырезать")
             ui.button(icon="delete_outline", on_click=lambda: _selection_action(scope, "delete"), color=None).props("flat round dense").tooltip("Удалить")
             ui.button(icon="ios_share", on_click=lambda: _selection_action(scope, "share"), color=None).props("flat round dense").tooltip("Поделиться")
-            ui.button(icon="send", on_click=lambda: _selection_action(scope, "send"), color=None).props("flat round dense").tooltip("Отправить")
             ui.button(icon="archive", on_click=lambda: _selection_action(scope, "archive"), color=None).props("flat round dense").tooltip("Архивировать")
             ui.button(icon="visibility_off", on_click=lambda: _selection_action(scope, "hide"), color=None).props("flat round dense").tooltip("Скрыть из интерфейса")
             ui.button(
@@ -236,6 +244,9 @@ def render_explorer_screen(
         _refresh_selection_bar(refs)
 
     def _selection_checkbox(key: str, refs: dict[str, Any]) -> Any:
+        if refs.get("bar") is None:
+            # Нет панели действий — чекбокс выделения бесполезен.
+            return None
         checkbox = ui.checkbox(
             value=key in _selected_set(),
             on_change=lambda e, k=key: (_set_key_selected(k, bool(e.value)), _refresh_selection_bar(refs)),
@@ -246,7 +257,8 @@ def render_explorer_screen(
     def _selection_badge(_path_or_ext: str, _kind: str, key: str, refs: dict[str, Any]) -> None:
         with ui.element("div").classes("rag-file-select-icon"):
             checkbox = _selection_checkbox(key, refs)
-            checkbox.classes(add="rag-table-select-checkbox")
+            if checkbox is not None:
+                checkbox.classes(add="rag-table-select-checkbox")
 
     # ── Explorer / Cloud Drive screen ─────────────────────────────────────────
 
@@ -1216,10 +1228,9 @@ def render_explorer_screen(
                 _cd_set_clipboard(paths, "cut")
             elif action == "delete":
                 _cd_delete_selected_dialog(paths)
-            elif action == "share":
+            elif action in {"share", "send"}:
+                # «Отправить» и «Поделиться» открывают один и тот же диалог — одна кнопка.
                 _cd_share_paths(paths, verb="Поделиться")
-            elif action == "send":
-                _cd_share_paths(paths, verb="Отправить")
             elif action == "archive":
                 _cd_archive_paths(paths)
             elif action == "hide":
@@ -1310,7 +1321,6 @@ def render_explorer_screen(
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "cut")).props("data-rag-cut").classes("rag-context-action-hidden")
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "delete")).props("data-rag-delete").classes("rag-context-action-hidden")
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "share")).props("data-rag-share").classes("rag-context-action-hidden")
-            ui.button(on_click=lambda p=node_path: _cd_single_action(p, "send")).props("data-rag-send").classes("rag-context-action-hidden")
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "archive")).props("data-rag-archive").classes("rag-context-action-hidden")
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "hide")).props("data-rag-hide").classes("rag-context-action-hidden")
             ui.button(on_click=lambda p=node_path: _cd_single_action(p, "unhide")).props("data-rag-unhide").classes("rag-context-action-hidden")
@@ -1979,13 +1989,6 @@ def render_explorer_screen(
                                     else:
                                         ui.label("✓").classes("rag-file-table-index-ok")
                                 with ui.element("div").classes("rag-file-table-actions"):
-                                    src = str(f.source_path or f.path or "")
-                                    if src:
-                                        ui.button(
-                                            icon="open_in_new",
-                                            on_click=lambda p=src: _select_in_os_explorer(p),
-                                            color=None,
-                                        ).props("flat round dense").tooltip("Выделить файл в Проводнике Windows")
                                     ui.button(
                                         icon="history",
                                         on_click=lambda fi=f: _cd_versions_dialog(fi),
@@ -2324,9 +2327,6 @@ def render_explorer_screen(
                 ui.html(icon, sanitize=False)
                 name_label = ui.label(path.name).classes("rag-explorer-name text-center text-sm")
                 name_label.tooltip(str(path.name))
-            _os_fn_tile = (lambda p=path: _open_os_path(str(p))) if is_dir else (lambda p=path: _select_in_os_explorer(str(p)))
-            os_button = ui.button(on_click=_os_fn_tile).props("data-rag-os")
-            os_button.classes("hidden")
 
     def render_row(path: Path, is_dir: bool, selection_refs: dict[str, Any], compact: bool = False) -> None:
         try:
@@ -2356,12 +2356,6 @@ def render_explorer_screen(
                     ui.button("Скачать", icon="download", on_click=lambda p=path: (_log_app_event(state, "explorer", "download", details={"path": str(p)}), ui.download(p, filename=p.name))).props("outline dense")
                     if path.suffix.lower() in _OCR_EXTS:
                         ui.button("Распознать", icon="document_scanner", on_click=lambda p=path: open_recognize_dialog(p)).props("outline dense").tooltip("Распознать текст (OCR)")
-                _os_fn = (lambda p=path: _open_os_path(str(p))) if is_dir else (lambda p=path: _select_in_os_explorer(str(p)))
-                ui.button("ОС", icon="open_in_new", on_click=_os_fn).props("flat dense data-rag-os").tooltip("Открыть в проводнике Windows" if is_dir else "Выделить файл в проводнике Windows")
-            else:
-                _os_fn2 = (lambda p=path: _open_os_path(str(p))) if is_dir else (lambda p=path: _select_in_os_explorer(str(p)))
-                os_button = ui.button(on_click=_os_fn2).props("data-rag-os")
-                os_button.classes("hidden")
             render_star(path, item_type="folder" if is_dir else "file")
 
     def _explorer_path_parts(root_path: Path, current_path: Path) -> List[Path]:
@@ -2428,7 +2422,6 @@ def render_explorer_screen(
             ui.label(str(current_details)).classes("rag-path")
             with ui.row().classes("w-full gap-1 mt-1"):
                 ui.button(icon="content_copy", on_click=lambda p=current_details: copy_path(p), color=None).props("flat round dense").tooltip("Скопировать путь")
-                ui.button(icon="open_in_new", on_click=lambda p=current_details: _open_os_path(str(p)), color=None).props("flat round dense").tooltip("Открыть в Проводнике Windows")
 
     def render_entries() -> None:
         entries_area.clear()

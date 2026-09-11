@@ -32,6 +32,8 @@ from .helpers import (
     _format_log_entries_text,
     _format_relative_time,
     _is_admin,
+    _read_coverage_summary,
+    _read_heartbeat_status,
     _read_index_stats,
     _read_index_telemetry,
     _read_log_entries,
@@ -47,6 +49,7 @@ from .system import (
     _find_live_running_index_run,
     _launch_indexer,
     _launch_ocr,
+    _recreate_applies,
     _safe_int,
     _stop_managed_timer,
     stop_active_indexer,
@@ -124,16 +127,28 @@ def render_index_screen(
                 pid = _launch_indexer(
                     state.cfg,
                     stage=stage_key,
+                    recreate=_recreate_applies(stage_key, s["recreate"]),
                     workers=s["workers"],
                     max_chunks=s["max_chunks"],
                     skip_inline_ocr=s["skip_inline_ocr"],
+                    force_ocr=s["ocr_enabled"],
                     ocr_engine=s["ocr_engine"],
                 )
             except RuntimeError as exc:
                 ui.notify(str(exc), type="warning")
                 return
             _set_phase_running(stage_key, True)
-            _log_app_event(state, "index", "run_now", details={"stage": stage_key, "pid": pid})
+            _log_app_event(
+                state,
+                "index",
+                "run_now",
+                details={
+                    "stage": stage_key,
+                    "pid": pid,
+                    "recreate": _recreate_applies(stage_key, s["recreate"]),
+                    "force_ocr": bool(s["ocr_enabled"]),
+                },
+            )
             ui.notify(f"Индексация «{_STAGE_LABELS.get(stage_key, stage_key)}» запущена (PID {pid}).", type="positive")
             await _refresh_progress()
             ui.timer(1.0, _refresh_progress, once=True)
@@ -645,6 +660,13 @@ def render_index_screen(
         _stop_managed_timer(state.index_progress_timer)
         state.index_progress_timer = ui.timer(5.0, _refresh_progress)
 
+    # ── Слепые зоны + heartbeat ──────────────────────────────────────
+    try:
+        render_blind_spots_card(state)
+    except Exception as exc:
+        _log.exception("render_blind_spots_card failed")
+        ui.label(f"Слепые зоны недоступны: {exc}").classes("rag-meta")
+
     # ── Расписание и параметры ───────────────────────────────────────
     with ui.column().classes("rag-card w-full p-4 gap-3"):
         with ui.row().classes("w-full items-center gap-2"):
@@ -768,6 +790,10 @@ def render_index_screen(
                     workers_input = ui.number("Потоки чтения (0 = авто)", value=initial_index_settings["workers"], min=0, max=32, step=1).props("dense outlined").classes("w-40")
                     max_chunks_input = ui.number("Макс. чанков на файл", value=initial_index_settings["max_chunks"], min=0, max=100000, step=1).props("dense outlined").classes("w-52")
                     recreate_input = ui.checkbox("Пересоздавать коллекцию", value=initial_index_settings["recreate"])
+                    recreate_input.tooltip(
+                        "Передаёт --recreate индексатору при полном прогоне (all/full) — и ручном, и по расписанию. "
+                        "Для отдельных стадий metadata/small/large не применяется."
+                    )
                     skip_inline_ocr_input = ui.checkbox("Пропускать OCR внутри индекса", value=initial_index_settings["skip_inline_ocr"])
 
                 ui.separator()
@@ -777,7 +803,11 @@ def render_index_screen(
                 _has_gpu_ocr = _gpu_ocr_available()
 
                 with ui.row().classes("w-full gap-3 items-end flex-wrap"):
-                    ocr_enabled_input = ui.checkbox("Запускать OCR после индексации", value=initial_index_settings["ocr_enabled"])
+                    ocr_enabled_input = ui.checkbox("OCR внутри индексации (--force-ocr)", value=initial_index_settings["ocr_enabled"])
+                    ocr_enabled_input.tooltip(
+                        "Индексатор распознаёт сканы прямо в прогоне (--force-ocr) — ручной запуск и расписание. "
+                        "Выключено: сканы получают status=deferred_ocr и ждут отдельного OCR-прохода."
+                    )
                     with ui.column().classes("gap-0"):
                         ocr_min_text_input = ui.number(
                             "Порог текста для скана (символов)",
@@ -925,26 +955,69 @@ def render_index_screen(
         chart_period.on_value_change(lambda _: rebuild_chart())
         rebuild_chart()
 
-def render_index_dashboard(state: PageState) -> None:
-    if not _is_admin(state):
-        return
-    stats = _read_index_stats(state.cfg)
-    telemetry = _read_index_telemetry(state.cfg)
+
+_BLIND_SPOT_REASON_LABELS: Dict[str, str] = {
+    "deferred_ocr": "ждут OCR",
+    "empty": "пустой текст",
+    "unreadable": "нечитаемые",
+    "error": "ошибка извлечения",
+    "reindexing": "переиндексация",
+    "ok": "только метаданные",
+}
+
+_HEARTBEAT_KIND_STYLE: Dict[str, tuple[str, str]] = {
+    "running": ("sync", "text-indigo-500"),
+    "finished": ("check_circle", "text-green-600"),
+    "failed": ("error", "text-red-600"),
+    "dead": ("heart_broken", "text-red-600"),
+    "missing": ("radio_button_unchecked", "text-gray-400"),
+}
+
+
+def render_blind_spots_card(state: PageState) -> None:
+    """Карточка «Слепые зоны» (coverage-report) + статус heartbeat индексатора."""
+    coverage = _read_coverage_summary(state.cfg, top_folders=5)
+    heartbeat = _read_heartbeat_status(state.cfg)
     with ui.column().classes("rag-card w-full p-4 gap-3"):
-        ui.label("Дашборд индексирования").classes("text-xl font-semibold")
-        if not stats["found"]:
-            ui.label(f"Состояние индекса не найдено: {stats['state_file']}").classes("rag-meta")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.icon("visibility_off").classes("text-2xl text-orange-500")
+            ui.label("Слепые зоны").classes("text-xl font-semibold")
+            ui.space()
+            icon_name, icon_cls = _HEARTBEAT_KIND_STYLE.get(str(heartbeat.get("kind") or "missing"), ("help", ""))
+            hb_chip = ui.row().classes("items-center gap-1 rag-chip")
+            with hb_chip:
+                ui.icon(icon_name, size="16px").classes(icon_cls)
+                ui.label(str(heartbeat.get("label") or "")).classes("text-xs")
+                if heartbeat.get("detail"):
+                    ui.label(f"· {heartbeat.get('detail')}").classes("rag-meta text-xs")
+            if heartbeat.get("description"):
+                hb_chip.tooltip(str(heartbeat.get("description")))
+        ui.label(
+            "Файлы, у которых в индексе только метаданные — содержимое не извлечено. "
+            "То же, что `index_rag --coverage-report`."
+        ).classes("rag-meta")
+        if not coverage.get("found"):
+            ui.label(
+                f"index_state.db не найден или не читается: {coverage.get('error') or coverage.get('state_file')}"
+            ).classes("rag-meta")
             return
-        with ui.row().classes("w-full gap-3"):
-            ui.label(f"Файлов: {stats['total']:,}".replace(",", " ")).classes("rag-chip")
-            ui.label(f"Размер: {_format_bytes(stats.get('total_size_bytes'))}").classes("rag-chip")
-            ui.label(f"Обновлен: {stats.get('last_modified', 'неизвестно')}").classes("rag-chip")
-            last_run = telemetry.get("last_run") or {}
-            if last_run:
-                ui.label(f"Последний запуск: {_format_duration_seconds(last_run.get('duration_sec'))}").classes("rag-chip")
-        if stats.get("by_ext"):
-            for ext, count in list(stats["by_ext"].items())[:12]:
-                ui.label(f"{ext}: {count}").classes("rag-meta")
-
-# ── Auth / login / access denied screens ──────────────────────────────────
-
+        total = int(coverage.get("total") or 0)
+        uncovered = int(coverage.get("uncovered") or 0)
+        with ui.row().classes("w-full gap-3 flex-wrap"):
+            ui.label(f"Без содержимого: {uncovered:,} из {total:,} ({100 - float(coverage.get('coverage_pct') or 0):.1f}%)".replace(",", " ")).classes("font-semibold")
+        by_status = dict(coverage.get("uncovered_by_status") or {})
+        if by_status:
+            with ui.row().classes("w-full gap-2 flex-wrap"):
+                for reason, count in by_status.items():
+                    label = _BLIND_SPOT_REASON_LABELS.get(str(reason), str(reason))
+                    ui.label(f"{label}: {int(count):,}".replace(",", " ")).classes("rag-chip text-xs").tooltip(f"status={reason}")
+        by_ext = dict(coverage.get("uncovered_by_extension") or {})
+        if by_ext:
+            ui.label(
+                "По расширениям: " + ", ".join(f"{ext} {int(cnt):,}".replace(",", " ") for ext, cnt in list(by_ext.items())[:8])
+            ).classes("rag-meta text-xs")
+        folders = list(coverage.get("uncovered_top_folders") or [])
+        if folders:
+            ui.label("Папки с наибольшим числом непокрытых файлов:").classes("rag-meta text-xs")
+            for row in folders:
+                ui.label(f"{int(row.get('files') or 0):,}  {row.get('folder')}".replace(",", " ")).classes("rag-path text-xs")

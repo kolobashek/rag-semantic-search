@@ -22,8 +22,8 @@ from rag_catalog.core.cloud_drive.storage import normalize_s3_credential
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
-from .auth_session import apply_login_session, prepare_login_session
 from .helpers import (
+    _alias_key_from_text,
     _cd_get_service,
     _telegram_deeplink,
 )
@@ -45,46 +45,6 @@ from .system import (
     _safe_int,
     _stop_managed_timer,
 )
-
-
-def _pick_folder_dialog(input_widget: Any, *, title: str = "Выберите папку") -> None:
-    """Open OS native folder-picker dialog (local server only) and populate input_widget."""
-    import threading as _threading  # noqa: PLC0415
-    def _run() -> None:
-        try:
-            import tkinter as _tk  # noqa: PLC0415
-            from tkinter import filedialog as _fd  # noqa: PLC0415
-            root = _tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            chosen = _fd.askdirectory(title=title, parent=root)
-            root.destroy()
-            if chosen:
-                input_widget.set_value(chosen)
-                input_widget.run_method("focus")
-        except Exception:
-            pass
-    _threading.Thread(target=_run, daemon=True).start()
-
-
-def _pick_file_dialog(input_widget: Any, *, title: str = "Выберите файл") -> None:
-    """Open OS native file-picker dialog (local server only) and populate input_widget."""
-    import threading as _threading  # noqa: PLC0415
-    def _run() -> None:
-        try:
-            import tkinter as _tk  # noqa: PLC0415
-            from tkinter import filedialog as _fd  # noqa: PLC0415
-            root = _tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            chosen = _fd.askopenfilename(title=title, parent=root)
-            root.destroy()
-            if chosen:
-                input_widget.set_value(chosen)
-                input_widget.run_method("focus")
-        except Exception:
-            pass
-    _threading.Thread(target=_run, daemon=True).start()
 
 
 def render_settings_screen(
@@ -671,16 +631,11 @@ def render_settings_screen(
 
     def render_admin_path_settings() -> None:
         def _path_row(label: str, value: str, *, folder: bool = True) -> ui.input:
+            # Путь вводится текстом: приложение работает на сервере, нативный диалог
+            # выбора файла открывался бы на сервере, а не у пользователя.
+            placeholder = "Папка на сервере" if folder else "Файл на сервере"
             with ui.row().classes("w-full items-center gap-1"):
-                inp = ui.input(label, value=value).props("dense outlined").classes("flex-1")
-                icon = "folder_open" if folder else "description"
-                tip = "Выбрать папку" if folder else "Выбрать файл"
-                btn = ui.button(icon=icon).props("flat dense round").classes("text-indigo-400 mt-1")
-                btn.tooltip(tip)
-                if folder:
-                    btn.on_click(lambda _inp=inp: _pick_folder_dialog(_inp))
-                else:
-                    btn.on_click(lambda _inp=inp: _pick_file_dialog(_inp))
+                inp = ui.input(label, value=value, placeholder=placeholder).props("dense outlined").classes("flex-1")
             return inp
 
         with ui.column().classes("rag-card w-full p-4 gap-3"):
@@ -816,10 +771,7 @@ def render_settings_screen(
 
             with ui.row().classes("w-full items-center gap-1"):
                 db_input = ui.input("База реестра Cloud Drive", value=initial_cloud["cloud_drive_db_path"]).props("dense outlined").classes("flex-1")
-                db_input.tooltip("SQLite-база реестра: хранит структуру папок, метаданные файлов, версии и историю задач.")
-                btn_db = ui.button(icon="folder_open").props("flat dense round").classes("text-indigo-400 mt-1")
-                btn_db.tooltip("Выбрать файл базы данных")
-                btn_db.on_click(lambda: _pick_file_dialog(db_input))
+                db_input.tooltip("SQLite-база реестра: хранит структуру папок, метаданные файлов, версии и историю задач. Путь на сервере.")
 
             storage_kind = ui.select(
                 {"local": "Local storage", "s3": "S3 / MinIO"},
@@ -831,10 +783,7 @@ def render_settings_screen(
             storage_root_row = ui.row().classes("w-full items-center gap-1")
             with storage_root_row:
                 storage_root_input = ui.input("Папка хранения файлов", value=initial_cloud["cloud_drive_storage_root"]).props("dense outlined").classes("flex-1")
-                storage_root_input.tooltip("Корневая папка для local storage.")
-                btn_root = ui.button(icon="folder_open").props("flat dense round").classes("text-indigo-400 mt-1")
-                btn_root.tooltip("Выбрать папку")
-                btn_root.on_click(lambda: _pick_folder_dialog(storage_root_input))
+                storage_root_input.tooltip("Корневая папка для local storage (путь на сервере).")
 
             s3_summary_row = ui.row().classes("w-full items-center gap-2")
             with s3_summary_row:
@@ -897,10 +846,7 @@ def render_settings_screen(
                 import_name_input = ui.input("Название", value="Сканер").props("dense outlined").classes("w-full")
                 with ui.row().classes("w-full items-center gap-1"):
                     import_source_input = ui.input("Исходная папка", value="").props("dense outlined").classes("flex-1")
-                    import_source_input.tooltip("Папка, куда пишет сканер или внешняя система.")
-                    btn_import_source = ui.button(icon="folder_open").props("flat dense round").classes("text-indigo-400 mt-1")
-                    btn_import_source.tooltip("Выбрать папку")
-                    btn_import_source.on_click(lambda: _pick_folder_dialog(import_source_input, title="Выберите исходную папку"))
+                    import_source_input.tooltip("Папка, куда пишет сканер или внешняя система (путь, доступный серверу).")
                 import_target_input = ui.input("Папка в Cloud Drive", value="Входящие/Сканер").props("dense outlined").classes("w-full")
                 import_target_input.tooltip("Куда складывать импортированные файлы внутри Cloud Drive.")
                 with ui.row().classes("w-full items-center gap-3 flex-wrap"):
@@ -2017,25 +1963,6 @@ def render_settings_screen(
                     ui.notify(f"Не удалось прочитать пары синхронизации: {exc}", type="negative")
                     return []
 
-            def _register_manual_client() -> None:
-                import platform as _platform  # noqa: PLC0415
-                import socket as _socket  # noqa: PLC0415
-                host = _socket.gethostname() or "local"
-                username = _username(state) or "admin"
-                try:
-                    svc.register_sync_client(
-                        username=username,
-                        device_id=f"manual-{username}-{host}".lower(),
-                        display_name=f"{host} (ручная настройка)",
-                        platform=_platform.system() or "manual",
-                        status="offline",
-                        metadata={"source": "web-settings"},
-                    )
-                    ui.notify("Sync-клиент добавлен в реестр.", type="positive")
-                    render_fn()
-                except Exception as exc:
-                    ui.notify(f"Не удалось добавить клиента: {exc}", type="negative")
-
             clients = _load_clients()
             selected_client = str(clients[0].get("id") or "") if clients else ""
 
@@ -2045,8 +1972,7 @@ def render_settings_screen(
                     with ui.element("div").classes("cd-empty-state w-full py-4"):
                         ui.icon("sync_disabled", size="28px").classes("opacity-30")
                         ui.label("Нет подключённых sync-клиентов.").classes("text-center")
-                        ui.label("До установки desktop-агента можно создать ручную запись клиента для настройки пар.").classes("text-center rag-meta text-xs")
-                        ui.button("Добавить текущий компьютер", icon="add", on_click=_register_manual_client).props("outline dense")
+                        ui.label("Клиенты появляются здесь после установки и входа desktop-агента на компьютере пользователя.").classes("text-center rag-meta text-xs")
                 else:
                     with ui.column().classes("w-full gap-2"):
                         for client in clients:
@@ -2060,7 +1986,6 @@ def render_settings_screen(
                                     ).classes("rag-meta text-xs truncate")
                                 color = "positive" if status == "online" else "warning" if status in {"paused", "error"} else "grey-4"
                                 ui.badge(status, color=color).classes("text-xs")
-                        ui.button("Добавить текущий компьютер", icon="add", on_click=_register_manual_client).props("outline dense")
 
             ui.separator()
 
@@ -2410,206 +2335,14 @@ def render_settings_screen(
                     ui.button("Сохранить настройки нейросети", icon="save", on_click=save_llm_settings).props("outline dense")
 
     def render_admin_search_aliases() -> None:
-        telemetry = _get_telemetry(state)
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Синонимы поиска").classes("text-xl font-semibold")
-            ui.label(
-                "Группы расширяют запросы без переиндексации: например, «реквизиты» ищет карточки предприятия и расчетные счета."
-            ).classes("rag-meta")
-
-            groups = telemetry.list_search_alias_groups() if hasattr(telemetry, "list_search_alias_groups") else []
-            with ui.expansion("Добавить группу", icon="add", value=False).classes("w-full"):
-                new_key = ui.input("Ключ группы (латиница, необязательно)", placeholder="company_card").props("dense outlined").classes("w-full")
-                new_label = ui.input("Основной термин", placeholder="Карточка предприятия").props("dense outlined").classes("w-full")
-                new_aliases = ui.textarea(
-                    "Синонимы — по одному на строку",
-                ).props("dense outlined autogrow rows=3 placeholder=реквизиты\nрасчётный счёт\nдетали компании").classes("w-full")
-                ui.label("Введите альтернативные формулировки — каждую с новой строки. Основной термин включается автоматически.").classes("rag-meta text-xs")
-                new_negative = ui.textarea("Исключения (необязательно)", ).props("dense outlined autogrow").classes("w-full")
-
-                def add_group() -> None:
-                    label = str(new_label.value or "").strip()
-                    key = str(new_key.value or label).strip()
-                    aliases = [x.strip() for x in str(new_aliases.value or "").splitlines() if x.strip()]
-                    negatives = [x.strip() for x in str(new_negative.value or "").splitlines() if x.strip()]
-                    try:
-                        telemetry.save_search_alias_group(key=key, label=label or key, aliases=aliases, negative_aliases=negatives)
-                        _log_app_event(state, "settings", "search_alias_add", details={"key": key, "label": label})
-                        ui.notify("Группа синонимов добавлена.", type="positive")
-                        render_fn()
-                    except Exception as exc:
-                        ui.notify(f"Не удалось сохранить: {exc}", type="negative")
-
-                ui.button("Добавить группу", icon="save", on_click=add_group).props("outline")
-
-            for group in groups:
-                group_key = str(group.get("key") or "")
-                _group_label = str(group.get("label") or "")
-                # Exclude the label itself from the aliases textarea — save_search_alias_group
-                # always prepends it automatically, so showing it here is confusing duplication.
-                _label_norm = _group_label.strip().lower().replace("ё", "е")
-                alias_text = "\n".join(
-                    str(a.get("alias") or "")
-                    for a in group.get("aliases") or []
-                    if str(a.get("alias") or "").strip().lower().replace("ё", "е") != _label_norm
-                )
-                negative_text = "\n".join(str(x) for x in group.get("negative_aliases") or [])
-                with ui.expansion(str(group.get("label") or group_key), icon="travel_explore", value=False).classes("w-full"):
-                    initial_group = {
-                        "label": _group_label,
-                        "aliases": alias_text,
-                        "negative": negative_text,
-                    }
-                    label_input = ui.input("Название (основной термин)", value=_group_label).props("dense outlined").classes("w-full")
-                    aliases_input = ui.textarea(
-                        "Синонимы — по одному на строку",
-                        value=alias_text,
-                    ).props("dense outlined autogrow rows=2").classes("w-full")
-                    ui.label("Основной термин включается автоматически; добавьте сюда альтернативные формулировки.").classes("rag-meta text-xs")
-                    negative_input = ui.textarea("Исключения", value=negative_text).props("dense outlined autogrow").classes("w-full")
-                    ui.label(f"Ключ: {group_key} · обновлено: {group.get('updated_at') or '-'}").classes("rag-meta")
-
-                    def save_group(
-                        key: str = group_key,
-                        label_ref: Any = label_input,
-                        aliases_ref: Any = aliases_input,
-                        negative_ref: Any = negative_input,
-                    ) -> None:
-                        aliases = [x.strip() for x in str(aliases_ref.value or "").splitlines() if x.strip()]
-                        negatives = [x.strip() for x in str(negative_ref.value or "").splitlines() if x.strip()]
-                        telemetry.save_search_alias_group(
-                            key=key,
-                            label=str(label_ref.value or key),
-                            aliases=aliases,
-                            negative_aliases=negatives,
-                        )
-                        _log_app_event(state, "settings", "search_alias_save", details={"key": key})
-                        ui.notify("Синонимы сохранены.", type="positive")
-                        render_fn()
-
-                    def delete_group(key: str = group_key) -> None:
-                        telemetry.delete_search_alias_group(key=key)
-                        _log_app_event(state, "settings", "search_alias_delete", details={"key": key})
-                        ui.notify("Группа удалена.", type="positive")
-                        render_fn()
-
-                    def reset_group_fields(
-                        _li: Any = label_input,
-                        _ai: Any = aliases_input,
-                        _ni: Any = negative_input,
-                        _ig: Dict[str, Any] = initial_group,
-                    ) -> None:
-                        _li.set_value(_ig["label"])
-                        _ai.set_value(_ig["aliases"])
-                        _ni.set_value(_ig["negative"])
-
-                    with ui.row().classes("gap-2 items-center"):
-                        ui.button("Удалить", icon="delete", on_click=delete_group).props("flat dense")
-                        ui.space()
-                        ui.button("Сбросить", icon="undo", on_click=reset_group_fields).props("flat dense")
-                        ui.button("Сохранить", icon="save", on_click=save_group).props("outline dense")
-
-            candidates = telemetry.suggest_search_alias_candidates(limit=12) if hasattr(telemetry, "suggest_search_alias_candidates") else []
-            with ui.expansion("Кандидаты из истории поиска", icon="psychology", value=False).classes("w-full"):
-                if not candidates:
-                    ui.label("Пока нет кандидатов. Они появятся после положительных реакций на результаты поиска.").classes("rag-meta")
-
-                def _quick_add_alias(cq: str, cp: str) -> None:
-                    import re as _re
-                    _key = _re.sub(r"[^a-z0-9]+", "_", cq.lower()).strip("_") or "alias"
-                    try:
-                        telemetry.save_search_alias_group(
-                            key=_key, label=cq, aliases=[cq, cp], source="analytics"
-                        )
-                        _log_app_event(state, "settings", "search_alias_add", details={"key": _key, "from": "admin_candidate"})
-                        ui.notify(f"Синоним добавлен: «{cq}» = «{cp}»", type="positive")
-                        render_fn()
-                    except Exception as exc:
-                        ui.notify(f"Не удалось добавить: {exc}", type="negative")
-
-                for item in candidates:
-                    cand_q = str(item.get("query") or "")
-                    cand_p = str(item.get("candidate") or "")
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(cand_p).classes("font-medium")
-                        ui.label(f"запрос: {cand_q}").classes("rag-meta")
-                        ui.label(str(item.get("title") or item.get("path") or "")).classes("rag-path flex-1")
-                        ui.button("Добавить", icon="add", on_click=lambda cq=cand_q, cp=cand_p: _quick_add_alias(cq, cp)).props("flat dense no-caps").classes("text-xs")
-
+        render_search_aliases_panel(state, render_fn=render_fn)
 
     # ── Settings screen body ──────────────────────────────────────────────
     auth_db = _get_auth_db(state)
 
-    # ── Форма входа (без боковой панели) ────────────────────────────
+    # Экран входа рендерит nice_app.render_login_screen ещё до выбора экрана,
+    # поэтому сюда неавторизованный пользователь не попадает.
     if state.current_user is None:
-        ui.label("Настройки").classes("text-2xl font-semibold")
-        with ui.column().classes("rag-card w-full max-w-xl p-4 gap-3"):
-            ui.label("Вход пользователя").classes("text-xl font-semibold")
-            ui.label(
-                "Первый администратор создаётся только при запуске с RAG_BOOTSTRAP_ADMIN_PASSWORD. "
-                "Если админ ещё не создан, остановите сервер, задайте переменную окружения и запустите снова."
-            ).classes("rag-meta")
-            username_input = ui.input("Логин").props("dense outlined").classes("w-full")
-            password_input = ui.input("Пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-
-            async def login() -> None:
-                # Только login_with_reason: плейн login() обходит троттлинг
-                # (LOGIN_LOCKOUT_SECONDS) и не пишет события в аудит, превращая
-                # эту форму в неограниченный оракул для перебора паролей.
-                username = str(username_input.value or "").strip()
-                result = await run.io_bound(
-                    auth_db.login_with_reason,
-                    username=username,
-                    password=str(password_input.value or ""),
-                )
-                reason = str(result.get("reason") or "")
-                user = result.get("user")
-                if reason == "rate_limited":
-                    retry_after = max(1, int(result.get("retry_after_seconds") or 1))
-                    await run.io_bound(
-                        auth_db.log_auth_event,
-                        username=username,
-                        event_type="login_throttled",
-                        ok=False,
-                        error=f"retry_after={retry_after}",
-                    )
-                    ui.notify(
-                        f"Слишком много попыток входа. Повторите через {max(1, (retry_after + 59) // 60)} мин.",
-                        type="warning",
-                        timeout=6000,
-                    )
-                    return
-                if reason == "pending" or reason == "blocked" or reason != "ok" or not user:
-                    # login_throttle_status считает именно события login_failed,
-                    # поэтому неудачу обязана фиксировать вызывающая сторона.
-                    await run.io_bound(
-                        auth_db.log_auth_event,
-                        username=username,
-                        event_type="login_failed",
-                        ok=False,
-                        error={"pending": "pending", "blocked": "blocked"}.get(reason, "bad_credentials"),
-                    )
-                    if reason == "pending":
-                        ui.notify("Аккаунт ещё не активирован администратором.", type="warning")
-                    elif reason == "blocked":
-                        ui.notify("Аккаунт заблокирован.", type="negative")
-                    else:
-                        ui.notify("Неверный логин или пароль.", type="negative")
-                    return
-                token = await run.io_bound(
-                    prepare_login_session, state, user, event_type="login"
-                )
-                apply_login_session(state, user, token)
-                ui.notify("Вход выполнен.", type="positive")
-                render_fn()
-
-            username_input.on("keyup.enter", lambda _: ui.run_javascript(
-                "const ins=document.querySelectorAll('.q-field__native,input[type=password]');"
-                "const i=Array.from(ins).findIndex(el=>el===document.activeElement);"
-                "if(i>=0&&ins[i+1])ins[i+1].focus();"
-            ))
-            password_input.on("keyup.enter", login)
-            ui.button("Войти", icon="login", on_click=login).props("unelevated")
         return
 
     user = state.current_user
@@ -2970,3 +2703,140 @@ def render_settings_screen(
     ui.timer(0.05, _init_from_hash, once=True)
 
 # ── Analytics / stats screen ───────────────────────────────────────────
+
+
+def render_search_aliases_panel(
+    state: PageState,
+    *,
+    render_fn: Callable[[], Any],
+    candidate_limit: int = 12,
+) -> None:
+    """Единственная реализация управления синонимами поиска.
+
+    Вызывается из настроек (секция «Синонимы поиска») и из аналитики (вкладка «Синонимы»).
+    """
+    telemetry = _get_telemetry(state)
+    with ui.column().classes("rag-card w-full p-4 gap-3"):
+        ui.label("Синонимы поиска").classes("text-xl font-semibold")
+        ui.label(
+            "Группы расширяют запросы без переиндексации: например, «реквизиты» ищет карточки предприятия и расчетные счета."
+        ).classes("rag-meta")
+
+        groups = telemetry.list_search_alias_groups() if hasattr(telemetry, "list_search_alias_groups") else []
+        with ui.expansion("Добавить группу", icon="add", value=False).classes("w-full"):
+            new_key = ui.input("Ключ группы (латиница, необязательно)", placeholder="company_card").props("dense outlined").classes("w-full")
+            new_label = ui.input("Основной термин", placeholder="Карточка предприятия").props("dense outlined").classes("w-full")
+            new_aliases = ui.textarea(
+                "Синонимы — по одному на строку",
+            ).props("dense outlined autogrow rows=3 placeholder=реквизиты\nрасчётный счёт\nдетали компании").classes("w-full")
+            ui.label("Введите альтернативные формулировки — каждую с новой строки. Основной термин включается автоматически.").classes("rag-meta text-xs")
+            new_negative = ui.textarea("Исключения (необязательно)", ).props("dense outlined autogrow").classes("w-full")
+
+            def add_group() -> None:
+                label = str(new_label.value or "").strip()
+                # Ядро принимает только [a-z0-9_]; кириллический термин транслитерируем.
+                key = str(new_key.value or "").strip() or (_alias_key_from_text(label) if label else "")
+                aliases = [x.strip() for x in str(new_aliases.value or "").splitlines() if x.strip()]
+                negatives = [x.strip() for x in str(new_negative.value or "").splitlines() if x.strip()]
+                try:
+                    telemetry.save_search_alias_group(key=key, label=label or key, aliases=aliases, negative_aliases=negatives)
+                    _log_app_event(state, "settings", "search_alias_add", details={"key": key, "label": label})
+                    ui.notify("Группа синонимов добавлена.", type="positive")
+                    render_fn()
+                except Exception as exc:
+                    ui.notify(f"Не удалось сохранить: {exc}", type="negative")
+
+            ui.button("Добавить группу", icon="save", on_click=add_group).props("outline")
+
+        for group in groups:
+            group_key = str(group.get("key") or "")
+            _group_label = str(group.get("label") or "")
+            # Exclude the label itself from the aliases textarea — save_search_alias_group
+            # always prepends it automatically, so showing it here is confusing duplication.
+            _label_norm = _group_label.strip().lower().replace("ё", "е")
+            alias_text = "\n".join(
+                str(a.get("alias") or "")
+                for a in group.get("aliases") or []
+                if str(a.get("alias") or "").strip().lower().replace("ё", "е") != _label_norm
+            )
+            negative_text = "\n".join(str(x) for x in group.get("negative_aliases") or [])
+            with ui.expansion(str(group.get("label") or group_key), icon="travel_explore", value=False).classes("w-full"):
+                initial_group = {
+                    "label": _group_label,
+                    "aliases": alias_text,
+                    "negative": negative_text,
+                }
+                label_input = ui.input("Название (основной термин)", value=_group_label).props("dense outlined").classes("w-full")
+                aliases_input = ui.textarea(
+                    "Синонимы — по одному на строку",
+                    value=alias_text,
+                ).props("dense outlined autogrow rows=2").classes("w-full")
+                ui.label("Основной термин включается автоматически; добавьте сюда альтернативные формулировки.").classes("rag-meta text-xs")
+                negative_input = ui.textarea("Исключения", value=negative_text).props("dense outlined autogrow").classes("w-full")
+                ui.label(f"Ключ: {group_key} · обновлено: {group.get('updated_at') or '-'}").classes("rag-meta")
+
+                def save_group(
+                    key: str = group_key,
+                    label_ref: Any = label_input,
+                    aliases_ref: Any = aliases_input,
+                    negative_ref: Any = negative_input,
+                ) -> None:
+                    aliases = [x.strip() for x in str(aliases_ref.value or "").splitlines() if x.strip()]
+                    negatives = [x.strip() for x in str(negative_ref.value or "").splitlines() if x.strip()]
+                    telemetry.save_search_alias_group(
+                        key=key,
+                        label=str(label_ref.value or key),
+                        aliases=aliases,
+                        negative_aliases=negatives,
+                    )
+                    _log_app_event(state, "settings", "search_alias_save", details={"key": key})
+                    ui.notify("Синонимы сохранены.", type="positive")
+                    render_fn()
+
+                def delete_group(key: str = group_key) -> None:
+                    telemetry.delete_search_alias_group(key=key)
+                    _log_app_event(state, "settings", "search_alias_delete", details={"key": key})
+                    ui.notify("Группа удалена.", type="positive")
+                    render_fn()
+
+                def reset_group_fields(
+                    _li: Any = label_input,
+                    _ai: Any = aliases_input,
+                    _ni: Any = negative_input,
+                    _ig: Dict[str, Any] = initial_group,
+                ) -> None:
+                    _li.set_value(_ig["label"])
+                    _ai.set_value(_ig["aliases"])
+                    _ni.set_value(_ig["negative"])
+
+                with ui.row().classes("gap-2 items-center"):
+                    ui.button("Удалить", icon="delete", on_click=delete_group).props("flat dense")
+                    ui.space()
+                    ui.button("Сбросить", icon="undo", on_click=reset_group_fields).props("flat dense")
+                    ui.button("Сохранить", icon="save", on_click=save_group).props("outline dense")
+
+        candidates = telemetry.suggest_search_alias_candidates(limit=candidate_limit) if hasattr(telemetry, "suggest_search_alias_candidates") else []
+        with ui.expansion("Кандидаты из истории поиска", icon="psychology", value=False).classes("w-full"):
+            if not candidates:
+                ui.label("Пока нет кандидатов. Они появятся после положительных реакций на результаты поиска.").classes("rag-meta")
+
+            def _quick_add_alias(cq: str, cp: str) -> None:
+                _key = _alias_key_from_text(cq)
+                try:
+                    telemetry.save_search_alias_group(
+                        key=_key, label=cq, aliases=[cq, cp], source="analytics"
+                    )
+                    _log_app_event(state, "settings", "search_alias_add", details={"key": _key, "from": "admin_candidate"})
+                    ui.notify(f"Синоним добавлен: «{cq}» = «{cp}»", type="positive")
+                    render_fn()
+                except Exception as exc:
+                    ui.notify(f"Не удалось добавить: {exc}", type="negative")
+
+            for item in candidates:
+                cand_q = str(item.get("query") or "")
+                cand_p = str(item.get("candidate") or "")
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label(cand_p).classes("font-medium")
+                    ui.label(f"запрос: {cand_q}").classes("rag-meta")
+                    ui.label(str(item.get("title") or item.get("path") or "")).classes("rag-path flex-1")
+                    ui.button("Добавить", icon="add", on_click=lambda cq=cand_q, cp=cand_p: _quick_add_alias(cq, cp)).props("flat dense no-caps").classes("text-xs")

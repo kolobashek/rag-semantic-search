@@ -496,6 +496,17 @@ def _effective_workers(configured: Any, *, stage: str = "all", mode: str = "inde
     return max(2, min(8, cpu))
 
 
+_RECREATE_STAGES = frozenset({"all", "full"})
+
+
+def _recreate_applies(stage: str, recreate: Any) -> bool:
+    """Настройка «Пересоздавать коллекцию» действует только на полный прогон (all/full).
+
+    Для metadata/small/large пересоздание уничтожило бы результаты других стадий.
+    """
+    return bool(recreate) and str(stage or "all").strip().lower() in _RECREATE_STAGES
+
+
 def _launch_indexer(
     cfg: Dict[str, Any],
     *,
@@ -504,9 +515,15 @@ def _launch_indexer(
     workers: Optional[int] = None,
     max_chunks: Optional[int] = None,
     skip_inline_ocr: bool = False,
+    force_ocr: bool = False,
     ocr_engine: str = "tesseract",
 ) -> int:
-    """Запустить index_rag как фоновый процесс. Возвращает PID."""
+    """Запустить index_rag как фоновый процесс. Возвращает PID.
+
+    force_ocr=True → ``--force-ocr`` (OCR внутри индексации включён независимо от
+    config.index_skip_ocr и стадии); иначе для стадий all/full/small/large
+    передаётся ``--no-ocr`` (OCR отдельным проходом).
+    """
     telemetry = TelemetryDB(str(_telemetry_db_path(cfg)))
     active_run = _find_live_running_index_run(telemetry)
     if active_run:
@@ -549,7 +566,9 @@ def _launch_indexer(
         args += ["--db", str(cfg.get("qdrant_db_path") or "")]
     if recreate:
         args.append("--recreate")
-    if skip_inline_ocr or str(stage or "").strip().lower() in {"all", "full", "small", "large"}:
+    if force_ocr:
+        args.append("--force-ocr")
+    elif skip_inline_ocr or str(stage or "").strip().lower() in {"all", "full", "small", "large"}:
         args.append("--no-ocr")
     _ocr_eng = str(ocr_engine or "tesseract").strip().lower()
     if _ocr_eng in ("rapidocr",):
@@ -770,14 +789,21 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
                         details={"id": sched_id, "stage": stage, "active_stage": launched_index_stage},
                     )
                     continue
-                pid = _launch_ocr(live_cfg, workers=workers, ocr_engine=str(cfg_settings.get("ocr_engine") or "tesseract"))
+                pid = _launch_ocr(
+                    live_cfg,
+                    min_text_len=_safe_int(cfg_settings.get("ocr_min_text_len"), 50) or 50,
+                    workers=workers,
+                    ocr_engine=str(cfg_settings.get("ocr_engine") or "tesseract"),
+                )
             else:
                 pid = _launch_indexer(
                     live_cfg,
                     stage=stage,
+                    recreate=_recreate_applies(stage, cfg_settings.get("recreate")),
                     workers=workers,
                     max_chunks=int(cfg_settings.get("max_chunks") if cfg_settings.get("max_chunks") is not None else live_cfg.get("index_max_chunks", 5)),
                     skip_inline_ocr=bool(cfg_settings.get("skip_inline_ocr")),
+                    force_ocr=bool(cfg_settings.get("ocr_enabled")),
                     ocr_engine=str(cfg_settings.get("ocr_engine") or "tesseract"),
                 )
         except RuntimeError as exc:

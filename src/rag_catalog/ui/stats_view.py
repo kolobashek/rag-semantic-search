@@ -8,7 +8,7 @@ Imported by: nice_app.py.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from nicegui import run, ui
 
@@ -21,15 +21,23 @@ from .helpers import (
     _format_bytes,
     _run_catalog_search,
 )
+from .settings_view import render_search_aliases_panel
 from .state import (
     PageState,
     _get_auth_db,
     _get_telemetry,
-    _log_app_event,
 )
 from .system import _telemetry_db_path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# Приложение пишет в app_events feature='search' действия run_start / run_quick /
+# run_full / run_done (а не 'search'). Один поиск = один run_start; счётчик
+# cloud_results есть только в run_full.
+SEARCH_START_ACTION = "run_start"
+SEARCH_FULL_ACTION = "run_full"
+# Cloud Drive операции: настройки пишут feature='cloud_drive', проводник — 'cd_explorer'.
+CLOUD_DRIVE_FEATURES = ("cloud_drive", "cd_explorer")
 
 
 def render_stats_screen(
@@ -37,6 +45,7 @@ def render_stats_screen(
     *,
     access_denied: Callable[..., None],
     query_handler: Callable[[str], Any],
+    render_fn: Optional[Callable[[], Any]] = None,
 ) -> None:
     if str((state.current_user or {}).get("role") or "") != "admin":
         access_denied(hint="Статистика поиска, аудит и бенчмарк доступны только администраторам.")
@@ -162,12 +171,13 @@ def render_stats_screen(
                     telemetry_path,
                     """
                     SELECT
-                      COUNT(*) AS total,
-                      SUM(CASE WHEN json_extract(details_json, '$.cloud_results') > 0 THEN 1 ELSE 0 END) AS with_cloud,
+                      SUM(CASE WHEN action = ? THEN 1 ELSE 0 END) AS total,
+                      SUM(CASE WHEN action = ? AND json_extract(details_json, '$.cloud_results') > 0 THEN 1 ELSE 0 END) AS with_cloud,
                       COUNT(DISTINCT username) AS users
                     FROM app_events
-                    WHERE feature='search' AND action='search'
+                    WHERE feature='search' AND action IN (?, ?)
                     """,
+                    (SEARCH_START_ACTION, SEARCH_FULL_ACTION, SEARCH_START_ACTION, SEARCH_FULL_ACTION),
                 )
                 cd_top_files = _db_query_dicts(
                     telemetry_path,
@@ -190,10 +200,11 @@ def render_stats_screen(
                     """
                     SELECT action, COUNT(*) AS cnt
                     FROM app_events
-                    WHERE feature='cloud_drive'
+                    WHERE feature IN (?, ?)
                     GROUP BY action
                     ORDER BY cnt DESC
                     """,
+                    CLOUD_DRIVE_FEATURES,
                 )
                 cds = cd_search_stats[0] if cd_search_stats else {}
                 cd_total = int(cds.get("total") or 0)
@@ -358,73 +369,12 @@ def render_stats_screen(
 
         # ── Синонимы ───────────────────────────────────────────────
         with ui.tab_panel(tab_synonyms):
-            tdb = _get_telemetry(state)
-            alias_groups = tdb.list_search_alias_groups() if tdb else []
-            candidates = tdb.suggest_search_alias_candidates(limit=30) if tdb else []
-
-            with ui.row().classes("w-full gap-3 items-start"):
-                # Existing alias groups
-                with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                    ui.label(f"Группы синонимов ({len(alias_groups)})").classes("font-semibold")
-                    if alias_groups:
-                        for grp in alias_groups[:20]:
-                            aliases = grp.get("aliases") or []
-                            active = [a for a in aliases if str(a.get("status") or "") == "active"]
-                            with ui.column().classes("rag-card p-2 gap-1 w-full"):
-                                with ui.row().classes("items-center gap-2"):
-                                    ui.icon("auto_awesome", size="16px").classes("text-indigo-400")
-                                    ui.label(str(grp.get("label") or grp.get("key") or "")).classes("font-medium text-sm")
-                                if active:
-                                    with ui.row().classes("flex-wrap gap-1"):
-                                        for a in active[:8]:
-                                            ui.label(str(a.get("alias") or "")).classes("rag-chip text-xs")
-                    else:
-                        ui.label("Нет настроенных групп синонимов.").classes("rag-meta")
-
-                # Candidates from feedback
-                with ui.column().classes("rag-card flex-1 p-4 gap-2"):
-                    ui.label("Кандидаты в синонимы").classes("font-semibold")
-                    ui.label(
-                        "Фразы из документов, которые часто открывали по похожим запросам — "
-                        "кандидаты на добавление как синоним."
-                    ).classes("rag-meta text-xs mb-1")
-                    if candidates:
-                        tdb_ref = _get_telemetry(state)
-
-                        def _add_synonym_from_candidate(cq: str, cp: str) -> None:
-                            if not tdb_ref:
-                                return
-                            import re as _re
-                            _key = _re.sub(r"[^a-z0-9]+", "_", cq.lower()).strip("_") or "alias"
-                            try:
-                                tdb_ref.save_search_alias_group(
-                                    key=_key,
-                                    label=cq,
-                                    aliases=[cq, cp],
-                                    source="analytics",
-                                )
-                                _log_app_event(state, "settings", "search_alias_add", details={"key": _key, "from": "analytics_candidate"})
-                                ui.notify(f"Синоним добавлен: «{cq}» = «{cp}»", type="positive")
-                            except Exception as exc:
-                                ui.notify(f"Не удалось добавить: {exc}", type="negative")
-
-                        for cand in candidates[:20]:
-                            q = str(cand.get("query") or "")
-                            phrase = str(cand.get("candidate") or "")
-                            title = str(cand.get("title") or "")
-                            score = int(cand.get("score") or 0)
-                            with ui.row().classes("w-full items-center gap-2"):
-                                with ui.column().classes("flex-1 gap-0"):
-                                    with ui.row().classes("items-center gap-1"):
-                                        ui.label(q).classes("text-xs rag-meta")
-                                        ui.icon("arrow_forward", size="12px").classes("rag-meta")
-                                        ui.label(phrase).classes("text-sm font-medium")
-                                    if title:
-                                        ui.label(title).classes("rag-path text-xs truncate")
-                                ui.label(f"+{score}").classes("rag-chip text-xs bg-green-50 text-green-700")
-                                ui.button(icon="add", on_click=lambda cq=q, cp=phrase: _add_synonym_from_candidate(cq, cp), color=None).props("flat round dense").tooltip("Добавить как синоним")
-                    else:
-                        ui.label("Недостаточно данных для предложений.").classes("rag-meta")
+            # Та же панель, что в настройках → секция «Синонимы поиска».
+            render_search_aliases_panel(
+                state,
+                render_fn=render_fn or (lambda: None),
+                candidate_limit=30,
+            )
 
         # ── Запросы ────────────────────────────────────────────────
         with ui.tab_panel(tab_queries):
@@ -688,7 +638,12 @@ def render_stats_screen(
                 ui.separator().classes("my-2")
                 ui.label("Cloud Drive — журнал операций").classes("font-semibold text-sm")
                 tdb = _get_telemetry(state)
-                cd_events_raw = tdb.list_app_events(feature="cloud_drive", limit=200) if tdb else []
+                cd_events_raw: list = []
+                if tdb:
+                    for feature_name in CLOUD_DRIVE_FEATURES:
+                        cd_events_raw.extend(tdb.list_app_events(feature=feature_name, limit=200))
+                    cd_events_raw.sort(key=lambda row: str(row.get("ts") or ""), reverse=True)
+                    cd_events_raw = cd_events_raw[:200]
 
                 with ui.row().classes("w-full gap-2"):
                     cd_action_filter = ui.input("Операция").props("dense outlined clearable").classes("w-48")

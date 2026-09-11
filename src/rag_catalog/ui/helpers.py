@@ -11,29 +11,34 @@ import html
 import json
 import re
 import sqlite3
-import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
-from nicegui import ui
-
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.exact_tokens import numeric_query_has_trusted_context
 from rag_catalog.core.index_state_db import IndexStateDB
+from rag_catalog.core.indexing.heartbeat import (
+    STATUS_FINISHED,
+    STATUS_RUNNING,
+    describe_heartbeat,
+    heartbeat_age_sec,
+    is_stale,
+    read_heartbeat,
+)
 from rag_catalog.core.log_history import (
     iter_history_texts,
     list_log_segments,
     read_history_tail,
     read_history_tail_lines,
 )
-from rag_catalog.core.rag_core import RAGSearcher
+from rag_catalog.core.rag_core import DEFAULT_CONFIG, RAGSearcher
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .state import (
@@ -441,7 +446,8 @@ def _cloud_query_set(cfg: Dict[str, Any], username: str = "") -> "set[str]":
         from rag_catalog.core.telemetry_db import TelemetryDB
         path = _telemetry_db_path(cfg)
         telemetry = TelemetryDB(str(path))
-        events = telemetry.list_app_events(feature="search", action="search", username=username or None, limit=200)
+        # Приложение пишет run_start/run_quick/run_full/run_done; cloud_results есть только в run_full.
+        events = telemetry.list_app_events(feature="search", action="run_full", username=username or None, limit=200)
         out: set[str] = set()
         for ev in events:
             details = ev.get("details") or {}
@@ -1105,27 +1111,6 @@ def _directory_children(path: str, limit: int = 60) -> Dict[str, Any]:
     return out
 
 
-def _open_os_path(path: str) -> None:
-    value = str(path or "").strip()
-    if not value:
-        return
-    try:
-        subprocess.Popen(["explorer", value])
-    except Exception as exc:
-        ui.notify(f"Не удалось открыть проводник ОС: {exc}", type="negative")
-
-
-def _select_in_os_explorer(path: str) -> None:
-    """Open Windows Explorer with the file selected (explorer /select,<path>)."""
-    value = str(path or "").strip()
-    if not value:
-        return
-    try:
-        subprocess.Popen(["explorer", f"/select,{value}"])
-    except Exception as exc:
-        ui.notify(f"Не удалось открыть проводник ОС: {exc}", type="negative")
-
-
 def _within_catalog(root: Path, candidate: Path) -> bool:
     try:
         candidate.resolve().relative_to(root.resolve())
@@ -1720,6 +1705,242 @@ def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
     return out
+
+
+def _index_state_db_file(cfg: Dict[str, Any]) -> Path:
+    return Path(str(cfg.get("qdrant_db_path") or "")) / "index_state.db"
+
+
+def _read_coverage_summary(cfg: Dict[str, Any], *, top_folders: int = 5) -> Dict[str, Any]:
+    """Отчёт «слепых зон» (то же, что index_rag --coverage-report) для UI.
+
+    ``found=False`` если index_state.db нет или не читается; тогда счётчики нулевые.
+    """
+    state_file = _index_state_db_file(cfg)
+    out: Dict[str, Any] = {
+        "found": False,
+        "state_file": str(state_file),
+        "total": 0,
+        "covered": 0,
+        "uncovered": 0,
+        "coverage_pct": 0.0,
+        "uncovered_by_status": {},
+        "uncovered_by_extension": {},
+        "uncovered_top_folders": [],
+    }
+    if not state_file.exists():
+        return out
+    try:
+        summary = IndexStateDB(str(state_file)).coverage_summary(top_folders=top_folders)
+    except Exception as exc:
+        out["error"] = str(exc)
+        return out
+    out.update(summary)
+    out["found"] = True
+    return out
+
+
+def _resolve_heartbeat_file(cfg: Dict[str, Any]) -> Path:
+    """cfg["indexer_heartbeat_path"] (по умолчанию data/indexer_heartbeat.json от корня проекта)."""
+    raw = str(
+        cfg.get("indexer_heartbeat_path")
+        or DEFAULT_CONFIG.get("indexer_heartbeat_path")
+        or "data/indexer_heartbeat.json"
+    ).strip()
+    path = Path(raw)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _format_age_seconds(seconds: Any) -> str:
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except (TypeError, ValueError):
+        total = 0
+    if total < 60:
+        return "меньше минуты"
+    minutes = total // 60
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours} ч"
+    return f"{hours // 24} дн"
+
+
+def _read_heartbeat_status(cfg: Dict[str, Any], *, now: Optional[float] = None) -> Dict[str, Any]:
+    """Статус heartbeat индексатора для UI.
+
+    kind: running | dead | finished | failed | missing.
+    """
+    hb = read_heartbeat(_resolve_heartbeat_file(cfg))
+    if not hb:
+        return {
+            "found": False,
+            "kind": "missing",
+            "label": "индексатор ещё не запускался",
+            "detail": "",
+            "age_sec": None,
+            "ts": None,
+            "raw": None,
+            "description": describe_heartbeat(None),
+        }
+    age = heartbeat_age_sec(hb, now=now)
+    status = str(hb.get("status") or STATUS_RUNNING)
+    stage = str(hb.get("stage") or "")
+    processed = int(hb.get("processed") or 0)
+    total = int(hb.get("total") or 0)
+    progress = f"{processed:,}/{total:,}".replace(",", " ") if total > 0 else str(processed)
+    stage_label = _STAGE_LABELS.get(stage, stage) or "—"
+    if status == STATUS_RUNNING and is_stale(hb, now=now):
+        kind, label = "dead", f"прогон умер: heartbeat не обновлялся {_format_age_seconds(age)}"
+        detail = f"{stage_label} · {progress}"
+    elif status == STATUS_RUNNING:
+        kind, label = "running", "прогон идёт"
+        detail = f"{stage_label} · {progress}"
+    elif status == STATUS_FINISHED:
+        kind, label = "finished", "прогон завершён"
+        detail = f"{stage_label} · {_format_age_seconds(age)} назад"
+    else:
+        kind, label = "failed", "прогон завершился с ошибкой"
+        detail = f"{stage_label} · {_format_age_seconds(age)} назад"
+    try:
+        ts_value: Optional[float] = float(hb.get("ts") or 0.0) or None
+    except (TypeError, ValueError):
+        ts_value = None
+    return {
+        "found": True,
+        "kind": kind,
+        "label": label,
+        "detail": detail,
+        "age_sec": age,
+        "ts": ts_value,
+        "raw": dict(hb),
+        "description": describe_heartbeat(hb, now=now),
+    }
+
+
+def _read_login_screen_stats(cfg: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Реальные цифры для экрана входа. Любое значение None/пусто, если данных нет.
+
+    documents      — файлов с содержимым в index_state.db (stage content/partial)
+    searches_today — записей search_logs за сегодня (локальная дата)
+    avg_seconds    — средняя длительность поиска за сегодня, сек
+    recent_searches— последние 3 запроса [{"time": "14:23", "query": "..."}] (без имён)
+    index_status   — {"dot": ok|info|warn|err, "label": ..., "sub": ...} по heartbeat
+    """
+    out: Dict[str, Any] = {
+        "documents": None,
+        "searches_today": None,
+        "avg_seconds": None,
+        "recent_searches": [],
+        "index_status": {"dot": "info", "label": "статус индекса неизвестен", "sub": "—"},
+    }
+    coverage = _read_coverage_summary(cfg, top_folders=0)
+    if coverage.get("found"):
+        out["documents"] = int(coverage.get("covered") or 0)
+
+    local_now = (now or datetime.now()).astimezone()
+    day_start_utc = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
+    telemetry_path = _telemetry_db_path(cfg)
+    today_rows = _db_query_dicts(
+        telemetry_path,
+        "SELECT COUNT(*) AS c, AVG(duration_ms) AS avg_ms FROM search_logs WHERE ts >= ?",
+        (day_start_utc,),
+    )
+    if today_rows:
+        row = today_rows[0]
+        count = int(row.get("c") or 0)
+        out["searches_today"] = count
+        if count > 0 and row.get("avg_ms") is not None:
+            out["avg_seconds"] = round(float(row.get("avg_ms") or 0) / 1000.0, 2)
+    recent_rows = _db_query_dicts(
+        telemetry_path,
+        """
+        SELECT ts, COALESCE(NULLIF(query_original, ''), query) AS query
+        FROM search_logs
+        WHERE query <> ''
+        ORDER BY id DESC
+        LIMIT 3
+        """,
+    )
+    recent: List[Dict[str, str]] = []
+    for row in recent_rows:
+        query = str(row.get("query") or "").strip()
+        if not query:
+            continue
+        raw_ts = str(row.get("ts") or "")
+        try:
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            time_label = dt.astimezone().strftime("%H:%M")
+        except ValueError:
+            time_label = raw_ts[11:16]
+        recent.append({"time": time_label, "query": query})
+    out["recent_searches"] = recent
+
+    hb = _read_heartbeat_status(cfg)
+    kind = str(hb.get("kind") or "missing")
+    if kind == "running":
+        out["index_status"] = {"dot": "info", "label": "индексация идёт", "sub": str(hb.get("detail") or "")}
+    elif kind == "finished":
+        ts_value = hb.get("ts")
+        date_label = time.strftime("%d.%m.%Y", time.localtime(float(ts_value))) if ts_value else "—"
+        out["index_status"] = {"dot": "ok", "label": "индекс актуален", "sub": date_label}
+    elif kind == "dead":
+        out["index_status"] = {"dot": "warn", "label": "индексация остановилась", "sub": _format_age_seconds(hb.get("age_sec")) + " назад"}
+    elif kind == "failed":
+        out["index_status"] = {"dot": "err", "label": "индексация с ошибкой", "sub": _format_age_seconds(hb.get("age_sec")) + " назад"}
+    return out
+
+
+def _list_index_chunks(cfg: Dict[str, Any], full_path: str, *, limit: int = 200) -> Dict[str, Any]:
+    """Чанки документа из Qdrant по точному full_path (scroll с фильтром, без метаданных).
+
+    Возвращает {"ok": bool, "error": str, "chunks": [...]} — chunks отсортированы по chunk_index.
+    """
+    path_value = str(full_path or "").strip()
+    if not path_value:
+        return {"ok": False, "error": "Путь не задан.", "chunks": []}
+    searcher = _cached_searcher_if_ready(cfg)
+    if searcher is None or not getattr(searcher, "connected", False):
+        return {"ok": False, "error": "Поисковик ещё не подключён к Qdrant.", "chunks": []}
+    try:
+        rows = searcher._content_chunks_for_paths([path_value], max_chunks=max(1, int(limit)))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "chunks": []}
+    chunks: List[Dict[str, Any]] = []
+    for item in rows:
+        chunk_index = item.get("chunk_index")
+        try:
+            sort_key = int(chunk_index) if chunk_index not in (None, "") else 10**9
+        except (TypeError, ValueError):
+            sort_key = 10**9
+        chunks.append({
+            "chunk_index": chunk_index,
+            "type": str(item.get("type") or ""),
+            "page": item.get("page"),
+            "sheet": str(item.get("sheet") or ""),
+            "section": str(item.get("section") or ""),
+            "text": _clean_text(item.get("text"))[:200],
+            "_sort": sort_key,
+        })
+    chunks.sort(key=lambda c: c["_sort"])
+    for chunk in chunks:
+        chunk.pop("_sort", None)
+    return {"ok": True, "error": "", "chunks": chunks}
+
+
+def _alias_key_from_text(value: str) -> str:
+    """Ключ группы синонимов из произвольного текста: транслитерация кириллицы + [a-z0-9_]."""
+    text = str(value or "").strip().lower().replace("ё", "е")
+    translit = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ж": "zh", "з": "z", "и": "i",
+        "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s",
+        "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    }
+    latin = "".join(translit.get(ch, ch) for ch in text)
+    key = re.sub(r"[^a-z0-9]+", "_", latin).strip("_")
+    return key[:64] or "alias"
 
 
 def _index_stage_from_note(note: str) -> str:

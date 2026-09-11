@@ -62,10 +62,10 @@ from .helpers import (
     _has_confident_numeric_exact_match,
     _highlight_query_terms,
     _is_admin,
+    _list_index_chunks,
     _load_user_state,
     _merge_search_results,
     _my_recent_queries,
-    _open_os_path,
     _parse_search_query,
     _popular_queries,
     _popular_query_terms,
@@ -73,6 +73,7 @@ from .helpers import (
     _preview_office_file,
     _qdrant_http_ready,
     _read_index_activity,
+    _read_login_screen_stats,
     _remember_query,
     _resolve_catalog_file,
     _result_group,
@@ -81,7 +82,6 @@ from .helpers import (
     _run_authorized_quick_name_search,
     _save_ui_settings,
     _search_suggestions,
-    _select_in_os_explorer,
     _telegram_deeplink,
     _viewer_file_url,
     _warm_searcher_cache,
@@ -114,6 +114,8 @@ install_env_log_handler()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 IMPLICIT_RESULT_USE_FEEDBACK = 0
+APP_VERSION = "3.4"
+APP_VERSION_LABEL = f"v{APP_VERSION}"
 
 
 def _record_implicit_search_result_use(
@@ -526,7 +528,7 @@ def _build_page(
                 else:
                     ui.icon("manage_search").classes("text-2xl")
                 ui.label("Rag-search").classes("rag-hdr-brand-name")
-                ui.label("v3.4").classes("rag-chip rag-mono-label rag-version-chip")
+                ui.label(APP_VERSION_LABEL).classes("rag-chip rag-mono-label rag-version-chip")
             # ── Center: nav tabs or explorer path ─────────────
             with ui.element("div").classes("rag-hdr-center"):
                 header_nav = ui.element("nav").classes("rag-hdr-nav")
@@ -1732,6 +1734,56 @@ def _build_page(
                 )
                 ui.label(str(v)).style("font-family:var(--rag-font-mono);font-size:12px;word-break:break-all")
 
+    def _render_chunks_body(full_path: str) -> None:
+        """Вкладка «Чанки»: реальные точки Qdrant по full_path (scroll, лимит 200)."""
+        if not str(full_path or "").strip():
+            ui.label("Для этого файла неизвестен путь в индексе.").classes("rag-meta")
+            return
+        holder = ui.column().classes("w-full gap-2")
+        with holder:
+            ui.spinner(size="sm")
+            ui.label("Загружаем чанки из индекса…").classes("rag-meta")
+
+        async def _load() -> None:
+            try:
+                data = await run.io_bound(_list_index_chunks, state.cfg, str(full_path), limit=200)
+            except Exception as exc:
+                data = {"ok": False, "error": str(exc), "chunks": []}
+            if not _client_alive():
+                return
+            holder.clear()
+            with holder:
+                if not data.get("ok"):
+                    ui.label(f"Чанки недоступны: {data.get('error') or 'ошибка'}").classes("rag-meta")
+                    return
+                chunks = list(data.get("chunks") or [])
+                if not chunks:
+                    ui.label("В индексе нет чанков содержимого для этого файла (только метаданные или файл ещё не проиндексирован).").classes("rag-meta")
+                    return
+                ui.label(f"Чанков: {len(chunks)}" + (" (показаны первые 200)" if len(chunks) >= 200 else "")).classes("rag-meta")
+                for chunk in chunks:
+                    bits: List[str] = []
+                    if chunk.get("chunk_index") not in (None, ""):
+                        bits.append(f"#{chunk.get('chunk_index')}")
+                    if chunk.get("page") not in (None, ""):
+                        bits.append(f"стр. {chunk.get('page')}")
+                    if chunk.get("sheet"):
+                        bits.append(f"лист {chunk.get('sheet')}")
+                    if chunk.get("section"):
+                        bits.append(str(chunk.get("section")))
+                    if chunk.get("type"):
+                        bits.append(str(chunk.get("type")))
+                    with ui.element("div").style(
+                        "padding:8px 0;border-bottom:1px solid var(--rag-border);display:flex;flex-direction:column;gap:4px"
+                    ):
+                        ui.label(" · ".join(bits) or "чанк").style(
+                            "font-family:var(--rag-font-mono);font-size:10px;text-transform:uppercase;"
+                            "letter-spacing:0.08em;color:var(--rag-muted)"
+                        )
+                        ui.label(str(chunk.get("text") or "")).style("font-size:12px;white-space:pre-wrap;word-break:break-word")
+
+        ui.timer(0.0, _load, once=True)
+
     def open_file_viewer(path_value: Path | str) -> None:
         candidate = _resolve_catalog_file(state.cfg, str(path_value or ""))
         if candidate is None:
@@ -1780,7 +1832,7 @@ def _build_page(
                     elif active_tab[0] == "meta":
                         _render_meta_body(candidate)
                     else:
-                        ui.label("Чанки документа в индексе (заглушка).").classes("rag-meta")
+                        _render_chunks_body(str(candidate))
 
             def _make_tab(key: str, label: str) -> None:
                 btn = ui.element("button").classes(
@@ -1817,9 +1869,6 @@ def _build_page(
                                                         state.__setattr__("explorer_path", str(p.parent)),
                                                         render()))\
                     .props("outline dense")
-                ui.button("Открыть в ОС", icon="open_in_new",
-                          on_click=lambda p=candidate: _select_in_os_explorer(str(p)))\
-                    .props("outline dense")
 
         preview_drawer.classes(remove="closed")
         preview_drawer_scrim.classes(remove="closed")
@@ -1842,6 +1891,7 @@ def _build_page(
                     "mime_type": row.mime_type,
                     "size_bytes": row.size_bytes,
                     "storage_key": row.storage_key,
+                    "source_path": str(getattr(row, "source_path", "") or ""),
                 }
             else:
                 file_info = {"path": cloud_path, "name": cloud_path.rsplit("/", 1)[-1]}
@@ -1852,6 +1902,7 @@ def _build_page(
                 "mime_type": str(getattr(file_value, "mime_type", "") or ""),
                 "size_bytes": getattr(file_value, "size_bytes", None),
                 "storage_key": str(getattr(file_value, "storage_key", "") or ""),
+                "source_path": str(getattr(file_value, "source_path", "") or ""),
             }
         cloud_path = str(file_info.get("path") or "").strip()
         name = str(file_info.get("name") or cloud_path.rsplit("/", 1)[-1] or "Файл")
@@ -1887,9 +1938,8 @@ def _build_page(
                         elif active_tab[0] == "meta":
                             _render_cloud_meta_body(file_info)
                         else:
-                            ui.label(
-                                "Чанки Cloud Drive документа в индексе будут доступны в следующем этапе preview."
-                            ).classes("rag-meta")
+                            # Cloud-файлы индексируются по локальному source_path (full_path в Qdrant).
+                            _render_chunks_body(str(file_info.get("source_path") or ""))
                     except Exception as exc:
                         ui.label(f"Не удалось построить preview: {exc}").classes("text-negative text-sm")
 
@@ -2194,18 +2244,6 @@ def _build_page(
                                     ui.download(pth, filename=pth.name)
 
                                 ui.button("Скачать", icon="download", on_click=download_local_file).props("outline dense")
-                        if kind == "Каталог":
-                            def open_folder_in_os(pth: str = full_path) -> None:
-                                track_result_use("open_folder_in_os")
-                                _open_os_path(pth)
-
-                            ui.button("Открыть в ОС", icon="open_in_new", on_click=open_folder_in_os).props("outline dense")
-                        else:
-                            def select_file_in_os(pth: str = full_path) -> None:
-                                track_result_use("select_file_in_os")
-                                _select_in_os_explorer(pth)
-
-                            ui.button("Найти в ОС", icon="open_in_new", on_click=select_file_in_os).props("outline dense").tooltip("Выделить файл в проводнике Windows")
                     if llm_on and kind != "Каталог":
                         if is_explaining and state.doc_explain_loading:
                             ui.spinner(size="xs").classes("ml-1")
@@ -2667,10 +2705,6 @@ def _build_page(
             settings_fn=lambda: go_settings_section("indexing"),
         )
 
-    def render_index_dashboard() -> None:
-        _index_view.render_index_dashboard(state)
-
-
     def render_access_denied(
         message: str = "Этот раздел доступен только администраторам.",
         *,
@@ -2767,6 +2801,11 @@ def _build_page(
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
         tg_login_token = {"value": ""}
+        try:
+            login_stats = _read_login_screen_stats(state.cfg)
+        except Exception:
+            logger.exception("login screen stats failed")
+            login_stats = {}
 
         async def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
             started = _time.perf_counter()
@@ -2932,7 +2971,7 @@ def _build_page(
                         "display:flex;align-items:center;gap:6px;padding:4px 10px;"
                         "background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);"
                         "border-radius:999px;font-family:var(--rag-font-mono);font-size:10px;color:rgba(255,255,255,.7)"
-                    ).text = "● онлайн · v3"
+                    ).text = f"● онлайн · {APP_VERSION_LABEL}"
 
                 # Hero text
                 with ui.element("div").style("margin-top:auto;margin-bottom:52px"):
@@ -2949,12 +2988,15 @@ def _build_page(
                         "</h1>"
                     )
 
-                    # Live stats
+                    # Live stats — реальные данные из index_state.db / telemetry, «—» при отсутствии
+                    documents = login_stats.get("documents")
+                    searches_today = login_stats.get("searches_today")
+                    avg_seconds = login_stats.get("avg_seconds")
                     with ui.element("div").style("display:flex;gap:0;margin-top:44px;max-width:480px"):
                         for i, (num, lbl) in enumerate([
-                            ("65 664", "документов в индексе"),
-                            ("187",    "поисков сегодня"),
-                            ("0.42с",  "среднее время"),
+                            (f"{int(documents):,}".replace(",", " ") if documents is not None else "—", "документов в индексе"),
+                            (str(int(searches_today)) if searches_today is not None else "—", "поисков сегодня"),
+                            (f"{float(avg_seconds):.2f}с" if avg_seconds is not None else "—", "среднее время"),
                         ]):
                             style = "display:flex;flex-direction:column;gap:6px;" + (
                                 "padding-right:24px;" if i < 2 else ""
@@ -2966,28 +3008,28 @@ def _build_page(
                                     "text-transform:uppercase;letter-spacing:0.1em;color:rgba(255,255,255,.4)"
                                 )
 
-                # Activity feed
-                with ui.element("div").style("margin-bottom:24px"):
-                    ui.label("↗ команда сейчас ищет").style(
-                        "font-family:var(--rag-font-mono);font-size:10px;letter-spacing:0.08em;"
-                        "color:rgba(255,255,255,.35);text-transform:uppercase;margin-bottom:10px;display:block"
-                    )
-                    for t, who, q in [
-                        ("14:23", "А. Иванов",  "карточка предприятия Спецмаш"),
-                        ("14:21", "М. Петрова", "паспорт цыбусов 2024"),
-                        ("14:19", "Д. Сидоров", "договор поставки № 442"),
-                    ]:
-                        with ui.element("div").classes("rag-login-activity-row"):
-                            ui.label(t)
-                            ui.label(who)
-                            ui.label(q).style("color:#8aabff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+                # Activity feed — последние реальные запросы без имён пользователей
+                recent_searches = list(login_stats.get("recent_searches") or [])
+                if recent_searches:
+                    with ui.element("div").style("margin-bottom:24px"):
+                        ui.label("↗ последние запросы").style(
+                            "font-family:var(--rag-font-mono);font-size:10px;letter-spacing:0.08em;"
+                            "color:rgba(255,255,255,.35);text-transform:uppercase;margin-bottom:10px;display:block"
+                        )
+                        for item in recent_searches:
+                            with ui.element("div").classes("rag-login-activity-row"):
+                                ui.label(str(item.get("time") or ""))
+                                ui.label("")
+                                ui.label(str(item.get("query") or "")).style(
+                                    "color:#8aabff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                                )
 
                 # Bottom
                 with ui.element("div").style(
                     "display:flex;justify-content:space-between;font-family:var(--rag-font-mono);"
                     "font-size:10px;color:rgba(255,255,255,.28);text-transform:uppercase;letter-spacing:0.08em"
                 ):
-                    ui.label("v3 · production")
+                    ui.label(f"{APP_VERSION_LABEL} · production")
                     ui.label("internal use only")
 
             # ── RIGHT: form panel ───────────────────────────────────────────
@@ -3061,10 +3103,15 @@ def _build_page(
                     "display:grid;grid-template-columns:1fr 1fr;gap:0;"
                     "border-top:1px solid var(--rag-border);margin:0 -32px;padding:0 32px;margin-top:auto"
                 ):
-                    for dot_cls, lbl, sub in [
-                        ("ok",   "индекс актуален",  "13.05.2026"),
-                        ("info", "индексация идёт",  "быстрый проход"),
-                    ]:
+                    index_status = dict(login_stats.get("index_status") or {})
+                    status_rows = [(
+                        str(index_status.get("dot") or "info"),
+                        str(index_status.get("label") or "статус индекса неизвестен"),
+                        str(index_status.get("sub") or "—"),
+                    )]
+                    if documents is not None:
+                        status_rows.append(("ok", "файлов с содержимым", f"{int(documents):,}".replace(",", " ")))
+                    for dot_cls, lbl, sub in status_rows:
                         with ui.element("div").style(
                             "display:flex;align-items:center;gap:10px;padding:14px 0;"
                             "font-size:12px;color:var(--rag-text)"
@@ -3097,6 +3144,7 @@ def _build_page(
             state,
             access_denied=render_access_denied,
             query_handler=choose_query_handler,
+            render_fn=render,
         )
 
     def render_jobs_screen() -> None:
