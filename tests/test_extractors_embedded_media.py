@@ -26,15 +26,16 @@ from rag_catalog.core.extractors.files import (
     extract_spreadsheet_document,
     extract_xlsx_document,
 )
+from rag_catalog.core.ocr_runtime import resolve_ocr_runtime
 
 SAMPLE_TEXT = "ТЕСТ 123456"
-REAL_DOCX = Path(r"O:\Обмен\Катя\ИП Галиулин\honda stwpwgn.docx")
 
 
 def _resolve_tesseract() -> str:
+    """Tesseract из RAG_TESSERACT_CMD / bundled tools/ (resolve_ocr_runtime) / PATH — без зашитых путей."""
     for candidate in (
         os.environ.get("RAG_TESSERACT_CMD", ""),
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        resolve_ocr_runtime({}).get("tesseract_cmd", ""),
         shutil.which("tesseract") or "",
     ):
         if candidate and Path(candidate).exists():
@@ -311,10 +312,17 @@ def test_xlsx_document_ocr_of_embedded_picture(tmp_path: Path) -> None:
 
 
 @needs_tesseract
-@pytest.mark.skipif(not REAL_DOCX.exists(), reason="реальный файл недоступен")
-def test_real_docx_with_scanned_sts() -> None:
-    doc = extract_docx_document(REAL_DOCX, tesseract_cmd=TESSERACT)
+def test_docx_with_two_scanned_pictures_recognizes_both(tmp_path: Path) -> None:
+    """Синтетический аналог «docx со сканами СТС»: два вставленных изображения с текстом."""
+    path = tmp_path / "two-scans.docx"
+    doc = Document()
+    doc.add_picture(BytesIO(_text_png("СЕРИЯ 501049")))
+    doc.add_picture(BytesIO(_text_png("НОМЕР 777123")))
+    doc.save(path)
 
-    image_text = "\n".join(b.text for b in doc.blocks if b.section.startswith("image:"))
-    assert doc.metadata["embedded_images"] == 2
+    extracted = extract_docx_document(path, tesseract_cmd=TESSERACT)
+
+    image_text = "\n".join(b.text for b in extracted.blocks if b.section.startswith("image:"))
+    assert extracted.metadata["embedded_images"] == 2
     assert "501049" in image_text.replace(" ", "")
+    assert "777123" in image_text.replace(" ", "")

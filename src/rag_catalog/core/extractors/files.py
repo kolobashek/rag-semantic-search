@@ -1050,6 +1050,73 @@ def _patch_pdf2image_popen_for_windows(pdf2image_module: Any) -> None:
     pdf2image_module._rag_hidden_popen_patched = True
 
 
+def _is_poppler_safe_path(path: Path) -> bool:
+    """Путь, который pdftoppm/pdfinfo (poppler, Windows) гарантированно откроют.
+
+    pdf2image передаёт путь в кодировке консоли: кириллица, «№», прочие не-ASCII
+    символы ломаются (`I/O Error: Couldn't open file ... No error`). Такие файлы
+    рендерим через временную копию с ASCII-именем.
+    """
+    text = str(path)
+    try:
+        return text.isascii()
+    except AttributeError:  # pragma: no cover - Python < 3.7
+        return all(ord(ch) < 128 for ch in text)
+
+
+def _ascii_temp_dir() -> str:
+    """Каталог для временных копий PDF: системный temp, а если он не ASCII — %SystemRoot%\\Temp."""
+    base = tempfile.gettempdir()
+    if _is_poppler_safe_path(Path(base)):
+        return base
+    if os.name == "nt":
+        for candidate in (
+            Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Temp",
+            Path(r"C:\Temp"),
+        ):
+            if _is_poppler_safe_path(candidate) and candidate.is_dir() and os.access(candidate, os.W_OK):
+                return str(candidate)
+    return base
+
+
+class _PopplerSafePdf:
+    """Context manager: путь к PDF, безопасный для poppler (оригинал или ASCII-копия во temp)."""
+
+    def __init__(self, filepath: Path) -> None:
+        self._source = Path(filepath)
+        self._tmp_dir: str = ""
+        self.path: Path = self._source
+        self.copied = False
+
+    def __enter__(self) -> Path:
+        if _is_poppler_safe_path(self._source) or not self._source.is_file():
+            return self._source
+        self._tmp_dir = tempfile.mkdtemp(prefix="rag_pdf_", dir=_ascii_temp_dir())
+        target = Path(self._tmp_dir) / "source.pdf"
+        shutil.copyfile(self._source, target)
+        self.path = target
+        self.copied = True
+        logger.debug("PDF с не-ASCII путём скопирован для poppler: %s -> %s", self._source, target)
+        return target
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._tmp_dir:
+            shutil.rmtree(self._tmp_dir, ignore_errors=True)
+            self._tmp_dir = ""
+
+
+def _pdf_page_count(filepath: Path, *, poppler_bin: str = "") -> int:
+    """Число страниц PDF через pdfinfo (poppler), устойчиво к не-ASCII путям."""
+    from pdf2image import pdfinfo_from_path  # type: ignore
+
+    poppler_path = str(poppler_bin or "").strip()
+    info_kwargs: dict[str, Any] = {}
+    if poppler_path:
+        info_kwargs["poppler_path"] = poppler_path
+    with _PopplerSafePdf(filepath) as safe_path:
+        return int(pdfinfo_from_path(str(safe_path), **info_kwargs).get("Pages") or 0)
+
+
 def _iter_pdf_pages(
     filepath: Path,
     *,
@@ -1058,32 +1125,37 @@ def _iter_pdf_pages(
     first_page: int = 1,
     last_page: int = 0,
 ) -> Iterator[tuple[int, int, Any]]:
-    """Render PDF pages in bounded batches and yield page number, total, image."""
+    """Render PDF pages in bounded batches and yield page number, total, image.
+
+    Пути с кириллицей/«№» poppler на Windows не открывает — PDF на время рендера
+    копируется во временный файл с ASCII-именем (см. ``_PopplerSafePdf``).
+    """
     from pdf2image import convert_from_path, pdfinfo_from_path  # type: ignore
 
     poppler_path = str(poppler_bin or "").strip()
     info_kwargs: dict[str, Any] = {}
     if poppler_path:
         info_kwargs["poppler_path"] = poppler_path
-    page_count = int(pdfinfo_from_path(str(filepath), **info_kwargs).get("Pages") or 0)
-    if page_count <= 0:
-        return
+    with _PopplerSafePdf(filepath) as safe_path:
+        page_count = int(pdfinfo_from_path(str(safe_path), **info_kwargs).get("Pages") or 0)
+        if page_count <= 0:
+            return
 
-    pages_per_batch = max(1, int(batch_pages or _DEFAULT_PDF_OCR_BATCH_PAGES))
-    range_start = max(1, int(first_page or 1))
-    range_end = min(page_count, int(last_page or page_count))
-    for batch_start in range(range_start, range_end + 1, pages_per_batch):
-        batch_end = min(range_end, batch_start + pages_per_batch - 1)
-        convert_kwargs: dict[str, Any] = {
-            "dpi": 200,
-            "first_page": batch_start,
-            "last_page": batch_end,
-        }
-        if poppler_path:
-            convert_kwargs["poppler_path"] = poppler_path
-        images = convert_from_path(str(filepath), **convert_kwargs)
-        for offset, page_img in enumerate(images):
-            yield batch_start + offset, page_count, page_img
+        pages_per_batch = max(1, int(batch_pages or _DEFAULT_PDF_OCR_BATCH_PAGES))
+        range_start = max(1, int(first_page or 1))
+        range_end = min(page_count, int(last_page or page_count))
+        for batch_start in range(range_start, range_end + 1, pages_per_batch):
+            batch_end = min(range_end, batch_start + pages_per_batch - 1)
+            convert_kwargs: dict[str, Any] = {
+                "dpi": 200,
+                "first_page": batch_start,
+                "last_page": batch_end,
+            }
+            if poppler_path:
+                convert_kwargs["poppler_path"] = poppler_path
+            images = convert_from_path(str(safe_path), **convert_kwargs)
+            for offset, page_img in enumerate(images):
+                yield batch_start + offset, page_count, page_img
 
 
 def ocr_pdf(

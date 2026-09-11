@@ -41,7 +41,7 @@ from .extractors import (
     extract_csv,
     extract_doc,
     extract_doc_meta,
-    extract_docx,
+    extract_docx_document,
     extract_html,
     extract_image,
     extract_pdf,
@@ -58,6 +58,9 @@ from .extractors import (
 from .index_state_db import IndexStateDB
 from .indexer_control import read_indexer_control
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
+from .indexing.ocr_deferral import EMBEDDED_MEDIA_EXTENSIONS as _EMBEDDED_MEDIA_EXTENSIONS
+from .indexing.ocr_deferral import IMAGE_EXTENSIONS as _IMAGE_EXTENSIONS
+from .indexing.ocr_deferral import document_has_deferred_embedded_ocr, is_deferred_ocr_candidate
 from .log_history import build_log_handler, install_env_log_handler
 from .ocr_runtime import resolve_ocr_runtime
 from .qdrant_connection import create_qdrant_client
@@ -120,7 +123,12 @@ SUPPORTED_EXTENSIONS = {
 }
 
 # Расширения изображений (подмножество SUPPORTED_EXTENSIONS)
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
+IMAGE_EXTENSIONS = set(_IMAGE_EXTENSIONS)
+# OOXML-контейнеры, внутри которых могут лежать вставленные сканы (word/media/…).
+# При --no-ocr такие файлы получают status=deferred_ocr, как сканы PDF.
+EMBEDDED_MEDIA_EXTENSIONS = set(_EMBEDDED_MEDIA_EXTENSIONS)
+# Порог «доля нечитаемых файлов/архивов inventory» — выше него cleanup «фантомов» отменяется.
+DEFAULT_CLEANUP_SKIP_FAILED_RATIO = 0.10
 
 # Максимум страниц/кадров при OCR многостраничного изображения (TIFF, GIF).
 # Защита от случайных файлов с тысячами кадров, которые зависнут индексатор.
@@ -475,6 +483,8 @@ class RAGIndexer:
         embedding_onnx_provider: str = "",
         embedding_onnx_file_name: str = "",
         heartbeat_path: str = "",
+        index_embedded_media: bool = True,
+        cleanup_skip_failed_ratio: float = DEFAULT_CLEANUP_SKIP_FAILED_RATIO,
     ) -> None:
         # current_stage выставляется при каждом запуске index_directory(stage=...)
         # и определяет поведение skip-логики и экстракции содержимого.
@@ -499,6 +509,12 @@ class RAGIndexer:
         self.batch_size = batch_size
         self.recreate = recreate_collection
         self.skip_ocr = skip_ocr
+        # OCR картинок и вложенных документов внутри docx/xlsx/pptx (index_embedded_media).
+        self.index_embedded_media = bool(index_embedded_media)
+        try:
+            self.cleanup_skip_failed_ratio = max(0.0, min(1.0, float(cleanup_skip_failed_ratio)))
+        except (TypeError, ValueError):
+            self.cleanup_skip_failed_ratio = DEFAULT_CLEANUP_SKIP_FAILED_RATIO
         self._ocr_context = threading.local()
         self.dry_run = False
         self.max_chunks_per_file = max_chunks_per_file  # 0 = без ограничений
@@ -812,10 +828,9 @@ class RAGIndexer:
         if (
             self.current_stage in {"small", "large"}
             and bool(getattr(self, "skip_ocr", False))
-            and extension in {".pdf", *IMAGE_EXTENSIONS}
-            and existing_status in {"deferred_ocr", "empty"}
             and existing_stage in {"metadata", "empty"}
             and str(existing.get("indexed_stage") or "") in {"small", "large"}
+            and is_deferred_ocr_candidate(extension, existing_status)
         ):
             return True
         # Если текущий этап = metadata, а файл уже проиндексирован (любым этапом) —
@@ -879,9 +894,29 @@ class RAGIndexer:
 
     # ── text extraction ────────────────────────────────────────────────
 
+    def _embedded_media_kwargs(self) -> Dict[str, Any]:
+        """Параметры OCR/вложений для OOXML-экстракторов (docx/xlsx/pptx).
+
+        skip_ocr — как для PDF: при --no-ocr картинки только пересчитываются
+        (metadata ocr_skipped=True → status deferred_ocr), но не распознаются.
+        """
+        return {
+            "include_embedded": bool(getattr(self, "index_embedded_media", True)),
+            "skip_ocr": bool(getattr(self, "skip_ocr", False)),
+            "tesseract_cmd": str(getattr(self, "ocr_tesseract_cmd", "") or ""),
+        }
+
+    def _extract_docx_document(self, filepath: Path) -> ExtractedDocument:
+        """DOCX как блоки: тело, колонтитулы, сноски, текстовые поля, вложения/OCR картинок."""
+        return extract_docx_document(
+            filepath,
+            max_chars=self._extractor_max_chars(),
+            **self._embedded_media_kwargs(),
+        )
+
     def _extract_docx(self, filepath: Path) -> str:
-        """Извлечь текст из DOCX (параграфы + таблицы)."""
-        return extract_docx(filepath)
+        """Извлечь текст из DOCX (legacy plain-text; provenance теряется)."""
+        return self._extract_docx_document(filepath).text
 
     def _extract_doc(self, filepath: Path) -> str:
         return extract_doc(filepath, max_chars=self._extractor_max_chars())
@@ -893,7 +928,11 @@ class RAGIndexer:
         return extract_pptx(filepath, max_chars=self._extractor_max_chars())
 
     def _extract_pptx_document(self, filepath: Path) -> ExtractedDocument:
-        return extract_pptx_document(filepath, max_chars=self._extractor_max_chars())
+        return extract_pptx_document(
+            filepath,
+            max_chars=self._extractor_max_chars(),
+            **self._embedded_media_kwargs(),
+        )
 
     def _extract_spreadsheet(self, filepath: Path) -> str:
         """
@@ -905,7 +944,11 @@ class RAGIndexer:
         return extract_spreadsheet(filepath, max_chars=self._extractor_max_chars())
 
     def _extract_spreadsheet_document(self, filepath: Path) -> ExtractedDocument:
-        return extract_spreadsheet_document(filepath, max_chars=self._extractor_max_chars())
+        return extract_spreadsheet_document(
+            filepath,
+            max_chars=self._extractor_max_chars(),
+            **self._embedded_media_kwargs(),
+        )
 
     def _extract_text(self, filepath: Path) -> str:
         return extract_text(filepath, max_chars=self._extractor_max_chars())
@@ -1259,12 +1302,17 @@ class RAGIndexer:
         row_end = block.row_end if block and block.row_end is not None else row
         sheet = block.sheet if block and block.sheet else self._extract_marker_text(chunk, r"Лист:\s*([^\n\r]+)")
         slide = block.slide if block and block.slide is not None else None
-        section = self._extract_section_title(chunk)
+        # Явный section блока (image:word/media/image1.png, embedded:…, header/footer/
+        # footnotes/textbox) важнее заголовка, угаданного по тексту чанка.
+        explicit_section = str(block.section or "").strip() if block else ""
+        section = explicit_section or self._extract_section_title(chunk)
+        block_kind = self._block_kind(block)
         group_size = max(1, int(getattr(self, "chunk_group_size", 4) or 4))
         parent_id = f"{doc_id}:chunk-group:{chunk_index // group_size}"
         return {
             "parent_id": parent_id,
             "section": section,
+            "block_kind": block_kind,
             "page": page,
             "sheet": sheet,
             "slide": slide,
@@ -1274,6 +1322,7 @@ class RAGIndexer:
                 "doc_id": doc_id,
                 "parent_id": parent_id,
                 "section": section,
+                "block_kind": block_kind,
                 "page": page,
                 "sheet": sheet,
                 "slide": slide,
@@ -1281,6 +1330,23 @@ class RAGIndexer:
                 "row_end": row_end,
             },
         }
+
+    @staticmethod
+    def _block_kind(block: Optional[TextBlock]) -> str:
+        """Тип источника блока: body | embedded_image | embedded_document | header | footer | …"""
+        if block is None:
+            return "body"
+        source = str((block.metadata or {}).get("source") or "").strip()
+        if source:
+            return source
+        section = str(block.section or "").strip()
+        if section.startswith("image:"):
+            return "embedded_image"
+        if section.startswith("embedded:"):
+            return "embedded_document"
+        if section in {"header", "footer", "footnotes", "endnotes", "textbox"}:
+            return section
+        return "body"
 
     @staticmethod
     def _spreadsheet_payload_fields(file_type: str) -> Dict[str, int]:
@@ -1341,7 +1407,39 @@ class RAGIndexer:
                 logger.debug("Файл не изменился, пропуск: %s", filepath)
                 return
             logger.info("Файл изменился, удаляю старые векторы: %s", filepath)
-            self._delete_file_vectors(filepath, payload_match=delete_payload_match)
+            try:
+                self._delete_file_vectors(filepath, payload_match=delete_payload_match)
+            except Exception as exc:
+                # Старые векторы остались — новые не пишем (иначе смесь старых и новых
+                # чанков). Помечаем файл как error и пробрасываем вызывающему коду
+                # (очередь/cloud drive обрабатывают ошибку по одному файлу).
+                delete_error = f"qdrant_delete_failed: {exc}"
+                next_retry_at = 0.0
+                if hasattr(self, "state_db"):
+                    try:
+                        failed_row = self.state_db.record_failed_path(
+                            file_key, fingerprint=fingerprint, error=delete_error
+                        )
+                        next_retry_at = float((failed_row or {}).get("next_retry_at") or 0.0)
+                    except Exception:
+                        next_retry_at = 0.0
+                self._upsert_state_entry(
+                    {
+                        **existing_entry,
+                        "full_path": file_key,
+                        "fingerprint": fingerprint,
+                        "mtime": mtime,
+                        "stage": "error",
+                        "indexed_stage": str(getattr(self, "current_stage", "") or "content"),
+                        "status": "error",
+                        "last_error": delete_error,
+                        "next_retry_at": next_retry_at,
+                        "indexed_chunks": 0,
+                        "total_chunks": 0,
+                        **(payload_extra or {}),
+                    }
+                )
+                raise
 
         logger.info("Индексирование: %s", filepath)
         doc_meta = extract_doc_meta(filepath)
@@ -1353,7 +1451,8 @@ class RAGIndexer:
         file_type = ext.lstrip(".") or "file"
 
         if ext == ".docx":
-            full_text = self._extract_docx(filepath)
+            extracted_doc = self._extract_docx_document(filepath)
+            full_text = extracted_doc.text
             file_type = "docx"
         elif ext == ".doc":
             full_text = self._extract_doc(filepath)
@@ -1523,6 +1622,13 @@ class RAGIndexer:
             else "content" if chunks else "metadata"
         )
         status = "ok" if chunks else "empty"
+        last_error = ""
+        if bool(getattr(self, "skip_ocr", False)) and document_has_deferred_embedded_ocr(extracted_doc):
+            # Внутри docx/xlsx/pptx есть картинки, OCR пропущен: как скан PDF при --no-ocr —
+            # файл ждёт OCR-прогона (stage=metadata, status=deferred_ocr).
+            stage = "metadata"
+            status = "deferred_ocr"
+            last_error = "deferred_ocr"
         self._upsert_state_entry(
             {
                 "full_path": file_key,
@@ -1531,7 +1637,7 @@ class RAGIndexer:
                 "stage": stage,
                 "indexed_stage": str(getattr(self, "current_stage", "") or "content"),
                 "status": status,
-                "last_error": "",
+                "last_error": last_error,
                 "next_retry_at": 0,
                 "size_bytes": size_bytes,
                 "extension": filepath.suffix.lower(),
@@ -1907,6 +2013,19 @@ def _resolve_heartbeat_path(cfg: Dict[str, Any]) -> str:
 
         path = Path(PROJECT_ROOT) / path
     return str(path)
+
+
+def _resolve_cleanup_skip_failed_ratio(cfg: Dict[str, Any]) -> float:
+    """cfg["index_cleanup_skip_failed_ratio"] в [0, 1]; по умолчанию 0.1 (10%)."""
+    raw = cfg.get("index_cleanup_skip_failed_ratio", DEFAULT_CLEANUP_SKIP_FAILED_RATIO)
+    try:
+        value = float(DEFAULT_CLEANUP_SKIP_FAILED_RATIO if raw is None else raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "index_cleanup_skip_failed_ratio=%r не число, использую %.2f", raw, DEFAULT_CLEANUP_SKIP_FAILED_RATIO
+        )
+        return DEFAULT_CLEANUP_SKIP_FAILED_RATIO
+    return max(0.0, min(1.0, value))
 
 
 def _print_indexer_status(heartbeat_path: str) -> None:
@@ -2304,6 +2423,8 @@ def main() -> None:
         catalog_wait_attempts=int(cfg.get("catalog_wait_attempts", 10) or 10),
         catalog_wait_seconds=int(cfg.get("catalog_wait_seconds", 60) or 60),
         heartbeat_path=heartbeat_path,
+        index_embedded_media=bool(cfg.get("index_embedded_media", True)),
+        cleanup_skip_failed_ratio=_resolve_cleanup_skip_failed_ratio(cfg),
     )
     logger.info("Потоков чтения: %d (index_read_workers=%s)", indexer.read_workers, cfg.get("index_read_workers"))
     if args.quality_report:

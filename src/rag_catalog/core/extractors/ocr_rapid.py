@@ -334,16 +334,16 @@ def ocr_pdf_rapid(filepath: Path, *, poppler_bin: str = "", batch_pages: int = 8
     with _ocr_semaphore:
         try:
             import pdf2image.pdf2image as pdf2image_impl  # noqa: PLC0415  # type: ignore
-            from pdf2image import pdfinfo_from_path  # type: ignore  # noqa: PLC0415
 
-            from rag_catalog.core.extractors.files import _patch_pdf2image_popen_for_windows  # noqa: PLC0415
+            from rag_catalog.core.extractors.files import (  # noqa: PLC0415
+                _patch_pdf2image_popen_for_windows,
+                _pdf_page_count,
+            )
 
             _patch_pdf2image_popen_for_windows(pdf2image_impl)
 
-            info_kwargs: dict[str, Any] = {}
-            if poppler_bin:
-                info_kwargs["poppler_path"] = str(poppler_bin)
-            page_count = int(pdfinfo_from_path(str(filepath), **info_kwargs).get("Pages") or 0)
+            # pdfinfo через ASCII-копию: poppler не открывает пути с кириллицей/«№».
+            page_count = _pdf_page_count(filepath, poppler_bin=str(poppler_bin or ""))
             parts: list[str] = []
             for first in range(1, page_count + 1, _PDF_PAGES_PER_PROCESS):
                 last = min(page_count, first + _PDF_PAGES_PER_PROCESS - 1)

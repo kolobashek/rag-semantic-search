@@ -98,8 +98,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "index_read_workers": 0,
     "index_max_chunks": 5,
     "index_skip_ocr": False,
+    # OCR картинок и чтение вложенных документов внутри docx/xlsx/pptx (word/media, embeddings)
+    "index_embedded_media": True,
+    # Доля нечитаемых файлов/архивов inventory, выше которой cleanup «фантомов» отменяется
+    "index_cleanup_skip_failed_ratio": 0.1,
     "index_default_stage": "all",
     "index_exclude_patterns": [],
+    # Heartbeat индексатора (JSON с прогрессом стадии); относительный путь — от корня проекта
+    "indexer_heartbeat_path": "data/indexer_heartbeat.json",
     "ocr_max_image_pages": 50,
     "ocr_pdf_batch_pages": 8,
     "ocr_rapid_fallback_enabled": True,
@@ -346,6 +352,7 @@ class RAGSearcher:
         self.config = apply_retrieval_preset(dict(config), set(config.keys()))
         self.embedding_model_name = str(self.config.get("embedding_model") or "")
         self.collection_name = resolve_collection_name_from_config(self.config)
+        self.config_issues: list[Any] = self._log_config_issues(dict(config))
         self.connected = False
         self._fulltext_available = False
         self._embedder: Optional[Any] = None  # SentenceTransformer, загружается лениво
@@ -379,6 +386,34 @@ class RAGSearcher:
             self.connected = True
         except Exception as exc:
             logger.error("Не удалось подключиться к Qdrant: %s", exc)
+
+    # ── config check (только предупреждения) ───────────────────────────
+
+    def _log_config_issues(self, config: Dict[str, Any]) -> list[Any]:
+        """Проверить конфиг через config_check в режиме «только лог, не падать».
+
+        Ошибки индексатора (например, несовпадение embedding-конфигурации со state-БД)
+        для поиска тоже важны, но не фатальны: пишем warning и работаем дальше.
+        Сеть (qdrant_url) здесь не проверяется — подключение делается ниже.
+        """
+        try:
+            from .config_check import LEVEL_ERROR, LEVEL_WARNING, validate_config  # noqa: PLC0415
+
+            issues = validate_config(
+                config,
+                check_qdrant=False,
+                collection_name=self.collection_name,
+                embedding_model=self.embedding_model_name,
+            )
+        except Exception as exc:
+            logger.debug("Валидация config в RAGSearcher не выполнена: %s", exc)
+            return []
+        for issue in issues:
+            if issue.level in (LEVEL_ERROR, LEVEL_WARNING):
+                logger.warning("config: %s", issue)
+            else:
+                logger.debug("config: %s", issue)
+        return list(issues)
 
     # ── lazy embedder ──────────────────────────────────────────────────
 

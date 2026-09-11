@@ -26,6 +26,7 @@ from .heartbeat import STATUS_FAILED as HEARTBEAT_FAILED
 from .heartbeat import STATUS_FINISHED as HEARTBEAT_FINISHED
 from .heartbeat import STATUS_RUNNING as HEARTBEAT_RUNNING
 from .heartbeat import write_heartbeat
+from .ocr_deferral import document_has_deferred_embedded_ocr, is_deferred_ocr_candidate
 from .qdrant_writer import upsert_points
 
 _TAR_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz")
@@ -41,6 +42,9 @@ EMPTY_RETRY_DELAY_SEC = 86_400
 EMPTY_RETRY_MAX_DELAY_SEC = 7 * 86_400
 # Если не прочитана большая доля inventory — cleanup «фантомов» слишком опасен.
 FAILED_INVENTORY_CLEANUP_SKIP_RATIO = 0.10
+# Столько батчей подряд не удалось записать в Qdrant (после всех ретраев) —
+# Qdrant недоступен, продолжать прогон бессмысленно: файлы уже помечены error.
+QDRANT_CONSECUTIVE_FLUSH_FAILURES_ABORT = 3
 
 
 def _encode_with_transient_retry(
@@ -771,10 +775,9 @@ class IndexStageRunner:
                     elif (
                         stage in ("small", "large")
                         and bool(getattr(indexer, "skip_ocr", False))
-                        and existing_ext in {".pdf", *self._image_extensions}
-                        and existing_status in {"deferred_ocr", "empty"}
                         and existing_stage in {"metadata", "empty"}
                         and str(existing.get("indexed_stage") or "") in {"small", "large"}
+                        and is_deferred_ocr_candidate(existing_ext, existing_status)
                     ):
                         skipped += 1
                         continue
@@ -863,6 +866,69 @@ class IndexStageRunner:
                 key = f"{doc_id}:chunk:{int(payload.get('chunk_index') or 0)}"
             return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
+        consecutive_flush_failures = [0]
+
+        def _persist_pending_states() -> None:
+            if hasattr(indexer, "state_db"):
+                indexer.state_db.upsert_many(pending_states)
+            else:
+                for row in pending_states:
+                    indexer._upsert_state_entry(row)
+
+        def _mark_batch_failed(exc: Exception, points_count: int) -> None:
+            """Qdrant не принял батч после всех ретраев: файлы батча → error с backoff.
+
+            Прогон продолжается (обрыв соединения не должен ронять ночную индексацию);
+            но если Qdrant не отвечает несколько батчей подряд — останавливаемся.
+            """
+            error_text = f"qdrant_upsert_failed: {exc}"
+            failed_files = 0
+            for row in pending_states:
+                if str(row.get("status") or "") == "error":
+                    continue  # уже учтён (например, qdrant_delete_failed)
+                key = str(row.get("full_path") or "")
+                next_retry_at = 0.0
+                if key and hasattr(indexer, "state_db"):
+                    try:
+                        failed_row = indexer.state_db.record_failed_path(
+                            key, fingerprint=str(row.get("fingerprint") or ""), error=error_text
+                        )
+                        next_retry_at = float((failed_row or {}).get("next_retry_at") or 0.0)
+                    except Exception:
+                        next_retry_at = 0.0
+                row.update(
+                    {
+                        "stage": "error",
+                        "status": "error",
+                        "last_error": error_text,
+                        "next_retry_at": next_retry_at,
+                        "content_hash": "",
+                        "indexed_chunks": 0,
+                        "total_chunks": 0,
+                    }
+                )
+                failed_files += 1
+            stage_stats["error_files"] += failed_files
+            consecutive_flush_failures[0] += 1
+            self._logger.error(
+                "Qdrant: батч из %d точек не записан после ретраев (%s) — %d файлов помечены "
+                "error с повторной попыткой, прогон продолжается (%d/%d сбоев подряд)",
+                points_count,
+                exc,
+                failed_files,
+                consecutive_flush_failures[0],
+                QDRANT_CONSECUTIVE_FLUSH_FAILURES_ABORT,
+            )
+            _persist_pending_states()
+            pending_texts.clear()
+            pending_payloads.clear()
+            pending_states.clear()
+            if consecutive_flush_failures[0] >= QDRANT_CONSECUTIVE_FLUSH_FAILURES_ABORT:
+                raise RuntimeError(
+                    f"Qdrant недоступен: {consecutive_flush_failures[0]} батчей подряд не записаны "
+                    f"({exc}); файлы помечены error и будут повторены на следующем прогоне"
+                ) from exc
+
         def flush() -> None:
             """
             Batch-encode накопленных текстов и запись в Qdrant.
@@ -871,11 +937,7 @@ class IndexStageRunner:
             """
             if not pending_texts:
                 if pending_states:
-                    if hasattr(indexer, "state_db"):
-                        indexer.state_db.upsert_many(pending_states)
-                    else:
-                        for row in pending_states:
-                            indexer._upsert_state_entry(row)
+                    _persist_pending_states()
                     pending_states.clear()
                 return
             encoded_points: List[PointStruct] = []
@@ -898,22 +960,23 @@ class IndexStageRunner:
                     PointStruct(id=_point_id(p), vector=v.tolist(), payload=p)
                     for v, p in zip(vectors, chunk_payloads)
                 )
-            written = upsert_points(
-                indexer.qdrant,
-                collection_name=indexer.collection_name,
-                points=encoded_points,
-                timeout_sec=int(getattr(indexer, "qdrant_timeout_sec", 60) or 60),
-            )
+            try:
+                written = upsert_points(
+                    indexer.qdrant,
+                    collection_name=indexer.collection_name,
+                    points=encoded_points,
+                    timeout_sec=int(getattr(indexer, "qdrant_timeout_sec", 60) or 60),
+                )
+            except Exception as exc:
+                _mark_batch_failed(exc, len(encoded_points))
+                return
+            consecutive_flush_failures[0] = 0
             indexer.point_count += written
             stage_stats["points_added"] += written
             self._logger.info(
                 "Записан батч: %d точек (итого %d)", len(pending_texts), indexer.point_count
             )
-            if hasattr(indexer, "state_db"):
-                indexer.state_db.upsert_many(pending_states)
-            else:
-                for row in pending_states:
-                    indexer._upsert_state_entry(row)
+            _persist_pending_states()
             pending_texts.clear()
             pending_payloads.clear()
             pending_states.clear()
@@ -1011,7 +1074,8 @@ class IndexStageRunner:
                 _fn = None
             elif ext == ".docx":
                 file_type = "docx"
-                _fn = indexer._extract_docx
+                _fn = None
+                _doc_fn = indexer._extract_docx_document
             elif ext == ".doc":
                 file_type = "doc"
                 _fn = indexer._extract_doc
@@ -1130,13 +1194,22 @@ class IndexStageRunner:
                     elapsed, size_mb, relative_path.name,
                 )
 
+            skip_ocr_active = stage in ("small", "large") and bool(getattr(indexer, "skip_ocr", False))
             deferred_ocr = (
-                stage in ("small", "large")
-                and bool(getattr(indexer, "skip_ocr", False))
+                skip_ocr_active
                 and (ext == ".pdf" or ext in self._image_extensions)
                 and not failure_error
                 and not full_text.strip()
             )
+            # Office-контейнер с картинками, OCR которых пропущен (--no-ocr): текст
+            # (если есть) индексируем, но файл помечаем deferred_ocr — как скан PDF,
+            # чтобы OCR-прогон его дочитал.
+            embedded_ocr_deferred = bool(
+                skip_ocr_active
+                and not failure_error
+                and document_has_deferred_embedded_ocr(extracted_doc)
+            )
+            deferred_ocr = deferred_ocr or embedded_ocr_deferred
             preserve_existing_partial = bool(
                 stage == "large"
                 and existing_entry
@@ -1628,15 +1701,17 @@ class IndexStageRunner:
                 inventory_keys = [str(item["state_key"]) for item in all_tasks]
                 protected_keys = self._protected_inventory_keys(failed_inventory_roots)
                 failed_ratio = len(failed_inventory_roots) / max(1, len(all_files))
-                if failed_inventory_roots and failed_ratio > FAILED_INVENTORY_CLEANUP_SKIP_RATIO:
+                skip_ratio = self._cleanup_skip_failed_ratio()
+                if failed_inventory_roots and failed_ratio > skip_ratio:
                     self._logger.error(
                         "Cleanup «фантомов» ПРОПУЩЕН на этапе '%s': не прочитано %d из %d файлов/архивов "
-                        "(%.1f%% > %.0f%%) — inventory ненадёжен, удаление из индекса отменено",
+                        "(%.1f%% > %.0f%%, index_cleanup_skip_failed_ratio) — inventory ненадёжен, "
+                        "удаление из индекса отменено",
                         stage,
                         len(failed_inventory_roots),
                         len(all_files),
                         failed_ratio * 100,
-                        FAILED_INVENTORY_CLEANUP_SKIP_RATIO * 100,
+                        skip_ratio * 100,
                     )
                 else:
                     if protected_keys:
@@ -1650,8 +1725,12 @@ class IndexStageRunner:
                         inventory_keys + sorted(protected_keys)
                     )
 
-        info = indexer.qdrant.get_collection(indexer.collection_name)
-        self._logger.info("Коллекция '%s': %d точек", indexer.collection_name, info.points_count)
+        try:
+            info = indexer.qdrant.get_collection(indexer.collection_name)
+            self._logger.info("Коллекция '%s': %d точек", indexer.collection_name, info.points_count)
+        except Exception as exc:
+            # Информационный запрос: обрыв соединения здесь не должен ронять завершённый этап.
+            self._logger.warning("Коллекция '%s': не удалось получить статистику: %s", indexer.collection_name, exc)
         if indexer.run_id:
             indexer.telemetry.finish_stage(
                 run_id=indexer.run_id,
@@ -1666,6 +1745,15 @@ class IndexStageRunner:
             )
         _write_stage_heartbeat(HEARTBEAT_FINISHED)
         return stage_stats
+
+    def _cleanup_skip_failed_ratio(self) -> float:
+        """Порог доли нечитаемых файлов/архивов inventory (config index_cleanup_skip_failed_ratio)."""
+        raw = getattr(self._indexer, "cleanup_skip_failed_ratio", FAILED_INVENTORY_CLEANUP_SKIP_RATIO)
+        try:
+            value = float(FAILED_INVENTORY_CLEANUP_SKIP_RATIO if raw is None else raw)
+        except (TypeError, ValueError):
+            return FAILED_INVENTORY_CLEANUP_SKIP_RATIO
+        return max(0.0, min(1.0, value))
 
     def _protected_inventory_keys(self, failed_roots: set[str]) -> set[str]:
         """Ключи state, которые нельзя удалять: их источник не удалось прочитать."""

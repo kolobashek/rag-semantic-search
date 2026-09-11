@@ -20,8 +20,11 @@
   "index_embedding_onnx_file_name": "",
   "index_max_chunks": 5,
   "index_skip_ocr": false,
+  "index_embedded_media": true,
+  "index_cleanup_skip_failed_ratio": 0.1,
   "index_defer_fulltext": false,
   "index_default_stage": "all",
+  "indexer_heartbeat_path": "data/indexer_heartbeat.json",
   "index_exclude_patterns": [
     "**/.git/**",
     "**/node_modules/**",

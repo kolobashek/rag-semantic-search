@@ -266,6 +266,7 @@ def _make_indexer(tmp_path: Path, extracted_text: str) -> RAGIndexer:
     idx._cleanup_deleted_files = lambda _files: 0
     idx._extract_doc = lambda _p: extracted_text
     idx._extract_docx = lambda _p: extracted_text
+    idx._extract_docx_document = lambda _p: document_from_legacy_text(extracted_text)
     idx._extract_spreadsheet = lambda _p: extracted_text
     idx._extract_spreadsheet_document = lambda _p: document_from_legacy_text(extracted_text)
     idx._extract_rtf = lambda _p: extracted_text
@@ -508,6 +509,7 @@ def test_read_error_is_marked_error_and_backed_off(tmp_path: Path) -> None:
         raise OSError("locked")
 
     idx._extract_docx = _raise
+    idx._extract_docx_document = _raise
 
     stats = idx.index_directory(stage="small")
 
@@ -619,6 +621,7 @@ def test_large_empty_extraction_preserves_partial_state_for_retry(tmp_path: Path
     quick = idx.state_db.get_entry(key)
     quick_points = len(idx.qdrant.points)
     idx._extract_docx = lambda _path: ""
+    idx._extract_docx_document = lambda _path: document_from_legacy_text("")
 
     stats = idx.index_directory(stage="large")
 
@@ -1221,3 +1224,95 @@ def test_metadata_stage_cleans_phantoms_with_full_inventory(tmp_path: Path) -> N
 
     assert len(calls) == 1
     assert set(calls[0]) == {str(kept), str(other)}
+
+
+# ── Qdrant: обрыв соединения не роняет прогон ─────────────────────────────────
+
+
+class _ResetQdrant(_FakeQdrant):
+    """upsert бросает ResponseHandlingException (WinError 10054) первые `failures` раз."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def upsert(self, collection_name, points, **kwargs):
+        if self.failures > 0:
+            self.failures -= 1
+            import httpx  # noqa: PLC0415
+            from qdrant_client.http.exceptions import ResponseHandlingException  # noqa: PLC0415
+
+            raise ResponseHandlingException(
+                httpx.ReadError("[WinError 10054] Удаленный хост принудительно разорвал существующее подключение")
+            )
+        super().upsert(collection_name, points)
+
+
+@pytest.fixture
+def no_qdrant_sleep(monkeypatch) -> list[float]:
+    from rag_catalog.core.indexing import qdrant_writer
+
+    delays: list[float] = []
+    monkeypatch.setattr(qdrant_writer.time, "sleep", lambda delay: delays.append(delay))
+    return delays
+
+
+def test_stage_survives_transient_qdrant_reset(tmp_path: Path, no_qdrant_sleep) -> None:
+    doc = tmp_path / "flaky.txt"
+    doc.write_text("content that must reach qdrant", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.qdrant = _ResetQdrant(failures=2)
+
+    stats = idx.index_directory(stage="small")
+
+    assert stats["error_files"] == 0
+    assert no_qdrant_sleep == [2.0, 4.0]
+    assert idx.qdrant.points
+    assert idx.state_db.get_entry(str(doc))["status"] == "ok"
+
+
+def test_stage_marks_batch_files_error_and_continues_when_qdrant_is_gone(tmp_path: Path, no_qdrant_sleep) -> None:
+    doc = tmp_path / "lost.txt"
+    doc.write_text("content lost in the reset", encoding="utf-8")
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.qdrant = _ResetQdrant(failures=10 ** 6)
+
+    stats = idx.index_directory(stage="small")  # не бросает
+
+    assert stats["error_files"] == 1
+    assert len(no_qdrant_sleep) == 5  # 2, 4, 8, 16, 32
+    assert idx.qdrant.points == []
+    row = idx.state_db.get_entry(str(doc))
+    assert row["stage"] == "error"
+    assert row["status"] == "error"
+    assert row["last_error"].startswith("qdrant_upsert_failed")
+    assert row["next_retry_at"] > time.time()
+    assert str(doc) in idx.state_db.failures
+
+    # Qdrant вернулся — файл переиндексируется на следующем прогоне после backoff.
+    idx.state_db.failures[str(doc)]["next_retry_at"] = 0.0
+    idx.qdrant = _ResetQdrant(failures=0)
+    second = idx.index_directory(stage="small")
+    assert second["error_files"] == 0
+    assert idx.state_db.get_entry(str(doc))["status"] == "ok"
+    assert idx.qdrant.points
+
+
+def test_stage_aborts_after_consecutive_qdrant_flush_failures(tmp_path: Path, no_qdrant_sleep) -> None:
+    from rag_catalog.core.indexing import stage_runner as runner_module
+
+    # Каждый файл даёт > WRITE_BATCH (64) точек → flush после каждого файла.
+    for name in ("a", "b", "c", "d"):
+        (tmp_path / f"{name}.txt").write_text(
+            " ".join(f"документ {name} строка {i} содержательный текст" for i in range(900)), encoding="utf-8"
+        )
+    idx = _make_indexer(tmp_path, extracted_text="")
+    idx.batch_size = 64  # WRITE_BATCH = 64
+    idx.qdrant = _ResetQdrant(failures=10 ** 6)
+
+    with pytest.raises(RuntimeError, match="Qdrant недоступен"):
+        idx.index_directory(stage="small")
+
+    failed = [row for row in idx.state_db.entries.values() if row.get("status") == "error"]
+    assert len(failed) == runner_module.QDRANT_CONSECUTIVE_FLUSH_FAILURES_ABORT
+    assert all(row["last_error"].startswith("qdrant_upsert_failed") for row in failed)

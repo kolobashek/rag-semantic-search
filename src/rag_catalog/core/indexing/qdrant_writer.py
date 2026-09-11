@@ -34,6 +34,91 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_UPSERT_BODY_BYTES = 28 * 1024 * 1024
 
+# Обрыв соединения с Qdrant (WinError 10054, httpx.ReadError/ConnectError,
+# ResponseHandlingException): 5 попыток с экспоненциальной паузой 2 → 32 с,
+# независимо от `retries`. Обычные таймауты Qdrant остаются на коротком ретрае.
+TRANSIENT_CONNECTION_RETRIES = 5
+_TRANSIENT_DELAY_BASE_SEC = 2.0
+_TRANSIENT_DELAY_MAX_SEC = 32.0
+
+_TRANSIENT_MESSAGE_MARKERS = (
+    "10054",
+    "10053",
+    "10061",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "forcibly closed",
+    "удаленный хост",
+    "удалённый хост",
+    "server disconnected",
+    "readerror",
+    "connecterror",
+    "remoteprotocolerror",
+)
+
+
+def _transient_exception_types() -> tuple[type[BaseException], ...]:
+    types: list[type[BaseException]] = [ConnectionError]  # + ConnectionResetError/Refused/Aborted
+    try:
+        from qdrant_client.http.exceptions import ResponseHandlingException  # noqa: PLC0415
+
+        types.append(ResponseHandlingException)
+    except Exception:  # pragma: no cover - qdrant_client без http.exceptions
+        pass
+    try:
+        import httpx  # noqa: PLC0415
+
+        # NetworkError: ReadError, WriteError, ConnectError, CloseError.
+        types.extend([httpx.NetworkError, httpx.RemoteProtocolError])
+    except Exception:  # pragma: no cover
+        pass
+    try:
+        import httpcore  # noqa: PLC0415
+
+        types.extend([httpcore.NetworkError, httpcore.RemoteProtocolError])
+    except Exception:  # pragma: no cover
+        pass
+    return tuple(types)
+
+
+_TRANSIENT_TYPES: tuple[type[BaseException], ...] = _transient_exception_types()
+
+
+def is_transient_connection_error(exc: BaseException) -> bool:
+    """Обрыв/сброс соединения с Qdrant, который имеет смысл повторить после паузы.
+
+    Проверяется сама ошибка и цепочка причин (`__cause__`/`__context__`): qdrant-client
+    заворачивает httpx.ReadError в ResponseHandlingException.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    depth = 0
+    while current is not None and id(current) not in seen and depth < 8:
+        seen.add(id(current))
+        depth += 1
+        if isinstance(current, _TRANSIENT_TYPES):
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in _TRANSIENT_MESSAGE_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _transient_delay(attempt: int) -> float:
+    """2, 4, 8, 16, 32 с для попыток 0..4."""
+    return float(min(_TRANSIENT_DELAY_MAX_SEC, _TRANSIENT_DELAY_BASE_SEC * (2 ** max(0, int(attempt)))))
+
+
+def _retry_plan(exc: Exception, attempt: int, retries: int) -> tuple[bool, float, int]:
+    """(повторять?, пауза, лимит попыток) для ошибки `exc` на попытке `attempt` (с 0)."""
+    if is_transient_connection_error(exc):
+        limit = max(int(retries), TRANSIENT_CONNECTION_RETRIES)
+        return attempt < limit, _transient_delay(attempt), limit
+    limit = int(retries)
+    return attempt < limit, min(5.0, 0.75 * (attempt + 1)), limit
+
 
 def _is_payload_too_large_error(exc: Exception) -> bool:
     message = str(exc).lower()
@@ -214,7 +299,8 @@ def delete_file_vectors(
         must.append(FieldCondition(key="full_path", match=MatchValue(value=str(filepath))))
 
     last_error: Exception | None = None
-    for attempt in range(max(1, int(retries) + 1)):
+    attempt = 0
+    while True:
         try:
             client.delete(
                 collection_name=collection_name,
@@ -225,17 +311,18 @@ def delete_file_vectors(
             return
         except Exception as exc:
             last_error = exc
-            if attempt >= int(retries):
+            should_retry, delay, limit = _retry_plan(exc, attempt, int(retries))
+            if not should_retry:
                 break
-            delay = min(5.0, 0.75 * (attempt + 1))
             logger.warning(
                 "Qdrant delete timeout/error, retry %d/%d in %.1fs: %s",
                 attempt + 1,
-                int(retries),
+                limit,
                 delay,
                 exc,
             )
             time.sleep(delay)
+            attempt += 1
     if last_error is not None:
         raise last_error
 
@@ -256,7 +343,8 @@ def upsert_points(
 
     def write_batch(prepared: list[PointStruct]) -> int:
         last_error: Exception | None = None
-        for attempt in range(max(1, int(retries) + 1)):
+        attempt = 0
+        while True:
             try:
                 try:
                     client.upsert(
@@ -286,17 +374,18 @@ def upsert_points(
                         len(prepared) - midpoint,
                     )
                     return write_batch(prepared[:midpoint]) + write_batch(prepared[midpoint:])
-                if attempt >= int(retries):
+                should_retry, delay, limit = _retry_plan(exc, attempt, int(retries))
+                if not should_retry:
                     break
-                delay = min(5.0, 0.75 * (attempt + 1))
                 logger.warning(
                     "Qdrant upsert timeout/error, retry %d/%d in %.1fs: %s",
                     attempt + 1,
-                    int(retries),
+                    limit,
                     delay,
                     exc,
                 )
                 time.sleep(delay)
+                attempt += 1
         if last_error is not None:
             raise last_error
         return len(prepared)

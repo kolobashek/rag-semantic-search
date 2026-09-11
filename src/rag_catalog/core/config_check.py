@@ -23,10 +23,11 @@ LEVEL_INFO = "info"
 
 # Ключи, которые читаются кодом, но отсутствуют в DEFAULT_CONFIG
 # (собрано grep-ом cfg.get(...) / config.get(...) по src/rag_catalog).
+# Ключи индексатора index_embedded_media / index_cleanup_skip_failed_ratio /
+# indexer_heartbeat_path объявлены в DEFAULT_CONFIG и известны через него.
 EXTRA_KNOWN_KEYS: frozenset[str] = frozenset(
     {
         # индексатор
-        "indexer_heartbeat_path",
         "ocr_engine",
         "ocr_rapid_files_per_process",
         "ocr_rapid_input_mb_per_process",
@@ -178,6 +179,23 @@ def validate_config(
             ),
         )
     )
+
+    # 3b. index_cleanup_skip_failed_ratio — доля в [0, 1]
+    if "index_cleanup_skip_failed_ratio" in cfg:
+        raw_ratio = cfg.get("index_cleanup_skip_failed_ratio")
+        try:
+            ratio = float(raw_ratio)
+            ratio_ok = 0.0 <= ratio <= 1.0
+        except (TypeError, ValueError):
+            ratio_ok = False
+        if not ratio_ok:
+            issues.append(
+                Issue(
+                    LEVEL_WARNING,
+                    "index_cleanup_skip_failed_ratio",
+                    f"ожидается число от 0 до 1 (доля нечитаемых файлов), получено {raw_ratio!r}; будет 0.1",
+                )
+            )
 
     # 4. OCR-бинарники
     for key, kind in (("ocr_tesseract_cmd", "file"), ("ocr_poppler_bin", "dir")):
