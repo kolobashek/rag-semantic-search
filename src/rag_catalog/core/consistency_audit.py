@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Mapping
+
+from .process_status import process_is_alive
 
 
 def _dict_rows(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -13,15 +14,7 @@ def _dict_rows(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = (
 
 
 def _pid_alive(pid: int) -> bool:
-    if int(pid or 0) <= 0:
-        return False
-    try:
-        os.kill(int(pid), 0)
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return process_is_alive(pid)
 
 
 def collect_state_consistency(path: str | Path, *, example_limit: int = 50) -> dict[str, Any]:

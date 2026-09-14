@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .db_contract import ensure_schema_version
+from .process_status import process_is_alive
 from .sqlite_runtime import prepare_sqlite_connection
 
 SCHEMA_VERSION = 5
@@ -24,16 +25,7 @@ def _utc_now() -> str:
 
 def _pid_alive(pid: int) -> bool:
     """Вернуть True если процесс с pid жив."""
-    import os as _os
-    if pid <= 0:
-        return False
-    try:
-        _os.kill(pid, 0)
-        return True
-    except PermissionError:
-        return True  # процесс жив, нет прав послать сигнал
-    except OSError:
-        return False
+    return process_is_alive(pid)
 
 
 DEFAULT_SEARCH_ALIAS_GROUPS: List[Dict[str, Any]] = [

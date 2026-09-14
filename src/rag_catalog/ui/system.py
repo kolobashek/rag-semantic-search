@@ -16,6 +16,7 @@ import psutil
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.log_history import open_run_log
+from rag_catalog.core.process_status import process_is_alive
 from rag_catalog.core.telemetry_db import TelemetryDB
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -84,17 +85,7 @@ def _windows_detached_creationflags() -> int:
 
 
 def _is_process_alive(pid: int) -> bool:
-    if int(pid or 0) <= 0:
-        return False
-    try:
-        os.kill(int(pid), 0)
-    except PermissionError:
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return False
-    return True
+    return process_is_alive(pid)
 
 
 def _process_matches_module(pid: int, module_name: str) -> bool:

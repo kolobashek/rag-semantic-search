@@ -68,17 +68,8 @@ def _windows_detached_creationflags() -> int:
 
 
 def _is_process_alive(pid: int) -> bool:
-    if int(pid or 0) <= 0:
-        return False
-    try:
-        os.kill(int(pid), 0)
-    except PermissionError:
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return False
-    return True
+    from .process_status import process_is_alive
+    return process_is_alive(pid)
 
 
 def _effective_workers(requested: int) -> int:
