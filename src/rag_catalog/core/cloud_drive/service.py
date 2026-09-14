@@ -2258,7 +2258,6 @@ class CloudDriveService:
         )
         before = int(indexer.point_count)
         payload_extra = self._cloud_payload(file_row)
-        indexer._delete_file_vectors(target_path, payload_match={'cloud_file_id': file_row.id})
         indexer.process_file(
             target_path,
             logical_path=logical_path,

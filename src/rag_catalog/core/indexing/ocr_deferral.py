@@ -30,6 +30,11 @@ def is_deferred_ocr_candidate(extension: str, status: str) -> bool:
     return False
 
 
+def document_ocr_error(doc: Optional[Any]) -> str:
+    metadata = getattr(doc, "metadata", None) or {}
+    return str(metadata.get("ocr_error") or "") if isinstance(metadata, dict) else ""
+
+
 def document_has_deferred_embedded_ocr(doc: Optional[Any]) -> bool:
     """True если экстрактор нашёл OCR-пригодные картинки, но OCR был пропущен (skip_ocr).
 

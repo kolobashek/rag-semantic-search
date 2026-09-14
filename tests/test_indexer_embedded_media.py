@@ -230,6 +230,57 @@ def test_process_file_indexes_docx_picture_text_with_ocr(tmp_path: Path, fake_oc
     assert idx.state_db.get_entry(str(path))["status"] == "ok"
 
 
+@pytest.mark.parametrize("staged", [False, True])
+def test_embedded_ocr_failure_is_not_a_successful_document(tmp_path, fake_ocr, monkeypatch, staged):
+    import pytesseract
+    path = _build_docx(tmp_path / "failed.docx")
+    idx = _make_indexer(tmp_path, skip_ocr=False)
+    idx.qdrant_timeout_sec = 5
+    def fail(*args, **kwargs):
+        raise RuntimeError("OCR unavailable")
+    monkeypatch.setattr(pytesseract, "image_to_string", fail)
+    if staged:
+        assert idx.index_directory(stage="small")["error_files"] == 1
+    else:
+        with pytest.raises(RuntimeError, match="embedded_ocr_failed"):
+            idx.process_file(path)
+    assert idx.state_db.get_entry(str(path))["status"] == "error"
+    assert idx.qdrant.points == []
+
+
+def test_replacement_retries_same_checksum_after_failed_delete(tmp_path, fake_ocr):
+    path = _build_docx(tmp_path / "retry.docx")
+    idx = _make_indexer(tmp_path, skip_ocr=False)
+    idx.qdrant_timeout_sec = 5
+    idx.process_file(path)
+    previous = list(idx.qdrant.points)
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(True)
+        raise RuntimeError("delete failed")
+    idx._delete_file_vectors = fail
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="delete failed"):
+            idx.process_file(path, fingerprint_override="new-checksum")
+    assert len(calls) == 2
+    assert idx.qdrant.points == previous
+    assert idx.state_db.get_entry(str(path))["status"] == "error"
+
+
+def test_unchanged_completed_file_does_not_delete_vectors(tmp_path, fake_ocr):
+    path = _build_docx(tmp_path / "same.docx")
+    idx = _make_indexer(tmp_path, skip_ocr=False)
+    idx.qdrant_timeout_sec = 5
+    idx.process_file(path)
+    previous = list(idx.qdrant.points)
+    def fail(*args, **kwargs):
+        raise AssertionError("unchanged file must not be deleted")
+    idx._delete_file_vectors = fail
+    idx.process_file(path)
+    assert idx.qdrant.points == previous
+    assert all(p.get("modified") for p in _content_payloads(idx))
+
+
 def test_indexer_disables_embedded_media_when_configured(tmp_path: Path, fake_ocr) -> None:
     path = _build_docx(tmp_path / "scan.docx")
     idx = _make_indexer(tmp_path, skip_ocr=False)

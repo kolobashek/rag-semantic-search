@@ -26,7 +26,7 @@ from .heartbeat import STATUS_FAILED as HEARTBEAT_FAILED
 from .heartbeat import STATUS_FINISHED as HEARTBEAT_FINISHED
 from .heartbeat import STATUS_RUNNING as HEARTBEAT_RUNNING
 from .heartbeat import write_heartbeat
-from .ocr_deferral import document_has_deferred_embedded_ocr, is_deferred_ocr_candidate
+from .ocr_deferral import document_has_deferred_embedded_ocr, document_ocr_error, is_deferred_ocr_candidate
 from .qdrant_writer import upsert_points
 
 _TAR_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz")
@@ -1194,6 +1194,8 @@ class IndexStageRunner:
                     elapsed, size_mb, relative_path.name,
                 )
 
+            if document_ocr_error(extracted_doc):
+                failure_error = f"embedded_ocr_failed: {document_ocr_error(extracted_doc)}"
             skip_ocr_active = stage in ("small", "large") and bool(getattr(indexer, "skip_ocr", False))
             deferred_ocr = (
                 skip_ocr_active
@@ -1333,6 +1335,9 @@ class IndexStageRunner:
                     "text": clean_chunk,
                     "filename": relative_path.name,
                     "extension": ext,
+                    "modified": meta_payload["modified"],
+                    "created": meta_payload["created"],
+                    "size_mb": meta_payload["size_mb"],
                     "path": logical_path_text,
                     "full_path": file_key,
                     "chunk_index": idx,
@@ -1444,6 +1449,19 @@ class IndexStageRunner:
                 stage_stats["processed_files"] += 1
                 _maybe_heartbeat()
                 indexer._check_indexer_control(stage=stage, stage_stats=stage_stats)
+
+                if str(result.get("error") or "").startswith("embedded_ocr_failed:"):
+                    stage_stats["error_files"] += 1
+                    failed = indexer.state_db.record_failed_path(
+                        str(result["file_key"]), fingerprint=str(result["fingerprint"]), error=result["error"],
+                    )
+                    pending_states.append({
+                        **(state_snapshot.get(str(result["file_key"])) or {}),
+                        "full_path": result["file_key"], "fingerprint": result["fingerprint"],
+                        "mtime": result["mtime"], "stage": "error", "status": "error",
+                        "last_error": result["error"], "next_retry_at": (failed or {}).get("next_retry_at", 0),
+                    })
+                    continue
 
                 content_hash = str(result.get("content_hash") or "")
                 if content_hash:

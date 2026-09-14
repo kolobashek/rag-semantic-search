@@ -60,7 +60,7 @@ from .indexer_control import read_indexer_control
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .indexing.ocr_deferral import EMBEDDED_MEDIA_EXTENSIONS as _EMBEDDED_MEDIA_EXTENSIONS
 from .indexing.ocr_deferral import IMAGE_EXTENSIONS as _IMAGE_EXTENSIONS
-from .indexing.ocr_deferral import document_has_deferred_embedded_ocr, is_deferred_ocr_candidate
+from .indexing.ocr_deferral import document_has_deferred_embedded_ocr, document_ocr_error, is_deferred_ocr_candidate
 from .log_history import build_log_handler, install_env_log_handler
 from .ocr_runtime import resolve_ocr_runtime
 from .qdrant_connection import create_qdrant_client
@@ -1403,43 +1403,14 @@ class RAGIndexer:
 
         existing_entry = self._get_state_entry(file_key)
         if existing_entry:
-            if str(existing_entry.get("fingerprint") or "") == fingerprint:
+            if (
+                str(existing_entry.get("fingerprint") or "") == fingerprint
+                and existing_entry.get("stage") == "content"
+                and existing_entry.get("status") == "ok"
+                and all(existing_entry.get(key) == value for key, value in (payload_extra or {}).items())
+            ):
                 logger.debug("Файл не изменился, пропуск: %s", filepath)
                 return
-            logger.info("Файл изменился, удаляю старые векторы: %s", filepath)
-            try:
-                self._delete_file_vectors(filepath, payload_match=delete_payload_match)
-            except Exception as exc:
-                # Старые векторы остались — новые не пишем (иначе смесь старых и новых
-                # чанков). Помечаем файл как error и пробрасываем вызывающему коду
-                # (очередь/cloud drive обрабатывают ошибку по одному файлу).
-                delete_error = f"qdrant_delete_failed: {exc}"
-                next_retry_at = 0.0
-                if hasattr(self, "state_db"):
-                    try:
-                        failed_row = self.state_db.record_failed_path(
-                            file_key, fingerprint=fingerprint, error=delete_error
-                        )
-                        next_retry_at = float((failed_row or {}).get("next_retry_at") or 0.0)
-                    except Exception:
-                        next_retry_at = 0.0
-                self._upsert_state_entry(
-                    {
-                        **existing_entry,
-                        "full_path": file_key,
-                        "fingerprint": fingerprint,
-                        "mtime": mtime,
-                        "stage": "error",
-                        "indexed_stage": str(getattr(self, "current_stage", "") or "content"),
-                        "status": "error",
-                        "last_error": delete_error,
-                        "next_retry_at": next_retry_at,
-                        "indexed_chunks": 0,
-                        "total_chunks": 0,
-                        **(payload_extra or {}),
-                    }
-                )
-                raise
 
         logger.info("Индексирование: %s", filepath)
         doc_meta = extract_doc_meta(filepath)
@@ -1490,6 +1461,14 @@ class RAGIndexer:
         else:
             logger.debug("Неподдерживаемый формат (только метаданные): %s", ext)
 
+        ocr_error = document_ocr_error(extracted_doc)
+        if ocr_error:
+            self._upsert_state_entry({
+                **(existing_entry or {}), "full_path": file_key, "fingerprint": fingerprint,
+                "mtime": mtime, "stage": "error", "status": "error",
+                "last_error": f"embedded_ocr_failed: {ocr_error}", **(payload_extra or {}),
+            })
+            raise RuntimeError(f"embedded_ocr_failed: {ocr_error}")
         chunk_source = extracted_doc if extracted_doc is not None else full_text
         chunk_items = self._chunk_text_with_provenance(chunk_source) if full_text.strip() else []
         chunks = [str(item.get("text") or "") for item in chunk_items]
@@ -1573,6 +1552,9 @@ class RAGIndexer:
                     "text": clean_chunk,
                     "filename": filepath.name,
                     "extension": ext,
+                    "modified": meta_payload["modified"],
+                    "created": meta_payload["created"],
+                    "size_mb": meta_payload["size_mb"],
                     "path": str(relative_path),
                     "full_path": str(filepath),
                     "chunk_index": idx,
@@ -1609,6 +1591,22 @@ class RAGIndexer:
             return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
         points = [PointStruct(id=_point_id(p), vector=v.tolist(), payload=p) for v, p in zip(vectors, payloads)]
+        # Extraction and embedding must succeed before removing the previous generation.
+        pending_entry = {
+            **(existing_entry or {}), "full_path": file_key, "fingerprint": fingerprint,
+            "mtime": mtime, "stage": "reindexing", "status": "error",
+            "last_error": "replacement_in_progress", **(payload_extra or {}),
+        }
+        self._upsert_state_entry(pending_entry)
+        if existing_entry or delete_payload_match:
+            try:
+                self._delete_file_vectors(filepath, payload_match=delete_payload_match)
+            except Exception as exc:
+                error = f"qdrant_delete_failed: {exc}"
+                self._upsert_state_entry({**pending_entry, "stage": "error", "last_error": error})
+                if hasattr(self, "state_db"):
+                    self.state_db.record_failed_path(file_key, fingerprint=fingerprint, error=error)
+                raise
         written = upsert_points(
             self.qdrant,
             collection_name=self.collection_name,

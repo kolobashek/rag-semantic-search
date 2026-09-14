@@ -972,8 +972,9 @@ def test_service_reindex_job_passes_cloud_identity_to_indexer(tmp_path: Path, mo
     assert completed.status == 'completed'
     assert completed.progress['indexed'] is True
     assert completed.progress['points_added'] == 3
-    assert calls['delete']['payload_match'] == {'cloud_file_id': uploaded['id']}  # type: ignore[index]
+    assert 'delete' not in calls  # The indexer owns replacement after its unchanged-file check.
     process_kwargs = calls['process']['kwargs']  # type: ignore[index]
+    assert process_kwargs['delete_payload_match'] == {'cloud_file_id': uploaded['id']}
     assert process_kwargs['logical_path'] == 'Folder A/hello.txt'
     assert process_kwargs['state_key'] == f"cloud:{uploaded['id']}"
     assert process_kwargs['payload_extra']['cloud_file_id'] == uploaded['id']
