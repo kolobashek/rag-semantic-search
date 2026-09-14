@@ -56,7 +56,8 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"),
     # Значение может быть в кавычках: token="...", password: '...'
     re.compile(
-        r"(?i)\b(token|password|passwd|secret|api[_-]?key|access[_-]?key)\b\s*[=:]\s*[\"']?[^\s,;&\"']+[\"']?"
+        r'''(?ix)\b(token|(?:access|refresh|id)[_-]?token|password|passwd|secret|api[_-]?key|access[_-]?key)\b
+        ["']?\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&}"']+)'''
     ),
     re.compile(r"(?i)([?&](?:token|key|password|secret)=)[^&\s]+"),
     re.compile(r"(?i)://[^/\s:@]+:[^/\s@]+@"),  # user:pass@host
@@ -189,6 +190,9 @@ class _BufferingHandler(logging.Handler):
             }
             if record.exc_info:
                 event["detail"] = self.format(record)
+            event = normalise_event(event)
+            if event is None:
+                return
             with self._lock:
                 self._queue.append(event)
         except Exception:  # pragma: no cover - журнал не должен ронять клиента
@@ -265,9 +269,9 @@ class ClientLogUploader(_BufferingHandler):
         self._send(
             {
                 "client": self._client,
-                "device_id": self._device_id,
-                "app_version": self._app_version,
-                "events": list(batch),
+                "device_id": _clean(self._device_id, MAX_DEVICE_CHARS),
+                "app_version": _clean(self._app_version, 40),
+                "events": [clean for event in batch if (clean := normalise_event(event)) is not None],
             }
         )
 

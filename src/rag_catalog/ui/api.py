@@ -424,8 +424,13 @@ async def api_client_logs(request: Request, authorization: AuthHeader = "") -> D
     """
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Client log body exceeds 1 MiB.")
+        body.extend(chunk)
     try:
-        payload = await request.json()
+        payload = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Ожидается JSON.") from None
     if not isinstance(payload, dict):

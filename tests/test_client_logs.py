@@ -30,12 +30,43 @@ class _FakeTelemetry:
         ("https://rag.local/api/files?token=deadbeef&path=/x", "deadbeef"),
         ("https://kris:hunter2@rag.local/api", "hunter2"),
         ("api_key: AKIA1234567890", "AKIA1234567890"),
+        ('{"password":"private value with spaces"}', "private"),
+        ('{"access_token":"sensitive-token"}', "sensitive-token"),
+        ('{"refresh_token":"secret-value"}', "secret-value"),
     ],
 )
 def test_secrets_are_redacted(raw: str, leaked: str) -> None:
     cleaned = client_logs.redact_secrets(raw)
     assert leaked not in cleaned
     assert "скрыто" in cleaned
+
+
+def test_uploader_redacts_before_queueing_and_sending():
+    sent = []
+    uploader = client_logs.ClientLogUploader(sent.append, client="sync")
+    uploader.emit(logging.LogRecord("test", logging.ERROR, "", 1,
+                                    '{"password":"private password"} Bearer private-token', (), None))
+    assert "private" not in str(list(uploader._queue))
+    uploader.flush()
+    assert "private" not in str(sent)
+    uploader.close()
+
+
+def test_client_log_endpoint_rejects_oversized_stream_before_json(monkeypatch):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from rag_catalog.ui import api
+    monkeypatch.setattr(api, "load_config", lambda: {})
+    monkeypatch.setattr(api, "_require_cloud_drive_api_user", lambda *a, **kw: {"username": "test"})
+    class Request:
+        async def stream(self):
+            yield b"x" * (1024 * 1024 + 1)
+            raise AssertionError("must stop consuming the request")
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(api.api_client_logs(Request(), authorization="test"))
+    assert error.value.status_code == 413
 
 
 def test_redaction_keeps_useful_context() -> None:
