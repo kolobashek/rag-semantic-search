@@ -751,7 +751,7 @@ def process_query(
             return format_rag_answer(answer)
 
     try:
-        results = searcher.search(q, limit=3, content_only=False, source=source, username=username)
+        results = searcher.search(q, limit=3, content_only=False, source=source, username=username, **filter_kwargs)
     except (ConnectionError, RuntimeError) as exc:
         return f"Ошибка инфраструктуры поиска: {exc}"
     results = acl_filter_results(acl_cfg, user, [item for item in (results or []) if isinstance(item, dict)])
@@ -1199,6 +1199,7 @@ def send_search_results(
         results = searcher.search(
             q, limit=30, content_only=False,
             source=f"telegram_bot:{chat_id}", username=username,
+            result_filter=acl_result_filter(dict(cfg or {}), user),
         )
     except (ConnectionError, RuntimeError) as exc:
         send_message(token, chat_id, f"Ошибка поиска: {exc}")

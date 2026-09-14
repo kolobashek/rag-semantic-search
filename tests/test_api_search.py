@@ -40,6 +40,16 @@ class _FakeSearcher:
         return []
 
 
+def test_acl_removes_closed_duplicate_paths(acl_env, client):
+    token, searcher = acl_env["token"], acl_env["searcher"]
+    searcher._results[0]["duplicates"] = ["Blocked/secret.txt"]
+    searcher._results[0]["duplicate_count"] = 1
+    response = client.get("/api/search", params={"q": "report"}, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert "Blocked/secret" not in response.text
+    assert response.json()["results"][0].get("duplicates", []) == []
+
+
 @pytest.fixture
 def client() -> TestClient:
     # Без контекстного менеджера: lifespan NiceGUI требует ui.run().

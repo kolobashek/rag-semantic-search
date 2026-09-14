@@ -524,6 +524,7 @@ class RAGSearcher:
         query_original: str = "",
         source: str = "unknown",
         username: str = "",
+        result_filter: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Семантический поиск по индексированным файлам.
@@ -791,6 +792,11 @@ class RAGSearcher:
             numeric_exact_results = self._apply_query_operators(operators, numeric_exact_results, operator_stats)
             lexical_results = self._apply_query_operators(operators, lexical_results, operator_stats)
             fulltext_results = self._apply_query_operators(operators, fulltext_results, operator_stats)
+        if result_filter is not None:
+            results = self._apply_result_filter(results, result_filter)
+            numeric_exact_results = self._apply_result_filter(numeric_exact_results, result_filter)
+            lexical_results = self._apply_result_filter(lexical_results, result_filter)
+            fulltext_results = self._apply_result_filter(fulltext_results, result_filter)
         relevance_gate_applied = False
         if str(self.config.get("retrieval_pipeline") or "legacy").lower() == "v2":
             reranker_enabled = bool(self.config.get("retrieval_reranker_enabled", False))
@@ -805,6 +811,8 @@ class RAGSearcher:
             )
             if operators.has_result_filters:
                 bm25_results = self._apply_query_operators(operators, bm25_results, operator_stats)
+            if result_filter is not None:
+                bm25_results = self._apply_result_filter(bm25_results, result_filter)
             channels = [numeric_exact_results, lexical_results, bm25_results, fulltext_results, results]
             fused = rrf_fuse(channels, limit=max(limit * 4, 40, fusion_candidate_limit))
             results = self._merge_ranked_results(
@@ -2403,6 +2411,7 @@ class RAGSearcher:
                 query_original=q,
                 source=f"{source}:search",
                 username=username,
+                result_filter=result_filter,
             )
         except Exception as exc:
             return {"ok": False, "answer": f"Ошибка поиска: {exc}", "sources": [], "error": f"search_error: {exc}"}
@@ -2652,7 +2661,8 @@ class RAGSearcher:
         retrieval_limit = min(limit * 3, 100) if result_filter is not None else limit
         try:
             candidates = self.search(
-                q, limit=retrieval_limit, file_type=None, content_only=True, source="fact_search"
+                q, limit=retrieval_limit, file_type=None, content_only=True, source="fact_search",
+                result_filter=result_filter,
             )
         except Exception as exc:
             self.telemetry.log_fact(

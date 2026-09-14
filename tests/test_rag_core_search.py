@@ -125,6 +125,26 @@ def _make_searcher(*, connected: bool, embed_mode: str = "ok", qdrant_mode: str 
     return s
 
 
+@pytest.mark.parametrize("blocked_first", [False, True])
+def test_acl_runs_before_duplicate_collapse_and_result_limit(blocked_first) -> None:
+    searcher = _make_searcher(connected=True)
+    paths = ["Allowed/report.txt", "Blocked/secret.txt"]
+    if blocked_first:
+        paths.reverse()
+    searcher.qdrant.query_points = lambda **kwargs: SimpleNamespace(points=[
+        SimpleNamespace(id=index, score=0.99 - index * 0.01, payload={
+            "type": "txt_content", "full_path": path, "path": path,
+            "filename": path.split("/")[-1], "text": "report", "content_hash": "same",
+        }) for index, path in enumerate(paths)
+    ])
+    results = searcher.search("report", limit=1, result_filter=lambda rows: [
+        row for row in rows if row.get("full_path", "").startswith("Allowed/")
+    ])
+    assert len(results) == 1
+    assert results[0]["full_path"] == "Allowed/report.txt"
+    assert "Blocked" not in str(results)
+
+
 def test_search_not_connected_raises_connection_error() -> None:
     s = _make_searcher(connected=False)
     with pytest.raises(ConnectionError):

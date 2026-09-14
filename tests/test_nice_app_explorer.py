@@ -2786,10 +2786,13 @@ def test_cloud_drive_recover_stale_jobs_endpoint(monkeypatch, tmp_path) -> None:
 
 def test_cloud_drive_search_filter_uses_registry_acl(tmp_path) -> None:
     cfg = {
+        "users_db_path": str(tmp_path / "users.db"),
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
         "cloud_drive_storage": "local",
         "cloud_drive_storage_root": str(tmp_path / "storage"),
     }
+    from rag_catalog.core.user_auth_db import UserAuthDB
+    UserAuthDB(cfg["users_db_path"]).admin_create_user(username="user", password="Test-123456", role="user")
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен")
     allowed = service.registry.upsert_folder(path="Allowed", name="Allowed", parent_id=root.id, depth=1)
@@ -2926,11 +2929,14 @@ def test_cloud_drive_search_filter_maps_filesystem_paths_to_registry_acl(tmp_pat
     allowed_path.write_text("ok", encoding="utf-8")
     blocked_path.write_text("secret", encoding="utf-8")
     cfg = {
+        "users_db_path": str(tmp_path / "users.db"),
         "catalog_path": str(catalog),
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),
         "cloud_drive_storage": "local",
         "cloud_drive_storage_root": str(tmp_path / "storage"),
     }
+    from rag_catalog.core.user_auth_db import UserAuthDB
+    UserAuthDB(cfg["users_db_path"]).admin_create_user(username="user", password="Test-123456", role="user")
     service = CloudDriveService.from_config(cfg)
     root = service.registry.ensure_root_folder(root_name="Обмен", source_path=str(catalog))
     allowed = service.registry.upsert_folder(

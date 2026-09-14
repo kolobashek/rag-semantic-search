@@ -598,6 +598,7 @@ def _api_run_search(
     content_only: bool,
     title_only: bool,
     username: str,
+    result_filter=None,
 ) -> List[Dict[str, Any]]:
     """Same retrieval path as helpers._run_catalog_search, but with telemetry source='api'."""
     results = _helpers._normalize_search_results(
@@ -610,6 +611,7 @@ def _api_run_search(
             source="api",
             username=username,
             query_original=query_original,
+            result_filter=result_filter,
         )
     )
     if results or content_only or title_only:
@@ -750,6 +752,7 @@ def api_search(
             content_only=bool(content_only),
             title_only=bool(title_only),
             username=username,
+            result_filter=_helpers._cd_acl_result_filter(cfg, user),
         )
     except HTTPException:
         raise

@@ -58,8 +58,8 @@ def test_login_stats_reads_real_values(tmp_path: Path) -> None:
     assert out["documents"] == 2  # content + partial, без deferred_ocr/error
     assert out["searches_today"] == 2
     assert out["avg_seconds"] == 0.6
-    assert [row["query"] for row in out["recent_searches"]] == ["договор 442", "паспорт котла"]
-    assert all(set(row) == {"time", "query"} for row in out["recent_searches"])  # без имён пользователей
+    assert out["recent_searches"] == []
+    assert "паспорт котла" not in json.dumps(out, ensure_ascii=False)
     assert out["index_status"]["dot"] == "ok"
     assert out["index_status"]["label"] == "индекс актуален"
     assert out["index_status"]["sub"] == time.strftime("%d.%m.%Y")
@@ -78,7 +78,7 @@ def test_login_stats_searches_today_excludes_yesterday(tmp_path: Path) -> None:
 
     assert out["searches_today"] == 0
     assert out["avg_seconds"] is None
-    assert out["recent_searches"][0]["query"] == "старый"
+    assert out["recent_searches"] == []
 
 
 # ── heartbeat / слепые зоны ────────────────────────────────────────────────

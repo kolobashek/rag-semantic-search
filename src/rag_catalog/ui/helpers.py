@@ -830,6 +830,7 @@ def _run_catalog_search(
     content_only: bool,
     title_only: bool,
     username: str = "",
+    result_filter=None,
 ) -> List[Dict[str, Any]]:
     results = _normalize_search_results(
         searcher.search(
@@ -841,6 +842,7 @@ def _run_catalog_search(
             source="nicegui",
             username=username,
             query_original=query_original,
+            result_filter=result_filter,
         )
     )
     if results or content_only or title_only:
@@ -1514,11 +1516,11 @@ def _filter_cloud_drive_search_results(
     if username:
         try:
             fresh_user = UserAuthDB(str(_users_db_path(cfg))).get_user(username=username)
-            if fresh_user is not None:
-                effective_user = fresh_user
+            if fresh_user is None or str(fresh_user.get("status") or "") != "active":
+                return []
+            effective_user = fresh_user
         except Exception:
-            effective_user["group_ids"] = []
-            effective_user["groups"] = []
+            return []
     try:
         effective_service = service or _cd_cached_service(cfg)
     except Exception:
@@ -1563,6 +1565,19 @@ def _filter_cloud_drive_search_results(
             if cloud_file_id:
                 item.setdefault("cloud_file_id", cloud_file_id)
             filtered.append(item)
+    duplicate_paths = list(dict.fromkeys(
+        str(path) for item in filtered for path in (item.get("duplicates") or [])
+    ))
+    if duplicate_paths:
+        permitted = _filter_cloud_drive_search_results(
+            cfg, effective_user, [{"full_path": path} for path in duplicate_paths], service=effective_service,
+        )
+        allowed_paths = {item["full_path"] for item in permitted}
+        filtered = [dict(item) for item in filtered]
+        for item in filtered:
+            if "duplicates" in item:
+                item["duplicates"] = [path for path in item["duplicates"] if path in allowed_paths]
+                item["duplicate_count"] = len(item["duplicates"])
     return filtered
 
 
@@ -1648,6 +1663,7 @@ def _run_authorized_catalog_search(
         content_only=content_only,
         title_only=title_only,
         username=username,
+        result_filter=_cd_acl_result_filter(cfg, user),
     )
     return _filter_cloud_drive_search_results(cfg, user, results)
 
@@ -1853,29 +1869,8 @@ def _read_login_screen_stats(cfg: Dict[str, Any], *, now: Optional[datetime] = N
         out["searches_today"] = count
         if count > 0 and row.get("avg_ms") is not None:
             out["avg_seconds"] = round(float(row.get("avg_ms") or 0) / 1000.0, 2)
-    recent_rows = _db_query_dicts(
-        telemetry_path,
-        """
-        SELECT ts, COALESCE(NULLIF(query_original, ''), query) AS query
-        FROM search_logs
-        WHERE query <> ''
-        ORDER BY id DESC
-        LIMIT 3
-        """,
-    )
-    recent: List[Dict[str, str]] = []
-    for row in recent_rows:
-        query = str(row.get("query") or "").strip()
-        if not query:
-            continue
-        raw_ts = str(row.get("ts") or "")
-        try:
-            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-            time_label = dt.astimezone().strftime("%H:%M")
-        except ValueError:
-            time_label = raw_ts[11:16]
-        recent.append({"time": time_label, "query": query})
-    out["recent_searches"] = recent
+    # Queries can contain personal data, including when author names are removed.
+    # Public login statistics must contain aggregates only.
 
     hb = _read_heartbeat_status(cfg)
     kind = str(hb.get("kind") or "missing")

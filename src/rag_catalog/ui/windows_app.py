@@ -95,6 +95,7 @@ class SearchThread(QThread):
                 file_type=self.file_type,
                 content_only=self.content_only,
                 source="windows_app",
+                result_filter=self.result_filter,
             )
             if self.result_filter is not None:
                 results = self.result_filter(results)
@@ -1002,8 +1003,7 @@ class RAGWindow(QMainWindow):
                 )
                 if not points:
                     break
-                for pt in points:
-                    payload = pt.payload or {}
+                for payload in self.result_filter([dict(pt.payload or {}) for pt in points]):
                     filename = str(payload.get("filename") or "").strip()
                     path = str(payload.get("path") or "").strip()
                     full_path = str(payload.get("full_path") or "").strip()
@@ -1043,6 +1043,10 @@ class RAGWindow(QMainWindow):
 
     def _build_did_you_mean(self, query: str) -> List[str]:
         self._load_hint_cache()
+        self._hint_terms = {
+            term for item in self.result_filter(self._hint_items)
+            for term in self._split_terms(" ".join(str(item.get(key) or "") for key in ("filename", "path", "full_path")))
+        }
         if not self._hint_terms:
             return []
         suggestions: List[str] = []
@@ -1079,7 +1083,7 @@ class RAGWindow(QMainWindow):
         q = query.lower()
         tokens = self._split_terms(q)
         scored: List[Tuple[int, Dict[str, str]]] = []
-        for item in self._hint_items:
+        for item in self.result_filter(self._hint_items):
             filename = (item.get("filename") or "").lower()
             path = (item.get("path") or item.get("full_path") or "").lower()
             bag = f"{filename} {path}"
@@ -1354,9 +1358,15 @@ class RAGWindow(QMainWindow):
     # ── settings ──────────────────────────────────────────────────────
 
     def _open_settings(self) -> None:
+        if str(self.user.get("role") or "") != "admin":
+            return
         dlg = SettingsDialog(self.cfg, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.cfg = dlg.get_updated_config()
+            self.result_filter = build_result_filter(self.cfg, self.user)
+            self._hints_loaded = False
+            self._hint_items = []
+            self._hint_terms = set()
             save_config(self.cfg)
             # Переинициализировать searcher с новыми путями
             self._init_searcher()
