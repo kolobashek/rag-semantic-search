@@ -633,8 +633,22 @@ class IndexStageRunner:
                 return []
             return tasks
 
+        only_paths = {
+            _normalize_only_path_key(path)
+            for path in (getattr(indexer, "only_paths", None) or set())
+            if str(path or "").strip()
+        }
         all_tasks: List[Dict[str, Any]] = []
         for filepath in all_files:
+            if only_paths:
+                keys = {str(filepath), str(filepath.relative_to(indexer.catalog_path))}
+                normalized = {_normalize_only_path_key(key) for key in keys}
+                selected = bool(normalized & only_paths) or any(
+                    requested.startswith(key + "::") or requested.startswith(key + "\\")
+                    for key in normalized for requested in only_paths
+                )
+                if not selected:
+                    continue
             archive_type = _archive_type_for_path(filepath)
             if archive_type == "zip":
                 all_tasks.extend(_zip_tasks(filepath))
@@ -649,7 +663,7 @@ class IndexStageRunner:
                 if task is not None:
                     all_tasks.append(task)
 
-        if hasattr(indexer, "state_db"):
+        if hasattr(indexer, "state_db") and not only_paths and not getattr(indexer, "dry_run", False):
             for archive_path, current_keys in archive_member_keys.items():
                 prefix = f"{archive_path}::"
                 stale_keys = sorted(set(indexer.state_db.list_entries_by_prefix(prefix)) - set(current_keys))
@@ -667,11 +681,6 @@ class IndexStageRunner:
                 if removed_keys:
                     indexer.state_db.delete_entries(removed_keys)
 
-        only_paths = {
-            _normalize_only_path_key(path)
-            for path in (getattr(indexer, "only_paths", None) or set())
-            if str(path or "").strip()
-        }
         if only_paths:
             before = len(all_tasks)
             all_tasks = [item for item in all_tasks if _task_matches_only_paths(item, only_paths)]

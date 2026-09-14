@@ -1195,6 +1195,21 @@ def _cleanup_recording_indexer(tmp_path: Path, calls: list) -> RAGIndexer:
     return idx
 
 
+def test_only_paths_never_opens_or_cleans_unrelated_archive(tmp_path, monkeypatch):
+    kept = tmp_path / "kept.txt"
+    kept.write_text("selected document", encoding="utf-8")
+    archive = tmp_path / "unrelated.zip"
+    with ZipFile(archive, "w") as zf:
+        zf.writestr("another.txt", "unrelated document")
+    idx = _make_indexer(tmp_path, "selected document")
+    idx.only_paths = {str(kept)}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unrelated archive must not be opened")
+    monkeypatch.setattr(stage_runner, "ZipFile", forbidden)
+    idx.index_directory(stage="large")
+    assert idx.state_db.get_entry(str(kept))["status"] == "ok"
+
+
 def test_metadata_stage_skips_phantom_cleanup_when_only_paths_active(tmp_path: Path) -> None:
     """--only-paths-file усекает inventory: cleanup стёр бы весь остальной индекс."""
     kept = tmp_path / "kept.txt"
