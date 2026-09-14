@@ -339,6 +339,8 @@ def extract_embedded_media_blocks(
         )
     except Exception as exc:
         logger.warning("Вложенные картинки %s: %s", path, exc)
+        if diagnostics is not None:
+            diagnostics["ocr_error"] = str(exc)
     return blocks
 
 

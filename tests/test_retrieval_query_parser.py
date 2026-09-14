@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+
+def test_web_parser_preserves_quoted_folder_filter():
+    from rag_catalog.ui.helpers import _parse_search_query
+    parsed = _parse_search_query('report path:"Folder With Spaces" after:2024-01-01')
+    assert parsed["path_filter"] == "folder with spaces"
+    assert parsed["must_phrases"] == []
+    assert parsed["semantic_query"] == "report"
+    assert parsed["date_from"] == "2024-01-01"
+
 from datetime import date
 from types import SimpleNamespace
 

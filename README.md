@@ -13,6 +13,11 @@
 
 ## Быстрый Старт
 
+Telegram-бот уведомляет активных администраторов с привязанным Telegram о `failed`
+или устаревшем heartbeat индексации. Повторные уведомления одного прогона подавляются
+между перезапусками; `index_alerts_enabled: false` отключает их. Путь задаётся
+`indexer_heartbeat_path`. Монитор не перезапускает индексатор, OCR или Qdrant автоматически.
+
 ```powershell
 pip install -r requirements.txt
 pip install -e .

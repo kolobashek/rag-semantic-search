@@ -56,6 +56,24 @@ class _PayloadLimitedClient(_FakeClient):
             )
 
 
+def test_collection_probe_retries_without_recreating(monkeypatch):
+    from rag_catalog.core.indexing import qdrant_writer
+    client = _FakeClient(["catalog"])
+    original = client.get_collections
+    attempts = []
+    def probe():
+        attempts.append(True)
+        if len(attempts) < 3:
+            raise TimeoutError("busy")
+        return original()
+    client.get_collections = probe
+    monkeypatch.setattr(qdrant_writer.time, "sleep", lambda delay: None)
+    assert ensure_collection(client, collection_name="catalog", vector_size=384) is False
+    assert len(attempts) == 3
+    assert client.deleted_collections == []
+    assert client.created == []
+
+
 def test_ensure_collection_creates_missing_collection() -> None:
     client = _FakeClient()
 

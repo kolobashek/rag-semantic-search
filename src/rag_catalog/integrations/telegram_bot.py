@@ -1847,8 +1847,11 @@ def main() -> int:
 
     logger.info("Telegram бот запущен. Ограничение chat_id: %s", allowed_chat_id or "нет")
     offset = 0
+    from rag_catalog.core.indexing.monitor import IndexHeartbeatMonitor
+    index_monitor = IndexHeartbeatMonitor(cfg, auth_db, lambda chat, text: send_message(token, chat, text))
     while True:
         try:
+            index_monitor.poll()
             updates = get_updates(token, offset)
             for upd in updates:
                 offset = max(offset, int(upd.get("update_id", 0)) + 1)

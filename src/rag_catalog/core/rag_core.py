@@ -106,6 +106,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "index_exclude_patterns": [],
     # Heartbeat индексатора (JSON с прогрессом стадии); относительный путь — от корня проекта
     "indexer_heartbeat_path": "data/indexer_heartbeat.json",
+    "index_alerts_enabled": True,
     "ocr_max_image_pages": 50,
     "ocr_pdf_batch_pages": 8,
     "ocr_rapid_fallback_enabled": True,
@@ -917,12 +918,48 @@ class RAGSearcher:
         stats: Dict[str, int],
     ) -> List[Dict[str, Any]]:
         """Post-filter channel results by "phrase", -word, path:, after:, before:."""
+        if operators.after or operators.before:
+            results = self._restore_result_dates(results)
         return apply_operator_filters(
             operators,
             results,
             modified_to_dt=self._modified_to_naive_dt,
             stats=stats,
         )
+
+    def _restore_result_dates(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Read dates for legacy content points without altering the live catalog."""
+        missing = [item for item in results if not item.get("modified")]
+        db_path = self._state_db_path() if missing else None
+        if not db_path:
+            return results
+        def keys(item):
+            return [str(value) for value in (
+                item.get("state_key"),
+                f"cloud:{item['cloud_file_id']}" if item.get("cloud_file_id") else None,
+                item.get("full_path"),
+            ) if value]
+        paths = list(dict.fromkeys(key for item in missing for key in keys(item)))
+        dates = {}
+        try:
+            import sqlite3
+            connection = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+            try:
+                for offset in range(0, len(paths), 400):
+                    batch = paths[offset:offset + 400]
+                    placeholders = ",".join("?" for _ in batch)
+                    dates.update(connection.execute(
+                        f"SELECT full_path, mtime FROM state_entries WHERE full_path IN ({placeholders})", batch,
+                    ).fetchall())
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            return results
+        return [
+            {**item, "modified": next((dates[key] for key in keys(item) if dates.get(key)), None)}
+            if not item.get("modified") else item
+            for item in results
+        ]
 
     def _terms_from_text(self, text: str) -> List[str]:
         # Same tokenizer as BM25/fulltext channels (retrieval/terms.py).
@@ -2678,7 +2715,7 @@ class RAGSearcher:
             return {"ok": False, "error": f"Ошибка поиска: {exc}"}
 
         entities = _extract_entities(q)
-        alias_entities = self._discover_entity_aliases(entities)
+        alias_entities = self._discover_entity_aliases(entities, result_filter=result_filter)
         entities = list(dict.fromkeys([*entities, *alias_entities]))
         if entities:
             metadata_hits = self._lexical_catalog_search(
@@ -2687,6 +2724,7 @@ class RAGSearcher:
                 file_type=None,
                 content_only=False,
             )
+            metadata_hits = self._apply_result_filter(metadata_hits, result_filter)
             paths = [
                 str(x.get("full_path") or "")
                 for x in metadata_hits
@@ -2770,13 +2808,13 @@ class RAGSearcher:
         )
         return out
 
-    def _discover_entity_aliases(self, entities: List[str]) -> List[str]:
+    def _discover_entity_aliases(self, entities: List[str], *, result_filter=None) -> List[str]:
         aliases: List[str] = []
         for entity in entities:
             if not entity:
                 continue
             try:
-                for item in self.search(entity, limit=20, content_only=False, source="alias_lookup"):
+                for item in self.search(entity, limit=20, content_only=False, source="alias_lookup", result_filter=result_filter):
                     bag = " ".join(
                         str(item.get(k, "") or "")
                         for k in ("filename", "path", "text")

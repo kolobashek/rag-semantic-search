@@ -595,41 +595,16 @@ def _parse_search_query(raw: str) -> Dict[str, Any]:
     Order matters: phrases and filters are removed first so они don't pollute
     boolean splitting; wildcards are extracted last so дог* или акт preserves OR.
     """
-    # 1. Quoted phrases → must match exactly
-    must_phrases: List[str] = re.findall(r'"([^"]+)"', raw)
-    q = re.sub(r'"[^"]+"', ' ', raw)
+    from rag_catalog.core.retrieval.query_parser import parse_query
 
-    # 2. Excluded words (-слово)
-    tokens = q.split()
-    excluded_words: List[str] = [t[1:].lower() for t in tokens if t.startswith('-') and len(t) > 1]
-    tokens = [t for t in tokens if not (t.startswith('-') and len(t) > 1)]
-    q = ' '.join(tokens)
-
-    # 3. Structured filters (consume them before boolean splitting)
-    file_type_filter: Optional[str] = None
-    m = re.search(r'\btype:(\.?\w+)', q, re.IGNORECASE)
-    if m:
-        ft = m.group(1).lower()
-        file_type_filter = ft if ft.startswith('.') else '.' + ft
-        q = (q[:m.start()] + q[m.end():]).strip()
-
-    date_from: Optional[str] = None
-    m = re.search(r'\bafter:(\d{4}-\d{2}-\d{2})', q, re.IGNORECASE)
-    if m:
-        date_from = m.group(1)
-        q = (q[:m.start()] + q[m.end():]).strip()
-
-    date_to: Optional[str] = None
-    m = re.search(r'\bbefore:(\d{4}-\d{2}-\d{2})', q, re.IGNORECASE)
-    if m:
-        date_to = m.group(1)
-        q = (q[:m.start()] + q[m.end():]).strip()
-
-    path_filter: Optional[str] = None
-    m = re.search(r'\bpath:(\S+)', q, re.IGNORECASE)
-    if m:
-        path_filter = m.group(1).lower()
-        q = (q[:m.start()] + q[m.end():]).strip()
+    parsed = parse_query(raw)
+    must_phrases = parsed.phrases
+    excluded_words = parsed.excluded
+    q = parsed.terms
+    file_type_filter = parsed.file_type
+    date_from = parsed.after.isoformat() if parsed.after else None
+    date_to = parsed.before.isoformat() if parsed.before else None
+    path_filter = parsed.path_contains.lower() if parsed.path_contains else None
 
     from_filter: Optional[str] = None
     m = re.search(r'\bfrom:(\S+)', q, re.IGNORECASE)
@@ -1841,7 +1816,7 @@ def _read_login_screen_stats(cfg: Dict[str, Any], *, now: Optional[datetime] = N
     documents      — файлов с содержимым в index_state.db (stage content/partial)
     searches_today — записей search_logs за сегодня (локальная дата)
     avg_seconds    — средняя длительность поиска за сегодня, сек
-    recent_searches— последние 3 запроса [{"time": "14:23", "query": "..."}] (без имён)
+    recent_searches— всегда пусто: запросы не публикуются до авторизации
     index_status   — {"dot": ok|info|warn|err, "label": ..., "sub": ...} по heartbeat
     """
     out: Dict[str, Any] = {

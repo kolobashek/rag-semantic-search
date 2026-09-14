@@ -145,6 +145,19 @@ def test_acl_runs_before_duplicate_collapse_and_result_limit(blocked_first) -> N
     assert "Blocked" not in str(results)
 
 
+def test_legacy_content_date_filter_restores_date_from_state(tmp_path):
+    from rag_catalog.core.retrieval.query_parser import parse_query
+    searcher = _make_searcher(connected=True)
+    searcher.config = {"qdrant_db_path": str(tmp_path)}
+    db = IndexStateDB(str(tmp_path / "index_state.db"))
+    db.upsert_many([{"full_path": "cloud:example", "mtime": datetime(2024, 1, 5).timestamp(),
+                     "fingerprint": "a", "stage": "content", "status": "ok"}])
+    rows = [{"full_path": "objects/example", "cloud_file_id": "example", "text": "report"}]
+    assert len(searcher._apply_query_operators(parse_query("report after:2020-01-01"), rows, {})) == 1
+    assert searcher._apply_query_operators(parse_query("report after:2025-01-01"), rows, {}) == []
+    assert "modified" not in rows[0]
+
+
 def test_search_not_connected_raises_connection_error() -> None:
     s = _make_searcher(connected=False)
     with pytest.raises(ConnectionError):
@@ -1494,7 +1507,7 @@ def test_answer_documents_fails_closed_when_filter_raises() -> None:
 def test_answer_fact_question_applies_result_filter() -> None:
     """Фильтр обязан получить кандидатов обеих веток поиска — векторной и лексической."""
     s = _searcher_returning([_SECRET_DOC])
-    s._discover_entity_aliases = lambda entities: []
+    s._discover_entity_aliases = lambda entities, **kwargs: []
     s._lexical_catalog_search = lambda **_kwargs: [
         {"type": "file_metadata", "full_path": _SECRET_DOC["full_path"]}
     ]

@@ -25,6 +25,7 @@
   "index_defer_fulltext": false,
   "index_default_stage": "all",
   "indexer_heartbeat_path": "data/indexer_heartbeat.json",
+  "index_alerts_enabled": true,
   "index_exclude_patterns": [
     "**/.git/**",
     "**/node_modules/**",

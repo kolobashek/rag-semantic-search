@@ -181,7 +181,16 @@ def ensure_collection(
     Returns `True` when the collection was recreated and state should be cleared
     by the caller.
     """
-    existing = [c.name for c in client.get_collections().collections]
+    for attempt in range(4):
+        try:
+            existing = [c.name for c in client.get_collections().collections]
+            break
+        except Exception as exc:
+            transient = isinstance(exc, TimeoutError) or is_transient_connection_error(exc)
+            if not transient or attempt == 3:
+                raise
+            logger.warning("Qdrant collection probe failed; retry %d/3", attempt + 1)
+            time.sleep(_transient_delay(attempt))
     if collection_name in existing:
         if recreate:
             logger.info("Пересоздание коллекции %s…", collection_name)

@@ -1500,7 +1500,7 @@ def render_explorer_screen(
                     query = str(folder_search.value or "").strip()
                     if not query:
                         return
-                    await choose_query_fn(f"{query} path:{cd_path}" if cd_path else query)
+                    await choose_query_fn(f'{query} path:"{cd_path}"' if cd_path else query)
 
                 folder_search.on("keydown.enter", _search_current_folder)
                 ui.button("Дерево", icon="account_tree", on_click=_cd_open_tree_dialog, color=None).props("outline dense no-caps").classes("rag-explorer-mobile-only")
@@ -2639,4 +2639,3 @@ def render_explorer_screen(
     render_entries()
 
 # ── Index / indexing management screen ────────────────────────────────────
-
