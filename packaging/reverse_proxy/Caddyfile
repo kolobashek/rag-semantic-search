@@ -23,3 +23,18 @@ cloud.tsk-nsk.ru {
 		format json
 	}
 }
+
+n8n.specmash.su {
+    encode zstd gzip
+    handle /eva-media/* {
+        reverse_proxy 192.168.1.247:18882
+    }
+    handle {
+        reverse_proxy 192.168.1.247:5678
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+}
