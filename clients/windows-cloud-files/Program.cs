@@ -119,6 +119,7 @@ internal static class Program
         CloudFilesProvider? activeProvider = null;
         object runtimeSync = new();
         bool restartRequested = false;
+        bool reauthorizeRequested = false;
         string unregisterRoot = "";
         bool showTray = !once && runSeconds <= 0;
         TrayApplicationContext? tray = null;
@@ -137,6 +138,16 @@ internal static class Program
             }
             shutdown.Cancel();
             tray?.Stop();
+        }
+
+        void RequestAuthorization()
+        {
+            lock (runtimeSync)
+            {
+                reauthorizeRequested = true;
+            }
+            AppLog.Info("Device authorization requested; stopping synchronization before restart.");
+            RequestStop(restart: true);
         }
 
         if (showTray)
@@ -198,6 +209,7 @@ internal static class Program
                         }
                     },
                     requestRestart: () => RequestStop(restart: true),
+                    requestAuthorization: RequestAuthorization,
                     requestExit: () => RequestStop(restart: false),
                     applicationToken: shutdown.Token);
                 trayReady.Set();
@@ -223,8 +235,17 @@ internal static class Program
         {
             AppLog.Info($"Starting provider {AppDefaults.Version} for {config.Server}.");
             bool firstAuthorization = config.Token.Length == 0;
-            if (config.Token.Length == 0)
+            using CloudDriveApi api = new(config.Server, config.Token);
+            string registeredClientId = await SessionAuthorization.RegisterAsync(
+                config.Token,
+                token =>
+                {
+                    api.SetCredentials(config.Server, token);
+                    return api.RegisterAsync(config.DeviceId, Environment.MachineName, shutdown.Token);
+                },
+                async () =>
             {
+                firstAuthorization = true;
                 status.SetState(ClientRunState.Authorizing, "Ожидание подтверждения входа…");
                 DeviceTokenResponse auth = await CloudDriveApi.AuthorizeDeviceAsync(config.Server, shutdown.Token);
                 config.Token = auth.Token;
@@ -232,11 +253,12 @@ internal static class Program
                 {
                     config.Server = auth.Server.TrimEnd('/');
                 }
-            }
-
-            using CloudDriveApi api = new(config.Server, config.Token);
-            config.ClientId = await api.RegisterAsync(config.DeviceId, Environment.MachineName, shutdown.Token);
+                return config.Token;
+            });
+            SessionAuthorization.ValidateClientIdentity(config.ClientId, registeredClientId);
+            config.ClientId = registeredClientId;
             store.SaveConfig(config);
+            api.SessionExpired += RequestAuthorization;
 
             await using CloudFilesProvider provider = new(config, store, api, status);
             lock (runtimeSync)
@@ -287,6 +309,10 @@ internal static class Program
         {
             exitCode = 0;
         }
+        catch (HttpRequestException) when (shutdown.IsCancellationRequested && reauthorizeRequested)
+        {
+            exitCode = 0;
+        }
         catch (Exception exception)
         {
             lock (runtimeSync)
@@ -331,6 +357,12 @@ internal static class Program
         }
         if (restart)
         {
+            if (reauthorizeRequested)
+            {
+                // Provider disposal has completed. Preserve the root, cache and sync state.
+                config.Token = "";
+                store.SaveConfig(config);
+            }
             if (oldRegisteredRoot.Length > 0)
             {
                 try
@@ -342,6 +374,8 @@ internal static class Program
                     AppLog.Error($"Не удалось отменить регистрацию старого корня {oldRegisteredRoot}.", exception);
                 }
             }
+            // Release the single-instance handle before the new process checks it.
+            singleInstance.Dispose();
             WindowsBootstrap.RestartInstalled();
         }
         return exitCode;

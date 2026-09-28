@@ -30,6 +30,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         Func<CloudFilesProvider?> provider,
         Func<ClientSettingsSelection, Task> saveSettings,
         Action requestRestart,
+        Action requestAuthorization,
         Action requestExit,
         CancellationToken applicationToken)
     {
@@ -81,6 +82,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add("Открыть облако в браузере", null, (_, _) => OpenUrl(_config.Server + "/explorer"));
         menu.Items.Add("Открыть журнал", null, (_, _) => OpenLog());
         menu.Items.Add("Перезапустить клиент", null, (_, _) => _requestRestart());
+        menu.Items.Add("Войти заново…", null, (_, _) => requestAuthorization());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("О программе…", null, (_, _) => ShowAbout());
         menu.Items.Add("Выход", null, (_, _) => _requestExit());

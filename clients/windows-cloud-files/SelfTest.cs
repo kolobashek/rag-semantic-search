@@ -6,6 +6,7 @@ internal static class SelfTest
 {
     public static void Run()
     {
+        TestSessionAuthorizationAsync().GetAwaiter().GetResult();
         Equal("https://cloud.tsk-nsk.ru", new ProviderConfig().Server);
         Equal(false, WindowsBootstrap.IsInteractiveInstall(["--self-test"]));
         Equal("Folder/file.txt", CloudPath.Normalize("/Folder\\file.txt/"));
@@ -235,6 +236,65 @@ internal static class SelfTest
                 Directory.Delete(temporary, true);
             }
         }
+    }
+
+    private static async Task TestSessionAuthorizationAsync()
+    {
+        SessionAuthorization.ValidateClientIdentity("", "first-client");
+        SessionAuthorization.ValidateClientIdentity("same", "same");
+        Throws<InvalidOperationException>(() => SessionAuthorization.ValidateClientIdentity("old", "other"));
+        int prompts = 0;
+        int attempts = 0;
+        Task<string> Authorize()
+        {
+            prompts++;
+            return Task.FromResult("new-token");
+        }
+        Equal("client", await SessionAuthorization.RegisterAsync("valid", _ => Task.FromResult("client"), Authorize));
+        Equal(0, prompts);
+        Equal("new-token", await SessionAuthorization.RegisterAsync("", token => Task.FromResult(token), Authorize));
+        Equal(1, prompts);
+        Equal("client", await SessionAuthorization.RegisterAsync("expired", token =>
+        {
+            attempts++;
+            if (token == "expired")
+                throw new HttpRequestException("expired", null, System.Net.HttpStatusCode.Unauthorized);
+            Equal("new-token", token);
+            return Task.FromResult("client");
+        }, Authorize));
+        Equal(2, attempts);
+        Equal(2, prompts);
+
+        foreach (System.Net.HttpStatusCode? code in new System.Net.HttpStatusCode?[]
+                 { System.Net.HttpStatusCode.Forbidden, System.Net.HttpStatusCode.ServiceUnavailable, null })
+        {
+            Throws<HttpRequestException>(() => SessionAuthorization.RegisterAsync("saved",
+                _ => throw new HttpRequestException("failure", null, code), Authorize).GetAwaiter().GetResult());
+        }
+        Equal(2, prompts);
+        Throws<HttpRequestException>(() => SessionAuthorization.RegisterAsync("expired",
+            _ => throw new HttpRequestException("invalid", null, System.Net.HttpStatusCode.Unauthorized),
+            Authorize).GetAwaiter().GetResult());
+        Equal(3, prompts);
+        Throws<OperationCanceledException>(() => SessionAuthorization.RegisterAsync("saved",
+            _ => throw new OperationCanceledException(), Authorize).GetAwaiter().GetResult());
+        Equal(3, prompts);
+
+        int notifications = 0;
+        using SessionExpiryHandler handler = new(() => notifications++, new UnauthorizedTestHandler());
+        using HttpClient client = new(handler);
+        using (await client.GetAsync("https://test.invalid/one")) { }
+        using (await client.GetAsync("https://test.invalid/two")) { }
+        Equal(1, notifications);
+        handler.Reset();
+        using (await client.GetAsync("https://test.invalid/three")) { }
+        Equal(2, notifications);
+    }
+
+    private sealed class UnauthorizedTestHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.Unauthorized));
     }
 
     private static void Equal<T>(T expected, T actual)

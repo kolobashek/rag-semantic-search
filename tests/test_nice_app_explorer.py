@@ -2276,9 +2276,9 @@ def test_registry_acl_filter_uses_one_bulk_snapshot_and_fails_closed() -> None:
 def test_sync_client_version_advertises_files_on_demand_channel() -> None:
     result = cloud_api.api_sync_client_version()
 
-    assert result["cloud_files_version"] == "0.6.1"
+    assert result["cloud_files_version"] == "0.6.2"
     assert "format=cloud-files-exe" in result["cloud_files_download_url"]
-    assert "v=0.6.1" in result["cloud_files_download_url"]
+    assert "v=0.6.2" in result["cloud_files_download_url"]
     assert isinstance(result["has_cloud_files_exe"], bool)
     assert result["cloud_files_channel"] == "stable"
     assert isinstance(result["cloud_files_size_bytes"], int)

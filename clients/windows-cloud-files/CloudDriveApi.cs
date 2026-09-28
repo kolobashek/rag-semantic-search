@@ -14,16 +14,31 @@ internal sealed class CloudDriveApi : IDisposable
     };
 
     private readonly HttpClient _http;
+    private readonly SessionExpiryHandler _sessionHandler;
+    public event Action? SessionExpired;
 
     public CloudDriveApi(string server, string token)
     {
-        _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true })
+        _sessionHandler = new SessionExpiryHandler(
+            () => SessionExpired?.Invoke(), new HttpClientHandler { AllowAutoRedirect = true });
+        _http = new HttpClient(_sessionHandler)
         {
             BaseAddress = new Uri(server.TrimEnd('/') + "/"),
             Timeout = TimeSpan.FromMinutes(10),
         };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"RAGCloudFiles/{AppDefaults.Version}");
+    }
+
+    public void SetCredentials(string server, string token)
+    {
+        // The server is established before the first request; rebinding later is unsafe.
+        if (_http.BaseAddress != new Uri(server.TrimEnd('/') + "/"))
+        {
+            throw new InvalidOperationException("Сервер авторизации изменился. Проверьте адрес в настройках.");
+        }
+        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        _sessionHandler.Reset();
     }
 
     public static async Task<DeviceTokenResponse> AuthorizeDeviceAsync(string server, CancellationToken cancellationToken)
