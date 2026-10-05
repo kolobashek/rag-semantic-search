@@ -1928,12 +1928,12 @@ class CloudDriveRegistryDB:
                 now = _utc_now()
                 conn.execute(
                     "UPDATE cloud_files SET deleted_at=?, updated_at=? "
-                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
+                    "WHERE deleted_at='' AND (path LIKE ? ESCAPE '\\' OR path=?)",
                     (now, now, self._like_subtree(clean_path), clean_path),
                 )
                 conn.execute(
                     "UPDATE cloud_folders SET deleted_at=?, updated_at=? "
-                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
+                    "WHERE deleted_at='' AND (path LIKE ? ESCAPE '\\' OR path=?)",
                     (now, now, self._like_subtree(clean_path), clean_path),
                 )
                 saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
@@ -1976,13 +1976,13 @@ class CloudDriveRegistryDB:
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE cloud_folders SET deleted_at='', updated_at=? "
-                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
-                    (now, self._like_subtree(clean_path), clean_path),
+                    "WHERE deleted_at=? AND (path LIKE ? ESCAPE '\\' OR path=?)",
+                    (now, folder.deleted_at, self._like_subtree(clean_path), clean_path),
                 )
                 conn.execute(
                     "UPDATE cloud_files SET deleted_at='', updated_at=? "
-                    "WHERE path LIKE ? ESCAPE '\\' OR path=?",
-                    (now, self._like_subtree(clean_path), clean_path),
+                    "WHERE deleted_at=? AND (path LIKE ? ESCAPE '\\' OR path=?)",
+                    (now, folder.deleted_at, self._like_subtree(clean_path), clean_path),
                 )
                 saved = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder.id,)).fetchone()
         assert saved is not None

@@ -279,6 +279,21 @@ def _start_cloud_drive_job_worker(cfg: Dict[str, Any]) -> None:
         return
     _CLOUD_JOB_WORKER_STARTED = True
 
+    def _shared_loop() -> None:
+        from rag_catalog.core.rag_core import load_config
+
+        while True:
+            try:
+                current = load_config()
+                if current.get('cloud_drive_enabled') and current.get('cloud_drive_shared_folders'):
+                    service = CloudDriveService.from_config(current)
+                    service.shared_folders.tick(service)
+            except Exception as exc:
+                print(f'[nice_app] shared folder worker: {exc}', file=sys.stderr)
+            time.sleep(60)
+
+    threading.Thread(target=_shared_loop, name='cloud-shared-folders', daemon=True).start()
+
     def _loop() -> None:
         global _CLOUD_AUTOSYNC_LAST_RUN_TS
         from rag_catalog.core.rag_core import load_config  # local import avoids a startup cycle

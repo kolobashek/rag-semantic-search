@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 from ..embedding_collections import resolve_collection_name_from_config
 from .models import CloudDriveImportSource, CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
 from .registry import CloudDriveRegistryDB
+from .shared_folders import SharedFolders, shared_write
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
 
 INDEXABLE_EXTENSIONS = {
@@ -45,9 +46,10 @@ class CloudDriveJobCancelled(RuntimeError):
 
 
 class CloudDriveService:
-    def __init__(self, *, registry: CloudDriveRegistryDB, storage: StorageAdapter) -> None:
+    def __init__(self, *, registry: CloudDriveRegistryDB, storage: StorageAdapter, shared_folders: Optional[list[dict]] = None) -> None:
         self.registry = registry
         self.storage = storage
+        self.shared_folders = SharedFolders(registry, shared_folders) if shared_folders else None
 
     @classmethod
     def from_config(cls, config: Dict[str, object]) -> 'CloudDriveService':
@@ -57,6 +59,7 @@ class CloudDriveService:
         return cls(
             registry=CloudDriveRegistryDB(db_path),
             storage=resolve_storage_adapter(config),
+            shared_folders=config.get('cloud_drive_shared_folders') or None,
         )
 
     def create_bootstrap_job(self, *, catalog_root: str, max_files: Optional[int] = None, import_files: bool = False) -> CloudDriveJob:
@@ -1066,6 +1069,7 @@ class CloudDriveService:
             )
         )
 
+    @shared_write
     def create_folder(self, *, parent_path: str = '', name: str) -> dict:
         folder = self.registry.create_folder(parent_path=parent_path, name=name)
         return {
@@ -1254,7 +1258,7 @@ class CloudDriveService:
 
     def get_download_descriptor(self, path: str) -> dict:
         node = self.registry.get_file_by_path(str(path or '').strip().replace('\\', '/').strip('/'))
-        if node is None:
+        if node is None or node.deleted_at:
             raise RuntimeError(f'Файл не найден: {path}')
         presign = getattr(self.storage, 'presigned_download_url', None)
         if callable(presign):
@@ -1283,6 +1287,7 @@ class CloudDriveService:
             'path': node.path,
         }
 
+    @shared_write
     def upload_file(
         self,
         *,
@@ -1353,6 +1358,7 @@ class CloudDriveService:
             'versions': versions,
         }
 
+    @shared_write
     def move_node(self, *, source_path: str, dest_parent_path: str = '', new_name: str = '') -> dict:
         source_node = self.registry.get_node_by_path(source_path)
         if source_node is None:
@@ -1410,6 +1416,7 @@ class CloudDriveService:
             'deleted_at': folder.deleted_at,
         }
 
+    @shared_write
     def delete_node(self, path: str) -> dict:
         source_node = self.registry.get_node_by_path(path)
         if source_node is None:
@@ -1434,6 +1441,7 @@ class CloudDriveService:
             'deleted_at': folder.deleted_at,
         }
 
+    @shared_write
     def restore_node(self, path: str) -> dict:
         clean_path = str(path or '').strip().replace('\\', '/').strip('/')
         file_row = self.registry.get_file_by_path(clean_path)
@@ -1461,6 +1469,9 @@ class CloudDriveService:
 
     def list_trash(self, *, limit: int = 200) -> dict:
         items = self.registry.list_deleted_nodes(limit=limit)
+        if self.shared_folders:
+            items = [item for item in items if not self.shared_folders.is_expired(
+                item['node_type'], item['id'], item['deleted_at'])]
         return {
             'items': items,
             'count': len(items),
@@ -1834,6 +1845,7 @@ class CloudDriveService:
             )
         return current
 
+    @shared_write
     def import_from_folder(
         self,
         *,
@@ -2006,6 +2018,7 @@ class CloudDriveService:
             'limited': False,
         }
 
+    @shared_write
     def bootstrap_from_catalog(
         self,
         catalog_root: str,
