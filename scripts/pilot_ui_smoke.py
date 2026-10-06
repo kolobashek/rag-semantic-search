@@ -26,7 +26,7 @@ from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 from rag_catalog.ui.helpers import _filter_cloud_drive_search_results
 
-SCREEN_ROUTES = ("search", "explorer", "jobs", "index", "stats", "settings")
+SCREEN_ROUTES = ("search", "explorer", "shifts", "jobs", "index", "stats", "settings")
 VIEWPORTS = ((480, 900), (900, 900), (1280, 900))
 
 
@@ -99,6 +99,7 @@ def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, Any]:
     )
 
     config = {
+        "work_shifts_db_path": str(state / "work_shifts.db"),
         "catalog_path": str(catalog),
         "qdrant_db_path": str(state),
         # A closed HTTP endpoint keeps the smoke isolated and prevents fallback
@@ -149,7 +150,7 @@ def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, Any]:
     if not auth.admin_create_user(
         username="pilot-smoke-user",
         display_name="Pilot Smoke User",
-        password=secrets.token_urlsafe(24),
+        password=password,
         role="user",
         status="active",
         must_change_password=False,
@@ -331,7 +332,76 @@ def _run_browser_smoke(
             page.get_by_label("Пароль", exact=True).fill(password)
             page.get_by_role("button", name="Войти", exact=True).click()
             page.get_by_text("ВНУТРЕННИЙ ПОИСК КОМПАНИИ", exact=True).wait_for(state="visible")
+            page.get_by_role("button", name="Смены", exact=True).wait_for(state="visible")
             _record_check(checks, "authenticated_login", started)
+
+            started = time.perf_counter()
+            page.goto(f"{base_url}/shifts", wait_until="domcontentloaded")
+            new_shift = page.get_by_role("button", name="Новая смена", exact=True)
+            new_shift.click()
+            dialog = page.get_by_role("dialog")
+            dialog.get_by_label("Организация", exact=True).fill("Smoke organization")
+            dialog.get_by_label("Техника / госномер", exact=True).fill("Smoke truck")
+            dialog.get_by_label("Объект", exact=True).fill("Smoke site")
+            dialog.get_by_label("Номер путевого листа", exact=True).fill("SMOKE-001")
+            dialog.get_by_label("Отработано без перерывов, ч", exact=True).fill("8.5")
+            dialog.get_by_role("button", name="Сохранить", exact=True).click()
+            page.get_by_role("cell", name="Smoke truck", exact=True).wait_for()
+            page.get_by_role("row").filter(has_text="Smoke truck").get_by_role("checkbox").click()
+            page.get_by_role("row").filter(has_text="Smoke truck").locator('[aria-checked="true"]').wait_for()
+            page.get_by_role("button", name="На проверку", exact=True).click()
+            page.get_by_role("dialog").get_by_role("button", name="Подтвердить", exact=True).click()
+            page.get_by_role("cell", name="На проверке", exact=True).wait_for()
+            page.get_by_role("row").filter(has_text="Smoke truck").get_by_role("checkbox").click()
+            page.get_by_role("row").filter(has_text="Smoke truck").locator('[aria-checked="true"]').wait_for()
+            page.get_by_role("button", name="Подтвердить", exact=True).click()
+            page.get_by_role("dialog").get_by_role("button", name="Подтвердить", exact=True).click()
+            page.get_by_role("cell", name="Подтверждено", exact=True).wait_for()
+            page.get_by_role("row").filter(has_text="Smoke truck").get_by_role("checkbox").click()
+            page.get_by_role("button", name="В черновик", exact=True).click()
+            page.get_by_role("dialog").get_by_label("Причина исправления").fill("Smoke correction")
+            page.get_by_role("dialog").get_by_role("button", name="Подтвердить", exact=True).click()
+            page.get_by_role("cell", name="Черновик", exact=True).wait_for()
+            page.get_by_role("row").filter(has_text="Smoke truck").get_by_role("checkbox").click()
+            page.get_by_role("button", name="Изменить черновик", exact=True).click()
+            page.get_by_role("dialog").get_by_label("Комментарий", exact=True).fill("Corrected")
+            page.set_viewport_size({"width": 480, "height": 900})
+            page.wait_for_timeout(500)
+            if _layout_probe(page)["horizontal_overflow"]:
+                raise RuntimeError("Shift editor overflows mobile viewport")
+            page.screenshot(path=str(artifact_dir / "shift-editor-480.png"), full_page=True)
+            page.get_by_role("dialog").get_by_role("button", name="Сохранить", exact=True).click()
+            page.get_by_role("dialog").wait_for(state="hidden")
+            page.set_viewport_size({"width": 1280, "height": 900})
+            page.get_by_role("row").filter(has_text="Smoke truck").get_by_role("checkbox").click()
+            page.get_by_role("button", name="История изменений", exact=True).click()
+            page.get_by_role("dialog").get_by_text("История смены №1", exact=True).wait_for()
+            page.get_by_role("dialog").get_by_role("button", name="Закрыть", exact=True).click()
+            with page.expect_download() as download:
+                page.get_by_role("button", name="Выгрузить CSV", exact=True).click()
+            downloaded = download.value
+            content = Path(downloaded.path()).read_text(encoding="utf-8-sig")
+            if "SMOKE-001" not in content or "Corrected" not in content:
+                raise RuntimeError("Shift CSV lost saved values")
+            _record_check(checks, "shift_create_submit_approve_reopen_edit_history_export", started)
+
+            started = time.perf_counter()
+            user_context = browser.new_context(viewport={"width": 1280, "height": 900})
+            try:
+                user_page = user_context.new_page()
+                user_page.goto(f"{base_url}/shifts", wait_until="domcontentloaded")
+                user_page.get_by_label("Логин или email", exact=True).fill("pilot-smoke-user")
+                user_page.get_by_label("Пароль", exact=True).fill(password)
+                user_page.get_by_role("button", name="Войти", exact=True).click()
+                user_page.get_by_text("Смен: 0", exact=False).wait_for()
+                if user_page.get_by_role("cell", name="Smoke truck", exact=True).count():
+                    raise RuntimeError("Another employee's shift leaked into regular user's journal")
+                if user_page.get_by_role("button", name="Подтвердить", exact=True).count():
+                    raise RuntimeError("Regular user sees approval action")
+                _record_check(checks, "shift_user_ui_isolation", started)
+            finally:
+                user_context.close()
+            page.goto(f"{base_url}/search", wait_until="domcontentloaded")
 
             started = time.perf_counter()
             query = "договор поставки TEST-2026"
@@ -421,6 +491,9 @@ def _run_browser_smoke(
                         raise RuntimeError(f"Навигация недоступна на /{screen} при {width}px.")
                     if int(probe["main_text_length"] or 0) < 1:
                         raise RuntimeError(f"Пустой main на /{screen} при {width}px.")
+                    if screen == "shifts":
+                        page.get_by_role("cell", name="Smoke truck", exact=True).wait_for()
+                        page.screenshot(path=str(artifact_dir / f"shifts-{width}.png"), full_page=True)
                     _record_check(
                         checks,
                         "responsive_screen",

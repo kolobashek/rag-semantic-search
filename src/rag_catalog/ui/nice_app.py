@@ -31,6 +31,7 @@ from . import index_view as _index_view
 from . import jobs_view as _jobs_view
 from . import settings_view as _settings_view
 from . import stats_view as _stats_view
+from . import work_shifts_view as _work_shifts_view
 from .auth_session import (
     apply_login_session,
     logout_session,
@@ -347,6 +348,7 @@ def _search_preset_items(state: PageState, *, limit: int = 8) -> List[tuple[str,
 APP_SCREEN_SPECS = (
     {"key": "search", "route": "/search", "title": "Поиск", "label": "Поиск", "icon": "search", "header": True, "drawer": True},
     {"key": "explorer", "route": "/explorer", "title": "Проводник", "label": "Файлы", "icon": "folder", "header": True, "drawer": True},
+    {"key": "shifts", "route": "/shifts", "title": "Смены", "label": "Смены", "icon": "event_note", "header": True, "drawer": True},
     {"key": "jobs", "route": "/jobs", "title": "Задачи", "label": "Задачи", "icon": "queue", "header": True, "drawer": True, "admin_only": True},
     {"key": "index", "route": "/index", "title": "Индекс", "label": "Индекс", "icon": "filter_center_focus", "drawer_icon": "analytics", "header": True, "drawer": True, "admin_only": True},
     {"key": "stats", "route": "/stats", "title": "Аналитика", "label": "Аналитика", "icon": "query_stats", "header": False, "drawer": True, "admin_only": True},
@@ -3306,6 +3308,8 @@ def _build_page(
                     render_stats_screen()
                 elif state.screen == "jobs":
                     render_jobs_screen()
+                elif state.screen == "shifts":
+                    _work_shifts_view.render_work_shifts(state)
                 else:
                     render_search_screen()
             initialized_screens.add(current_screen)
@@ -3438,6 +3442,11 @@ def stats_page() -> None:
 @ui.page("/jobs")
 def jobs_page() -> None:
     _build_page("jobs")
+
+
+@ui.page("/shifts")
+def shifts_page() -> None:
+    _build_page("shifts")
 
 
 @ui.page("/cloud")

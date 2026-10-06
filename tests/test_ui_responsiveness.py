@@ -41,10 +41,11 @@ def test_primary_screen_registry_covers_all_route_pages() -> None:
     specs = list(nice_app.APP_SCREEN_SPECS)
     keys = {str(spec["key"]) for spec in specs}
 
-    assert keys == {"search", "explorer", "jobs", "index", "stats", "settings"}
+    assert keys == {"search", "explorer", "shifts", "jobs", "index", "stats", "settings"}
     assert nice_app.APP_SCREEN_ROUTES == {
         "search": "/search",
         "explorer": "/explorer",
+        "shifts": "/shifts",
         "jobs": "/jobs",
         "index": "/index",
         "stats": "/stats",
@@ -74,10 +75,10 @@ def test_navigation_registry_marks_admin_and_public_screens() -> None:
     header_keys = {key for key, spec in specs.items() if spec.get("header")}
     drawer_keys = {key for key, spec in specs.items() if spec.get("drawer")}
 
-    assert public_keys == {"search", "explorer", "settings"}
+    assert public_keys == {"search", "explorer", "shifts", "settings"}
     assert admin_keys == {"jobs", "index", "stats"}
-    assert header_keys == {"search", "explorer", "jobs", "index"}
-    assert drawer_keys == {"search", "explorer", "jobs", "index", "stats"}
+    assert header_keys == {"search", "explorer", "shifts", "jobs", "index"}
+    assert drawer_keys == {"search", "explorer", "shifts", "jobs", "index", "stats"}
 
 
 def test_jobs_screen_rejects_regular_user_before_rendering() -> None:
