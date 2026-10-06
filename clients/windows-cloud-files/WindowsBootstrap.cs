@@ -14,6 +14,7 @@ internal static class WindowsBootstrap
         @"Software\Microsoft\Windows\CurrentVersion\Uninstall\RAGCloudFiles";
     private const string CommandStorePath =
         @"Software\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell";
+    private const string ShellCommandsKey = @"RAGCloudFiles.Commands";
     private static readonly string[] ClassicShellTargets =
     [
         @"Software\Classes\*\shell\RAGCloudFiles",
@@ -178,7 +179,7 @@ internal static class WindowsBootstrap
             appKey.SetValue("Executable", InstalledExecutable, RegistryValueKind.String);
         }
         ApplyStartup(config.StartWithWindows);
-        InstallClassicContextMenu(config.RootPath);
+        RefreshContextMenu(config.RootPath);
         RegisterInstalledApplication();
     }
 
@@ -480,6 +481,8 @@ internal static class WindowsBootstrap
         {
             Registry.CurrentUser.DeleteSubKeyTree(target, throwOnMissingSubKey: false);
         }
+        Registry.CurrentUser.DeleteSubKeyTree(
+            $@"Software\Classes\{ShellCommandsKey}", throwOnMissingSubKey: false);
         foreach (string command in new[]
                  {
                      "RAGCloudFiles.Share",
@@ -564,7 +567,7 @@ internal static class WindowsBootstrap
         return start;
     }
 
-    private static void InstallClassicContextMenu(string rootPath)
+    internal static void RefreshContextMenu(string rootPath)
     {
         string[] commandNames =
         [
@@ -573,14 +576,16 @@ internal static class WindowsBootstrap
             "RAGCloudFiles.ManageAccess",
             "RAGCloudFiles.KeepOffline",
         ];
-        string appliesTo = $"System.ItemPathDisplay:~=\"{Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar)}\"";
+        IReadOnlyList<string> roots = VirtualDriveManager.GetRootAliases(rootPath);
+        string appliesTo = BuildContextMenuFilter(roots);
         foreach (string target in ClassicShellTargets)
         {
             using RegistryKey key = Registry.CurrentUser.CreateSubKey(target);
             key.SetValue("MUIVerb", "RAG Cloud", RegistryValueKind.String);
             key.SetValue("Icon", InstalledExecutable, RegistryValueKind.String);
             key.SetValue("Position", "Top", RegistryValueKind.String);
-            key.SetValue("SubCommands", string.Join(';', commandNames), RegistryValueKind.String);
+            key.DeleteValue("SubCommands", throwOnMissingValue: false);
+            key.SetValue("ExtendedSubCommandsKey", ShellCommandsKey, RegistryValueKind.String);
             key.SetValue("AppliesTo", appliesTo, RegistryValueKind.String);
         }
 
@@ -588,11 +593,19 @@ internal static class WindowsBootstrap
         InstallClassicCommand(commandNames[1], "Скопировать ссылку", "copy-link");
         InstallClassicCommand(commandNames[2], "Управление доступом…", "manage-access");
         InstallClassicCommand(commandNames[3], "Всегда хранить на этом устройстве", "keep-offline");
+        AppLog.Info($"Explorer context menu registered for {string.Join(", ", roots)}.");
     }
+
+    internal static string BuildContextMenuFilter(IEnumerable<string> roots) =>
+        string.Join(" OR ", roots.Select(root =>
+        {
+            string path = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+            return $"(System.ItemPathDisplay:=\"{path}\" OR System.ItemPathDisplay:~<\"{path}\\\")";
+        }).Distinct(StringComparer.OrdinalIgnoreCase));
 
     private static void InstallClassicCommand(string name, string label, string action)
     {
-        using RegistryKey key = Registry.CurrentUser.CreateSubKey($@"{CommandStorePath}\{name}");
+        using RegistryKey key = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ShellCommandsKey}\shell\{name}");
         key.SetValue("", label, RegistryValueKind.String);
         key.SetValue("Icon", InstalledExecutable, RegistryValueKind.String);
         using RegistryKey command = key.CreateSubKey("command");

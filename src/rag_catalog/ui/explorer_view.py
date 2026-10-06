@@ -50,7 +50,21 @@ from .state import (
 
 _EXPLORER_PAGE_SIZE = 40
 _TREE_CHILD_LIMIT = 24
-_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.6.8"
+_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.6.9"
+
+
+def _cloud_drive_internal_share_links(
+    service: CloudDriveService, paths: List[str], can_read: Callable[[str], bool]
+) -> List[str]:
+    # These URLs never grant access: the explorer checks the recipient's session and ACL.
+    if not all(can_read(path) for path in paths):
+        raise PermissionError("Нет доступа к одному из выбранных объектов.")
+    links = []
+    for path in paths:
+        node = service.get_node(path)
+        kind = "folder" if node["node_type"] == "folder" else "file"
+        links.append(f"/explorer?path={quote(path, safe='')}&kind={kind}")
+    return links
 
 
 def _cloud_node_modified_timestamp(node: Any) -> float:
@@ -893,12 +907,40 @@ def render_explorer_screen(
             if not clean_paths:
                 ui.notify("Ничего не выбрано.", type="warning")
                 return
-            blocked = [path for path in clean_paths if not _cd_can(path, "admin")]
+            blocked = [path for path in clean_paths if not _cd_can(path, "editor")]
             if blocked:
-                ui.notify(f"Нет прав администрирования: {blocked[0]}", type="negative")
+                try:
+                    links = _cloud_drive_internal_share_links(svc, clean_paths, _cd_can)
+                except Exception as exc:
+                    ui.notify(str(exc), type="negative")
+                    return
+
+                async def _copy_internal_links() -> None:
+                    try:
+                        await ui.run_javascript(
+                            "return navigator.clipboard.writeText("
+                            f"{json.dumps(links)}.map(p => window.location.origin + p).join('\\n'))"
+                        )
+                        ui.notify("Ссылка скопирована." if len(links) == 1 else "Ссылки скопированы.", type="positive")
+                    except Exception:
+                        ui.notify("Не удалось скопировать ссылку в буфер обмена.", type="negative")
+
+                with ui.dialog() as link_dialog, ui.card().classes("p-4 gap-3 w-full max-w-xl"):
+                    ui.label(verb).classes("text-lg font-semibold")
+                    ui.label("Только для сотрудников с доступом к файлу.").classes("rag-meta")
+                    for path in clean_paths[:12]:
+                        ui.label(path).classes("w-full break-words")
+                    ui.label("Для выдачи доступа и публичных ссылок нужны права редактора.").classes("rag-meta")
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Скопировать ссылку" if len(links) == 1 else "Скопировать ссылки",
+                                  icon="link", on_click=_copy_internal_links)
+                        ui.button("Закрыть", on_click=link_dialog.close).props("flat")
+                link_dialog.open()
                 return
 
             single_path = clean_paths[0] if len(clean_paths) == 1 else ""
+            is_global_admin = _is_admin(page_state)
+            can_manage_access = all(_cd_can(path, "admin") for path in clean_paths)
             public_links_enabled = bool(page_state.cfg.get("cloud_drive_public_links_enabled"))
             try:
                 share_groups = _get_auth_db(page_state).list_groups(include_archived=True)
@@ -931,7 +973,8 @@ def render_explorer_screen(
                 with ui.expansion("Внутренний доступ", icon="person_add", value=True).classes("w-full"):
                     with ui.row().classes("w-full gap-2 items-center"):
                         share_subject_type = ui.select(
-                            {"user": "Пользователь", "group": "Группа", "role": "Роль", "*": "Все"},
+                            ({"user": "Пользователь", "group": "Группа", "role": "Роль", "*": "Все"}
+                             if is_global_admin else {"user": "Пользователь", "group": "Группа", "*": "Все"}),
                             value="user",
                             label="Кому",
                         ).props("dense outlined").classes("min-w-40")
@@ -939,7 +982,8 @@ def render_explorer_screen(
                         share_group_id = ui.select(share_group_options, label="Группа").props("dense outlined").classes("flex-1")
                         share_group_id.set_visibility(False)
                     share_access = ui.select(
-                        {"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"},
+                        ({"viewer": "Просмотр", "editor": "Редактирование", "admin": "Администрирование"}
+                         if is_global_admin else {"viewer": "Просмотр", "editor": "Редактирование"}),
                         value="viewer",
                         label="Уровень доступа",
                     ).props("dense outlined").classes("w-full max-w-xs")
@@ -980,13 +1024,25 @@ def render_explorer_screen(
                                     with ui.column().classes("gap-0 min-w-0 flex-1"):
                                         ui.label(f"{subject_labels.get(subject_type, subject_type)}: {subject_name}").classes("text-sm truncate")
                                         ui.label(f"{access_labels.get(access_level, access_level)} · {scope}").classes("rag-meta text-xs")
-                                    ui.button(
+                                    revoke_button = ui.button(
                                         icon="person_remove",
                                         on_click=_make_permission_revoke_handler(permission_id),
                                     ).props('flat dense round size=sm color=negative aria-label="Отозвать доступ"').tooltip("Отозвать доступ")
+                                    revoke_button.set_enabled(can_manage_access and (is_global_admin or resource_id in direct_ids))
 
                     async def _revoke_internal_share(permission_id: str) -> None:
                         try:
+                            if not _cd_can(single_path, "admin"):
+                                raise PermissionError("Для отзыва доступа нужны права администратора папки.")
+                            node = svc.registry.get_node_by_path(single_path)
+                            direct_ids = {single_path, str(getattr(node, "id", "") or "")}
+                            if not is_global_admin and not any(
+                                str(item.get("id") or "") == permission_id
+                                and item.get("resource_type") in {"path", "file", "folder"}
+                                and str(item.get("resource_id") or "") in direct_ids
+                                for item in svc.list_permissions(path=single_path)
+                            ):
+                                raise PermissionError("Унаследованный доступ изменяется в исходной папке.")
                             ok = await run.io_bound(svc.revoke_permission, permission_id)
                             if not ok:
                                 raise RuntimeError("Правило уже удалено или не найдено.")
@@ -1019,9 +1075,15 @@ def render_explorer_screen(
                                 ui.notify("Укажите пользователя, группу или роль.", type="warning")
                                 return
                             access_level = str(share_access.value or "viewer").strip().lower()
+                            if not is_global_admin and (
+                                access_level not in {"viewer", "editor"} or subject_type not in {"user", "group", "*"}
+                            ):
+                                raise PermissionError("Можно выдавать только просмотр или редактирование.")
                             granted: list[dict[str, str]] = []
                             for path in clean_paths:
                                 def _grant_path(path: str = path) -> Dict[str, str]:
+                                    if not _cd_can(path, "editor"):
+                                        raise PermissionError("Нет прав редактора.")
                                     return svc.grant_path_permission(
                                         subject_type=subject_type,
                                         subject_id=subject_id,
@@ -1105,6 +1167,10 @@ def render_explorer_screen(
 
                         async def _revoke_public_link(token: str) -> None:
                             try:
+                                if not _cd_can(single_path, "editor"):
+                                    raise PermissionError("Нет прав редактора.")
+                                if token not in {str(link.get("token") or "") for link in svc.list_share_links(path=single_path)}:
+                                    raise PermissionError("Ссылка не принадлежит выбранному объекту.")
                                 ok = await run.io_bound(svc.revoke_share_link, token)
                                 if not ok:
                                     raise RuntimeError("Ссылка уже отозвана или не найдена.")
@@ -1124,6 +1190,10 @@ def render_explorer_screen(
                             try:
                                 path = clean_paths[0]
                                 def _create_link() -> Dict[str, str]:
+                                    from rag_catalog.core.rag_core import load_config
+
+                                    if not _cd_can(path, "editor") or not load_config().get("cloud_drive_public_links_enabled"):
+                                        raise PermissionError("Нет прав редактора или публичные ссылки отключены.")
                                     return svc.create_share_link(
                                         path=path,
                                         created_by=_username(page_state),

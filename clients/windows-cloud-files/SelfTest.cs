@@ -156,6 +156,26 @@ internal static class SelfTest
             Equal("", ShellCommandHandler.GetCloudPath(root, root));
             Throws<InvalidDataException>(() =>
                 ShellCommandHandler.GetCloudPath(root, Path.Combine(temporary, "outside.txt")));
+            string aliasLetter = VirtualDriveManager.EnsureMounted(root, "Z");
+            try
+            {
+                string aliasRoot = aliasLetter + ":\\";
+                Equal(unicodePath, ShellCommandHandler.GetCloudPath(root,
+                    Path.Combine(aliasRoot, "Документы", "Смета 2026.xlsx")));
+                Equal("", ShellCommandHandler.GetCloudPath(root, aliasRoot));
+                Equal(true, VirtualDriveManager.GetRootAliases(root).Contains(aliasRoot));
+                string menuFilter = WindowsBootstrap.BuildContextMenuFilter(
+                    VirtualDriveManager.GetRootAliases(root));
+                Equal(true, menuFilter.Contains($"System.ItemPathDisplay:~<\"{aliasRoot}\""));
+                Equal(true, menuFilter.Contains($"System.ItemPathDisplay:~<\"{root}\\\""));
+                Throws<InvalidDataException>(() => ShellCommandHandler.GetCloudPath(
+                    Path.Combine(temporary, "different-root"), Path.Combine(aliasRoot, "Документы")));
+            }
+            finally
+            {
+                VirtualDriveManager.RemoveForRoot(root);
+            }
+            Equal(@"\\server\share\file.txt", VirtualDriveManager.ResolveDosPath(@"\\server\share\file.txt"));
             CloudNode matchingRemote = new()
             {
                 NodeType = "file",

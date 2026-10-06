@@ -591,7 +591,7 @@ def api_client_diagnostics_download(client_id: str, authorization: AuthHeader = 
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.6.8"
+_CLOUD_FILES_VERSION = "0.6.9"
 _CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 
@@ -1231,7 +1231,7 @@ def api_cloud_drive_permissions(
                 status_code=403, detail="Пользователь может открыть доступ всем, пользователю или группе."
             )
         _require_cloud_drive_path_access(
-            cfg, user, path, service=service, required_level="admin", audit_action="permissions_grant"
+            cfg, user, path, service=service, required_level="editor", audit_action="permissions_grant"
         )
     try:
         if str(path or "").strip() or not str(resource_type or "").strip():
@@ -1274,7 +1274,7 @@ def api_cloud_drive_permissions_list(
         if not str(path or "").strip():
             raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
         _require_cloud_drive_path_access(
-            cfg, user, path, service=service, required_level="admin", audit_action="permissions_list"
+            cfg, user, path, service=service, required_level="editor", audit_action="permissions_list"
         )
     return service.list_permissions(path=path)
 
@@ -1294,7 +1294,13 @@ def api_cloud_drive_permission_revoke(
         _require_cloud_drive_path_access(
             cfg, user, path, service=service, required_level="admin", audit_action="permissions_revoke"
         )
-        allowed_ids = {str(item.get("id") or "") for item in service.list_permissions(path=path)}
+        node = service.registry.get_node_by_path(path)
+        direct_ids = {str(path).strip().replace("\\", "/").strip("/"), str(getattr(node, "id", "") or "")}
+        allowed_ids = {
+            str(item.get("id") or "") for item in service.list_permissions(path=path)
+            if item.get("resource_type") in {"path", "file", "folder"}
+            and str(item.get("resource_id") or "") in direct_ids
+        }
         if str(permission_id or "").strip() not in allowed_ids:
             raise HTTPException(status_code=403, detail="Нет прав на отзыв этого доступа.")
     ok = service.revoke_permission(permission_id)
@@ -1316,7 +1322,7 @@ def api_cloud_drive_share_link_create(
     _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
     _require_cloud_drive_path_access(
-        cfg, user, path, service=service, required_level="admin", audit_action="share_link_create"
+        cfg, user, path, service=service, required_level="editor", audit_action="share_link_create"
     )
     try:
         link = service.create_share_link(
@@ -1354,7 +1360,7 @@ def api_cloud_drive_share_links(
         if not clean_path:
             raise HTTPException(status_code=400, detail="Для пользователя нужен path.")
         _require_cloud_drive_path_access(
-            cfg, user, clean_path, service=service, required_level="admin", audit_action="share_links_list"
+            cfg, user, clean_path, service=service, required_level="editor", audit_action="share_links_list"
         )
     links = service.list_share_links(path=clean_path, include_inactive=bool(include_inactive))
     _audit_cloud_drive_api_event(cfg, user, "share_links_list", details={"path": clean_path, "count": len(links)})
@@ -1375,7 +1381,7 @@ def api_cloud_drive_share_link_revoke(
     if not clean_path:
         raise HTTPException(status_code=400, detail="Для отзыва публичной ссылки нужен path.")
     _require_cloud_drive_path_access(
-        cfg, user, clean_path, service=service, required_level="admin", audit_action="share_link_revoke"
+        cfg, user, clean_path, service=service, required_level="editor", audit_action="share_link_revoke"
     )
     allowed_tokens = {
         str(item.get("token") or "") for item in service.list_share_links(path=clean_path, include_inactive=True)

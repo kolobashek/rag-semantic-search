@@ -92,6 +92,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             VirtualDriveManager.RemoveForRoot(_root);
         }
 
+        WindowsBootstrap.RefreshContextMenu(_root);
+
         await NetworkRecovery.ExecuteAsync(async () =>
         {
             _status.SetState(ClientRunState.Syncing, "Подготовка облачной папки…");

@@ -83,8 +83,8 @@ internal static class ShellCommandHandler
             throw new InvalidDataException("Проводник не передал выбранный файл или папку.");
         }
 
-        string root = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar);
-        string candidate = Path.GetFullPath(selectedPath).TrimEnd(Path.DirectorySeparatorChar);
+        string root = VirtualDriveManager.ResolveDosPath(rootPath).TrimEnd(Path.DirectorySeparatorChar);
+        string candidate = VirtualDriveManager.ResolveDosPath(selectedPath).TrimEnd(Path.DirectorySeparatorChar);
         if (!candidate.Equals(root, StringComparison.OrdinalIgnoreCase) &&
             !candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
         {

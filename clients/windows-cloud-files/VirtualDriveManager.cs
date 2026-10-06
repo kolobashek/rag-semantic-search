@@ -89,6 +89,50 @@ internal static class VirtualDriveManager
         return candidates;
     }
 
+    internal static string ResolveDosPath(string path)
+    {
+        string resolved = Path.GetFullPath(path);
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        while (resolved.Length >= 3 && resolved[1] == ':')
+        {
+            if (!seen.Add(resolved[..2]))
+            {
+                throw new InvalidDataException("Cyclic virtual drive mapping.");
+            }
+            string? target = QueryTarget(resolved[..2]);
+            if (target is null || !target.StartsWith(@"\??\", StringComparison.Ordinal) ||
+                target.Length < 7 || target[5] != ':' || target[6] != '\\')
+            {
+                return resolved;
+            }
+
+            resolved = Path.GetFullPath(Path.Combine(target[4..], resolved[3..]));
+        }
+
+        return resolved;
+    }
+
+    internal static IReadOnlyList<string> GetRootAliases(string rootPath)
+    {
+        string root = ResolveDosPath(rootPath).TrimEnd(Path.DirectorySeparatorChar);
+        List<string> aliases = [Path.GetFullPath(rootPath), root];
+        foreach (char letter in Enumerable.Range('D', 'Z' - 'D' + 1).Select(value => (char)value))
+        {
+            string drive = $"{letter}:\\";
+            try
+            {
+                if (QueryTarget($"{letter}:") is not null &&
+                    TargetsEqual(ResolveDosPath(drive), root))
+                {
+                    aliases.Add(drive);
+                }
+            }
+            catch (InvalidDataException) { }
+        }
+
+        return aliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
     private static string ToDosDeviceTarget(string rootPath) =>
         @"\??\" + Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar);
 
