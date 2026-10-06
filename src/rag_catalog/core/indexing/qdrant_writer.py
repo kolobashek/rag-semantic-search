@@ -18,7 +18,9 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    HnswConfigDiff,
     MatchValue,
+    OptimizersConfigDiff,
     PayloadSchemaType,
     PointStruct,
     Snowball,
@@ -229,7 +231,9 @@ def create_collection(
     logger.info("Создание коллекции %s…", collection_name)
     client.create_collection(
         collection_name=collection_name,
-        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE, on_disk=True),
+        hnsw_config=HnswConfigDiff(on_disk=True, max_indexing_threads=2),
+        optimizers_config=OptimizersConfigDiff(max_optimization_threads=1),
     )
     ensure_payload_indexes(
         client,

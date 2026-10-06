@@ -13,6 +13,7 @@ class _FakeClient:
         self.collections = list(collections or [])
         self.deleted_collections: list[str] = []
         self.created: list[tuple[str, object]] = []
+        self.creation_options: list[dict] = []
         self.deleted_points: list[dict] = []
         self.upserted: list[tuple[str, int]] = []
         self.payload_indexes: list[dict] = []
@@ -26,8 +27,9 @@ class _FakeClient:
         if name in self.collections:
             self.collections.remove(name)
 
-    def create_collection(self, *, collection_name: str, vectors_config) -> None:
+    def create_collection(self, *, collection_name: str, vectors_config, **kwargs) -> None:
         self.created.append((collection_name, vectors_config))
+        self.creation_options.append(kwargs)
         self.collections.append(collection_name)
 
     def create_payload_index(self, **kwargs) -> None:
@@ -81,6 +83,10 @@ def test_ensure_collection_creates_missing_collection() -> None:
 
     assert recreated is False
     assert client.created[0][0] == "catalog"
+    assert client.created[0][1].on_disk is True
+    assert client.creation_options[0]["hnsw_config"].on_disk is True
+    assert client.creation_options[0]["hnsw_config"].max_indexing_threads == 2
+    assert client.creation_options[0]["optimizers_config"].max_optimization_threads == 1
 
 
 def test_ensure_collection_recreates_existing_collection() -> None:
