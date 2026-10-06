@@ -56,6 +56,7 @@
   "users_db_path": "/data/state/rag_users.db",
   "telemetry_db_path": "/data/state/rag_telemetry.db",
   "cloud_drive_enabled": true,
+  "cloud_drive_index_worker_enabled": true,
   "ui_cloud_drive_search_hints_enabled": false,
   "cloud_drive_public_links_enabled": false,
   "cloud_drive_db_path": "/data/state/cloud_drive.db",

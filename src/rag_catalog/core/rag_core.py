@@ -134,6 +134,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "telemetry_db_path": "",
     # ── Cloud drive foundation ──────────────────────────────────────────
     "cloud_drive_enabled": False,
+    "cloud_drive_index_worker_enabled": True,
     "ui_cloud_drive_search_hints_enabled": False,
     "cloud_drive_public_links_enabled": False,
     "cloud_drive_db_path": "",

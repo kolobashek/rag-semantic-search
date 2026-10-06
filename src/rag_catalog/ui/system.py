@@ -301,7 +301,8 @@ def _start_cloud_drive_job_worker(cfg: Dict[str, Any]) -> None:
         while True:
             try:
                 cfg_now = load_config()
-                if bool(cfg_now.get("cloud_drive_enabled")):
+                if (bool(cfg_now.get("cloud_drive_enabled"))
+                        and bool(cfg_now.get("cloud_drive_index_worker_enabled", True))):
                     service = CloudDriveService.from_config(cfg_now)
                     service.recover_stale_jobs(job_types=["reindex", "cleanup"], lease_timeout_seconds=1800, limit=50)
                     service.run_pending_reindex_jobs(index_config=cfg_now, limit=3)
