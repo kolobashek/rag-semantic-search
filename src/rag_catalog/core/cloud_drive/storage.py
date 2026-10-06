@@ -181,6 +181,12 @@ class S3StorageAdapter:
             )
         )
 
+    def open_download(self, storage_key: str, *, byte_range: str = '') -> dict:
+        params = {'Bucket': self.bucket, 'Key': storage_key}
+        if byte_range:
+            params['Range'] = byte_range
+        return self._client.get_object(**params)
+
     def healthcheck(self) -> dict:
         probe_key = f".healthcheck/{uuid.uuid4().hex}"
         try:

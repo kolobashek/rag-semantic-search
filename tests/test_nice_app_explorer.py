@@ -2328,6 +2328,76 @@ def test_cloud_drive_acl_revision_tracks_permissions_and_groups() -> None:
     assert group_changed != initial
 
 
+def test_role_grant_refreshes_existing_files_in_change_feed(monkeypatch, tmp_path):
+    cfg = {'cloud_drive_db_path': str(tmp_path / 'cloud.db'), 'cloud_drive_storage': 'local',
+           'cloud_drive_storage_root': str(tmp_path / 'storage')}
+    service = CloudDriveService.from_config(cfg)
+    home = service.registry.ensure_user_home_folder(username='owner')
+    service.registry.upsert_file(folder_id=home.id, path='owner/scan.pdf', name='scan.pdf',
+        storage_key='object', mime_type='application/pdf', size_bytes=10, checksum='hash', source_path='')
+    monkeypatch.setattr(cloud_api, 'load_config', lambda: cfg)
+    monkeypatch.setattr(cloud_api, '_require_cloud_drive_api_user',
+                        lambda *a, **kw: {'username': 'veronika', 'role': 'user'})
+    before = cloud_api.api_cloud_drive_changes()
+    assert 'owner/scan.pdf' not in {r['path'] for r in before['changes']}
+    grant = service.grant_path_permission(subject_type='role', subject_id='user',
+                                         path='owner', access_level='editor')
+    delta = cloud_api.api_cloud_drive_changes(since=before['next_cursor'])
+    assert delta['acl_revision'] != before['acl_revision']
+    snapshot = cloud_api.api_cloud_drive_changes()
+    assert 'owner/scan.pdf' in {r['path'] for r in snapshot['changes']}
+    assert service.user_can_access(username='veronika', role='user', path='owner/scan.pdf', required_level='editor')
+    service.revoke_permission(grant['id'])
+    revoked = cloud_api.api_cloud_drive_changes()
+    assert revoked['acl_revision'] != snapshot['acl_revision']
+    assert 'owner/scan.pdf' not in {r['path'] for r in revoked['changes']}
+
+
+def test_s3_api_streaming_keeps_acl_and_preview_sandbox(monkeypatch, tmp_path):
+    from io import BytesIO
+
+    cfg = {'cloud_drive_db_path': str(tmp_path / 'cloud.db'), 'cloud_drive_storage': 'local',
+           'cloud_drive_storage_root': str(tmp_path / 'storage'), 'cloud_drive_public_links_enabled': True}
+    service = CloudDriveService.from_config(cfg)
+    home = service.registry.ensure_user_home_folder(username='owner')
+    payload = b'<script>alert(1)</script>'
+    service.registry.upsert_file(folder_id=home.id, path='owner/test.html', name='test.html',
+        storage_key='object', mime_type='text/html', size_bytes=len(payload), checksum='hash', source_path='')
+
+    class Storage:
+        calls = 0
+        def open_download(self, key, *, byte_range=''):
+            self.calls += 1
+            assert key == 'object'
+            if byte_range:
+                assert byte_range == 'bytes=0-3'
+                return {'Body': BytesIO(payload[:4]), 'ContentLength': 4, 'ContentRange': f'bytes 0-3/{len(payload)}'}
+            return {'Body': BytesIO(payload), 'ContentLength': len(payload)}
+
+    service.storage = Storage()
+    monkeypatch.setattr(cloud_api, 'load_config', lambda: cfg)
+    monkeypatch.setattr(CloudDriveService, 'from_config', lambda cfg: service)
+    monkeypatch.setattr(cloud_api, '_require_cloud_drive_api_user',
+                        lambda *a, **kw: {'username': 'veronika', 'role': 'user'})
+    for endpoint in (api_cloud_drive_download, api_cloud_drive_preview):
+        with pytest.raises(HTTPException) as caught:
+            endpoint('owner/test.html')
+        assert caught.value.status_code == 403
+    assert service.storage.calls == 0
+    service.grant_path_permission(subject_type='role', subject_id='user', path='owner', access_level='editor')
+    download = api_cloud_drive_download('owner/test.html', byte_range='bytes=0-3')
+    assert download.status_code == 206
+    assert 'location' not in download.headers
+    assert download.headers['content-range'] == f'bytes 0-3/{len(payload)}'
+    preview = api_cloud_drive_preview('owner/test.html')
+    assert preview.headers['content-type'].startswith('text/plain')
+    assert preview.headers['content-security-policy'].startswith('sandbox')
+    link = service.create_share_link(path='owner/test.html', created_by='owner')
+    public = api_cloud_drive_public_download(token=link['token'], byte_range='bytes=0-3')
+    assert public.status_code == 206
+    assert 'location' not in public.headers
+
+
 def test_cloud_drive_acl_allows_user_and_role_prefixes() -> None:
     cfg = {
         "cloud_drive_acl": {

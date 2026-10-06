@@ -35,6 +35,7 @@ from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from . import helpers as _helpers
+from .cloud_download import storage_download_response
 from .helpers import _cd_registry_acl_allows, _cd_registry_acl_filter, _resolve_catalog_file
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
@@ -1348,7 +1349,9 @@ def api_cloud_drive_public_list(token: str = "", path: str = "") -> Dict[str, An
 
 
 @app.get("/api/cloud-drive/public/download")
-def api_cloud_drive_public_download(token: str = "", path: str = ""):
+def api_cloud_drive_public_download(
+    token: str = "", path: str = "", byte_range: Annotated[str, Header(alias="Range")] = ""
+):
     cfg = load_config()
     _require_public_links_enabled(cfg)
     service = CloudDriveService.from_config(cfg)
@@ -1357,6 +1360,8 @@ def api_cloud_drive_public_download(token: str = "", path: str = ""):
         descriptor = service.get_download_descriptor(effective_path)
     except RuntimeError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    if descriptor.get("mode") == "storage_stream":
+        return storage_download_response(service.storage, descriptor, byte_range)
     if descriptor.get("mode") != "local_file":
         if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
             return RedirectResponse(str(descriptor["url"]))
@@ -2119,7 +2124,9 @@ def api_cloud_drive_create_folder(
 
 
 @app.get("/api/cloud-drive/download")
-def api_cloud_drive_download(path: str, authorization: AuthHeader = ""):
+def api_cloud_drive_download(
+    path: str, authorization: AuthHeader = "", byte_range: Annotated[str, Header(alias="Range")] = ""
+):
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     _require_cloud_drive_path_access(cfg, user, path, audit_action="download")
@@ -2129,6 +2136,10 @@ def api_cloud_drive_download(path: str, authorization: AuthHeader = ""):
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "download", ok=False, details={"path": path, "error": str(exc)})
         raise HTTPException(status_code=404, detail=str(exc))
+    if descriptor.get("mode") == "storage_stream":
+        response = storage_download_response(service.storage, descriptor, byte_range)
+        _audit_cloud_drive_api_event(cfg, user, "download", details={"path": path, "mode": "storage_stream"})
+        return response
     if descriptor.get("mode") != "local_file":
         if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
             _audit_cloud_drive_api_event(
@@ -2151,7 +2162,9 @@ def api_cloud_drive_download(path: str, authorization: AuthHeader = ""):
 
 
 @app.get("/api/cloud-drive/preview")
-def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
+def api_cloud_drive_preview(
+    path: str, authorization: AuthHeader = "", byte_range: Annotated[str, Header(alias="Range")] = ""
+):
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
     service = CloudDriveService.from_config(cfg)
@@ -2161,6 +2174,11 @@ def api_cloud_drive_preview(path: str, authorization: AuthHeader = ""):
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "preview", ok=False, details={"path": path, "error": str(exc)})
         raise HTTPException(status_code=404, detail=str(exc))
+    if descriptor.get("mode") == "storage_stream":
+        media_type, headers = _safe_preview_response_options(descriptor['filename'], descriptor['mime_type'])
+        return storage_download_response(
+            service.storage, descriptor, byte_range, inline=True, media_type=media_type, headers=headers,
+        )
     if descriptor.get("mode") != "local_file":
         if descriptor.get("mode") == "redirect_url" and descriptor.get("url"):
             _audit_cloud_drive_api_event(

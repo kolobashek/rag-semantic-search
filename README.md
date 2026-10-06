@@ -219,7 +219,7 @@ Cloud Drive — registry-backed файловый слой: папки, файл�
 Поддержано:
 
 - local storage;
-- S3/MinIO adapter contract, healthcheck, presigned download path;
+- S3/MinIO adapter contract, healthcheck, same-origin streaming downloads with byte ranges;
 - bootstrap/import metadata and files;
 - upload/download/versions;
 - create folder, rename, move;
@@ -235,6 +235,8 @@ Cloud Drive — registry-backed файловый слой: папки, файл�
 - Cloud Drive search results are filtered by Cloud Drive access before RAG use.
 
 ### S3 / MinIO Storage
+
+Файлы из S3/MinIO выдаются через HTTPS-адрес приложения после проверки доступа, включая частичную загрузку (`Range`) для Files On-Demand. Внутренний адрес хранилища (`127.0.0.1:9000` или `minio:9000`) не передаётся клиенту; публиковать порт MinIO в интернете для скачивания не требуется.
 
 При выборе `cloud_drive_storage: "s3"` Cloud Drive хранит содержимое файлов в объектном хранилище.
 В таком режиме обязательно нужен `cloud_drive_bucket` — это контейнер объектов, без него backend не знает куда писать/читать данные.
