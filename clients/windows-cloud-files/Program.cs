@@ -122,6 +122,9 @@ internal static class Program
         bool reauthorizeRequested = false;
         string unregisterRoot = "";
         bool showTray = !once && runSeconds <= 0;
+        ClientUpdater? updater = null;
+        CloudDriveApi? updateApi = null;
+        Task? updaterTask = null;
         TrayApplicationContext? tray = null;
         Thread? trayThread = null;
         using ManualResetEventSlim trayReady = new(initialState: false);
@@ -211,6 +214,12 @@ internal static class Program
                     requestRestart: () => RequestStop(restart: true),
                     requestAuthorization: RequestAuthorization,
                     requestExit: () => RequestStop(restart: false),
+                    checkUpdates: async () =>
+                    {
+                        if (updater is null) return "Проверка станет доступна после входа.";
+                        await updater.CheckAndApplyAsync(() => RequestStop(restart: false), shutdown.Token);
+                        return updater.LastCheckMessage;
+                    },
                     applicationToken: shutdown.Token);
                 trayReady.Set();
                 Application.Run(tray);
@@ -262,6 +271,12 @@ internal static class Program
             api.SessionExpired += RequestAuthorization;
             diagnostics = new ClientDiagnostics(config);
             diagnostics.Start();
+            // Keep recovery/update control alive even if provider startup fails.
+            updateApi = new CloudDriveApi(config.Server, config.Token);
+            updater = new ClientUpdater(updateApi, status);
+            if (showTray)
+                updaterTask = updater.RunAutomaticAsync(config.ClientId,
+                    () => RequestStop(restart: false), shutdown.Token);
 
             await using CloudFilesProvider provider = new(config, store, api, status);
             lock (runtimeSync)
@@ -286,26 +301,7 @@ internal static class Program
             }
             else
             {
-                ClientUpdater updater = new(api, status);
-                Task updaterTask = updater.RunAutomaticAsync(
-                    () => RequestStop(restart: false),
-                    shutdown.Token);
-                try
-                {
-                    await provider.RunAsync(shutdown.Token);
-                }
-                finally
-                {
-                    shutdown.Cancel();
-                    try
-                    {
-                        await updaterTask;
-                    }
-                    catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
-                    {
-                        // Normal application shutdown stops the update timer.
-                    }
-                }
+                await provider.RunAsync(shutdown.Token);
             }
         }
         catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
@@ -339,6 +335,13 @@ internal static class Program
         }
         finally
         {
+            shutdown.Cancel();
+            if (updaterTask is not null)
+            {
+                try { await updaterTask; }
+                catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+            }
+            updateApi?.Dispose();
             if (diagnostics is not null)
             {
                 await diagnostics.DisposeAsync();

@@ -12,6 +12,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Func<ClientSettingsSelection, Task> _saveSettings;
     private readonly Action _requestRestart;
     private readonly Action _requestExit;
+    private readonly Func<Task<string>> _checkUpdates;
     private readonly CancellationToken _applicationToken;
     private readonly Control _dispatcher;
     private readonly NotifyIcon _notifyIcon;
@@ -32,6 +33,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         Action requestRestart,
         Action requestAuthorization,
         Action requestExit,
+        Func<Task<string>> checkUpdates,
         CancellationToken applicationToken)
     {
         _status = status;
@@ -40,6 +42,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _saveSettings = saveSettings;
         _requestRestart = requestRestart;
         _requestExit = requestExit;
+        _checkUpdates = checkUpdates;
         _applicationToken = applicationToken;
         _dispatcher = new Control();
         _dispatcher.CreateControl();
@@ -279,13 +282,34 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ShowAbout()
     {
-        MessageBox.Show(
-            $"{AppDefaults.ProductName}{Environment.NewLine}"
-            + $"Версия: {AppDefaults.Version}{Environment.NewLine}{Environment.NewLine}"
-            + $"Сервер: {_config.Server}{Environment.NewLine}"
-            + $"Локальная папка: {_config.RootPath}",
-            $"О программе {AppDefaults.ProductName}",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
+        using Form dialog = new()
+        {
+            Text = $"О программе {AppDefaults.ProductName}", Width = 560, Height = 300,
+            StartPosition = FormStartPosition.CenterScreen, MinimizeBox = false, MaximizeBox = false,
+            AutoScaleMode = AutoScaleMode.Dpi,
+        };
+        FlowLayoutPanel layout = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
+            WrapContents = false, Padding = new Padding(16), AutoScroll = true };
+        layout.Controls.Add(new Label { Text = $"{AppDefaults.ProductName}\nВерсия: {AppDefaults.Version}\n\nСервер: {_config.Server}\nПапка: {_config.RootPath}",
+            AutoSize = true, MaximumSize = new Size(490, 0) });
+        Label result = new() { AutoSize = true, MaximumSize = new Size(490, 0) };
+        Button check = new() { Text = "Проверить обновления", AutoSize = true };
+        check.Click += async (_, _) =>
+        {
+            check.Enabled = false;
+            result.Text = "Проверка обновлений…";
+            try
+            {
+                string message = await _checkUpdates();
+                if (!dialog.IsDisposed) result.Text = message;
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { if (!dialog.IsDisposed) result.Text = ex.Message; }
+            finally { if (!dialog.IsDisposed) check.Enabled = true; }
+        };
+        layout.Controls.Add(check);
+        layout.Controls.Add(result);
+        dialog.Controls.Add(layout);
+        dialog.ShowDialog();
     }
 }

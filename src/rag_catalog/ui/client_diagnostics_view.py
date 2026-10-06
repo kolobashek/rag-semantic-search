@@ -28,6 +28,7 @@ def show_client_diagnostics(state, client: dict):
         ui.label(f"Журнал: {client.get('display_name') or client.get('device_id')}").classes('text-lg font-semibold')
         ui.label(str(client.get('username') or '')).classes('rag-meta')
         status = ui.label().classes('text-sm')
+        update_status = ui.label().classes('text-sm')
         text = ui.textarea().props('readonly outlined rows=16').classes('w-full font-mono text-xs')
 
         def refresh():
@@ -45,6 +46,19 @@ def show_client_diagnostics(state, client: dict):
             if text.value != value:
                 text.set_value(value)
             download.set_enabled(bool(row['uploaded_at']))
+            update = store.read_update(client_id)
+            update_status.set_text(
+                (f"Обновлён до {update['reported_version']}" if update.get('completed_at')
+                 else f"Ожидается обновление до {update['target_version']}") if update else '')
+
+        def request_update():
+            if not require_admin():
+                return
+            from .api import _CLOUD_FILES_VERSION
+            store.request_update(client_id, _username(state), _CLOUD_FILES_VERSION)
+            _log_app_event(state, 'settings', 'client_update_request', details={'client_id': client_id})
+            ui.notify('Обновление запрошено. Клиент 0.6.4+ проверит команду при подключении.')
+            refresh()
 
         def request():
             if not require_admin():
@@ -64,6 +78,7 @@ def show_client_diagnostics(state, client: dict):
         with ui.row().classes('w-full gap-2'):
             ui.button('Запросить свежий журнал', icon='sync', on_click=request)
             download = ui.button('Скачать', icon='download', on_click=save).props('outline')
+            ui.button('Обновить клиент', icon='system_update', on_click=request_update).props('outline')
             ui.space()
             ui.button('Закрыть', on_click=dialog.close).props('flat')
         timer = ui.timer(5, refresh)

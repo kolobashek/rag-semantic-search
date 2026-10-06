@@ -32,6 +32,37 @@ class ClientDiagnosticsDB:
                 requested_by TEXT NOT NULL DEFAULT '', requested_at REAL NOT NULL DEFAULT 0,
                 uploaded_at REAL NOT NULL DEFAULT 0, app_version TEXT NOT NULL DEFAULT '',
                 log_text TEXT NOT NULL DEFAULT '')''')
+            db.execute('''CREATE TABLE IF NOT EXISTS client_updates (
+                client_id TEXT PRIMARY KEY, target_version TEXT NOT NULL,
+                requested_by TEXT NOT NULL, requested_at REAL NOT NULL,
+                reported_version TEXT NOT NULL DEFAULT '', checked_at REAL NOT NULL DEFAULT 0,
+                completed_at REAL NOT NULL DEFAULT 0)''')
+
+    def request_update(self, client_id: str, requested_by: str, version: str) -> dict:
+        with self._connect() as db:
+            db.execute('''INSERT INTO client_updates(client_id,target_version,requested_by,requested_at)
+                          VALUES (?,?,?,?) ON CONFLICT(client_id) DO UPDATE SET
+                          target_version=excluded.target_version, requested_by=excluded.requested_by,
+                          requested_at=excluded.requested_at, completed_at=0''',
+                       (client_id, version, requested_by, time.time()))
+        return self.read_update(client_id)
+
+    def read_update(self, client_id: str) -> dict:
+        with self._connect() as db:
+            row = db.execute('SELECT * FROM client_updates WHERE client_id=?', (client_id,)).fetchone()
+        return dict(row) if row else {}
+
+    def poll_update(self, client_id: str, version: str) -> dict:
+        with self._connect() as db:
+            row = db.execute('SELECT * FROM client_updates WHERE client_id=?', (client_id,)).fetchone()
+            if row:
+                def parts(value):
+                    return tuple(int(p) for p in value.split('.')) if re.fullmatch(r'\d+\.\d+\.\d+', value) else ()
+                done = bool(parts(version) and parts(version) >= parts(row['target_version']))
+                db.execute('''UPDATE client_updates SET reported_version=?, checked_at=?,
+                              completed_at=CASE WHEN ? THEN ? ELSE completed_at END WHERE client_id=?''',
+                           (version[:40], time.time(), done, time.time(), client_id))
+        return self.read_update(client_id)
 
     @classmethod
     def from_config(cls, cfg):

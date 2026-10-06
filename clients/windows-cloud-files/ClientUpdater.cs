@@ -10,6 +10,7 @@ internal sealed class ClientUpdater
     private readonly CloudDriveApi _api;
     private readonly ClientStatusModel _status;
     private readonly SemaphoreSlim _checkLock = new(1, 1);
+    public string LastCheckMessage { get; private set; } = "";
 
     public ClientUpdater(CloudDriveApi api, ClientStatusModel status)
     {
@@ -17,21 +18,24 @@ internal sealed class ClientUpdater
         _status = status;
     }
 
-    public async Task RunAutomaticAsync(Action requestShutdown, CancellationToken cancellationToken)
+    public async Task RunAutomaticAsync(string clientId, Action requestShutdown, CancellationToken cancellationToken)
     {
-        if (await CheckAndApplyAsync(requestShutdown, cancellationToken))
+        DateTimeOffset nextCheck = DateTimeOffset.MinValue;
+        DateTimeOffset retryAfter = DateTimeOffset.MinValue;
+        using PeriodicTimer timer = new(TimeSpan.FromSeconds(30));
+        do
         {
-            return;
-        }
-
-        using PeriodicTimer timer = new(CheckInterval);
-        while (await timer.WaitForNextTickAsync(cancellationToken))
-        {
-            if (await CheckAndApplyAsync(requestShutdown, cancellationToken))
+            bool requested = false;
+            try { requested = await _api.IsUpdateRequestedAsync(clientId, cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+            catch { /* An unavailable command endpoint must not disable ordinary updates. */ }
+            if ((requested || DateTimeOffset.UtcNow >= nextCheck) && DateTimeOffset.UtcNow >= retryAfter)
             {
-                return;
+                if (await CheckAndApplyAsync(requestShutdown, cancellationToken)) return;
+                nextCheck = DateTimeOffset.UtcNow + CheckInterval;
+                retryAfter = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(5);
             }
-        }
+        } while (await timer.WaitForNextTickAsync(cancellationToken));
     }
 
     public async Task<bool> CheckAndApplyAsync(
@@ -41,6 +45,7 @@ internal sealed class ClientUpdater
         if (!WindowsBootstrap.IsRunningInstalled ||
             !await _checkLock.WaitAsync(0, cancellationToken))
         {
+            LastCheckMessage = "Проверка обновлений уже выполняется.";
             return false;
         }
 
@@ -62,6 +67,7 @@ internal sealed class ClientUpdater
             if (!manifest.HasCloudFilesExecutable ||
                 !IsNewerVersion(AppDefaults.Version, manifest.Version))
             {
+                LastCheckMessage = $"Установлена актуальная версия {AppDefaults.Version}.";
                 return false;
             }
             if (!IsValidSha256(manifest.Sha256) ||
@@ -96,6 +102,7 @@ internal sealed class ClientUpdater
             File.Move(temporaryPath, finalPath);
             _status.SetState(ClientRunState.Syncing, $"Установка обновления {version}…");
             WindowsBootstrap.LaunchStagedUpdate(finalPath, actualHash);
+            LastCheckMessage = $"Устанавливается версия {version}.";
             requestShutdown();
             return true;
         }
@@ -106,12 +113,7 @@ internal sealed class ClientUpdater
         catch (Exception exception)
         {
             AppLog.Error("Автоматическое обновление не выполнено.", exception);
-            ClientStatusSnapshot snapshot = _status.Current;
-            _status.SetState(
-                snapshot.ActiveTransfers > 0 ? ClientRunState.Syncing : ClientRunState.UpToDate,
-                snapshot.ActiveTransfers > 0
-                    ? $"Загружается файлов: {snapshot.ActiveTransfers}"
-                    : "Синхронизировано");
+            LastCheckMessage = "Не удалось обновить клиент: " + exception.Message;
             return false;
         }
         finally

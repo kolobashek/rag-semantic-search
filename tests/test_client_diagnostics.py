@@ -64,6 +64,8 @@ def diagnostic_api(tmp_path, monkeypatch):
     app.post('/upload')(api.api_client_diagnostics_upload)
     app.get('/status')(api.api_client_diagnostics_status)
     app.get('/download')(api.api_client_diagnostics_download)
+    app.post('/update')(api.api_client_update_request)
+    app.get('/update-pending')(api.api_client_update_pending)
     with TestClient(app) as client:
         yield client, tokens, {'client_id': client_id}, cfg
 
@@ -102,3 +104,28 @@ def test_diagnostics_acl_and_body_limits(diagnostic_api):
     for payload in [[], {'log_text': []}, {'log_text': None}]:
         assert client.post('/upload', params=params, headers=tokens['veronika'], json=payload).status_code == 400
     assert client.get('/status', params={'client_id': 'missing'}, headers=tokens['admin']).status_code == 404
+
+
+def test_remote_update_owner_and_admin_only(diagnostic_api):
+    client, tokens, params, cfg = diagnostic_api
+    assert client.post('/update', params=params).status_code == 401
+    assert client.post('/update', params=params, headers=tokens['veronika']).status_code == 403
+    assert client.get('/update-pending', params=params, headers=tokens['other']).status_code == 403
+    assert client.get('/update-pending', params=params, headers=tokens['admin']).status_code == 403
+    result = client.post('/update', params=params, headers=tokens['admin'])
+    assert result.status_code == 200
+    assert result.json()['target_version'] == api._CLOUD_FILES_VERSION
+    query = {**params, 'app_version': '0.6.3'}
+    assert client.get('/update-pending', params=query, headers=tokens['veronika']).json()['requested']
+    query['app_version'] = api._CLOUD_FILES_VERSION
+    assert not client.get('/update-pending', params=query, headers=tokens['veronika']).json()['requested']
+    assert ClientDiagnosticsDB.from_config(cfg).read_update(params['client_id'])['completed_at'] > 0
+
+
+def test_update_request_survives_restart_and_invalid_version(tmp_path):
+    path = str(tmp_path / 'logs.db')
+    ClientDiagnosticsDB(path).request_update('pc', 'admin', '0.6.4')
+    db = ClientDiagnosticsDB(path)
+    assert not db.poll_update('pc', 'invalid')['completed_at']
+    assert not db.poll_update('pc', '0.6.3')['completed_at']
+    assert db.poll_update('pc', '0.6.5')['completed_at']

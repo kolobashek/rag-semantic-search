@@ -45,6 +45,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private DateTimeOffset _lastFullSnapshot = DateTimeOffset.MinValue;
     private DateTimeOffset _nextCacheCheck = DateTimeOffset.MinValue;
     private int _cacheCheckRequested = 1;
+    private bool _namespaceIncomplete;
+    private bool _localScanIncomplete;
 
     public CloudFilesProvider(
         ProviderConfig config,
@@ -101,6 +103,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             _refreshLock.Release();
         }
         await TryApplyCachePolicyAsync(cancellationToken);
+        ReportIncompleteNamespace();
     }
 
     public static void Unregister(string rootPath)
@@ -142,7 +145,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         try
         {
             _status.SetState(ClientRunState.Syncing, "Проверка изменений…");
-            if (DateTimeOffset.UtcNow - _lastFullSnapshot >= TimeSpan.FromMinutes(30))
+            if (_namespaceIncomplete || _localScanIncomplete || DateTimeOffset.UtcNow - _lastFullSnapshot >= TimeSpan.FromMinutes(30))
             {
                 await RefreshFullSnapshotAsync(cancellationToken);
             }
@@ -163,6 +166,14 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             await ApplyOfflinePolicyAsync(cancellationToken);
         }
         await TryApplyCachePolicyAsync(cancellationToken, force: false);
+        ReportIncompleteNamespace();
+    }
+
+    private void ReportIncompleteNamespace()
+    {
+        if (_namespaceIncomplete || _localScanIncomplete)
+            _status.SetState(ClientRunState.Error, "Часть папок недоступна; повторим синхронизацию",
+                "Другие файлы доступны. Подробности в журнале клиента.");
     }
 
     public IReadOnlyList<string> GetTopLevelFolders()
@@ -583,6 +594,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private void ReconcileNamespace()
     {
+        _namespaceIncomplete = false;
         Dictionary<string, CloudNode> desired;
         lock (_nodesSync)
         {
@@ -731,8 +743,25 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private async Task RecoverLocalChangesAsync(CancellationToken cancellationToken)
     {
-        foreach (string localDirectory in Directory
-                     .EnumerateDirectories(_root, "*", SearchOption.AllDirectories)
+        LocalTreeScan scan = LocalTreeScan.Read(_root, (path, error) =>
+            AppLog.Error($"Local folder scan deferred: {path}", error), repair: path =>
+            {
+                if (!TryGetCloudPath(path, out string cloudPath) || GetRemoteNode(cloudPath)?.IsFolder != true)
+                    return false;
+                try
+                {
+                    CloudFilePinning.RepairDirectoryPopulation(path);
+                    AppLog.Info($"Repaired cloud folder population: {cloudPath}");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error($"Cloud folder repair deferred: {cloudPath}", ex);
+                    return false;
+                }
+            });
+        _localScanIncomplete = scan.Unreadable.Count > 0;
+        foreach (string localDirectory in scan.Directories
                      .OrderBy(path => CloudPath.Depth(Path.GetRelativePath(_root, path))))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -750,7 +779,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
         }
 
-        foreach (string localFile in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+        foreach (string localFile in scan.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (TryGetCloudPath(localFile, out string cloudPath))
@@ -767,6 +796,13 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
         }
 
+        // Exists returns false for inaccessible cloud placeholders too. Never turn
+        // an incomplete local scan into destructive remote deletion requests.
+        if (scan.Unreadable.Count > 0)
+        {
+            AppLog.Warn($"Skipped deletion recovery: {scan.Unreadable.Count} local paths could not be read.");
+            return;
+        }
         foreach (string managedPath in _state.ManagedPaths
                      .OrderBy(CloudPath.Depth)
                      .ToArray())
@@ -1276,6 +1312,27 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         HashSet<string> nextManaged,
         Dictionary<string, string> nextVersions)
     {
+        foreach (var group in nodes.GroupBy(node => CloudPath.Parent(node.Path), StringComparer.OrdinalIgnoreCase))
+        {
+            try { CreateMissingPlaceholderGroup(group, nextManaged, nextVersions); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException or ArgumentException)
+            {
+                _namespaceIncomplete = true;
+                AppLog.Error($"Placeholder creation deferred for folder {group.Key}.", ex);
+                foreach (CloudNode node in group.Where(node => _state.ManagedPaths.Contains(node.Path)))
+                {
+                    nextManaged.Add(node.Path);
+                    nextVersions.TryAdd(node.Path, _state.ManagedVersions.GetValueOrDefault(node.Path, ""));
+                }
+            }
+        }
+    }
+
+    private void CreateMissingPlaceholderGroup(
+        IEnumerable<CloudNode> nodes,
+        HashSet<string> nextManaged,
+        Dictionary<string, string> nextVersions)
+    {
         foreach (IGrouping<string, CloudNode> parentGroup in nodes.GroupBy(
                      node => CloudPath.Parent(node.Path),
                      StringComparer.OrdinalIgnoreCase))
@@ -1343,18 +1400,20 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                     native.Infos,
                     CF_CREATE_FLAGS.CF_CREATE_FLAG_STOP_ON_ERROR,
                     out uint processed);
-                result.ThrowOnFailure();
-                if (processed != create.Count)
+                // Preserve successful entries even when another entry in the batch fails.
+                int succeeded = 0;
+                for (int index = 0; index < Math.Min(processed, (uint)create.Count); index++)
                 {
-                    throw new IOException($"CfAPI создал {processed} из {create.Count} плейсхолдеров в {localParent}.");
-                }
-
-                foreach (CloudNode node in create)
-                {
+                    if (native.Infos[index].Result.Value < 0) continue;
+                    CloudNode node = create[index];
+                    succeeded++;
                     nextManaged.Add(node.Path);
                     nextVersions[node.Path] = NodeSignature(node);
                     CloudFilePinning.RefreshShell(CloudPath.LocalPath(_root, node.Path));
                 }
+                result.ThrowOnFailure();
+                if (succeeded != create.Count)
+                    throw new IOException($"CfAPI создал {succeeded} из {create.Count} плейсхолдеров в {localParent}.");
             }
         }
     }

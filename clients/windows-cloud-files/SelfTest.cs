@@ -6,6 +6,30 @@ internal static class SelfTest
 {
     public static void Run()
     {
+        LocalTreeScan scan = LocalTreeScan.Read("root", (_, _) => { },
+            path => path switch
+            {
+                "root" => ["bad", "good"],
+                "bad" => throw new IOException("Cloud provider unavailable"),
+                "good" => ["good/file.pdf"],
+                _ => [],
+            }, path => path.EndsWith(".pdf") ? FileAttributes.Archive : FileAttributes.Directory);
+        Equal(1, scan.Unreadable.Count);
+        Equal("good/file.pdf", scan.Files.Single());
+        int attempts = 0;
+        int repairs = 0;
+        LocalTreeScan recovered = LocalTreeScan.Read("root", (_, _) => { },
+            path => attempts++ == 0 ? throw new IOException("Old placeholder") : ["file.pdf"],
+            _ => FileAttributes.Archive, _ => { repairs++; return true; });
+        Equal(0, recovered.Unreadable.Count);
+        Equal(1, repairs);
+        Equal(1, recovered.Files.Count);
+        repairs = 0;
+        LocalTreeScan persistent = LocalTreeScan.Read("root", (_, _) => { },
+            _ => throw new IOException("Still unavailable"), _ => FileAttributes.Directory,
+            _ => { repairs++; return true; });
+        Equal(1, repairs);
+        Equal(1, persistent.Unreadable.Count);
         TestSessionAuthorizationAsync().GetAwaiter().GetResult();
         Equal("https://cloud.tsk-nsk.ru", new ProviderConfig().Server);
         Equal(false, WindowsBootstrap.IsInteractiveInstall(["--self-test"]));

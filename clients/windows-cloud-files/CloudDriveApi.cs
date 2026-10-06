@@ -127,6 +127,20 @@ internal sealed class CloudDriveApi : IDisposable
             ?? throw new InvalidOperationException("Сервер вернул пустой манифест обновления.");
     }
 
+    public async Task<bool> IsUpdateRequestedAsync(string clientId, CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        string query = QueryString(new Dictionary<string, string>
+        {
+            ["client_id"] = clientId, ["app_version"] = AppDefaults.Version,
+        });
+        using HttpResponseMessage response = await _http.GetAsync("api/cloud-drive/sync/update/pending?" + query, timeout.Token);
+        response.EnsureSuccessStatusCode();
+        using JsonDocument json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+        return json.RootElement.GetProperty("requested").GetBoolean();
+    }
+
     public async Task DownloadUpdateAsync(
         string downloadUrl,
         string destination,

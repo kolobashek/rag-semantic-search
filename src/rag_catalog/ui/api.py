@@ -477,6 +477,23 @@ def api_client_diagnostics_pending(client_id: str, authorization: AuthHeader = '
     return {'request_id': row['request_id']}
 
 
+@app.post('/api/cloud-drive/sync/update/request')
+def api_client_update_request(client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    user = _diagnostics_access(cfg, authorization, client_id, admin=True)
+    row = ClientDiagnosticsDB.from_config(cfg).request_update(client_id, str(user['username']), _CLOUD_FILES_VERSION)
+    _audit_cloud_drive_api_event(cfg, user, 'client_update_request', details={'client_id': client_id})
+    return row
+
+
+@app.get('/api/cloud-drive/sync/update/pending')
+def api_client_update_pending(client_id: str, app_version: str = '', authorization: AuthHeader = ''):
+    cfg = load_config()
+    _diagnostics_access(cfg, authorization, client_id, admin=False)
+    row = ClientDiagnosticsDB.from_config(cfg).poll_update(client_id, app_version)
+    return {'requested': bool(row and not row['completed_at']), 'target_version': row.get('target_version', '')}
+
+
 @app.post('/api/cloud-drive/sync/diagnostics/request')
 def api_client_diagnostics_request(client_id: str, authorization: AuthHeader = ''):
     cfg = load_config()
@@ -534,7 +551,7 @@ def api_client_diagnostics_download(client_id: str, authorization: AuthHeader = 
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.6.3"
+_CLOUD_FILES_VERSION = "0.6.4"
 _CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 

@@ -57,6 +57,14 @@ internal static class WindowsBootstrap
             ?? throw new InvalidOperationException("Не удалось определить путь запущенного приложения."));
         ConfigStore store = new();
         ProviderConfig config = store.LoadConfig();
+        if (File.Exists(InstalledExecutable) && File.Exists(store.ConfigPath))
+        {
+            StopInstalledProvider();
+            File.Copy(source, InstalledExecutable, overwrite: true);
+            AppLog.Info($"Updated installed client to {AppDefaults.Version}; existing settings preserved.");
+            RestartInstalled();
+            return true;
+        }
         using SetupForm setup = new(
             config.RootPath,
             config.KeepAllOffline,
