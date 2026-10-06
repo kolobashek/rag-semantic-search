@@ -1,8 +1,11 @@
+import asyncio
+from io import BytesIO
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi import HTTPException
+from starlette.datastructures import UploadFile
 
 from rag_catalog.core.cloud_drive.service import CloudDriveService
 from rag_catalog.ui import api, explorer_view
@@ -96,3 +99,22 @@ def test_internal_share_links_do_not_create_grants_or_tokens(sharing):
     assert service.list_share_links() == []
     with pytest.raises(PermissionError):
         explorer_view._cloud_drive_internal_share_links(service, paths, lambda p: p == "owner")
+
+
+def test_file_editor_can_update_without_create_permission(sharing):
+    _, service, _ = sharing
+    service.grant_path_permission(subject_type="user", subject_id="employee", path="owner/sample.txt", access_level="editor")
+    uploaded = asyncio.run(api.api_cloud_drive_upload(
+        parent_path="owner", file=UploadFile(filename="sample.txt", file=BytesIO(b"updated"))))
+    assert uploaded["path"] == "owner/sample.txt"
+    for name in ("new.txt", "~$sample.txt"):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api.api_cloud_drive_upload(parent_path="owner", file=UploadFile(filename=name, file=BytesIO(b"new"))))
+        assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("name", ["../sample.txt", "..\\sample.txt", "C:sample.txt"])
+def test_upload_rejects_filename_paths(sharing, name):
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api.api_cloud_drive_upload(parent_path="owner", file=UploadFile(filename=name, file=BytesIO(b"new"))))
+    assert exc.value.status_code == 400

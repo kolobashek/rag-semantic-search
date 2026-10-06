@@ -2350,12 +2350,22 @@ async def api_cloud_drive_upload(
     filename = _decode_upload_filename(str(file.filename or "")) if file is not None else ""
     if not filename:
         raise HTTPException(status_code=400, detail="Не передан файл для загрузки.")
+    if filename in {".", ".."} or any(char in filename for char in "/\\:\x00"):
+        raise HTTPException(status_code=400, detail="Недопустимое имя файла.")
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(
-        cfg, user, parent_path, service=service, required_level="editor", audit_action="upload"
-    )
+    clean_parent = str(parent_path or "").strip().replace("\\", "/").strip("/")
+    target_path = f"{clean_parent}/{filename}" if clean_parent else filename
+
+    def require_upload_access() -> None:
+        # Updating a shared file does not require permission to create siblings.
+        access_path = target_path if service.registry.get_file_by_path(target_path) is not None else clean_parent
+        _require_cloud_drive_path_access(
+            cfg, user, access_path, service=service, required_level="editor", audit_action="upload"
+        )
+
+    require_upload_access()
     suffix = Path(filename).suffix
     max_upload_bytes = _cloud_drive_max_upload_bytes(cfg)
     tmp_path = ""
@@ -2363,6 +2373,7 @@ async def api_cloud_drive_upload(
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
             await _write_bounded_upload(file, tmp, max_bytes=max_upload_bytes)
+        require_upload_access()
         result = service.upload_file(
             parent_path=parent_path,
             filename=filename,
