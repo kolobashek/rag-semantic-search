@@ -30,6 +30,18 @@ internal static partial class CloudFilePinning
         TryGetPlaceholderInfo(path, out CF_IN_SYNC_STATE state)
         && state == CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC;
 
+    internal static bool ReadPlaceholderState(string path, out bool inSync)
+    {
+        inSync = false;
+        const FileAttributes cloudFlags = FileAttributes.ReparsePoint | FileAttributes.Offline
+            | (FileAttributes)0x00400000 | (FileAttributes)0x00040000;
+        if ((File.GetAttributes(path) & cloudFlags) == 0) return false;
+        // A failed metadata read is not evidence of an ordinary local file.
+        bool placeholder = TryGetPlaceholderInfo(path, out CF_IN_SYNC_STATE state, strict: true);
+        inSync = state == CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC;
+        return placeholder;
+    }
+
     public static void ConvertToPlaceholder(string path, string cloudPath)
     {
         using SafeFileHandle handle = OpenForPlaceholderManagement(path);
@@ -162,7 +174,7 @@ internal static partial class CloudFilePinning
         }
     }
 
-    private static bool TryGetPlaceholderInfo(string path, out CF_IN_SYNC_STATE inSyncState)
+    private static bool TryGetPlaceholderInfo(string path, out CF_IN_SYNC_STATE inSyncState, bool strict = false)
     {
         inSyncState = CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_NOT_IN_SYNC;
         using SafeFileHandle handle = CreateFile(
@@ -171,19 +183,22 @@ internal static partial class CloudFilePinning
             FileShareRead | FileShareWrite | FileShareDelete,
             0,
             OpenExisting,
-            FileFlagBackupSemantics,
+            FileFlagBackupSemantics | 0x00200000,
             0);
         if (handle.IsInvalid)
         {
+            if (strict) throw new IOException("Cannot inspect cloud metadata: " + path, Marshal.GetHRForLastWin32Error());
             return false;
         }
 
         Span<byte> buffer = stackalloc byte[8192];
-        if (PInvoke.CfGetPlaceholderInfo(
+        HRESULT result = PInvoke.CfGetPlaceholderInfo(
                 handle,
                 CF_PLACEHOLDER_INFO_CLASS.CF_PLACEHOLDER_INFO_BASIC,
-                buffer).Failed)
+                buffer);
+        if (result.Failed)
         {
+            if (strict) throw new IOException("Cannot inspect cloud metadata: " + path, result.Value);
             return false;
         }
 

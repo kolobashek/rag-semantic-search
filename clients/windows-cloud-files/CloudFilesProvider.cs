@@ -47,6 +47,9 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private int _cacheCheckRequested = 1;
     private bool _namespaceIncomplete;
     private bool _localScanIncomplete;
+    private int _deferredPlaceholders;
+    private int _preservedPlaceholders;
+    private int _createdPlaceholders;
 
     public CloudFilesProvider(
         ProviderConfig config,
@@ -115,6 +118,42 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
 
         SyncRootRegistrar.Unregister(root);
+    }
+
+    internal static async Task TestNativePlaceholdersAsync()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rag-native-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        ProviderConfig config = new() { RootPath = root, Server = "https://" + Guid.NewGuid().ToString("N") + ".invalid" };
+        bool registered = false;
+        try
+        {
+            await SyncRootRegistrar.EnsureRegisteredAsync(config, root, CancellationToken.None);
+            registered = true;
+            using NativePlaceholderBatch batch = new([
+                new CloudNode { Path = "test.pdf", NodeType = "file", SizeBytes = 1024 },
+                new CloudNode { Path = "folder", NodeType = "folder" },
+            ]);
+            PInvoke.CfCreatePlaceholders(root, batch.Infos, CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE, out uint count).ThrowOnFailure();
+            if (count != 2) throw new InvalidOperationException("Missing native test placeholders");
+            string file = Path.Combine(root, "test.pdf");
+            bool placeholder = CloudFilePinning.ReadPlaceholderState(file, out bool inSync);
+            if (!placeholder || !inSync)
+                throw new InvalidOperationException($"Cannot read native placeholder metadata: attributes={File.GetAttributes(file)}, placeholder={placeholder}, inSync={inSync}");
+            await SyncRootRegistrar.EnsureRegisteredAsync(config, root, CancellationToken.None);
+            if (!File.Exists(file) || !CloudFilePinning.ReadPlaceholderState(file, out inSync) || !inSync)
+                throw new InvalidOperationException("Registration damaged native placeholders");
+            CloudFilePinning.RepairDirectoryPopulation(Path.Combine(root, "folder"));
+            if (Directory.GetFileSystemEntries(root).Length != 2) throw new InvalidOperationException("Native enumeration failed");
+            string preserved = PlaceholderRecovery.Preserve(root, "test.pdf");
+            if (!File.Exists(preserved) || File.Exists(file)) throw new InvalidOperationException("Native preservation failed");
+            File.Move(preserved, file);
+        }
+        finally
+        {
+            if (registered) SyncRootRegistrar.Unregister(root);
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -533,8 +572,9 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         _cursor = snapshot.Cursor;
         _aclRevision = snapshot.AclRevision;
-        await RecoverLocalChangesAsync(cancellationToken);
         ReconcileNamespace();
+        AppLog.Info($"Placeholder pass: created={_createdPlaceholders}, preserved={_preservedPlaceholders}, deferred={_deferredPlaceholders}.");
+        await RecoverLocalChangesAsync(cancellationToken);
         _lastFullSnapshot = DateTimeOffset.UtcNow;
         AppLog.Info($"Namespace reconciled: {_state.ManagedPaths.Count} managed paths.");
         _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
@@ -587,14 +627,17 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         if (changed)
         {
-            await RecoverLocalChangesAsync(cancellationToken);
             ReconcileNamespace();
+            await RecoverLocalChangesAsync(cancellationToken);
         }
     }
 
     private void ReconcileNamespace()
     {
         _namespaceIncomplete = false;
+        _deferredPlaceholders = 0;
+        _preservedPlaceholders = 0;
+        _createdPlaceholders = 0;
         Dictionary<string, CloudNode> desired;
         lock (_nodesSync)
         {
@@ -779,6 +822,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
         }
 
+        int failedFiles = 0;
         foreach (string localFile in scan.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -790,30 +834,18 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 }
                 catch (Exception exception)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    failedFiles++;
+                    _localScanIncomplete = true;
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
-                    AppLog.Error($"Не удалось восстановить локальный файл {cloudPath}.", exception);
+                    if (failedFiles <= 5)
+                        AppLog.Error($"Не удалось восстановить локальный файл {cloudPath} (0x{exception.HResult:X8}).", exception);
                 }
             }
         }
-
-        // Exists returns false for inaccessible cloud placeholders too. Never turn
-        // an incomplete local scan into destructive remote deletion requests.
-        if (scan.Unreadable.Count > 0)
-        {
-            AppLog.Warn($"Skipped deletion recovery: {scan.Unreadable.Count} local paths could not be read.");
-            return;
-        }
-        foreach (string managedPath in _state.ManagedPaths
-                     .OrderBy(CloudPath.Depth)
-                     .ToArray())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            string localPath = CloudPath.LocalPath(_root, managedPath);
-            if (!File.Exists(localPath) && !Directory.Exists(localPath) && HasRemoteNode(managedPath))
-            {
-                await SyncLocalDeletionAsync(managedPath, cancellationToken);
-            }
-        }
+        if (failedFiles > 0) AppLog.Warn($"Deferred {failedFiles} files with local errors; no cloud content overwritten.");
+        // Missing placeholders after an upgrade are not proof of user deletion.
+        // Only explicit CfAPI/FilesystemWatcher notifications propagate deletes.
     }
 
     private async Task SyncLocalPathAsync(
@@ -850,6 +882,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         bool explicitDelete,
         CancellationToken cancellationToken)
     {
+        if (!explicitDelete) return;
         string target = explicitDelete && HasRemoteNode(cloudPath)
             ? cloudPath
             : _state.ManagedPaths
@@ -958,7 +991,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private async Task SyncLocalDirectoryAsync(string cloudPath, CancellationToken cancellationToken)
     {
         string localPath = CloudPath.LocalPath(_root, cloudPath);
-        bool placeholder = CloudFilePinning.IsPlaceholder(localPath);
+        bool placeholder = CloudFilePinning.ReadPlaceholderState(localPath, out _);
         if (_state.ManagedPaths.Contains(cloudPath)
             && !HasRemoteNode(cloudPath)
             && placeholder
@@ -1022,9 +1055,16 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
 
         bool managed = _state.ManagedPaths.Contains(cloudPath);
-        bool placeholder = CloudFilePinning.IsPlaceholder(localPath);
+        bool placeholder;
+        bool inSync;
+        try { placeholder = CloudFilePinning.ReadPlaceholderState(localPath, out inSync); }
+        catch (IOException ex) when (PlaceholderRecovery.IsCorruptMetadata(ex.HResult) && managed && HasRemoteNode(cloudPath))
+        {
+            QuarantineCorruptPlaceholder(cloudPath, localPath);
+            return;
+        }
         string fingerprint = LocalFingerprint(localPath);
-        if (managed && placeholder && CloudFilePinning.IsInSync(localPath))
+        if (managed && placeholder && inSync)
         {
             return;
         }
@@ -1103,6 +1143,19 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             _status.EndTransfer(cloudPath, transferError);
         }
+    }
+
+    private void QuarantineCorruptPlaceholder(string cloudPath, string localPath)
+    {
+        if (HasRemoteNode(PlaceholderRecovery.FolderName))
+            throw new IOException("Recovery folder name conflicts with a cloud folder; originals preserved.");
+        _internalDeletePaths[cloudPath] = DateTimeOffset.UtcNow.AddMinutes(5);
+        string preserved = PlaceholderRecovery.Preserve(_root, cloudPath);
+        _state.LocalFingerprints.Remove(cloudPath);
+        _state.ManagedVersions.Remove(cloudPath);
+        _namespaceIncomplete = true;
+        if (++_preservedPlaceholders <= 5)
+            AppLog.Warn($"Preserved corrupt placeholder {localPath} at {preserved}; cloud copy will be recreated.");
     }
 
     private async Task<bool> TryAdoptMatchingRemoteFileAsync(
@@ -1209,7 +1262,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
 
         return CloudPath.TryNormalize(Path.GetRelativePath(_root, fullPath), out cloudPath)
-            && cloudPath.Length > 0;
+            && cloudPath.Length > 0 && !PlaceholderRecovery.IsRecoveryPath(cloudPath);
     }
 
     private bool HasRemoteNode(string cloudPath) => GetRemoteNode(cloudPath) is not null;
@@ -1348,6 +1401,27 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                     string localPath = CloudPath.LocalPath(_root, node.Path);
                     string signature = NodeSignature(node);
                     bool exists = File.Exists(localPath) || Directory.Exists(localPath);
+                    if (exists && !node.IsFolder && _state.ManagedPaths.Contains(node.Path))
+                    {
+                        try
+                        {
+                            try { CloudFilePinning.ReadPlaceholderState(localPath, out _); }
+                            catch (IOException ex) when (PlaceholderRecovery.IsCorruptMetadata(ex.HResult))
+                            {
+                                QuarantineCorruptPlaceholder(node.Path, localPath);
+                                exists = false;
+                            }
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            _namespaceIncomplete = true;
+                            if (++_deferredPlaceholders <= 5)
+                                AppLog.Error($"Cloud metadata recovery deferred: {node.Path} (0x{ex.HResult:X8})", ex);
+                            nextManaged.Add(node.Path);
+                            nextVersions[node.Path] = _state.ManagedVersions.GetValueOrDefault(node.Path, "");
+                            continue;
+                        }
+                    }
                     if (exists
                         && _state.ManagedPaths.Contains(node.Path)
                         && !node.IsFolder
@@ -1407,6 +1481,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                     if (native.Infos[index].Result.Value < 0) continue;
                     CloudNode node = create[index];
                     succeeded++;
+                    _createdPlaceholders++;
                     nextManaged.Add(node.Path);
                     nextVersions[node.Path] = NodeSignature(node);
                     CloudFilePinning.RefreshShell(CloudPath.LocalPath(_root, node.Path));

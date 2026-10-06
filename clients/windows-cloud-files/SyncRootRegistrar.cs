@@ -23,24 +23,14 @@ internal static class SyncRootRegistrar
         StorageFolder folder = await StorageFolder.GetFolderFromPathAsync(root);
         string expectedId = BuildSyncRootId(config.Server);
         StorageProviderSyncRootInfo? existing = GetRegistration(folder);
-        if (existing is not null
-            && existing.Id.Equals(expectedId, StringComparison.OrdinalIgnoreCase)
-            && existing.Version.Equals(AppDefaults.Version, StringComparison.Ordinal))
+        if (existing is not null && CanReuseRegistration(existing.Id, expectedId))
         {
             return;
         }
 
         if (existing is not null && existing.Id.Length > 0)
         {
-            StorageProviderSyncRootManager.Unregister(existing.Id);
-        }
-        else
-        {
-            int result = PInvoke.CfUnregisterSyncRoot(root).Value;
-            if (result < 0 && result != NotUnderSyncRootHResult)
-            {
-                AppLog.Info($"Legacy CfAPI unregister returned 0x{result:X8} for {root}.");
-            }
+            throw new InvalidOperationException("Облачная папка зарегистрирована другим провайдером. Регистрация и файлы сохранены.");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -71,6 +61,9 @@ internal static class SyncRootRegistrar
         await Task.Delay(250, cancellationToken);
         AppLog.Info($"Registered Explorer sync root {expectedId} at {root}.");
     }
+
+    internal static bool CanReuseRegistration(string existingId, string expectedId) =>
+        existingId.Equals(expectedId, StringComparison.OrdinalIgnoreCase);
 
     public static void Unregister(string rootPath)
     {
@@ -114,13 +107,12 @@ internal static class SyncRootRegistrar
         }
         catch (UnauthorizedAccessException)
         {
-            return null;
+            throw;
         }
         catch (COMException exception)
         {
-            AppLog.Info(
-                $"Explorer sync-root lookup returned 0x{exception.HResult:X8}; migrating legacy registration.");
-            return null;
+            if (exception.HResult is NotUnderSyncRootHResult or unchecked((int)0x80070490)) return null;
+            throw;
         }
     }
 }

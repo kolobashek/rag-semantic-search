@@ -6,6 +6,10 @@ internal static class SelfTest
 {
     public static void Run()
     {
+        Equal(true, SyncRootRegistrar.CanReuseRegistration("Provider!A", "provider!a"));
+        Equal(false, SyncRootRegistrar.CanReuseRegistration("other", "Provider!A"));
+        Equal(true, PlaceholderRecovery.IsCorruptMetadata(unchecked((int)0x8007016B)));
+        Equal(false, PlaceholderRecovery.IsCorruptMetadata(unchecked((int)0x80070005)));
         LocalTreeScan scan = LocalTreeScan.Read("root", (_, _) => { },
             path => path switch
             {
@@ -174,6 +178,10 @@ internal static class SelfTest
                         CancellationToken.None)
                     .GetAwaiter()
                     .GetResult());
+            string preserved = PlaceholderRecovery.Preserve(root, unicodePath);
+            Equal("test", File.ReadAllText(preserved));
+            Equal(false, File.Exists(localFile));
+            Throws<InvalidDataException>(() => PlaceholderRecovery.Preserve(root, "../outside.txt"));
             string testLog = Path.Combine(temporary, "logs", "RagCloudFiles.log");
             Directory.CreateDirectory(Path.GetDirectoryName(testLog)!);
             string privateLog = "Authorization: Bearer private-token\npassword=secret-value\n"

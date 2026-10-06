@@ -22,6 +22,8 @@ internal sealed class LocalTreeScan
             {
                 foreach (string path in list(directory))
                 {
+                    if (directory.Equals(root, StringComparison.OrdinalIgnoreCase)
+                        && Path.GetFileName(path).Equals(PlaceholderRecovery.FolderName, StringComparison.OrdinalIgnoreCase)) continue;
                     try
                     {
                         FileAttributes flags = attributes(path);

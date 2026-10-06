@@ -551,7 +551,7 @@ def api_client_diagnostics_download(client_id: str, authorization: AuthHeader = 
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.6.4"
+_CLOUD_FILES_VERSION = "0.6.5"
 _CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 

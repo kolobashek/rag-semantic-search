@@ -16,6 +16,12 @@ internal static class Program
         }
 
         Dictionary<string, string> options = ParseOptions(args);
+        if (options.ContainsKey("self-test-cloud"))
+        {
+            await CloudFilesProvider.TestNativePlaceholdersAsync();
+            Console.WriteLine("Native CfAPI self-test: OK");
+            return 0;
+        }
         if (options.ContainsKey("apply-update"))
         {
             int waitProcessId = int.Parse(options.GetValueOrDefault("wait-pid", "0"));
@@ -405,6 +411,7 @@ internal static class Program
             string name = argument[2..];
             if (name is "once"
                 or "self-test"
+                or "self-test-cloud"
                 or "unregister"
                 or "uninstall"
                 or "installed"
