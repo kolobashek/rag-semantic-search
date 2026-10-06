@@ -22,6 +22,7 @@ from rag_catalog.core.cloud_drive.storage import normalize_s3_credential
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.user_auth_db import UserAuthDB
 
+from .client_diagnostics_view import show_client_diagnostics
 from .helpers import (
     _alias_key_from_text,
     _cd_get_service,
@@ -1986,6 +1987,10 @@ def render_settings_screen(
                                     ).classes("rag-meta text-xs truncate")
                                 color = "positive" if status == "online" else "warning" if status in {"paused", "error"} else "grey-4"
                                 ui.badge(status, color=color).classes("text-xs")
+                                ui.button(
+                                    icon="description",
+                                    on_click=lambda c=dict(client): show_client_diagnostics(state, c),
+                                ).props("flat round dense").tooltip("Журнал клиента")
 
             ui.separator()
 

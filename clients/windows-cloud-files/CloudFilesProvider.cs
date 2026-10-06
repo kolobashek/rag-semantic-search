@@ -508,7 +508,9 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private async Task RefreshFullSnapshotAsync(CancellationToken cancellationToken)
     {
+        AppLog.Info("Refreshing visible cloud namespace and access permissions.");
         VisibleSnapshot snapshot = await _api.GetVisibleSnapshotAsync(cancellationToken);
+        AppLog.Info($"Received {snapshot.Nodes.Count} visible objects; reconciling local placeholders.");
         lock (_nodesSync)
         {
             _nodes.Clear();
@@ -523,6 +525,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         await RecoverLocalChangesAsync(cancellationToken);
         ReconcileNamespace();
         _lastFullSnapshot = DateTimeOffset.UtcNow;
+        AppLog.Info($"Namespace reconciled: {_state.ManagedPaths.Count} managed paths.");
         _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
         Console.WriteLine($"Доступно объектов: {_nodes.Count:N0}; содержимое файлов остаётся в облаке до открытия.");
     }

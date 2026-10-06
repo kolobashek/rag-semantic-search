@@ -152,6 +152,19 @@ internal static class SelfTest
                     .GetResult());
             string testLog = Path.Combine(temporary, "logs", "RagCloudFiles.log");
             Directory.CreateDirectory(Path.GetDirectoryName(testLog)!);
+            string privateLog = "Authorization: Bearer private-token\npassword=secret-value\n"
+                + "https://cloud.example/auth/device?code=ABCD-1234; code ABCD-1234\n"
+                + "https://store.example/?X-Amz-Signature=signing-secret\n";
+            string cleaned = ClientDiagnostics.Redact(privateLog);
+            foreach (string secret in new[] { "private-token", "secret-value", "ABCD-1234", "signing-secret" })
+            {
+                Equal(false, cleaned.Contains(secret, StringComparison.Ordinal));
+            }
+            File.WriteAllText(testLog, new string('x', 300000) + "\nlast entry\n");
+            Equal("last entry\n", ClientDiagnostics.ReadTail(testLog));
+            File.WriteAllText(testLog, privateLog);
+            Equal(cleaned, ClientDiagnostics.ReadTail(testLog));
+            TestDiagnosticsAsync(testLog).GetAwaiter().GetResult();
             File.WriteAllText(testLog, "current log");
             File.WriteAllText(
                 Path.Combine(Path.GetDirectoryName(testLog)!, "RagCloudFiles.1.log"),
@@ -289,6 +302,56 @@ internal static class SelfTest
         handler.Reset();
         using (await client.GetAsync("https://test.invalid/three")) { }
         Equal(2, notifications);
+    }
+
+    private static async Task TestDiagnosticsAsync(string logPath)
+    {
+        DiagnosticsTestHandler handler = new();
+        await using ClientDiagnostics diagnostics = new(
+            new ProviderConfig { Server = "https://test.invalid", ClientId = "test-client", Token = "test-token" },
+            handler, logPath);
+        await diagnostics.SendOnceAsync(CancellationToken.None);
+        Equal(1, handler.Uploads);
+        await diagnostics.SendOnceAsync(CancellationToken.None);
+        Equal(1, handler.Uploads);
+        handler.Pending = "admin-request";
+        handler.Fail = true;
+        Throws<HttpRequestException>(() => diagnostics.SendOnceAsync(CancellationToken.None).GetAwaiter().GetResult());
+        handler.Fail = false;
+        await diagnostics.SendOnceAsync(CancellationToken.None);
+        Equal(2, handler.Uploads);
+        Equal("admin-request", handler.LastRequestId);
+    }
+
+    private sealed class DiagnosticsTestHandler : HttpMessageHandler
+    {
+        public int Uploads;
+        public string Pending = "";
+        public string LastRequestId = "";
+        public bool Fail;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Equal("test-token", request.Headers.Authorization?.Parameter);
+            Equal(true, request.RequestUri!.Query.Contains("client_id=test-client"));
+            string payload;
+            if (request.Method == HttpMethod.Get)
+            {
+                payload = JsonSerializer.Serialize(new { request_id = Pending });
+            }
+            else
+            {
+                if (Fail) return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable);
+                using JsonDocument json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                LastRequestId = json.RootElement.GetProperty("request_id").GetString()!;
+                string log = json.RootElement.GetProperty("log_text").GetString()!;
+                Equal(false, log.Contains("private-token"));
+                Equal(false, log.Contains("ABCD-1234"));
+                Uploads++;
+                payload = "{\"ok\":true}";
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(payload) };
+        }
     }
 
     private sealed class UnauthorizedTestHandler : HttpMessageHandler

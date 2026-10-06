@@ -231,6 +231,7 @@ internal static class Program
         };
 
         int exitCode = 0;
+        ClientDiagnostics? diagnostics = null;
         try
         {
             AppLog.Info($"Starting provider {AppDefaults.Version} for {config.Server}.");
@@ -259,6 +260,8 @@ internal static class Program
             config.ClientId = registeredClientId;
             store.SaveConfig(config);
             api.SessionExpired += RequestAuthorization;
+            diagnostics = new ClientDiagnostics(config);
+            diagnostics.Start();
 
             await using CloudFilesProvider provider = new(config, store, api, status);
             lock (runtimeSync)
@@ -336,6 +339,10 @@ internal static class Program
         }
         finally
         {
+            if (diagnostics is not null)
+            {
+                await diagnostics.DisposeAsync();
+            }
             lock (runtimeSync)
             {
                 activeProvider = null;

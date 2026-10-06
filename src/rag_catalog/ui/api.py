@@ -24,9 +24,10 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List
 
 from fastapi import File, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from nicegui import app
 
+from rag_catalog.core.client_diagnostics import MAX_LOG_BYTES, ClientDiagnosticsDB
 from rag_catalog.core.client_logs import MAX_EVENTS_PER_BATCH, ingest_client_events
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness, cloud_drive_operations_health
@@ -458,9 +459,82 @@ async def api_client_logs(request: Request, authorization: AuthHeader = "") -> D
     return {"ok": True, "stored": stored, "received": len(events)}
 
 
+def _diagnostics_access(cfg, authorization: str, client_id: str, *, admin: bool):
+    user = _require_cloud_drive_api_user(cfg, authorization=authorization, admin_only=admin)
+    service = CloudDriveService.from_config(cfg)
+    if service.registry.get_sync_client(client_id) is None:
+        raise HTTPException(404, 'Client not found')
+    if not admin:
+        _require_sync_client_access(service, user, client_id, admin_ok=False)
+    return user
+
+
+@app.get('/api/cloud-drive/sync/diagnostics/pending')
+def api_client_diagnostics_pending(client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    _diagnostics_access(cfg, authorization, client_id, admin=False)
+    row = ClientDiagnosticsDB.from_config(cfg).read(client_id)
+    return {'request_id': row['request_id']}
+
+
+@app.post('/api/cloud-drive/sync/diagnostics/request')
+def api_client_diagnostics_request(client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    user = _diagnostics_access(cfg, authorization, client_id, admin=True)
+    row = ClientDiagnosticsDB.from_config(cfg).request(client_id, str(user['username']))
+    _audit_cloud_drive_api_event(cfg, user, 'client_log_request', details={'client_id': client_id})
+    return {k: v for k, v in row.items() if k != 'log_text'}
+
+
+@app.post('/api/cloud-drive/sync/diagnostics')
+async def api_client_diagnostics_upload(request: Request, client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    _diagnostics_access(cfg, authorization, client_id, admin=False)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 1024 * 1024:
+            raise HTTPException(413, 'Diagnostic upload exceeds 1 MiB')
+        body.extend(chunk)
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError):
+        raise HTTPException(400, 'Expected JSON object') from None
+    if not isinstance(payload, dict) or not isinstance(payload.get('log_text'), str):
+        raise HTTPException(400, 'Expected log_text string')
+    if len(payload['log_text'].encode('utf-8')) > MAX_LOG_BYTES:
+        raise HTTPException(413, 'Log exceeds 256 KiB')
+    ClientDiagnosticsDB.from_config(cfg).submit(
+        client_id, payload['log_text'], request_id=str(payload.get('request_id') or '')[:64],
+        app_version=str(payload.get('app_version') or '')[:40],
+    )
+    return {'ok': True}
+
+
+@app.get('/api/cloud-drive/sync/diagnostics')
+def api_client_diagnostics_status(client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    _diagnostics_access(cfg, authorization, client_id, admin=True)
+    row = ClientDiagnosticsDB.from_config(cfg).read(client_id)
+    return {k: v for k, v in row.items() if k != 'log_text'}
+
+
+@app.get('/api/cloud-drive/sync/diagnostics/download')
+def api_client_diagnostics_download(client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    user = _diagnostics_access(cfg, authorization, client_id, admin=True)
+    row = ClientDiagnosticsDB.from_config(cfg).read(client_id)
+    if not row['uploaded_at']:
+        raise HTTPException(404, 'No client log received yet')
+    _audit_cloud_drive_api_event(cfg, user, 'client_log_download', details={'client_id': client_id})
+    return PlainTextResponse(row['log_text'], headers={
+        'Content-Disposition': 'attachment; filename="RagCloudFiles.log"',
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+    })
+
+
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.6.2"
+_CLOUD_FILES_VERSION = "0.6.3"
 _CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 
