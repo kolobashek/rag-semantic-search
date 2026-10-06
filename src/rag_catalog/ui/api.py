@@ -477,6 +477,31 @@ def api_client_diagnostics_pending(client_id: str, authorization: AuthHeader = '
     return {'request_id': row['request_id']}
 
 
+@app.post('/api/cloud-drive/sync/diagnostics/heartbeat')
+async def api_client_diagnostics_heartbeat(request: Request, client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    _diagnostics_access(cfg, authorization, client_id, admin=False)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 8192:
+            raise HTTPException(413, 'Heartbeat exceeds 8 KiB')
+        body.extend(chunk)
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError):
+        raise HTTPException(400, 'Expected JSON object') from None
+    fields = ('app_version', 'phase', 'state', 'last_error')
+    if not isinstance(payload, dict) or any(not isinstance(payload.get(k), str) for k in fields):
+        raise HTTPException(400, 'Expected heartbeat strings')
+    if payload['phase'] not in {'registration', 'authorization', 'namespace', 'running', 'failed', 'stopped'}:
+        raise HTTPException(400, 'Unknown startup phase')
+    if payload['state'] not in {'Starting', 'Authorizing', 'Syncing', 'UpToDate', 'Offline', 'Error', 'Stopped'}:
+        raise HTTPException(400, 'Unknown client state')
+    store = ClientDiagnosticsDB.from_config(cfg)
+    store.heartbeat(client_id, **{k: payload[k] for k in fields})
+    return {'request_id': store.read(client_id)['request_id']}
+
+
 @app.post('/api/cloud-drive/sync/update/request')
 def api_client_update_request(client_id: str, authorization: AuthHeader = ''):
     cfg = load_config()
@@ -531,8 +556,9 @@ async def api_client_diagnostics_upload(request: Request, client_id: str, author
 def api_client_diagnostics_status(client_id: str, authorization: AuthHeader = ''):
     cfg = load_config()
     _diagnostics_access(cfg, authorization, client_id, admin=True)
-    row = ClientDiagnosticsDB.from_config(cfg).read(client_id)
-    return {k: v for k, v in row.items() if k != 'log_text'}
+    store = ClientDiagnosticsDB.from_config(cfg)
+    row = store.read(client_id)
+    return {**{k: v for k, v in row.items() if k != 'log_text'}, 'health': store.read_health(client_id)}
 
 
 @app.get('/api/cloud-drive/sync/diagnostics/download')
@@ -551,7 +577,7 @@ def api_client_diagnostics_download(client_id: str, authorization: AuthHeader = 
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.6.5"
+_CLOUD_FILES_VERSION = "0.6.6"
 _CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 

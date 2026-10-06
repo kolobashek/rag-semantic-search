@@ -250,6 +250,11 @@ internal static class Program
         try
         {
             AppLog.Info($"Starting provider {AppDefaults.Version} for {config.Server}.");
+            if (config.ClientId.Length > 0 && config.Token.Length > 0)
+            {
+                diagnostics = new ClientDiagnostics(config, status: status);
+                diagnostics.Start();
+            }
             bool firstAuthorization = config.Token.Length == 0;
             using CloudDriveApi api = new(config.Server, config.Token);
             string registeredClientId = await SessionAuthorization.RegisterAsync(
@@ -262,6 +267,7 @@ internal static class Program
                 async () =>
             {
                 firstAuthorization = true;
+                diagnostics?.SetPhase("authorization");
                 status.SetState(ClientRunState.Authorizing, "Ожидание подтверждения входа…");
                 DeviceTokenResponse auth = await CloudDriveApi.AuthorizeDeviceAsync(config.Server, shutdown.Token);
                 config.Token = auth.Token;
@@ -275,7 +281,9 @@ internal static class Program
             config.ClientId = registeredClientId;
             store.SaveConfig(config);
             api.SessionExpired += RequestAuthorization;
-            diagnostics = new ClientDiagnostics(config);
+            if (diagnostics is not null) await diagnostics.DisposeAsync();
+            diagnostics = new ClientDiagnostics(config, status: status);
+            diagnostics.SetPhase("namespace");
             diagnostics.Start();
             // Keep recovery/update control alive even if provider startup fails.
             updateApi = new CloudDriveApi(config.Server, config.Token);
@@ -290,6 +298,7 @@ internal static class Program
                 activeProvider = provider;
             }
             await provider.StartAsync(shutdown.Token);
+            diagnostics.SetPhase("running");
             AppLog.Info($"Provider ready at {Path.GetFullPath(config.RootPath)}.");
             Console.WriteLine($"RAG Cloud Drive готов: {Path.GetFullPath(config.RootPath)}");
             if (firstAuthorization)
@@ -325,6 +334,7 @@ internal static class Program
                 activeProvider = null;
             }
             status.SetState(ClientRunState.Error, "Клиент остановлен из-за ошибки", exception.Message);
+            diagnostics?.SetPhase("failed");
             AppLog.Error("RAG Cloud Files остановлен из-за ошибки.", exception);
             exitCode = 1;
             if (showTray)
@@ -350,6 +360,7 @@ internal static class Program
             updateApi?.Dispose();
             if (diagnostics is not null)
             {
+                if (exitCode == 0) diagnostics.SetPhase("stopped");
                 await diagnostics.DisposeAsync();
             }
             lock (runtimeSync)

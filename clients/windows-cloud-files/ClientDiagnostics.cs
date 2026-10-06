@@ -13,14 +13,19 @@ internal sealed class ClientDiagnostics : IAsyncDisposable
     private readonly ProviderConfig _config;
     private readonly HttpClient _http;
     private readonly string _logPath;
+    private readonly ClientStatusModel? _status;
+    private string _phase = "registration";
     private readonly CancellationTokenSource _stop = new();
     private Task? _task;
     private string _lastHash = "";
     private DateTimeOffset _lastUpload;
 
-    public ClientDiagnostics(ProviderConfig config, HttpMessageHandler? handler = null, string? logPath = null)
+    public ClientDiagnostics(ProviderConfig config, HttpMessageHandler? handler = null, string? logPath = null,
+        ClientStatusModel? status = null)
     {
-        _config = config;
+        // Freeze the authorized identity while interactive login can change the live config.
+        _config = new ProviderConfig { Server = config.Server, Token = config.Token, ClientId = config.ClientId };
+        _status = status;
         _logPath = logPath ?? AppLog.FilePath;
         _http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false })
         {
@@ -29,6 +34,8 @@ internal sealed class ClientDiagnostics : IAsyncDisposable
     }
 
     public void Start() => _task = Task.Run(RunAsync);
+
+    public void SetPhase(string phase) => Volatile.Write(ref _phase, phase);
 
     private async Task RunAsync()
     {
@@ -60,8 +67,18 @@ internal sealed class ClientDiagnostics : IAsyncDisposable
 
     internal async Task SendOnceAsync(CancellationToken cancellationToken)
     {
+        if (_config.ClientId.Length == 0 || _config.Token.Length == 0) return;
         string query = "?client_id=" + Uri.EscapeDataString(_config.ClientId);
-        using HttpRequestMessage poll = Request(HttpMethod.Get, "/pending" + query);
+        ClientStatusSnapshot? status = _status?.Current;
+        string error = Redact(status?.LastError ?? "");
+        using HttpRequestMessage poll = Request(HttpMethod.Post, "/heartbeat" + query);
+        poll.Content = JsonContent.Create(new
+        {
+            app_version = AppDefaults.Version,
+            phase = Volatile.Read(ref _phase),
+            state = status?.State.ToString() ?? "Starting",
+            last_error = error[..Math.Min(error.Length, 1000)],
+        });
         using HttpResponseMessage response = await _http.SendAsync(poll, cancellationToken);
         response.EnsureSuccessStatusCode();
         using JsonDocument json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
@@ -134,6 +151,10 @@ internal sealed class ClientDiagnostics : IAsyncDisposable
             try { await _task; }
             catch (OperationCanceledException) { }
         }
+        // Capture terminal errors too, but never hold shutdown indefinitely when offline.
+        using CancellationTokenSource finalSend = new(TimeSpan.FromSeconds(5));
+        try { await SendOnceAsync(finalSend.Token); }
+        catch { }
         _http.Dispose();
         _stop.Dispose();
     }

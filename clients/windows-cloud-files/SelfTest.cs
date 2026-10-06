@@ -339,13 +339,19 @@ internal static class SelfTest
     private static async Task TestDiagnosticsAsync(string logPath)
     {
         DiagnosticsTestHandler handler = new();
+        ClientStatusModel status = new();
+        ProviderConfig config = new() { Server = "https://test.invalid", ClientId = "test-client", Token = "test-token" };
         await using ClientDiagnostics diagnostics = new(
-            new ProviderConfig { Server = "https://test.invalid", ClientId = "test-client", Token = "test-token" },
-            handler, logPath);
+            config, handler, logPath, status);
+        config.Token = "changed-during-login";
         await diagnostics.SendOnceAsync(CancellationToken.None);
         Equal(1, handler.Uploads);
+        Equal("registration", handler.Phase);
         await diagnostics.SendOnceAsync(CancellationToken.None);
         Equal(1, handler.Uploads);
+        Equal(2, handler.Heartbeats);
+        diagnostics.SetPhase("failed");
+        status.SetState(ClientRunState.Error, "Registration failed", "Bearer private-token registration failed");
         handler.Pending = "admin-request";
         handler.Fail = true;
         Throws<HttpRequestException>(() => diagnostics.SendOnceAsync(CancellationToken.None).GetAwaiter().GetResult());
@@ -353,6 +359,14 @@ internal static class SelfTest
         await diagnostics.SendOnceAsync(CancellationToken.None);
         Equal(2, handler.Uploads);
         Equal("admin-request", handler.LastRequestId);
+        Equal("failed", handler.Phase);
+        Equal("Error", handler.State);
+        Equal(false, handler.Error.Contains("private-token"));
+        Equal(true, handler.Error.Contains("registration failed"));
+        DiagnosticsTestHandler unauthenticated = new();
+        await using ClientDiagnostics missingIdentity = new(new ProviderConfig(), unauthenticated, logPath);
+        await missingIdentity.SendOnceAsync(CancellationToken.None);
+        Equal(0, unauthenticated.Heartbeats);
     }
 
     private sealed class DiagnosticsTestHandler : HttpMessageHandler
@@ -361,14 +375,23 @@ internal static class SelfTest
         public string Pending = "";
         public string LastRequestId = "";
         public bool Fail;
+        public int Heartbeats;
+        public string Phase = "";
+        public string State = "";
+        public string Error = "";
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Equal("test-token", request.Headers.Authorization?.Parameter);
             Equal(true, request.RequestUri!.Query.Contains("client_id=test-client"));
             string payload;
-            if (request.Method == HttpMethod.Get)
+            if (request.RequestUri.AbsolutePath.EndsWith("/heartbeat"))
             {
+                using JsonDocument json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                Phase = json.RootElement.GetProperty("phase").GetString()!;
+                State = json.RootElement.GetProperty("state").GetString()!;
+                Error = json.RootElement.GetProperty("last_error").GetString()!;
+                Heartbeats++;
                 payload = JsonSerializer.Serialize(new { request_id = Pending });
             }
             else

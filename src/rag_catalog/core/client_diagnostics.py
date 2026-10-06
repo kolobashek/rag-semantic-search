@@ -12,6 +12,7 @@ from .client_logs import redact_secrets
 
 MAX_LOG_BYTES = 256 * 1024
 RETENTION_SECONDS = 14 * 86400
+HEALTH_FRESH_SECONDS = 90
 
 
 def clean_log(text: str) -> str:
@@ -37,6 +38,30 @@ class ClientDiagnosticsDB:
                 requested_by TEXT NOT NULL, requested_at REAL NOT NULL,
                 reported_version TEXT NOT NULL DEFAULT '', checked_at REAL NOT NULL DEFAULT 0,
                 completed_at REAL NOT NULL DEFAULT 0)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS client_health (
+                client_id TEXT PRIMARY KEY, last_seen_at REAL NOT NULL,
+                app_version TEXT NOT NULL, phase TEXT NOT NULL,
+                state TEXT NOT NULL, last_error TEXT NOT NULL)''')
+
+    def heartbeat(self, client_id: str, *, app_version: str, phase: str, state: str, last_error: str) -> None:
+        with self._connect() as db:
+            self._prune(db)
+            db.execute('''INSERT INTO client_health VALUES (?,?,?,?,?,?)
+                          ON CONFLICT(client_id) DO UPDATE SET
+                          last_seen_at=excluded.last_seen_at, app_version=excluded.app_version,
+                          phase=excluded.phase, state=excluded.state, last_error=excluded.last_error''',
+                       (client_id, time.time(), app_version[:40], phase[:40], state[:40],
+                        clean_log(last_error)[:1000]))
+
+    def read_health(self, client_id: str) -> dict:
+        with self._connect() as db:
+            self._prune(db)
+            row = db.execute('SELECT * FROM client_health WHERE client_id=?', (client_id,)).fetchone()
+        health = dict(row) if row else {'last_seen_at': 0, 'app_version': '', 'phase': '',
+                                       'state': '', 'last_error': ''}
+        age = time.time() - health['last_seen_at']
+        health['fresh'] = bool(health['last_seen_at'] and 0 <= age <= HEALTH_FRESH_SECONDS)
+        return health
 
     def request_update(self, client_id: str, requested_by: str, version: str) -> dict:
         with self._connect() as db:
@@ -80,6 +105,7 @@ class ClientDiagnosticsDB:
 
     @staticmethod
     def _prune(db):
+        db.execute('DELETE FROM client_health WHERE last_seen_at < ?', (time.time() - RETENTION_SECONDS,))
         db.execute('DELETE FROM client_diagnostics WHERE MAX(requested_at, uploaded_at) < ?',
                    (time.time() - RETENTION_SECONDS,))
         db.execute('PRAGMA incremental_vacuum(64)')

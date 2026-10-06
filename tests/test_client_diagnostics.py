@@ -60,6 +60,7 @@ def diagnostic_api(tmp_path, monkeypatch):
     monkeypatch.setattr(api, 'load_config', lambda: cfg)
     app = FastAPI()
     app.get('/pending')(api.api_client_diagnostics_pending)
+    app.post('/heartbeat')(api.api_client_diagnostics_heartbeat)
     app.post('/request')(api.api_client_diagnostics_request)
     app.post('/upload')(api.api_client_diagnostics_upload)
     app.get('/status')(api.api_client_diagnostics_status)
@@ -129,3 +130,37 @@ def test_update_request_survives_restart_and_invalid_version(tmp_path):
     assert not db.poll_update('pc', 'invalid')['completed_at']
     assert not db.poll_update('pc', '0.6.3')['completed_at']
     assert db.poll_update('pc', '0.6.5')['completed_at']
+
+
+def test_health_freshness_is_independent_of_log_and_request(tmp_path, monkeypatch):
+    db = ClientDiagnosticsDB(str(tmp_path / 'health.db'))
+    assert not db.read_health('pc')['fresh']
+    request = db.request('pc', 'admin')
+    db.heartbeat('pc', app_version='0.6.6', phase='failed', state='Error', last_error='Bearer private-token')
+    assert db.read_health('pc')['fresh']
+    assert 'private-token' not in db.read_health('pc')['last_error']
+    assert db.read('pc')['uploaded_at'] == 0
+    assert db.read('pc')['request_id'] == request['request_id']
+    now = time.time()
+    monkeypatch.setattr('rag_catalog.core.client_diagnostics.time.time', lambda: now + 91)
+    row = db.read_health('pc')
+    assert not row['fresh'] and row['phase'] == 'failed'
+    monkeypatch.setattr('rag_catalog.core.client_diagnostics.time.time', lambda: now + 15 * 86400)
+    assert not db.read_health('pc')['last_seen_at']
+
+
+def test_heartbeat_reports_registration_failure_without_new_registration(diagnostic_api):
+    client, tokens, params, cfg = diagnostic_api
+    payload = dict(app_version='0.6.6', phase='failed', state='Error', last_error='Registration HTTP 502')
+    request = client.post('/request', params=params, headers=tokens['admin']).json()
+    response = client.post('/heartbeat', params=params, headers=tokens['veronika'], json=payload)
+    assert response.status_code == 200 and response.json()['request_id'] == request['request_id']
+    health = client.get('/status', params=params, headers=tokens['admin']).json()['health']
+    assert health['fresh'] and health['state'] == 'Error' and health['app_version'] == '0.6.6'
+    assert health['last_error'] == payload['last_error']
+    for headers, expected in [({}, 401), (tokens['other'], 403), (tokens['admin'], 403)]:
+        assert client.post('/heartbeat', params=params, headers=headers, json=payload).status_code == expected
+    assert client.post('/heartbeat', params={'client_id': 'missing'}, headers=tokens['veronika'], json=payload).status_code == 404
+    assert client.post('/heartbeat', params=params, headers=tokens['veronika'], content=b'x' * 8193).status_code == 413
+    for bad in [[], {}, {**payload, 'state': []}, {**payload, 'phase': 'fake'}, {**payload, 'state': 'fake'}]:
+        assert client.post('/heartbeat', params=params, headers=tokens['veronika'], json=bad).status_code == 400

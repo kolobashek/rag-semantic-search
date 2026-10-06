@@ -28,6 +28,7 @@ def show_client_diagnostics(state, client: dict):
         ui.label(f"Журнал: {client.get('display_name') or client.get('device_id')}").classes('text-lg font-semibold')
         ui.label(str(client.get('username') or '')).classes('rag-meta')
         status = ui.label().classes('text-sm')
+        health_status = ui.label().classes('text-sm whitespace-pre-wrap')
         update_status = ui.label().classes('text-sm')
         text = ui.textarea().props('readonly outlined rows=16').classes('w-full font-mono text-xs')
 
@@ -42,6 +43,18 @@ def show_client_diagnostics(state, client: dict):
             if row['request_id']:
                 message += ' · ожидается ответ компьютера'
             status.set_text(message)
+            health = store.read_health(client_id)
+            if health['last_seen_at']:
+                seen = datetime.fromtimestamp(health['last_seen_at']).strftime('%d.%m.%Y %H:%M:%S')
+                phase = {'registration': 'регистрация', 'authorization': 'ожидание входа',
+                         'namespace': 'подготовка файлов', 'running': 'работает',
+                         'failed': 'ошибка запуска/работы', 'stopped': 'остановлен'}.get(health['phase'], health['phase'])
+                prefix = 'На связи' if health['fresh'] else 'Нет свежей связи; последнее известное состояние'
+                health_status.set_text(
+                    f"{prefix}: {seen} · версия {health['app_version']} · {phase} · {health['state']}"
+                    + (f"\nПоследняя переданная ошибка: {health['last_error']}" if health['last_error'] else ''))
+            else:
+                health_status.set_text('Текущее состояние неизвестно: сигнал состояния ещё не получен. Данные журнала исторические.')
             value = row['log_text'][-16000:]
             if text.value != value:
                 text.set_value(value)
