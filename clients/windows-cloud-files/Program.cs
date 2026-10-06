@@ -18,7 +18,7 @@ internal static class Program
         Dictionary<string, string> options = ParseOptions(args);
         if (options.ContainsKey("self-test-cloud"))
         {
-            await CloudFilesProvider.TestNativePlaceholdersAsync();
+            await CloudFilesProvider.TestNativePlaceholdersAsync(options.GetValueOrDefault("native-fixture"));
             Console.WriteLine("Native CfAPI self-test: OK");
             return 0;
         }

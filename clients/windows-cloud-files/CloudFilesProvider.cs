@@ -125,7 +125,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         SyncRootRegistrar.Unregister(root);
     }
 
-    internal static async Task TestNativePlaceholdersAsync()
+    internal static async Task TestNativePlaceholdersAsync(string? snapshotFixture = null)
     {
         string fixture = Path.Combine(Path.GetTempPath(), "rag-native-test-" + Guid.NewGuid().ToString("N"));
         string root = Path.Combine(fixture, "original");
@@ -152,6 +152,32 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 throw new InvalidOperationException("Registration damaged native placeholders");
             CloudFilePinning.RepairDirectoryPopulation(Path.Combine(root, "folder"));
             if (Directory.GetFileSystemEntries(root).Length != 2) throw new InvalidOperationException("Native enumeration failed");
+            string[] nestedFolders = ["Каталог", "Каталог/Вложенная папка", "Каталог/Вложенная папка/Документы"];
+            foreach (string folderPath in nestedFolders)
+            {
+                using NativePlaceholderBatch nested = new([new CloudNode { Path = folderPath, NodeType = "folder" }]);
+                string parentPath = CloudPath.Parent(folderPath);
+                string parent = parentPath.Length == 0 ? root : CloudPath.LocalPath(root, parentPath);
+                PInvoke.CfCreatePlaceholders(parent, nested.Infos, CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE, out uint nestedCount).ThrowOnFailure();
+                nested.Infos[0].Result.ThrowOnFailure();
+                if (nestedCount != 1 || !CloudFilePinning.IsPlaceholder(CloudPath.LocalPath(root, folderPath)))
+                    throw new InvalidOperationException($"Nested native folder metadata is invalid: {folderPath}, processed={nestedCount}, attributes={File.GetAttributes(CloudPath.LocalPath(root, folderPath))}");
+            }
+            CloudNode[] nestedFiles = Enumerable.Range(0, 300).Select(index => new CloudNode
+            {
+                Path = $"Каталог/Вложенная папка/Документы/Документ {index}.pdf", NodeType = "file", SizeBytes = 663418,
+            }).ToArray();
+            foreach (CloudNode[] chunk in nestedFiles.Chunk(256))
+            {
+                using NativePlaceholderBatch nested = new(chunk);
+                PInvoke.CfCreatePlaceholders(CloudPath.LocalPath(root, "Каталог/Вложенная папка/Документы"),
+                    nested.Infos, CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE, out uint nestedCount).ThrowOnFailure();
+                if (nestedCount != chunk.Length) throw new InvalidOperationException("Nested native batch incomplete");
+                foreach (var info in nested.Infos) info.Result.ThrowOnFailure();
+                foreach (CloudNode node in chunk)
+                    if (!CloudFilePinning.ReadPlaceholderState(CloudPath.LocalPath(root, node.Path), out _))
+                        throw new InvalidOperationException("Nested native file metadata is invalid");
+            }
             using NativePlaceholderBatch mixed = new([
                 new CloudNode { Path = "test.pdf", NodeType = "file", SizeBytes = 1024 },
                 new CloudNode { Path = "after-collision.pdf", NodeType = "file", SizeBytes = 1024 },
@@ -174,6 +200,46 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             if (freshCount != 1 || !CloudFilePinning.ReadPlaceholderState(Path.Combine(replacement, "fresh.pdf"), out _)
                 || !CloudFilePinning.ReadPlaceholderState(file, out _))
                 throw new InvalidOperationException("Independent replacement registration damaged original root");
+            {
+                Random random = new(42);
+                const string letters = "абвгдежзийклмнопрстуфхцчшщэюя";
+                CloudNode[] nodes = snapshotFixture is not null
+                    ? System.Text.Json.JsonSerializer.Deserialize<CloudNode[]>(await File.ReadAllTextAsync(snapshotFixture)) ?? []
+                    : Enumerable.Range(0, 60).Select(index => new CloudNode
+                    {
+                        Path = "Каталог/" + $"{index:D3}-" + new string(Enumerable.Range(0, random.Next(3, 90))
+                            .Select(_ => letters[random.Next(letters.Length)]).ToArray()) + ".pdf",
+                        NodeType = "file", SizeBytes = 663418,
+                    }).ToArray();
+                using CloudDriveApi api = new(config.Server, "native-test-no-network");
+                await using CloudFilesProvider provider = new(config, store, api);
+                foreach (CloudNode node in nodes)
+                {
+                    if (!CloudPath.TryNormalize(node.Path, out string normalized) || normalized.Length == 0) continue;
+                    node.Path = normalized;
+                    provider._nodes[normalized] = node;
+                }
+                provider.ConnectSyncRoot();
+                provider.ReconcileNamespace(CancellationToken.None);
+                Console.WriteLine($"Native fixture: created={provider._createdPlaceholders}, deferred={provider._deferredPlaceholders}");
+                int errors = 0;
+                foreach (CloudNode node in provider._nodes.Values)
+                {
+                    try
+                    {
+                        string path = CloudPath.LocalPath(replacement, node.Path);
+                        if (node.IsFolder) Directory.GetFileSystemEntries(path);
+                        else if (!CloudFilePinning.ReadPlaceholderState(path, out _))
+                            throw new InvalidOperationException("Not a placeholder");
+                    }
+                    catch (Exception error)
+                    {
+                        if (++errors <= 10) Console.WriteLine($"Native fixture error: {node.Path}; 0x{error.HResult:X8}; {error.Message}");
+                    }
+                }
+                if (errors > 0 || provider._namespaceIncomplete)
+                    throw new InvalidOperationException($"Native fixture failed: {errors} unreadable entries");
+            }
         }
         finally
         {
@@ -1428,7 +1494,9 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             string localParent = parentGroup.Key.Length == 0
                 ? _root
                 : CloudPath.LocalPath(_root, parentGroup.Key);
-            foreach (CloudNode[] batch in parentGroup.Chunk(256))
+            // Mixed-identity native batches can return S_OK yet leave unreadable
+            // metadata (0x8007016B). One entry per call passes real-catalog verification.
+            foreach (CloudNode[] batch in parentGroup.Chunk(1))
             {
                 List<CloudNode> create = [];
                 foreach (CloudNode node in batch)
