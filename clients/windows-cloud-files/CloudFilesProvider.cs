@@ -92,7 +92,12 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             VirtualDriveManager.RemoveForRoot(_root);
         }
 
-        await RefreshFullSnapshotAsync(cancellationToken);
+        await NetworkRecovery.ExecuteAsync(async () =>
+        {
+            _status.SetState(ClientRunState.Syncing, "Подготовка облачной папки…");
+            await RefreshFullSnapshotAsync(cancellationToken);
+            return true;
+        }, cancellationToken, (error, wait) => NetworkRecovery.Report(_status, error, wait));
         await ApplyOfflinePolicyAsync(cancellationToken);
         StartLocalChangeTracking();
         await _refreshLock.WaitAsync(cancellationToken);
@@ -122,10 +127,12 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     internal static async Task TestNativePlaceholdersAsync()
     {
-        string root = Path.Combine(Path.GetTempPath(), "rag-native-test-" + Guid.NewGuid().ToString("N"));
+        string fixture = Path.Combine(Path.GetTempPath(), "rag-native-test-" + Guid.NewGuid().ToString("N"));
+        string root = Path.Combine(fixture, "original");
         Directory.CreateDirectory(root);
         ProviderConfig config = new() { RootPath = root, Server = "https://" + Guid.NewGuid().ToString("N") + ".invalid" };
         bool registered = false;
+        string? replacement = null;
         try
         {
             await SyncRootRegistrar.EnsureRegisteredAsync(config, root, CancellationToken.None);
@@ -145,14 +152,34 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 throw new InvalidOperationException("Registration damaged native placeholders");
             CloudFilePinning.RepairDirectoryPopulation(Path.Combine(root, "folder"));
             if (Directory.GetFileSystemEntries(root).Length != 2) throw new InvalidOperationException("Native enumeration failed");
+            using NativePlaceholderBatch mixed = new([
+                new CloudNode { Path = "test.pdf", NodeType = "file", SizeBytes = 1024 },
+                new CloudNode { Path = "after-collision.pdf", NodeType = "file", SizeBytes = 1024 },
+            ]);
+            PInvoke.CfCreatePlaceholders(root, mixed.Infos, CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE, out uint mixedCount);
+            if (mixedCount != 2 || mixed.Infos[0].Result.Value >= 0 || mixed.Infos[1].Result.Value < 0
+                || !CloudFilePinning.ReadPlaceholderState(Path.Combine(root, "after-collision.pdf"), out _))
+                throw new InvalidOperationException("One colliding entry blocked the rest of the native batch");
             string preserved = PlaceholderRecovery.Preserve(root, "test.pdf");
             if (!File.Exists(preserved) || File.Exists(file)) throw new InvalidOperationException("Native preservation failed");
             File.Move(preserved, file);
+            ConfigStore store = new(Path.Combine(fixture, "config", "config.json"));
+            NamespaceRecovery.Prepare(config, store, Guid.NewGuid().ToString("N"));
+            replacement = config.RootPath;
+            await SyncRootRegistrar.EnsureRegisteredAsync(config, replacement, CancellationToken.None);
+            using NativePlaceholderBatch replacementBatch = new([
+                new CloudNode { Path = "fresh.pdf", NodeType = "file", SizeBytes = 1024 },
+            ]);
+            PInvoke.CfCreatePlaceholders(replacement, replacementBatch.Infos, CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE, out uint freshCount).ThrowOnFailure();
+            if (freshCount != 1 || !CloudFilePinning.ReadPlaceholderState(Path.Combine(replacement, "fresh.pdf"), out _)
+                || !CloudFilePinning.ReadPlaceholderState(file, out _))
+                throw new InvalidOperationException("Independent replacement registration damaged original root");
         }
         finally
         {
+            if (replacement is not null) SyncRootRegistrar.Unregister(replacement);
             if (registered) SyncRootRegistrar.Unregister(root);
-            Directory.Delete(root, recursive: true);
+            Directory.Delete(fixture, recursive: true);
         }
     }
 
@@ -572,7 +599,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         _cursor = snapshot.Cursor;
         _aclRevision = snapshot.AclRevision;
-        ReconcileNamespace();
+        ReconcileNamespace(cancellationToken);
         AppLog.Info($"Placeholder pass: created={_createdPlaceholders}, preserved={_preservedPlaceholders}, deferred={_deferredPlaceholders}.");
         await RecoverLocalChangesAsync(cancellationToken);
         _lastFullSnapshot = DateTimeOffset.UtcNow;
@@ -627,12 +654,12 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         if (changed)
         {
-            ReconcileNamespace();
+            ReconcileNamespace(cancellationToken);
             await RecoverLocalChangesAsync(cancellationToken);
         }
     }
 
-    private void ReconcileNamespace()
+    private void ReconcileNamespace(CancellationToken cancellationToken)
     {
         _namespaceIncomplete = false;
         _deferredPlaceholders = 0;
@@ -651,6 +678,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                      .OrderBy(node => CloudPath.Depth(node.Path))
                      .GroupBy(node => CloudPath.Depth(node.Path)))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CreateMissingPlaceholders(depthGroup, nextManaged, nextVersions);
         }
 
@@ -659,6 +687,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                      .OrderBy(node => node.Path, StringComparer.OrdinalIgnoreCase)
                      .GroupBy(node => CloudPath.Parent(node.Path), StringComparer.OrdinalIgnoreCase))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CreateMissingPlaceholders(parentGroup, nextManaged, nextVersions);
         }
 
@@ -666,6 +695,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                      .Where(path => !desired.ContainsKey(path))
                      .OrderByDescending(CloudPath.Depth))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             RemoveManagedPath(stalePath);
         }
 
@@ -786,23 +816,28 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private async Task RecoverLocalChangesAsync(CancellationToken cancellationToken)
     {
+        int folderErrors = 0;
+        int repairs = 0;
         LocalTreeScan scan = LocalTreeScan.Read(_root, (path, error) =>
-            AppLog.Error($"Local folder scan deferred: {path}", error), repair: path =>
+        {
+            if (++folderErrors <= 5) AppLog.Error($"Local folder scan deferred: {path}", error);
+        }, repair: path =>
             {
                 if (!TryGetCloudPath(path, out string cloudPath) || GetRemoteNode(cloudPath)?.IsFolder != true)
                     return false;
                 try
                 {
                     CloudFilePinning.RepairDirectoryPopulation(path);
-                    AppLog.Info($"Repaired cloud folder population: {cloudPath}");
+                    if (++repairs <= 5) AppLog.Info($"Repaired cloud folder population: {cloudPath}");
                     return true;
                 }
                 catch (Exception ex)
                 {
-                    AppLog.Error($"Cloud folder repair deferred: {cloudPath}", ex);
+                    if (folderErrors < 5) AppLog.Error($"Cloud folder repair deferred: {cloudPath}", ex);
                     return false;
                 }
-            });
+            }, cancellationToken: cancellationToken);
+        if (folderErrors > 0) AppLog.Warn($"Deferred {folderErrors} unreadable folders; originals preserved.");
         _localScanIncomplete = scan.Unreadable.Count > 0;
         foreach (string localDirectory in scan.Directories
                      .OrderBy(path => CloudPath.Depth(Path.GetRelativePath(_root, path))))
@@ -1371,7 +1406,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException or ArgumentException)
             {
                 _namespaceIncomplete = true;
-                AppLog.Error($"Placeholder creation deferred for folder {group.Key}.", ex);
+                if (++_deferredPlaceholders <= 5) AppLog.Error($"Placeholder creation deferred for folder {group.Key}.", ex);
                 foreach (CloudNode node in group.Where(node => _state.ManagedPaths.Contains(node.Path)))
                 {
                     nextManaged.Add(node.Path);
@@ -1472,7 +1507,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 HRESULT result = PInvoke.CfCreatePlaceholders(
                     localParent,
                     native.Infos,
-                    CF_CREATE_FLAGS.CF_CREATE_FLAG_STOP_ON_ERROR,
+                    CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE,
                     out uint processed);
                 // Preserve successful entries even when another entry in the batch fails.
                 int succeeded = 0;
@@ -1484,11 +1519,23 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                     _createdPlaceholders++;
                     nextManaged.Add(node.Path);
                     nextVersions[node.Path] = NodeSignature(node);
+                    // Dispose persists these if shutdown interrupts a large namespace pass.
+                    _state.ManagedPaths.Add(node.Path);
+                    _state.ManagedVersions[node.Path] = NodeSignature(node);
                     CloudFilePinning.RefreshShell(CloudPath.LocalPath(_root, node.Path));
                 }
-                result.ThrowOnFailure();
                 if (succeeded != create.Count)
-                    throw new IOException($"CfAPI создал {succeeded} из {create.Count} плейсхолдеров в {localParent}.");
+                {
+                    _namespaceIncomplete = true;
+                    if (_deferredPlaceholders < 5)
+                        AppLog.Warn($"CfAPI created {succeeded}/{create.Count} entries in {localParent}; HRESULT=0x{result.Value:X8}.");
+                    _deferredPlaceholders += create.Count - succeeded;
+                    foreach (CloudNode node in create.Where(node => !nextManaged.Contains(node.Path) && _state.ManagedPaths.Contains(node.Path)))
+                    {
+                        nextManaged.Add(node.Path);
+                        nextVersions[node.Path] = _state.ManagedVersions.GetValueOrDefault(node.Path, "");
+                    }
+                }
             }
         }
     }

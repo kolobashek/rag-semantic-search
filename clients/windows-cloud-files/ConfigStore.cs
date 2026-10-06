@@ -24,13 +24,21 @@ internal sealed class ConfigStore
 
     public string ConfigPath { get; }
 
-    public string StatePath { get; }
+    public string StatePath { get; private set; }
+
+    internal void SelectStateNamespace(string key)
+    {
+        if (key.Length > 0 && !Guid.TryParseExact(key, "N", out _))
+            throw new InvalidDataException("Invalid cloud root key.");
+        StatePath = Path.Combine(Path.GetDirectoryName(ConfigPath)!, key.Length == 0 ? "state.json" : $"state-{key}.json");
+    }
 
     public ProviderConfig LoadConfig()
     {
         ProviderConfig config = LoadRegistryDefaults();
         if (!File.Exists(ConfigPath))
         {
+            SelectStateNamespace(config.RootKey);
             return config;
         }
 
@@ -49,6 +57,9 @@ internal sealed class ConfigStore
             config.DeviceId = saved.DeviceId;
         }
         config.ClientId = saved.ClientId;
+        config.RootKey = saved.RootKey;
+        config.PreservedRoot = saved.PreservedRoot;
+        SelectStateNamespace(config.RootKey);
         config.PollSeconds = saved.PollSeconds;
         config.KeepAllOffline = saved.KeepAllOffline;
         config.OfflinePaths = new HashSet<string>(
@@ -127,6 +138,7 @@ internal sealed class ConfigStore
             config.DeviceId = deviceId;
         }
         config.KeepAllOffline = Convert.ToInt32(key.GetValue("KeepAllOffline", 0)) != 0;
+        config.RootKey = Convert.ToString(key.GetValue("RootKey")) ?? "";
         config.MaxCacheSizeGb = CachePolicy.NormalizeMaxCacheSizeGb(
             Convert.ToInt32(key.GetValue("MaxCacheSizeGb", CachePolicy.DefaultMaxCacheSizeGb)));
         config.MinimumFreeSpaceGb = CachePolicy.NormalizeMinimumFreeSpaceGb(

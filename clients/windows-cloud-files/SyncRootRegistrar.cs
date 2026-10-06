@@ -21,7 +21,7 @@ internal static class SyncRootRegistrar
     {
         string root = Path.GetFullPath(rootPath);
         StorageFolder folder = await StorageFolder.GetFolderFromPathAsync(root);
-        string expectedId = BuildSyncRootId(config.Server);
+        string expectedId = BuildSyncRootId(config.Server, config.RootKey);
         StorageProviderSyncRootInfo? existing = GetRegistration(folder);
         if (existing is not null && CanReuseRegistration(existing.Id, expectedId))
         {
@@ -87,11 +87,14 @@ internal static class SyncRootRegistrar
         VirtualDriveManager.RemoveForRoot(root);
     }
 
-    internal static string BuildSyncRootId(string server)
+    internal static string BuildSyncRootId(string server, string rootKey = "")
     {
+        if (rootKey.Length > 0 && !Guid.TryParseExact(rootKey, "N", out _))
+            throw new InvalidDataException("Invalid cloud root key.");
         string sid = WindowsIdentity.GetCurrent().User?.Value
             ?? throw new InvalidOperationException("Не удалось определить SID пользователя Windows.");
-        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(server.TrimEnd('/').ToLowerInvariant()));
+        string identity = server.TrimEnd('/').ToLowerInvariant() + (rootKey.Length > 0 ? "\n" + rootKey : "");
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
         return $"TSK.RagCloudFiles!{sid}!{Convert.ToHexString(hash)[..16]}";
     }
 

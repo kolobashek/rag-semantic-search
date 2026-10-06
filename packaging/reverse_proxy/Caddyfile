@@ -1,11 +1,24 @@
 {
 	admin 127.0.0.1:2019
+	log default {
+		output file C:/ProgramData/RAGCatalog/caddy/errors.log {
+			roll_size 10mb
+			roll_keep 4
+			roll_keep_for 336h
+		}
+		format json
+		level ERROR
+	}
 }
 
 cloud.tsk-nsk.ru {
 	encode zstd gzip
 
-	reverse_proxy 127.0.0.1:8080
+	reverse_proxy 127.0.0.1:8080 {
+		transport http {
+			keepalive 2s
+		}
+	}
 
 	header {
 		Strict-Transport-Security "max-age=31536000"

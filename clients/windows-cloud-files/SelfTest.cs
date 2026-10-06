@@ -35,6 +35,9 @@ internal static class SelfTest
         Equal(1, repairs);
         Equal(1, persistent.Unreadable.Count);
         TestSessionAuthorizationAsync().GetAwaiter().GetResult();
+        TestNetworkRecoveryAsync().GetAwaiter().GetResult();
+        TestSnapshotRetryAsync().GetAwaiter().GetResult();
+        TestNamespaceRecovery();
         Equal("https://cloud.tsk-nsk.ru", new ProviderConfig().Server);
         Equal(false, WindowsBootstrap.IsInteractiveInstall(["--self-test"]));
         Equal("Folder/file.txt", CloudPath.Normalize("/Folder\\file.txt/"));
@@ -334,6 +337,120 @@ internal static class SelfTest
         handler.Reset();
         using (await client.GetAsync("https://test.invalid/three")) { }
         Equal(2, notifications);
+    }
+
+    private static async Task TestSnapshotRetryAsync()
+    {
+        SnapshotRetryHandler handler = new();
+        using CloudDriveApi api = new("https://test.invalid", "test-token", handler);
+        int retries = 0;
+        api.RetryingRead += (_, _) => retries++;
+        VisibleSnapshot snapshot = await api.GetVisibleSnapshotAsync(CancellationToken.None);
+        Equal(1, retries);
+        Equal(2, snapshot.Nodes.Count);
+        Equal(handler.Urls[1], handler.Urls[2]); // Retry the failed page, not the whole snapshot.
+        Equal(4, handler.Urls.Count);
+        using CloudDriveApi denied = new("https://test.invalid", "test-token", new UnauthorizedTestHandler());
+        try
+        {
+            await denied.GetVisibleSnapshotAsync(CancellationToken.None);
+            throw new InvalidOperationException("Unauthorized snapshot accepted");
+        }
+        catch (HttpRequestException error) { Equal(System.Net.HttpStatusCode.Unauthorized, error.StatusCode!.Value); }
+    }
+
+    private sealed class SnapshotRetryHandler : HttpMessageHandler
+    {
+        public List<string> Urls = [];
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Urls.Add(request.RequestUri!.ToString());
+            if (Urls.Count == 2) return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.BadGateway));
+            string path = Urls.Count == 1 ? "a.pdf" : "b.pdf";
+            string cursor = Urls.Count == 1 ? "page2" : "end";
+            object[] nodes = Urls.Count == 4 ? [] : [new { path, node_type = "file" }];
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new { changes = nodes, next_cursor = cursor, acl_revision = "stable" })),
+            });
+        }
+    }
+
+    private static void TestNamespaceRecovery()
+    {
+        string temporary = Path.Combine(Path.GetTempPath(), "rag-recovery-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temporary);
+        try
+        {
+            string original = Path.Combine(temporary, "original");
+            Directory.CreateDirectory(original);
+            File.WriteAllText(Path.Combine(original, "local.txt"), "unsynced content");
+            ConfigStore store = new(Path.Combine(temporary, "config", "config.json"));
+            store.SaveState(new ProviderState());
+            string originalState = File.ReadAllText(store.StatePath);
+            ProviderConfig config = new() { RootPath = original, Token = "test-token", KeepAllOffline = false };
+            config.OfflinePaths.Add("pinned");
+            string request = Guid.NewGuid().ToString("N");
+            NamespaceRecovery.Prepare(config, store, request);
+            Equal("unsynced content", File.ReadAllText(Path.Combine(original, "local.txt")));
+            Equal(originalState, File.ReadAllText(store.StatePath));
+            Equal(original, config.PreservedRoot);
+            Equal(0, Directory.GetFileSystemEntries(config.RootPath).Length);
+            ProviderConfig restored = new ConfigStore(store.ConfigPath).LoadConfig();
+            Equal(request, restored.RootKey);
+            Equal("test-token", restored.Token);
+            Equal(true, restored.OfflinePaths.Contains("pinned"));
+            ConfigStore newStore = new(store.ConfigPath);
+            newStore.LoadConfig();
+            Equal(false, File.Exists(newStore.StatePath));
+            NamespaceRecovery.Prepare(restored, newStore, request);
+            Throws<InvalidDataException>(() => NamespaceRecovery.Prepare(restored, newStore, "../invalid"));
+            string collision = Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(Path.Combine(temporary, "RAG Cloud Drive - " + collision[..8]));
+            Throws<IOException>(() => NamespaceRecovery.Prepare(restored, newStore, collision));
+        }
+        finally { Directory.Delete(temporary, recursive: true); }
+    }
+
+    private static async Task TestNetworkRecoveryAsync()
+    {
+        List<double> waits = [];
+        int calls = 0;
+        int result = await NetworkRecovery.ExecuteAsync(() =>
+        {
+            if (++calls < 8) throw new HttpRequestException("502", null, System.Net.HttpStatusCode.BadGateway);
+            return Task.FromResult(42);
+        }, CancellationToken.None, delay: (wait, _) => { waits.Add(wait.TotalSeconds); return Task.CompletedTask; });
+        Equal(42, result);
+        Equal("5,10,20,40,60,60,60", string.Join(",", waits));
+        foreach (var code in new[] { System.Net.HttpStatusCode.Unauthorized, System.Net.HttpStatusCode.Forbidden,
+                                     System.Net.HttpStatusCode.NotFound, System.Net.HttpStatusCode.BadRequest })
+            Equal(false, NetworkRecovery.IsTransient(new HttpRequestException("fatal", null, code), CancellationToken.None));
+        Equal(false, NetworkRecovery.IsTransient(new IOException("corrupt local metadata"), CancellationToken.None));
+        Equal(true, NetworkRecovery.IsTransient(new TaskCanceledException("HTTP timeout"), CancellationToken.None));
+        using CancellationTokenSource stop = new();
+        calls = 0;
+        try
+        {
+            await NetworkRecovery.ExecuteAsync<int>(() =>
+            {
+                calls++;
+                throw new HttpRequestException("unavailable", null, System.Net.HttpStatusCode.ServiceUnavailable);
+            }, stop.Token, delay: (_, token) => { stop.Cancel(); token.ThrowIfCancellationRequested(); return Task.CompletedTask; });
+            throw new InvalidOperationException("Cancellation not observed");
+        }
+        catch (OperationCanceledException) { }
+        Equal(1, calls);
+        Equal(false, NetworkRecovery.IsTransient(new TaskCanceledException(), stop.Token));
+        calls = 0;
+        try
+        {
+            await NetworkRecovery.ExecuteAsync<int>(() => { calls++; throw new HttpRequestException("502", null, System.Net.HttpStatusCode.BadGateway); },
+                CancellationToken.None, maxAttempts: 3, delay: (_, _) => Task.CompletedTask);
+            throw new InvalidOperationException("Retry bound not enforced");
+        }
+        catch (HttpRequestException) { }
+        Equal(3, calls);
     }
 
     private static async Task TestDiagnosticsAsync(string logPath)

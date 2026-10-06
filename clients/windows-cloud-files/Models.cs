@@ -24,6 +24,12 @@ internal sealed class ProviderConfig
     [JsonPropertyName("client_id")]
     public string ClientId { get; set; } = "";
 
+    [JsonPropertyName("root_key")]
+    public string RootKey { get; set; } = "";
+
+    [JsonPropertyName("preserved_root")]
+    public string PreservedRoot { get; set; } = "";
+
     [JsonPropertyName("poll_seconds")]
     public int PollSeconds { get; set; } = 60;
 

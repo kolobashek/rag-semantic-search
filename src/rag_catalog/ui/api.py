@@ -497,9 +497,22 @@ async def api_client_diagnostics_heartbeat(request: Request, client_id: str, aut
         raise HTTPException(400, 'Unknown startup phase')
     if payload['state'] not in {'Starting', 'Authorizing', 'Syncing', 'UpToDate', 'Offline', 'Error', 'Stopped'}:
         raise HTTPException(400, 'Unknown client state')
+    root_key = payload.get('root_key', '')
+    if not isinstance(root_key, str) or (root_key and not re.fullmatch(r'[a-f0-9]{32}', root_key)):
+        raise HTTPException(400, 'Invalid root key')
     store = ClientDiagnosticsDB.from_config(cfg)
     store.heartbeat(client_id, **{k: payload[k] for k in fields})
-    return {'request_id': store.read(client_id)['request_id']}
+    return {'request_id': store.read(client_id)['request_id'],
+            'recovery_request_id': store.poll_recovery(client_id, root_key)}
+
+
+@app.post('/api/cloud-drive/sync/recovery/request')
+def api_client_recovery_request(client_id: str, authorization: AuthHeader = ''):
+    cfg = load_config()
+    user = _diagnostics_access(cfg, authorization, client_id, admin=True)
+    row = ClientDiagnosticsDB.from_config(cfg).request_recovery(client_id, str(user['username']))
+    _audit_cloud_drive_api_event(cfg, user, 'client_recovery_request', details={'client_id': client_id})
+    return row
 
 
 @app.post('/api/cloud-drive/sync/update/request')
@@ -558,7 +571,8 @@ def api_client_diagnostics_status(client_id: str, authorization: AuthHeader = ''
     _diagnostics_access(cfg, authorization, client_id, admin=True)
     store = ClientDiagnosticsDB.from_config(cfg)
     row = store.read(client_id)
-    return {**{k: v for k, v in row.items() if k != 'log_text'}, 'health': store.read_health(client_id)}
+    return {**{k: v for k, v in row.items() if k != 'log_text'}, 'health': store.read_health(client_id),
+            'recovery': store.read_recovery(client_id)}
 
 
 @app.get('/api/cloud-drive/sync/diagnostics/download')
@@ -577,7 +591,7 @@ def api_client_diagnostics_download(client_id: str, authorization: AuthHeader = 
 
 # Bump this whenever packaging/build.ps1 produces a new exe
 _SYNC_CLIENT_VERSION = "1.1.0"
-_CLOUD_FILES_VERSION = "0.6.6"
+_CLOUD_FILES_VERSION = "0.6.7"
 _CLOUD_FILES_SHELL_VERSION = "0.4.0"
 
 

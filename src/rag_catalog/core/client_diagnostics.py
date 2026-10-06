@@ -42,6 +42,34 @@ class ClientDiagnosticsDB:
                 client_id TEXT PRIMARY KEY, last_seen_at REAL NOT NULL,
                 app_version TEXT NOT NULL, phase TEXT NOT NULL,
                 state TEXT NOT NULL, last_error TEXT NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS client_recoveries (
+                client_id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
+                requested_by TEXT NOT NULL, requested_at REAL NOT NULL,
+                switched_at REAL NOT NULL DEFAULT 0)''')
+
+    def request_recovery(self, client_id: str, requested_by: str) -> dict:
+        with self._connect() as db:
+            db.execute('''INSERT INTO client_recoveries VALUES (?,?,?,?,0)
+                          ON CONFLICT(client_id) DO UPDATE SET request_id=excluded.request_id,
+                          requested_by=excluded.requested_by, requested_at=excluded.requested_at, switched_at=0
+                          WHERE client_recoveries.switched_at>0 OR client_recoveries.requested_at<?''',
+                       (client_id, uuid.uuid4().hex, requested_by, time.time(), time.time() - 86400))
+        return self.read_recovery(client_id)
+
+    def read_recovery(self, client_id: str) -> dict:
+        with self._connect() as db:
+            db.execute('DELETE FROM client_recoveries WHERE MAX(requested_at, switched_at) < ?',
+                       (time.time() - RETENTION_SECONDS,))
+            row = db.execute('SELECT * FROM client_recoveries WHERE client_id=?', (client_id,)).fetchone()
+        return dict(row) if row else {}
+
+    def poll_recovery(self, client_id: str, root_key: str) -> str:
+        with self._connect() as db:
+            db.execute('''UPDATE client_recoveries SET switched_at=?
+                          WHERE client_id=? AND request_id=? AND switched_at=0''',
+                       (time.time(), client_id, root_key))
+        row = self.read_recovery(client_id)
+        return row['request_id'] if row and not row['switched_at'] and row['requested_at'] >= time.time() - 86400 else ''
 
     def heartbeat(self, client_id: str, *, app_version: str, phase: str, state: str, last_error: str) -> None:
         with self._connect() as db:

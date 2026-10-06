@@ -30,6 +30,7 @@ def show_client_diagnostics(state, client: dict):
         status = ui.label().classes('text-sm')
         health_status = ui.label().classes('text-sm whitespace-pre-wrap')
         update_status = ui.label().classes('text-sm')
+        recovery_status = ui.label().classes('text-sm')
         text = ui.textarea().props('readonly outlined rows=16').classes('w-full font-mono text-xs')
 
         def refresh():
@@ -63,6 +64,29 @@ def show_client_diagnostics(state, client: dict):
             update_status.set_text(
                 (f"Обновлён до {update['reported_version']}" if update.get('completed_at')
                  else f"Ожидается обновление до {update['target_version']}") if update else '')
+            recovery = store.read_recovery(client_id)
+            recovery_status.set_text(('Новая папка подготовлена; результат синхронизации смотрите в статусе.'
+                                      if recovery['switched_at'] else 'Запрошено восстановление в новой папке (команда действует сутки).')
+                                     if recovery else '')
+
+        def request_recovery():
+            if not require_admin():
+                return
+            with ui.dialog() as confirmation, ui.card().classes('max-w-lg'):
+                ui.label('Восстановить облачную папку?').classes('font-semibold')
+                ui.label('Клиент 0.6.7+ создаст новую папку рядом со старой. Исходная папка и локальные изменения '
+                         'останутся на месте; они не будут автоматически перенесены в новую. Содержимое облачных '
+                         'файлов загружается при открытии или согласно выбранным офлайн-настройкам.')
+                def confirm():
+                    if require_admin():
+                        store.request_recovery(client_id, _username(state))
+                        _log_app_event(state, 'settings', 'client_recovery_request', details={'client_id': client_id})
+                        refresh()
+                    confirmation.close()
+                with ui.row():
+                    ui.button('Создать новую папку', icon='create_new_folder', on_click=confirm)
+                    ui.button('Отмена', on_click=confirmation.close).props('flat')
+            confirmation.open()
 
         def request_update():
             if not require_admin():
@@ -92,6 +116,7 @@ def show_client_diagnostics(state, client: dict):
             ui.button('Запросить свежий журнал', icon='sync', on_click=request)
             download = ui.button('Скачать', icon='download', on_click=save).props('outline')
             ui.button('Обновить клиент', icon='system_update', on_click=request_update).props('outline')
+            ui.button('Восстановить папку', icon='restore', on_click=request_recovery).props('outline')
             ui.space()
             ui.button('Закрыть', on_click=dialog.close).props('flat')
         timer = ui.timer(5, refresh)

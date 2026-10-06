@@ -8,7 +8,7 @@ internal sealed class LocalTreeScan
 
     public static LocalTreeScan Read(string root, Action<string, Exception> onError,
         Func<string, string[]>? list = null, Func<string, FileAttributes>? attributes = null,
-        Func<string, bool>? repair = null)
+        Func<string, bool>? repair = null, CancellationToken cancellationToken = default)
     {
         list ??= Directory.GetFileSystemEntries;
         attributes ??= File.GetAttributes;
@@ -18,10 +18,12 @@ internal sealed class LocalTreeScan
         pending.Enqueue(root);
         while (pending.TryDequeue(out string? directory))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 foreach (string path in list(directory))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (directory.Equals(root, StringComparison.OrdinalIgnoreCase)
                         && Path.GetFileName(path).Equals(PlaceholderRecovery.FolderName, StringComparison.OrdinalIgnoreCase)) continue;
                     try

@@ -16,11 +16,12 @@ internal sealed class CloudDriveApi : IDisposable
     private readonly HttpClient _http;
     private readonly SessionExpiryHandler _sessionHandler;
     public event Action? SessionExpired;
+    public event Action<Exception, TimeSpan>? RetryingRead;
 
-    public CloudDriveApi(string server, string token)
+    public CloudDriveApi(string server, string token, HttpMessageHandler? handler = null)
     {
         _sessionHandler = new SessionExpiryHandler(
-            () => SessionExpired?.Invoke(), new HttpClientHandler { AllowAutoRedirect = true });
+            () => SessionExpired?.Invoke(), handler ?? new HttpClientHandler { AllowAutoRedirect = true });
         _http = new HttpClient(_sessionHandler)
         {
             BaseAddress = new Uri(server.TrimEnd('/') + "/"),
@@ -88,6 +89,8 @@ internal sealed class CloudDriveApi : IDisposable
 
     public async Task<string> RegisterAsync(string deviceId, string displayName, CancellationToken cancellationToken)
     {
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
         string query = QueryString(new Dictionary<string, string>
         {
             ["device_id"] = deviceId,
@@ -101,7 +104,7 @@ internal sealed class CloudDriveApi : IDisposable
                 update_channel = "stable",
             }),
         });
-        using HttpResponseMessage response = await _http.PostAsync("api/cloud-drive/sync/clients?" + query, null, cancellationToken);
+        using HttpResponseMessage response = await _http.PostAsync("api/cloud-drive/sync/clients?" + query, null, timeout.Token);
         response.EnsureSuccessStatusCode();
         SyncClientResponse client = await response.Content.ReadFromJsonAsync<SyncClientResponse>(JsonOptions, cancellationToken)
             ?? throw new InvalidOperationException("Сервер не вернул идентификатор sync client.");
@@ -191,10 +194,15 @@ internal sealed class CloudDriveApi : IDisposable
         for (int pageNumber = 0; pageNumber < 10_000; pageNumber++)
         {
             string path = "api/cloud-drive/changes?limit=5000&since=" + Uri.EscapeDataString(cursor);
-            using HttpResponseMessage response = await _http.GetAsync(path, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            ChangePage page = await response.Content.ReadFromJsonAsync<ChangePage>(JsonOptions, cancellationToken)
-                ?? throw new InvalidOperationException("Сервер вернул пустую страницу change feed.");
+            ChangePage page = await NetworkRecovery.ExecuteAsync(async () =>
+            {
+                using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(60));
+                using HttpResponseMessage response = await _http.GetAsync(path, timeout.Token);
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadFromJsonAsync<ChangePage>(JsonOptions, cancellationToken)
+                    ?? throw new InvalidOperationException("Сервер вернул пустую страницу change feed.");
+            }, cancellationToken, (error, wait) => RetryingRead?.Invoke(error, wait), maxAttempts: 3);
             if (aclRevision.Length == 0)
             {
                 aclRevision = page.AclRevision;

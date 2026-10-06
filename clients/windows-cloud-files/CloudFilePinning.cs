@@ -60,7 +60,7 @@ internal static partial class CloudFilePinning
         using SafeFileHandle handle = CreateFile(Path.GetFullPath(path), FileWriteData | FileReadAttributes,
             FileShareRead | FileShareWrite | FileShareDelete, 0, OpenExisting,
             FileFlagBackupSemantics | 0x00200000, 0); // FILE_FLAG_OPEN_REPARSE_POINT
-        if (handle.IsInvalid) throw new IOException("Cannot repair cloud folder: " + path);
+        if (handle.IsInvalid) throw new IOException("Cannot repair cloud folder: " + path, Marshal.GetHRForLastWin32Error());
         PInvoke.CfUpdatePlaceholder(new HANDLE(handle.DangerousGetHandle()), null, null, 0, null, 0,
             CF_UPDATE_FLAGS.CF_UPDATE_FLAG_DISABLE_ON_DEMAND_POPULATION, null, null).ThrowOnFailure();
         GC.KeepAlive(handle);

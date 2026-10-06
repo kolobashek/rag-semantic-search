@@ -14,6 +14,7 @@ internal sealed class ClientDiagnostics : IAsyncDisposable
     private readonly HttpClient _http;
     private readonly string _logPath;
     private readonly ClientStatusModel? _status;
+    private readonly Action<string>? _requestRecovery;
     private string _phase = "registration";
     private readonly CancellationTokenSource _stop = new();
     private Task? _task;
@@ -21,11 +22,12 @@ internal sealed class ClientDiagnostics : IAsyncDisposable
     private DateTimeOffset _lastUpload;
 
     public ClientDiagnostics(ProviderConfig config, HttpMessageHandler? handler = null, string? logPath = null,
-        ClientStatusModel? status = null)
+        ClientStatusModel? status = null, Action<string>? requestRecovery = null)
     {
         // Freeze the authorized identity while interactive login can change the live config.
-        _config = new ProviderConfig { Server = config.Server, Token = config.Token, ClientId = config.ClientId };
+        _config = new ProviderConfig { Server = config.Server, Token = config.Token, ClientId = config.ClientId, RootKey = config.RootKey };
         _status = status;
+        _requestRecovery = requestRecovery;
         _logPath = logPath ?? AppLog.FilePath;
         _http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false })
         {
@@ -78,11 +80,18 @@ internal sealed class ClientDiagnostics : IAsyncDisposable
             phase = Volatile.Read(ref _phase),
             state = status?.State.ToString() ?? "Starting",
             last_error = error[..Math.Min(error.Length, 1000)],
+            root_key = _config.RootKey,
         });
         using HttpResponseMessage response = await _http.SendAsync(poll, cancellationToken);
         response.EnsureSuccessStatusCode();
         using JsonDocument json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         string requestId = json.RootElement.GetProperty("request_id").GetString() ?? "";
+        if (json.RootElement.TryGetProperty("recovery_request_id", out JsonElement recovery))
+        {
+            string recoveryId = recovery.GetString() ?? "";
+            if (Guid.TryParseExact(recoveryId, "N", out _) && recoveryId != _config.RootKey)
+                _requestRecovery?.Invoke(recoveryId);
+        }
         string log = ReadTail(_logPath);
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(log)));
         if (requestId.Length == 0 && hash == _lastHash

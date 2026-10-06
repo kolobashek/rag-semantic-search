@@ -127,6 +127,7 @@ internal static class Program
         bool restartRequested = false;
         bool reauthorizeRequested = false;
         string unregisterRoot = "";
+        string recoveryRequest = "";
         bool showTray = !once && runSeconds <= 0;
         ClientUpdater? updater = null;
         CloudDriveApi? updateApi = null;
@@ -156,6 +157,13 @@ internal static class Program
                 reauthorizeRequested = true;
             }
             AppLog.Info("Device authorization requested; stopping synchronization before restart.");
+            RequestStop(restart: true);
+        }
+
+        void RequestRecovery(string requestId)
+        {
+            lock (runtimeSync) { recoveryRequest = requestId; }
+            AppLog.Info("Administrator requested a fresh namespace; original root will be preserved.");
             RequestStop(restart: true);
         }
 
@@ -252,17 +260,20 @@ internal static class Program
             AppLog.Info($"Starting provider {AppDefaults.Version} for {config.Server}.");
             if (config.ClientId.Length > 0 && config.Token.Length > 0)
             {
-                diagnostics = new ClientDiagnostics(config, status: status);
+                diagnostics = new ClientDiagnostics(config, status: status, requestRecovery: RequestRecovery);
                 diagnostics.Start();
             }
             bool firstAuthorization = config.Token.Length == 0;
             using CloudDriveApi api = new(config.Server, config.Token);
+            api.RetryingRead += (error, wait) => NetworkRecovery.Report(status, error, wait);
             string registeredClientId = await SessionAuthorization.RegisterAsync(
                 config.Token,
                 token =>
                 {
                     api.SetCredentials(config.Server, token);
-                    return api.RegisterAsync(config.DeviceId, Environment.MachineName, shutdown.Token);
+                    return NetworkRecovery.ExecuteAsync(
+                        () => api.RegisterAsync(config.DeviceId, Environment.MachineName, shutdown.Token),
+                        shutdown.Token, (error, wait) => NetworkRecovery.Report(status, error, wait));
                 },
                 async () =>
             {
@@ -282,7 +293,7 @@ internal static class Program
             store.SaveConfig(config);
             api.SessionExpired += RequestAuthorization;
             if (diagnostics is not null) await diagnostics.DisposeAsync();
-            diagnostics = new ClientDiagnostics(config, status: status);
+            diagnostics = new ClientDiagnostics(config, status: status, requestRecovery: RequestRecovery);
             diagnostics.SetPhase("namespace");
             diagnostics.Start();
             // Keep recovery/update control alive even if provider startup fails.
@@ -384,6 +395,21 @@ internal static class Program
         }
         if (restart)
         {
+            if (recoveryRequest.Length > 0)
+            {
+                try
+                {
+                    NamespaceRecovery.Prepare(config, store, recoveryRequest);
+                    VirtualDriveManager.RemoveForRoot(config.PreservedRoot);
+                    WindowsBootstrap.SavePreferences(config);
+                }
+                catch (Exception error)
+                {
+                    AppLog.Error("Не удалось подготовить новую облачную папку. Исходная папка сохранена.", error);
+                    WindowsBootstrap.ShowError("Восстановление облачной папки не выполнено.", error);
+                    return 1;
+                }
+            }
             if (reauthorizeRequested)
             {
                 // Provider disposal has completed. Preserve the root, cache and sync state.

@@ -61,6 +61,7 @@ def diagnostic_api(tmp_path, monkeypatch):
     app = FastAPI()
     app.get('/pending')(api.api_client_diagnostics_pending)
     app.post('/heartbeat')(api.api_client_diagnostics_heartbeat)
+    app.post('/recovery')(api.api_client_recovery_request)
     app.post('/request')(api.api_client_diagnostics_request)
     app.post('/upload')(api.api_client_diagnostics_upload)
     app.get('/status')(api.api_client_diagnostics_status)
@@ -164,3 +165,34 @@ def test_heartbeat_reports_registration_failure_without_new_registration(diagnos
     assert client.post('/heartbeat', params=params, headers=tokens['veronika'], content=b'x' * 8193).status_code == 413
     for bad in [[], {}, {**payload, 'state': []}, {**payload, 'phase': 'fake'}, {**payload, 'state': 'fake'}]:
         assert client.post('/heartbeat', params=params, headers=tokens['veronika'], json=bad).status_code == 400
+
+
+def test_recovery_requires_admin_and_exact_ack(diagnostic_api):
+    client, tokens, params, cfg = diagnostic_api
+    assert client.post('/recovery', params=params).status_code == 401
+    assert client.post('/recovery', params=params, headers=tokens['veronika']).status_code == 403
+    request = client.post('/recovery', params=params, headers=tokens['admin']).json()
+    assert client.post('/recovery', params=params, headers=tokens['admin']).json()['request_id'] == request['request_id']
+    payload = dict(app_version='0.6.7', phase='failed', state='Error', last_error='old root corrupt')
+    assert client.post('/heartbeat', params=params, headers=tokens['other'], json=payload).status_code == 403
+    assert client.post('/heartbeat', params=params, headers=tokens['veronika'], json={**payload, 'root_key': '../escape'}).status_code == 400
+    pending = client.post('/heartbeat', params=params, headers=tokens['veronika'], json=payload).json()
+    assert pending['recovery_request_id'] == request['request_id']
+    payload['root_key'] = '0' * 32
+    assert client.post('/heartbeat', params=params, headers=tokens['veronika'], json=payload).json()['recovery_request_id']
+    payload['root_key'] = request['request_id']
+    assert not client.post('/heartbeat', params=params, headers=tokens['veronika'], json=payload).json()['recovery_request_id']
+    status = client.get('/status', params=params, headers=tokens['admin']).json()
+    assert status['recovery']['switched_at'] > 0
+    assert status['health']['state'] == 'Error'  # Root switch is not a successful sync.
+
+
+def test_recovery_command_expires_and_survives_restart(tmp_path, monkeypatch):
+    path = str(tmp_path / 'recovery.db')
+    request = ClientDiagnosticsDB(path).request_recovery('pc', 'admin')
+    store = ClientDiagnosticsDB(path)
+    assert store.poll_recovery('pc', '') == request['request_id']
+    now = time.time()
+    monkeypatch.setattr('rag_catalog.core.client_diagnostics.time.time', lambda: now + 86401)
+    assert not store.poll_recovery('pc', '')
+    assert store.request_recovery('pc', 'admin')['request_id'] != request['request_id']

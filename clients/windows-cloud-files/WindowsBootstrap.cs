@@ -164,6 +164,7 @@ internal static class WindowsBootstrap
         {
             appKey.SetValue("Server", config.Server, RegistryValueKind.String);
             appKey.SetValue("RootPath", config.RootPath, RegistryValueKind.String);
+            appKey.SetValue("RootKey", config.RootKey, RegistryValueKind.String);
             appKey.SetValue("KeepAllOffline", config.KeepAllOffline ? 1 : 0, RegistryValueKind.DWord);
             appKey.SetValue("MaxCacheSizeGb", config.MaxCacheSizeGb, RegistryValueKind.DWord);
             appKey.SetValue(
