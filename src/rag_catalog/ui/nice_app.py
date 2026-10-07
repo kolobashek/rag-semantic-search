@@ -24,6 +24,7 @@ from nicegui import app, events, run, ui
 
 from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config, save_config
+from rag_catalog.core.roles import can_open_screen, can_use_catalog, user_roles
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
 from . import explorer_view as _explorer_view
@@ -554,6 +555,11 @@ def _build_page(
                     color=None,
                 ).props("flat round dense aria-label='Сменить цветовую тему'").classes("rag-header-button")
                 theme_button.tooltip("Сменить тему")
+                shift_logout_button = ui.button(icon="logout", on_click=lambda: do_logout(), color=None).props(
+                    "flat round dense aria-label='Выйти из аккаунта'"
+                ).classes("rag-header-button")
+                shift_logout_button.tooltip("Выйти из аккаунта")
+                shift_logout_button.set_visibility(False)
                 header_title = ui.label("").classes("hidden")
                 header_user_label = ui.label("").classes("rag-avatar hidden lg:grid")
 
@@ -727,9 +733,10 @@ def _build_page(
 
     def update_nav() -> None:
         is_admin = str((state.current_user or {}).get("role") or "") == "admin"
+        shift_logout_button.set_visibility(bool(state.current_user) and not can_use_catalog(state.current_user))
         nav_items = [
             spec for spec in APP_SCREEN_SPECS
-            if spec.get("drawer") and (not spec.get("admin_only") or is_admin)
+            if spec.get("drawer") and can_open_screen(state.current_user, str(spec["key"]))
         ]
 
         # ── Header nav tabs (desktop) ──────────────────────
@@ -737,7 +744,7 @@ def _build_page(
         if state.current_user:
             header_items = [
                 spec for spec in APP_SCREEN_SPECS
-                if spec.get("header") and (not spec.get("admin_only") or is_admin)
+                if spec.get("header") and can_open_screen(state.current_user, str(spec["key"]))
             ]
             with header_nav:
                 for spec in header_items:
@@ -777,7 +784,8 @@ def _build_page(
             user_label = "Настройки"
             if state.current_user:
                 user_label = f"Настройки · {state.current_user.get('username')}"
-            ui.button(user_label, icon="settings", on_click=lambda: set_screen("settings", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+            if can_use_catalog(state.current_user):
+                ui.button(user_label, icon="settings", on_click=lambda: set_screen("settings", close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
             if state.current_user:
                 ui.button("Выйти", icon="logout", on_click=do_logout, color=None).props("flat align=left no-caps").classes("rag-nav-button w-full")
 
@@ -3156,8 +3164,19 @@ def _build_page(
             access_denied=render_access_denied,
         )
 
+    rendered_identity = [None]
+
     def render() -> None:
         render_started = _time.perf_counter()
+        if state.auth_token:
+            state.current_user = _get_auth_db(state).get_user_by_session(state.auth_token)
+        identity = ((state.current_user or {}).get("username"), tuple(sorted(user_roles(state.current_user))))
+        if rendered_identity[0] != identity:
+            dirty_screens.update(initialized_screens)
+            rendered_identity[0] = identity
+        if state.current_user and not can_open_screen(state.current_user, state.screen):
+            state.screen = "search" if can_use_catalog(state.current_user) else "shifts"
+            ui.run_javascript(f"history.replaceState(null, '', '/{state.screen}')")
         update_page_mode()
         header_title.set_text({
             **APP_SCREEN_TITLES,
@@ -3258,7 +3277,7 @@ def _build_page(
         except Exception:
             pass
         try:
-            settings_button.set_visibility(state.screen != "settings")
+            settings_button.set_visibility(state.screen != "settings" and can_use_catalog(state.current_user))
         except Exception:
             pass
         dark_mode.set_value(state.theme == "dark")

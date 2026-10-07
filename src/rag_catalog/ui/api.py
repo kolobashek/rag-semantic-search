@@ -177,6 +177,9 @@ def _require_cloud_drive_api_user(
         raise HTTPException(status_code=401, detail="Сессия недействительна или истекла.")
     if str(user.get("status") or "") != "active":
         raise HTTPException(status_code=403, detail="Пользователь не активирован.")
+    from rag_catalog.core.roles import can_use_catalog
+    if not can_use_catalog(user):
+        raise HTTPException(status_code=403, detail="Роль не предоставляет доступ к облаку.")
     if admin_only and str(user.get("role") or "") != "admin":
         raise HTTPException(status_code=403, detail="Недостаточно прав.")
     try:

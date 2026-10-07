@@ -359,7 +359,9 @@ def is_allowed_chat(chat_id: str, allowed_chat_id: str) -> bool:
 
 def get_authorized_telegram_user(auth_db: UserAuthDB, chat_id: str) -> Dict[str, Any] | None:
     try:
-        return auth_db.get_user_by_telegram_chat_id(str(chat_id or "").strip())
+        from rag_catalog.core.roles import can_use_catalog
+        user = auth_db.get_user_by_telegram_chat_id(str(chat_id or "").strip())
+        return user if can_use_catalog(user) else None
     except Exception:
         return None
 

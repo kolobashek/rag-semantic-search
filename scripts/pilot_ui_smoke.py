@@ -152,10 +152,14 @@ def _prepare_contour(root: Path, *, qdrant_url: str) -> dict[str, Any]:
         display_name="Pilot Smoke User",
         password=password,
         role="user",
+        roles=["user", "driver"],
         status="active",
         must_change_password=False,
     ):
         raise RuntimeError("Не удалось создать isolated smoke user.")
+    for name, role in (("pilot-driver", "driver"), ("pilot-dispatcher", "dispatcher")):
+        auth.admin_create_user(username=name, display_name=name, password=password, roles=[role],
+                               must_change_password=False)
     return {
         "config_path": str(config_path),
         "username": username,
@@ -340,9 +344,10 @@ def _run_browser_smoke(
             new_shift = page.get_by_role("button", name="Новая смена", exact=True)
             new_shift.click()
             dialog = page.get_by_role("dialog")
-            dialog.get_by_label("Организация", exact=True).fill("Smoke organization")
-            dialog.get_by_label("Техника / госномер", exact=True).fill("Smoke truck")
-            dialog.get_by_label("Объект", exact=True).fill("Smoke site")
+            for label, value in (("Организация", "Smoke organization"), ("Техника / госномер", "Smoke truck"), ("Объект", "Smoke site")):
+                field = dialog.get_by_label(label, exact=True)
+                field.fill(value)
+                field.press("Enter")
             dialog.get_by_label("Номер путевого листа", exact=True).fill("SMOKE-001")
             dialog.get_by_label("Отработано без перерывов, ч", exact=True).fill("8.5")
             dialog.get_by_role("button", name="Сохранить", exact=True).click()
@@ -363,7 +368,7 @@ def _run_browser_smoke(
             page.get_by_role("dialog").get_by_role("button", name="Подтвердить", exact=True).click()
             page.get_by_role("cell", name="Черновик", exact=True).wait_for()
             page.get_by_role("row").filter(has_text="Smoke truck").get_by_role("checkbox").click()
-            page.get_by_role("button", name="Изменить черновик", exact=True).click()
+            page.get_by_role("button", name="Изменить смену", exact=True).click()
             page.get_by_role("dialog").get_by_label("Комментарий", exact=True).fill("Corrected")
             page.set_viewport_size({"width": 480, "height": 900})
             page.wait_for_timeout(500)
@@ -384,6 +389,61 @@ def _run_browser_smoke(
             if "SMOKE-001" not in content or "Corrected" not in content:
                 raise RuntimeError("Shift CSV lost saved values")
             _record_check(checks, "shift_create_submit_approve_reopen_edit_history_export", started)
+
+            started = time.perf_counter()
+            page.get_by_role("button", name="Управление", exact=True).click()
+            management = page.get_by_role("dialog")
+            management.get_by_role("cell", name="Smoke organization", exact=True).wait_for()
+            management.get_by_role("tab", name="История всех путевых", exact=True).click()
+            management.get_by_text("Smoke correction", exact=True).count()
+            management.get_by_role("button", name="Закрыть", exact=True).click()
+            _record_check(checks, "shift_management_dialog", started)
+
+            for role_name in ("pilot-driver", "pilot-dispatcher"):
+                started = time.perf_counter()
+                role_context = browser.new_context(viewport={"width": 1280, "height": 900})
+                try:
+                    role_page = role_context.new_page()
+                    role_page.goto(f"{base_url}/search", wait_until="domcontentloaded")
+                    role_page.get_by_label("Логин или email", exact=True).fill(role_name)
+                    role_page.get_by_label("Пароль", exact=True).fill(password)
+                    role_page.get_by_role("button", name="Войти", exact=True).click()
+                    role_page.get_by_text("Смены и путевые листы", exact=True).wait_for()
+                    role_page.get_by_role("button", name="Выйти из аккаунта", exact=True).wait_for()
+                    for name in ("Поиск", "Файлы", "Задачи", "Индекс"):
+                        if role_page.get_by_role("button", name=name, exact=True).is_visible():
+                            raise RuntimeError(f"{role_name} sees forbidden navigation: {name}")
+                    role_page.goto(f"{base_url}/explorer", wait_until="domcontentloaded")
+                    role_page.get_by_text("Смены и путевые листы", exact=True).wait_for()
+                    if role_name == "pilot-driver":
+                        role_page.get_by_text("Смен: 0", exact=False).wait_for()
+                        role_page.get_by_role("button", name="Новая смена", exact=True).click()
+                        editor = role_page.get_by_role("dialog")
+                        for label, value in (("Организация", "Smoke organization"), ("Техника / госномер", "Smoke truck"), ("Объект", "Smoke site")):
+                            editor.get_by_label(label, exact=True).click()
+                            role_page.get_by_role("option", name=value, exact=True).click()
+                        editor.get_by_label("Отработано без перерывов, ч", exact=True).fill("7")
+                        editor.get_by_role("button", name="Сохранить и отправить", exact=True).click()
+                        role_page.get_by_role("cell", name="На проверке", exact=True).wait_for()
+                        if not role_page.locator(".q-badge.bg-negative").count():
+                            raise RuntimeError("Unapproved shift is not red")
+                    else:
+                        role_page.get_by_role("button", name="Управление", exact=True).click()
+                        role_page.get_by_role("tab", name="Сотрудники", exact=True).click()
+                        role_page.get_by_role("button", name="Добавить водителя", exact=True).click()
+                        editor = role_page.get_by_role("dialog").last
+                        editor.get_by_label("Логин", exact=True).fill("created-by-dispatcher")
+                        editor.get_by_label("ФИО", exact=True).fill("Smoke Driver")
+                        editor.get_by_label("Временный пароль", exact=True).fill(password)
+                        editor.get_by_role("button", name="Сохранить", exact=True).click()
+                        role_page.get_by_role("cell", name="Smoke Driver", exact=True).wait_for()
+                        role_page.get_by_role("dialog").get_by_role("button", name="Закрыть", exact=True).click()
+                    role_page.get_by_role("dialog").wait_for(state="hidden")
+                    role_page.wait_for_timeout(400)
+                    role_page.screenshot(path=str(artifact_dir / f"{role_name}-1280.png"), full_page=True)
+                    _record_check(checks, f"{role_name}_navigation_and_workflow", started)
+                finally:
+                    role_context.close()
 
             started = time.perf_counter()
             user_context = browser.new_context(viewport={"width": 1280, "height": 900})
@@ -492,7 +552,7 @@ def _run_browser_smoke(
                     if int(probe["main_text_length"] or 0) < 1:
                         raise RuntimeError(f"Пустой main на /{screen} при {width}px.")
                     if screen == "shifts":
-                        page.get_by_role("cell", name="Smoke truck", exact=True).wait_for()
+                        page.get_by_role("cell", name="Smoke truck", exact=True).first.wait_for()
                         page.screenshot(path=str(artifact_dir / f"shifts-{width}.png"), full_page=True)
                     _record_check(
                         checks,

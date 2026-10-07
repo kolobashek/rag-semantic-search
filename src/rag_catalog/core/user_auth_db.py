@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .db_contract import ensure_schema_version
+from .roles import normalize_roles, primary_role, user_roles
 from .sqlite_runtime import prepare_sqlite_connection
 
 DEFAULT_SESSION_TTL_DAYS = 7
@@ -25,7 +26,7 @@ MAX_SESSION_TTL_DAYS = 7
 SESSION_TTL_SETTING_KEY = "session_ttl_days"
 SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
 ANY_TELEGRAM_CHAT_ID = "*"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 LOGIN_MAX_FAILURES = 5
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 LOGIN_LOCKOUT_SECONDS = 15 * 60
@@ -69,6 +70,13 @@ class UserAuthDB:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @staticmethod
+    def _with_roles(conn, user):
+        row = conn.execute("SELECT roles_json FROM users WHERE username=?", (user["username"],)).fetchone()
+        user["roles_json"] = row[0] if row else ""
+        user["roles"] = sorted(user_roles(user))
+        return user
 
     def _prepare_connection(self, conn: sqlite3.Connection) -> None:
         prepare_sqlite_connection(conn)
@@ -262,6 +270,7 @@ class UserAuthDB:
             "telegram_username": "ALTER TABLE users ADD COLUMN telegram_username TEXT NOT NULL DEFAULT ''",
             "password_hash": "ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''",
             "role": "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+            "roles_json": "ALTER TABLE users ADD COLUMN roles_json TEXT NOT NULL DEFAULT ''",
             "must_change_password": "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0",
         }
         for col, sql in migrations.items():
@@ -1020,7 +1029,7 @@ class UserAuthDB:
                 ).fetchone()
                 if row is None or str(row["status"]) != "active":
                     return None
-                data = dict(row)
+                data = self._with_roles(conn, dict(row))
                 if not _verify_password(password, str(data.get("password_hash", ""))):
                     return None
                 if update_login:
@@ -1067,6 +1076,7 @@ class UserAuthDB:
             return {"user": None, "reason": "invalid_credentials"}
         data = dict(row)
         data.pop("password_hash", None)
+        data["roles"] = sorted(user_roles(data))
         with self._lock:
             with self._connect() as conn:
                 conn.execute("UPDATE users SET last_login_at=? WHERE username=?", (_utc_now(), usr))
@@ -1273,7 +1283,7 @@ class UserAuthDB:
                 ).fetchone()
                 if row is None or str(row["status"]) != "active":
                     return None
-                user = dict(row)
+                user = self._with_roles(conn, dict(row))
                 user["groups"] = self._list_user_groups_conn(conn, str(user.get("username") or ""))
                 user["group_ids"] = [str(group["id"]) for group in user["groups"]]
         self.touch_session(value)
@@ -1307,7 +1317,7 @@ class UserAuthDB:
                 ).fetchone()
                 if row is None:
                     return None
-                user = dict(row)
+                user = self._with_roles(conn, dict(row))
                 user["groups"] = self._list_user_groups_conn(conn, usr)
                 user["group_ids"] = [str(group["id"]) for group in user["groups"]]
                 return user
@@ -1330,7 +1340,7 @@ class UserAuthDB:
                 ).fetchone()
                 if row is None:
                     return None
-                user = dict(row)
+                user = self._with_roles(conn, dict(row))
                 user["groups"] = self._list_user_groups_conn(conn, str(user.get("username") or ""))
                 user["group_ids"] = [str(group["id"]) for group in user["groups"]]
                 return user
@@ -1468,7 +1478,7 @@ class UserAuthDB:
                     ORDER BY role='admin' DESC, username
                     """
                 ).fetchall()
-                users = [dict(row) for row in rows]
+                users = [self._with_roles(conn, dict(row)) for row in rows]
                 for user in users:
                     username = str(user.get("username") or "")
                     user["groups"] = self._list_user_groups_conn(conn, username, active_only=False)
@@ -1683,6 +1693,47 @@ class UserAuthDB:
                 )
                 return cur.rowcount > 0
 
+    def save_driver(self, token: str, *, username: str, display_name: str,
+                    password: str = "", create: bool = False, archived: bool = False) -> None:
+        """Dispatcher-scoped account changes; authorization and mutation share a transaction."""
+        usr, name = str(username).strip().lower(), str(display_name).strip()
+        if not usr or len(usr) > 100 or any(c.isspace() for c in usr) or not name or len(name) > 200:
+            raise ValueError("Укажите логин без пробелов и имя сотрудника")
+        if (create or password) and len(password) < 12:
+            raise ValueError("Временный пароль должен содержать не менее 12 символов")
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                actor_row = conn.execute("""SELECT u.* FROM users u JOIN user_sessions s ON s.username=u.username
+                    WHERE s.token=? AND s.revoked_at IS NULL AND s.expires_at>?""", (token, now)).fetchone()
+                actor = dict(actor_row) if actor_row else {}
+                if (actor.get("status") != "active" or actor.get("must_change_password")
+                        or not user_roles(actor).intersection({"admin", "dispatcher"})):
+                    raise PermissionError("Недостаточно прав для изменения сотрудников")
+                target = conn.execute("SELECT * FROM users WHERE username=?", (usr,)).fetchone()
+                if create:
+                    if target:
+                        raise ValueError("Этот логин уже занят")
+                    conn.execute("""INSERT INTO users(username,display_name,password_hash,role,roles_json,
+                        status,must_change_password,created_at,verified_at) VALUES(?,?,?,?,?,?,1,?,?)""",
+                        (usr, name, _hash_password(password), "driver", '["driver"]', "active", now, now))
+                else:
+                    if not target:
+                        raise ValueError("Сотрудник не найден")
+                    if user_roles(dict(target)) != {"driver"}:
+                        raise PermissionError("Учётную запись с дополнительными ролями изменяет администратор в настройках")
+                    conn.execute("UPDATE users SET display_name=?,status=? WHERE username=?",
+                                 (name, "blocked" if archived else "active", usr))
+                    if password:
+                        conn.execute("UPDATE users SET password_hash=?,must_change_password=1 WHERE username=?",
+                                     (_hash_password(password), usr))
+                    if archived or password:
+                        conn.execute("UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, usr))
+                conn.execute("INSERT INTO auth_events(ts,username,event_type,ok,error) VALUES(?,?,?,1,?)",
+                             (now, actor["username"], "driver_create" if create else "driver_update",
+                              json.dumps({"target": usr, "display_name": name, "archived": archived}, ensure_ascii=False)))
+
     def admin_update_user(
         self,
         *,
@@ -1693,9 +1744,11 @@ class UserAuthDB:
         role: str,
         status: str,
         must_change_password: bool,
+        roles: Optional[list[str]] = None,
     ) -> bool:
         usr = (username or "").strip().lower()
-        role_value = "admin" if str(role or "").strip().lower() == "admin" else "user"
+        role_values = normalize_roles(roles if roles is not None else [role])
+        role_value = primary_role(role_values)
         status_value = str(status or "").strip().lower()
         if status_value not in {"active", "pending", "blocked"}:
             status_value = "active"
@@ -1706,7 +1759,7 @@ class UserAuthDB:
                 cur = conn.execute(
                     """
                     UPDATE users
-                    SET display_name=?, telegram_chat_id=?, telegram_username=?, role=?, status=?, must_change_password=?
+                    SET display_name=?, telegram_chat_id=?, telegram_username=?, role=?, status=?, must_change_password=?, roles_json=?
                     WHERE username=?
                     """,
                     (
@@ -1716,6 +1769,7 @@ class UserAuthDB:
                         role_value,
                         status_value,
                         1 if must_change_password else 0,
+                        json.dumps(role_values),
                         usr,
                     ),
                 )
@@ -1744,9 +1798,11 @@ class UserAuthDB:
         role: str = "user",
         status: str = "active",
         must_change_password: bool = True,
+        roles: Optional[list[str]] = None,
     ) -> bool:
         usr = (username or "").strip().lower()
-        role_value = "admin" if str(role or "").strip().lower() == "admin" else "user"
+        role_values = normalize_roles(roles if roles is not None else [role])
+        role_value = primary_role(role_values)
         status_value = str(status or "").strip().lower()
         if status_value not in {"active", "pending", "blocked"}:
             status_value = "active"
@@ -1761,9 +1817,9 @@ class UserAuthDB:
                         INSERT INTO users (
                             username, display_name, telegram_chat_id, telegram_username, password_hash,
                             role, must_change_password, status, created_at,
-                            verified_at
+                            verified_at, roles_json
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             usr,
@@ -1776,6 +1832,7 @@ class UserAuthDB:
                             status_value,
                             now,
                             now if status_value == "active" else None,
+                            json.dumps(role_values),
                         ),
                     )
                 except sqlite3.IntegrityError:

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import date
 from pathlib import Path
 
 from nicegui import run, ui
 
+from rag_catalog.core.roles import can_manage_shifts
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
 
 from .state import PageState, _get_auth_db
+from .work_shifts_admin import show_shift_administration, show_shift_history
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +24,14 @@ def render_work_shifts(state: PageState) -> None:
     total = 0
     busy = False
     action_buttons = {}
-    admin = (state.current_user or {}).get("role") == "admin"
+    admin = can_manage_shifts(state.current_user)
 
     def update_actions():
         status = table.selected[0]["status"] if table.selected else None
         allowed = {
-            "edit": status == "draft", "submitted": status == "draft", "delete": status == "draft",
-            "approved": admin and status == "submitted", "history": status is not None,
-            "draft": status == "submitted" or (admin and status == "approved"),
+            "edit": status is not None, "submitted": admin and status == "draft", "delete": admin and status is not None,
+            "approved": admin and status in {"draft", "submitted"}, "history": status is not None,
+            "draft": admin and status in {"submitted", "approved"},
         }
         for key, button in action_buttons.items():
             button.set_enabled(allowed[key])
@@ -97,11 +98,11 @@ def render_work_shifts(state: PageState) -> None:
         row = {} if new else selected()
         if row is None:
             return
-        if row and row["status"] != "draft":
-            ui.notify("Сначала верните смену в черновик", type="warning")
-            return
         try:
             available_users = await call(journal.users)
+            if row.get("employee") and row["employee"] not in available_users:
+                available_users[row["employee"]] = row["employee_name"] + " (архив)"
+            references = await call(journal.references)
         except Exception as exc:
             error(exc)
             return
@@ -117,7 +118,12 @@ def render_work_shifts(state: PageState) -> None:
                 for key, label in (("organization", "Организация"), ("equipment", "Техника / госномер"),
                                    ("workplace", "Объект"), ("partner", "Контрагент"),
                                    ("waybill_number", "Номер путевого листа")):
-                    inputs[key] = ui.input(label, value=row.get(key, "")).props("maxlength=200")
+                    options = sorted({ref["name"] for ref in references if ref["kind"] == key} | ({row[key]} if row.get(key) else set()))
+                    if key != "waybill_number":
+                        inputs[key] = ui.select(options, label=label, value=row.get(key) or None,
+                                                with_input=True, new_value_mode="add-unique" if admin else None).classes("w-full")
+                    else:
+                        inputs[key] = ui.input(label, value=row.get(key, "")).props("maxlength=200")
                 inputs["hours"] = ui.number("Отработано без перерывов, ч", value=row.get("work_minutes", 0) / 60,
                                             min=0, max=24, step=0.25)
                 inputs["breaks"] = ui.number("Перерывы, ч", value=row.get("break_minutes", 0) / 60,
@@ -139,7 +145,7 @@ def render_work_shifts(state: PageState) -> None:
 
             with ui.row().classes("w-full justify-end"):
                 ui.button("Отмена", on_click=dialog.close).props("flat")
-                save_button = ui.button("Сохранить", icon="save", on_click=save)
+                save_button = ui.button("Сохранить" if admin else "Сохранить и отправить", icon="save", on_click=save)
         dialog.open()
 
     async def change(action):
@@ -147,12 +153,12 @@ def render_work_shifts(state: PageState) -> None:
         if row is None or journal is None:
             return
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg").style("background: var(--rag-surface-strong)"):
-            title = {"delete": "Удалить черновик?", "draft": "Вернуть в черновик?",
+            title = {"delete": "Удалить смену?", "draft": "Вернуть в черновик?",
                      "submitted": "Отправить на проверку?", "approved": "Подтвердить смену?"}[action]
             ui.label(title).classes("text-lg font-semibold")
             ui.label(f"{row['work_date']} · {row['employee_name']} · {row['equipment']}").classes("break-words")
             reason = ui.textarea("Причина исправления").classes("w-full").props("maxlength=2000")
-            reason.set_visibility(action == "draft")
+            reason.set_visibility(row["status"] == "approved" and action != "delete")
 
             async def execute():
                 confirm.disable()
@@ -185,14 +191,8 @@ def render_work_shifts(state: PageState) -> None:
                 with ui.column().classes("w-full max-h-96 overflow-auto"):
                     for event in events:
                         with ui.expansion(f"{event['created_at'][:19]} UTC · {event['actor']} · {labels[event['action']]}").classes("w-full"):
-                            snapshot = json.loads(event["snapshot"])
                             ui.label(event["reason"] or "Без комментария")
-                            for key, label in (("work_date", "Дата"), ("employee_name", "Сотрудник"),
-                                               ("equipment", "Техника"), ("workplace", "Объект"),
-                                               ("organization", "Организация"), ("partner", "Контрагент"),
-                                               ("waybill_number", "Путевой лист"), ("comment", "Комментарий")):
-                                ui.label(f"{label}: {snapshot[key]}").classes("break-words")
-                            ui.label(f"Отработано: {snapshot['work_minutes'] / 60:g} ч; перерывы: {snapshot['break_minutes'] / 60:g} ч")
+                            show_shift_history(event)
                 ui.button("Закрыть", on_click=dialog.close).props("flat")
             dialog.open()
         except Exception as exc:
@@ -221,6 +221,8 @@ def render_work_shifts(state: PageState) -> None:
                 new_button = ui.button("Новая смена", icon="add", on_click=lambda: edit(new=True))
                 new_button.disable()
                 ui.button(icon="download", on_click=export).props('flat aria-label="Выгрузить CSV"').tooltip("Выгрузить CSV")
+                if admin:
+                    ui.button("Управление", icon="manage_accounts", on_click=lambda: show_shift_administration(state, journal))
         with ui.row().classes("w-full items-end gap-3"):
             start = ui.input("С", value=date.today().replace(day=1).isoformat()).props("type=date")
             end = ui.input("По", value=date.today().isoformat()).props("type=date")
@@ -231,19 +233,22 @@ def render_work_shifts(state: PageState) -> None:
         summary = ui.label("Загрузка журнала...").classes("text-sm")
         progress = ui.linear_progress().props("indeterminate").classes("w-full")
         columns = [dict(name=key, field=key, label=label, align="left") for key, label in (
-            ("work_date", "Дата"), ("shift_number", "Смена"), ("employee_name", "Сотрудник"),
+            ("work_date", "Дата"), ("status_label", "Статус"), ("shift_number", "Смена"), ("employee_name", "Сотрудник"),
             ("organization", "Организация"), ("equipment", "Техника"), ("workplace", "Объект"),
-            ("waybill_number", "Путевой лист"), ("hours", "Часы"), ("breaks", "Перерывы"),
-            ("status_label", "Статус"))]
+            ("waybill_number", "Путевой лист"), ("hours", "Часы"), ("breaks", "Перерывы"))]
         table = ui.table(columns=columns, rows=[], row_key="id", selection="single", on_select=update_actions).classes("w-full max-w-full").props("flat bordered wrap-cells")
+        table.add_slot('body-cell-status_label', '''
+            <q-td :props="props"><q-badge :color="props.row.status === 'approved' ? 'positive' : 'negative'"
+            :label="props.row.status_label" /></q-td>''')
         with ui.row().classes("w-full flex-wrap items-center"):
-            action_buttons["edit"] = ui.button(icon="edit", on_click=lambda: edit()).props('flat aria-label="Изменить черновик"').tooltip("Изменить черновик")
-            action_buttons["submitted"] = ui.button("На проверку", icon="send", on_click=lambda: change("submitted")).props("flat")
+            action_buttons["edit"] = ui.button(icon="edit", on_click=lambda: edit()).props('flat aria-label="Изменить смену"').tooltip("Изменить смену")
             if admin:
+                action_buttons["submitted"] = ui.button("На проверку", icon="send", on_click=lambda: change("submitted")).props("flat")
                 action_buttons["approved"] = ui.button("Подтвердить", icon="check", on_click=lambda: change("approved")).props("flat")
-            action_buttons["draft"] = ui.button("В черновик", icon="undo", on_click=lambda: change("draft")).props("flat")
+                action_buttons["draft"] = ui.button("В черновик", icon="undo", on_click=lambda: change("draft")).props("flat")
             action_buttons["history"] = ui.button(icon="history", on_click=history).props('flat aria-label="История изменений"').tooltip("История изменений")
-            action_buttons["delete"] = ui.button(icon="delete", on_click=lambda: change("delete")).props('flat color=negative aria-label="Удалить черновик"').tooltip("Удалить черновик")
+            if admin:
+                action_buttons["delete"] = ui.button(icon="delete", on_click=lambda: change("delete")).props('flat color=negative aria-label="Удалить смену"').tooltip("Удалить смену")
             update_actions()
         with ui.row().classes("w-full items-center justify-end"):
             previous = ui.button(icon="chevron_left", on_click=lambda: paginate(-1)).props("flat")

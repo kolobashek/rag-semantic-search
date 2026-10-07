@@ -10,7 +10,7 @@ from rag_catalog.core.work_shifts import WorkShiftJournal
 @pytest.fixture
 def journal(tmp_path):
     users = {name: dict(username=name, display_name=name.title(), role=role, status="active")
-             for name, role in (("admin", "admin"), ("alice", "user"), ("bob", "user"))}
+             for name, role in (("admin", "admin"), ("alice", "driver"), ("bob", "driver"), ("dispatcher", "dispatcher"))}
     auth = SimpleNamespace(get_user_by_session=lambda token: users.get(token),
                            get_user=lambda username: users.get(username), list_users=lambda: list(users.values()))
     return WorkShiftJournal(tmp_path / "shifts.db", auth)
@@ -79,27 +79,25 @@ def test_account_changes_apply_immediately(journal, payload, change):
 
 def test_role_revocation_is_checked_on_each_operation(journal, payload):
     row = journal.save("alice", payload)
-    journal.transition("alice", row["id"], 1, "submitted")
     journal.auth.get_user_by_session("admin")["role"] = "user"
     with pytest.raises(PermissionError):
-        journal.transition("admin", row["id"], 2, "approved")
+        journal.transition("admin", row["id"], 1, "approved")
 
 
-def test_approval_locks_and_reopen_requires_admin_reason(journal, payload):
+def test_driver_changes_invalidate_approval_and_manager_reopen_requires_reason(journal, payload):
     row = journal.save("alice", payload)
-    journal.transition("alice", row["id"], 1, "submitted")
+    assert row["status"] == "submitted"
     with pytest.raises(PermissionError):
-        journal.transition("alice", row["id"], 2, "approved")
-    journal.transition("admin", row["id"], 2, "approved")
-    with pytest.raises(ValueError):
-        journal.save("admin", dict(payload, employee="alice"), shift_id=row["id"], revision=3)
-    with pytest.raises(ValueError):
-        journal.delete("admin", row["id"], 3)
+        journal.transition("alice", row["id"], 1, "approved")
+    journal.transition("dispatcher", row["id"], 1, "approved")
+    result = journal.save("alice", dict(payload, hours=9), shift_id=row["id"], revision=2)
+    assert result["status"] == "submitted"
     with pytest.raises(PermissionError):
         journal.transition("alice", row["id"], 3, "draft", "Correction")
+    journal.transition("admin", row["id"], 3, "approved")
     with pytest.raises(ValueError):
-        journal.transition("admin", row["id"], 3, "draft")
-    journal.transition("admin", row["id"], 3, "draft", "Correction")
+        journal.transition("admin", row["id"], 4, "draft")
+    journal.transition("admin", row["id"], 4, "draft", "Correction")
     assert journal.history("alice", row["id"])[-1]["reason"] == "Correction"
 
 
@@ -126,7 +124,7 @@ def test_duplicate_rejected_without_overwriting_and_soft_delete(journal, payload
         journal.save("alice", dict(payload, equipment="TRUCK A", hours=1))
     assert listing(journal)["work_minutes"] == 510
     journal.save("bob", payload)
-    journal.delete("alice", row["id"], 1)
+    journal.delete("dispatcher", row["id"], 1)
     assert listing(journal)["count"] == 0
     journal.save("alice", payload)
     with journal._connection() as conn:
@@ -159,9 +157,9 @@ def test_validation(journal, payload, changes):
 
 
 def test_zero_hours_draft_cannot_be_submitted(journal, payload):
-    row = journal.save("alice", dict(payload, hours=0))
+    row = journal.save("admin", dict(payload, hours=0, employee="alice"))
     with pytest.raises(ValueError):
-        journal.transition("alice", row["id"], 1, "submitted")
+        journal.transition("admin", row["id"], 1, "submitted")
 
 
 def test_filters_pagination_and_totals(journal, payload):
@@ -194,7 +192,7 @@ def test_real_session_revocation(tmp_path, monkeypatch, payload):
 
     monkeypatch.setenv("RAG_DISABLE_DEFAULT_ADMIN", "1")
     auth = UserAuthDB(str(tmp_path / "users.db"))
-    auth.admin_create_user(username="alice", password="only-for-test", must_change_password=False)
+    auth.admin_create_user(username="alice", password="only-for-test", must_change_password=False, roles=["driver"])
     token = auth.create_session(username="alice")
     journal = WorkShiftJournal(tmp_path / "shifts.db", auth)
     journal.save(token, payload)

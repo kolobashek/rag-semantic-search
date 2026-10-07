@@ -2402,10 +2402,10 @@ def test_cloud_drive_acl_allows_user_and_role_prefixes() -> None:
     cfg = {
         "cloud_drive_acl": {
             "users": {"ivan": ["Projects/A"]},
-            "roles": {"viewer": ["Public"]},
+            "roles": {"user": ["Public"]},
         }
     }
-    user = {"username": "ivan", "role": "viewer"}
+    user = {"username": "ivan", "role": "user"}
 
     assert _cd_acl_allows(cfg, user, "Projects/A/report.docx")
     assert _cd_acl_allows(cfg, user, "Public/readme.txt")

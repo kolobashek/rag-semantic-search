@@ -12,10 +12,14 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from .roles import can_manage_shifts, can_use_shifts
 from .sqlite_runtime import prepare_sqlite_connection
 
 STATUS_LABELS = {"draft": "Черновик", "submitted": "На проверке", "approved": "Подтверждено"}
 TEXT_FIELDS = ("organization", "equipment", "workplace", "partner", "waybill_number", "comment")
+REFERENCE_LABELS = {"organization": "Организации", "equipment": "Техника", "workplace": "Объекты", "partner": "Контрагенты"}
+AUDIT_FIELDS = ("employee", "employee_name", "work_date", "shift_number", *TEXT_FIELDS,
+                "work_minutes", "break_minutes", "status", "deleted")
 
 
 def _day(value: str) -> str:
@@ -65,6 +69,7 @@ class WorkShiftJournal:
         self.auth = auth_db
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as conn:
+            seed_references = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shift_references'").fetchone() is None
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS shifts (
                     id INTEGER PRIMARY KEY,
@@ -100,7 +105,18 @@ class WorkShiftJournal:
                     snapshot TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS shift_events_record ON shift_events(shift_id, id);
+                CREATE TABLE IF NOT EXISTS shift_references (
+                    id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+                    name_key TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(kind, name_key)
+                );
             """)
+            for kind in (REFERENCE_LABELS if seed_references else ()):
+                for row in conn.execute(f"SELECT DISTINCT {kind} FROM shifts WHERE {kind}<>''").fetchall():
+                    conn.execute("INSERT OR IGNORE INTO shift_references(kind,name,name_key) VALUES(?,?,?)",
+                                 (kind, row[0], row[0].casefold()))
 
     @contextmanager
     def _connection(self):
@@ -118,17 +134,19 @@ class WorkShiftJournal:
         user = self.auth.get_user_by_session(token)
         if not user or user.get("status") != "active" or user.get("must_change_password"):
             raise PermissionError("Сессия истекла или требуется сменить пароль. Войдите заново.")
+        if not can_use_shifts(user):
+            raise PermissionError("Нужна роль Водитель или Диспетчер")
         return user
 
     def users(self, token: str) -> dict[str, str]:
         user = self._user(token)
-        users = self.auth.list_users() if user.get("role") == "admin" else [user]
+        users = self.auth.list_users() if can_manage_shifts(user) else [user]
         return {u["username"]: u.get("display_name") or u["username"] for u in users if u["status"] == "active"}
 
     @staticmethod
     def _row(conn, user, shift_id, revision=None) -> dict:
         row = conn.execute("SELECT * FROM shifts WHERE id=? AND deleted=0", (shift_id,)).fetchone()
-        if row is None or (user.get("role") != "admin" and row["employee"] != user["username"]):
+        if row is None or (not can_manage_shifts(user) and row["employee"] != user["username"]):
             raise PermissionError("Смена недоступна")
         if revision is not None and revision != row["revision"]:
             raise ValueError("Смена уже изменена. Обновите журнал и откройте её заново.")
@@ -147,16 +165,29 @@ class WorkShiftJournal:
         user = self._user(token)
         values = _payload(data)
         employee = str(data.get("employee") or user["username"]).strip().lower()
-        if user.get("role") != "admin" and employee != user["username"]:
+        if not can_manage_shifts(user) and employee != user["username"]:
             raise PermissionError("Нельзя создавать смены другого сотрудника")
         target = self.auth.get_user(username=employee)
-        if not target or target.get("status") != "active":
+        if not target or (target.get("status") != "active" and (not can_manage_shifts(user) or shift_id is None)):
             raise ValueError("Сотрудник не найден или отключён")
         values.update(employee=employee, employee_name=target.get("display_name") or employee)
         values["updated_at"] = datetime.now(timezone.utc).isoformat()
+        values["status"] = "draft" if can_manage_shifts(user) else "submitted"
         try:
             with self._connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                old = {}
+                if shift_id is not None:
+                    if revision is None:
+                        raise ValueError("Не указана версия смены")
+                    old = self._row(conn, user, shift_id, revision)
+                    if target.get("status") != "active" and employee != old["employee"]:
+                        raise ValueError("Нельзя назначить смену отключённому сотруднику")
+                if can_manage_shifts(user):
+                    for kind in REFERENCE_LABELS:
+                        if values[kind] and values[kind] != old.get(kind):
+                            conn.execute("INSERT OR IGNORE INTO shift_references(kind,name,name_key) VALUES(?,?,?)",
+                                         (kind, values[kind], values[kind].casefold()))
                 if shift_id is None:
                     values["created_at"] = values["updated_at"]
                     fields = ",".join(values)
@@ -166,11 +197,8 @@ class WorkShiftJournal:
                     ).lastrowid
                     action = "create"
                 else:
-                    if revision is None:
-                        raise ValueError("Не указана версия смены")
-                    old = self._row(conn, user, shift_id, revision)
                     if old["status"] != "draft":
-                        raise ValueError("Сначала верните смену в черновик")
+                        values["status"] = "submitted"
                     setters = ",".join(f"{key}=?" for key in values)
                     conn.execute(
                         f"UPDATE shifts SET {setters}, revision=revision+1 WHERE id=?",
@@ -189,12 +217,12 @@ class WorkShiftJournal:
             conn.execute("BEGIN IMMEDIATE")
             row = self._row(conn, user, shift_id, revision)
             edge = (row["status"], status)
-            allowed = {("draft", "submitted"), ("submitted", "draft")}
-            if user.get("role") == "admin":
-                allowed |= {("submitted", "approved"), ("approved", "draft")}
+            allowed = set()
+            if can_manage_shifts(user):
+                allowed = {(before, after) for before in STATUS_LABELS for after in STATUS_LABELS if before != after}
             if edge not in allowed:
                 raise PermissionError("Этот переход статуса недоступен")
-            if status == "submitted" and row["work_minutes"] == 0:
+            if status in {"submitted", "approved"} and row["work_minutes"] == 0:
                 raise ValueError("Перед отправкой на проверку укажите отработанные часы")
             reason = str(reason).strip()
             if len(reason) > 2000 or (row["status"] == "approved" and not reason):
@@ -211,9 +239,9 @@ class WorkShiftJournal:
             raise ValueError("Не указана версия смены")
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = self._row(conn, user, shift_id, revision)
-            if row["status"] != "draft":
-                raise ValueError("Удалить можно только черновик")
+            self._row(conn, user, shift_id, revision)
+            if not can_manage_shifts(user):
+                raise PermissionError("Удаление доступно диспетчеру")
             conn.execute(
                 "UPDATE shifts SET deleted=1, revision=revision+1, updated_at=? WHERE id=?",
                 (datetime.now(timezone.utc).isoformat(), shift_id),
@@ -223,11 +251,80 @@ class WorkShiftJournal:
     def history(self, token: str, shift_id: int) -> list[dict]:
         user = self._user(token)
         with self._connection() as conn:
-            self._row(conn, user, shift_id)
-            return [dict(row) for row in conn.execute(
+            if not can_manage_shifts(user):
+                self._row(conn, user, shift_id)
+            events = [dict(row) for row in conn.execute(
                 "SELECT actor,action,reason,snapshot,created_at FROM shift_events WHERE shift_id=? ORDER BY id",
                 (shift_id,),
             )]
+            previous = {}
+            for event in events:
+                snapshot = json.loads(event["snapshot"])
+                event["changes"] = {key: [previous.get(key), snapshot.get(key)] for key in AUDIT_FIELDS
+                                    if previous.get(key) != snapshot.get(key)}
+                previous = snapshot
+            return events
+
+    def audit(self, token: str, *, offset: int = 0, limit: int = 50) -> dict:
+        if not can_manage_shifts(self._user(token)):
+            raise PermissionError("История всех путевых доступна диспетчеру")
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("Некорректная страница истории")
+        with self._connection() as conn:
+            conn.execute("BEGIN")
+            total = conn.execute("SELECT count(*) FROM shift_events").fetchone()[0]
+            rows = [dict(row) for row in conn.execute("""
+                SELECT e.*, (SELECT p.snapshot FROM shift_events p
+                  WHERE p.shift_id=e.shift_id AND p.id<e.id ORDER BY p.id DESC LIMIT 1) AS previous
+                FROM shift_events e ORDER BY e.id DESC LIMIT ? OFFSET ?
+            """, (limit, offset))]
+            for row in rows:
+                before, after = json.loads(row.pop("previous") or "{}"), json.loads(row["snapshot"])
+                row["changes"] = {key: [before.get(key), after.get(key)] for key in AUDIT_FIELDS
+                                  if before.get(key) != after.get(key)}
+            return {"count": total, "rows": rows}
+
+    def references(self, token: str, *, archived: bool = False) -> list[dict]:
+        user = self._user(token)
+        if archived and not can_manage_shifts(user):
+            raise PermissionError("Недостаточно прав")
+        with self._connection() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM shift_references WHERE archived=0 OR ? ORDER BY kind,name", (int(archived),))]
+
+    def employees(self, token: str) -> list[dict]:
+        if not can_manage_shifts(self._user(token)):
+            raise PermissionError("Сотрудниками управляет диспетчер")
+        from .roles import user_roles
+        return [{"username": u["username"], "display_name": u.get("display_name") or u["username"],
+                 "status": u["status"], "editable": user_roles(u) == {"driver"}}
+                for u in self.auth.list_users()]
+
+    def save_employee(self, token: str, **data) -> None:
+        self._user(token)
+        self.auth.save_driver(token, **data)
+
+    def save_reference(self, token: str, kind: str, name: str, *, record_id: int | None = None,
+                       revision: int | None = None, archived: bool = False) -> None:
+        if not can_manage_shifts(self._user(token)):
+            raise PermissionError("Справочники изменяет диспетчер")
+        name = str(name).strip()
+        if kind not in REFERENCE_LABELS or not name or len(name) > 200:
+            raise ValueError("Укажите тип и название (до 200 символов)")
+        try:
+            with self._connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if record_id is None:
+                    conn.execute("INSERT INTO shift_references(kind,name,name_key) VALUES(?,?,?)",
+                                 (kind, name, name.casefold()))
+                else:
+                    result = conn.execute("""UPDATE shift_references SET name=?,name_key=?,archived=?,revision=revision+1
+                        WHERE id=? AND kind=? AND revision=?""",
+                        (name, name.casefold(), int(archived), record_id, kind, revision))
+                    if not result.rowcount:
+                        raise ValueError("Справочник изменён. Обновите список.")
+        except sqlite3.IntegrityError:
+            raise ValueError("Такое название уже есть, в том числе в архиве") from None
 
     def list(self, token: str, *, date_from: str, date_to: str, employee: str = "", status: str = "",
              offset: int = 0, limit: int = 50) -> dict:
@@ -238,7 +335,7 @@ class WorkShiftJournal:
             raise ValueError("Некорректные параметры журнала")
         conditions = ["deleted=0", "work_date>=?", "work_date<=?"]
         params = [date_from, date_to]
-        if user.get("role") != "admin":
+        if not can_manage_shifts(user):
             employee = user["username"]
         if employee:
             conditions.append("employee=?")

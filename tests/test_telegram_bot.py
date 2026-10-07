@@ -71,7 +71,7 @@ class _FakeSearcher:
 class _FakeAuthDB:
     def __init__(self, out=None, user=None):
         self.out = out
-        self.user = user
+        self.user = {"role": "user", **user} if user else user
         self.events = []
         self.unlinked = False
         self.registration_requests = []

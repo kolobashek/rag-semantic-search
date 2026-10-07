@@ -1323,6 +1323,9 @@ def _cd_acl_allows(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) 
       }
     Empty/missing ACL means allow, so existing installs keep working.
     """
+    from rag_catalog.core.roles import can_use_catalog
+    if user is not None and not can_use_catalog(user):
+        return False
     acl = cfg.get("cloud_drive_acl")
     if not isinstance(acl, dict) or not acl:
         return True
@@ -1496,6 +1499,9 @@ def _filter_cloud_drive_search_results(
             effective_user = fresh_user
         except Exception:
             return []
+    from rag_catalog.core.roles import can_use_catalog
+    if effective_user and not can_use_catalog(effective_user):
+        return []
     try:
         effective_service = service or _cd_cached_service(cfg)
     except Exception:
@@ -1571,6 +1577,9 @@ def _cd_acl_allows_local_file(
     """
     clean = str(path or "").strip()
     if not clean:
+        return False
+    from rag_catalog.core.roles import can_use_catalog
+    if user is not None and not can_use_catalog(user):
         return False
     if not str(cfg.get("cloud_drive_db_path") or "").strip():
         return True

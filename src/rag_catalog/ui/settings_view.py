@@ -20,6 +20,7 @@ from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.cloud_drive.operations import cloud_drive_operations_health
 from rag_catalog.core.cloud_drive.storage import normalize_s3_credential
 from rag_catalog.core.rag_core import load_config, save_config
+from rag_catalog.core.roles import ROLE_LABELS, primary_role, user_roles
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .client_diagnostics_view import show_client_diagnostics
@@ -68,18 +69,24 @@ def render_settings_screen(
                 new_telegram = ui.input("Telegram chat id").props("dense outlined").classes("w-full")
                 new_telegram_username = ui.input("Telegram username").props("dense outlined prefix=@").classes("w-full")
                 new_password = ui.input("Временный пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-                new_role = ui.select(["user", "admin"], value="user", label="Роль").props("dense outlined").classes("w-full")
+                new_role = ui.select(ROLE_LABELS, value=["user"], multiple=True, label="Роли").props("dense outlined use-chips").classes("w-full")
                 new_status = ui.select(["active", "pending", "blocked"], value="active", label="Статус").props("dense outlined").classes("w-full")
                 new_must_change = ui.checkbox("Потребовать смену пароля", value=True)
 
                 def create_user() -> None:
+                    if not new_role.value:
+                        ui.notify("Выберите хотя бы одну роль", type="warning")
+                        return
+                    if "admin" not in user_roles(auth_db.get_user_by_session(state.auth_token)):
+                        ui.notify("Недостаточно прав", type="negative")
+                        return
                     ok = auth_db.admin_create_user(
                         username=str(new_username.value or ""),
                         display_name=str(new_display.value or ""),
                         telegram_chat_id=str(new_telegram.value or ""),
                         telegram_username=str(new_telegram_username.value or ""),
                         password=str(new_password.value or ""),
-                        role=str(new_role.value or "user"),
+                        roles=list(new_role.value),
                         status=str(new_status.value or "active"),
                         must_change_password=bool(new_must_change.value),
                     )
@@ -254,14 +261,14 @@ def render_settings_screen(
                         "display_name": str(user.get("display_name") or ""),
                         "telegram_chat_id": str(user.get("telegram_chat_id") or ""),
                         "telegram_username": str(user.get("telegram_username") or ""),
-                        "role": role,
+                        "role": sorted(user_roles(user)),
                         "status": status or "active",
                         "must_change_password": bool(int(user.get("must_change_password") or 0)),
                     }
                     display_input = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
                     telegram_input = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
                     telegram_username_input = ui.input("Telegram username", value=str(user.get("telegram_username") or "")).props("dense outlined prefix=@").classes("w-full")
-                    role_input = ui.select(["user", "admin"], value=role, label="Роль").props("dense outlined").classes("w-full")
+                    role_input = ui.select(ROLE_LABELS, value=sorted(user_roles(user)), multiple=True, label="Роли").props("dense outlined use-chips").classes("w-full")
                     status_input = ui.select(["active", "pending", "blocked"], value=status or "active", label="Статус").props("dense outlined").classes("w-full")
                     must_input = ui.checkbox("Потребовать смену пароля", value=bool(int(user.get("must_change_password") or 0)))
                     reset_password = ui.input("Новый временный пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
@@ -274,13 +281,21 @@ def render_settings_screen(
                         role_input: Any = role_input,
                         status_input: Any = status_input,
                         must_input: Any = must_input,
+                        initial_user: Any = initial_user,
                     ) -> None:
+                        if not role_input.value:
+                            ui.notify("Выберите хотя бы одну роль", type="warning")
+                            return
+                        if "admin" not in user_roles(auth_db.get_user_by_session(state.auth_token)):
+                            ui.notify("Недостаточно прав", type="negative")
+                            return
                         ok = auth_db.admin_update_user(
                             username=username,
                             display_name=str(display_input.value or ""),
                             telegram_chat_id=str(telegram_input.value or ""),
                             telegram_username=str(telegram_username_input.value or ""),
-                            role=str(role_input.value or "user"),
+                            role=primary_role(role_input.value),
+                            roles=list(role_input.value),
                             status=str(status_input.value or "active"),
                             must_change_password=bool(must_input.value),
                         )
@@ -288,11 +303,10 @@ def render_settings_screen(
                             "display_name": str(display_input.value or ""),
                             "telegram_chat_id": str(telegram_input.value or ""),
                             "telegram_username": str(telegram_username_input.value or ""),
-                            "role": str(role_input.value or "user"),
+                            "role": sorted(role_input.value),
                             "status": str(status_input.value or "active"),
                             "must_change_password": bool(must_input.value),
                         })
-                        user_actions.set_visibility(False)
                         ui.notify("Пользователь обновлен." if ok else "Не удалось обновить пользователя.", type="positive" if ok else "negative")
                         _refresh_current_user(state)
                         render_fn()
@@ -301,6 +315,9 @@ def render_settings_screen(
                         username: str = username,
                         reset_password: Any = reset_password,
                     ) -> None:
+                        if "admin" not in user_roles(auth_db.get_user_by_session(state.auth_token)):
+                            ui.notify("Недостаточно прав", type="negative")
+                            return
                         ok = auth_db.admin_set_password(
                             username=username,
                             new_password=str(reset_password.value or ""),
@@ -312,20 +329,26 @@ def render_settings_screen(
                     user_actions = ui.row().classes("rag-dirty-actions")
                     user_actions.set_visibility(False)
 
-                    def current_user_values() -> Dict[str, Any]:
+                    def current_user_values(display_input=display_input, telegram_input=telegram_input,
+                                            telegram_username_input=telegram_username_input, role_input=role_input,
+                                            status_input=status_input, must_input=must_input) -> Dict[str, Any]:
                         return {
                             "display_name": str(display_input.value or ""),
                             "telegram_chat_id": str(telegram_input.value or ""),
                             "telegram_username": str(telegram_username_input.value or ""),
-                            "role": str(role_input.value or "user"),
+                            "role": sorted(role_input.value or []),
                             "status": str(status_input.value or "active"),
                             "must_change_password": bool(must_input.value),
                         }
 
-                    def refresh_user_dirty() -> None:
+                    def refresh_user_dirty(current_user_values=current_user_values, initial_user=initial_user,
+                                           user_actions=user_actions) -> None:
                         user_actions.set_visibility(current_user_values() != initial_user)
 
-                    def reset_user_fields() -> None:
+                    def reset_user_fields(display_input=display_input, telegram_input=telegram_input,
+                                          telegram_username_input=telegram_username_input, role_input=role_input,
+                                          status_input=status_input, must_input=must_input,
+                                          initial_user=initial_user, user_actions=user_actions) -> None:
                         display_input.set_value(initial_user["display_name"])
                         telegram_input.set_value(initial_user["telegram_chat_id"])
                         telegram_username_input.set_value(initial_user["telegram_username"])
@@ -334,12 +357,8 @@ def render_settings_screen(
                         must_input.set_value(initial_user["must_change_password"])
                         user_actions.set_visibility(False)
 
-                    display_input.on_value_change(lambda _: refresh_user_dirty())
-                    telegram_input.on_value_change(lambda _: refresh_user_dirty())
-                    telegram_username_input.on_value_change(lambda _: refresh_user_dirty())
-                    role_input.on_value_change(lambda _: refresh_user_dirty())
-                    status_input.on_value_change(lambda _: refresh_user_dirty())
-                    must_input.on_value_change(lambda _: refresh_user_dirty())
+                    for field in (display_input, telegram_input, telegram_username_input, role_input, status_input, must_input):
+                        field.on_value_change(lambda _, refresh=refresh_user_dirty: refresh())
 
                     with ui.row().classes("gap-2"):
                         ui.button("Сбросить пароль", icon="key", on_click=set_password).props("outline")

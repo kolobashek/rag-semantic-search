@@ -18,6 +18,9 @@ def ensure_cloud_drive_user_home(state: PageState, user: Dict[str, Any] | None =
         if not bool(cfg.get("cloud_drive_enabled")) or not str(cfg.get("cloud_drive_db_path") or "").strip():
             return
         current = user or state.current_user or {}
+        from rag_catalog.core.roles import can_use_catalog
+        if not can_use_catalog(current):
+            return
         username = str(current.get("username") or "").strip().lower()
         if not username:
             return
