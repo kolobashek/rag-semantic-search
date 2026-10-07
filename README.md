@@ -50,6 +50,13 @@ python -m rag_catalog.cli.launcher restart-bot --bot on
 python -m rag_catalog.cli.launcher support-bundle --output runtime/support.zip
 ```
 
+Launcher запускает службы тем же Python, которым запущен сам. Для ONNX-поиска
+в этом окружении должны импортироваться `optimum.onnxruntime` и `onnxruntime`,
+а `get_available_providers()` должен включать провайдер из конфигурации
+(например, `DmlExecutionProvider`). Перед стартом/перезапуском launcher проверяет
+эти зависимости; при ошибке работающие службы не останавливает. Тестовый `.venv`
+не следует использовать для рабочего запуска без этой проверки.
+
 Лаунчер поднимает:
 
 - web UI на `127.0.0.1:8080`;

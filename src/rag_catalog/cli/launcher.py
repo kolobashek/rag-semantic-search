@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import io
 import json
 import os
@@ -42,6 +43,33 @@ def load_config() -> Dict[str, Any]:
 def _runtime_dir() -> Path:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     return RUNTIME_DIR
+
+
+def _search_runtime_ready(cfg: Dict[str, Any]) -> bool:
+    """Check the spawning interpreter before stopping a working service."""
+    providers = []
+    if (str(cfg.get("embedding_backend") or "").lower() == "onnx"
+            and not str(cfg.get("embedding_model") or "").startswith("ollama:")):
+        providers.append(str(cfg.get("embedding_onnx_provider") or "").strip())
+    if cfg.get("retrieval_reranker_enabled") and str(cfg.get("retrieval_reranker_backend") or "").lower() == "onnx":
+        providers.append(str(cfg.get("retrieval_reranker_onnx_provider") or "").strip())
+    if not providers:
+        return True
+    try:
+        ort = importlib.import_module("onnxruntime")
+        optimum = importlib.import_module("optimum.onnxruntime")
+        # Import lazy exports too: installed metadata alone does not prove compatibility.
+        getattr(optimum, "ORTModelForFeatureExtraction")
+        getattr(optimum, "ORTModelForSequenceClassification")
+        available = ort.get_available_providers()
+        missing = [provider for provider in providers if provider and provider not in available]
+        if missing:
+            raise RuntimeError(f"ONNX providers unavailable: {', '.join(missing)}")
+    except Exception as exc:
+        print(f"search-runtime=not-ready (python={sys.executable}; {exc})")
+        print("Start the launcher with the configured ONNX/Optimum runtime. Running services were not stopped.")
+        return False
+    return True
 
 
 def _shared_runtime_dir(cfg: Dict[str, Any]) -> Path:
@@ -539,6 +567,8 @@ def _status(host: str, port: int) -> int:
 def _start(args: argparse.Namespace) -> int:
     _runtime_dir()
     cfg = load_config()
+    if not _search_runtime_ready(cfg):
+        return 1
     qdrant_msg = _start_qdrant_if_needed(cfg, args.qdrant)
     web_msg = _start_web(cfg, args.host, int(args.port))
     bot_msg = _start_bot(args.bot)
@@ -558,6 +588,8 @@ def _stop(args: argparse.Namespace) -> int:
 
 
 def _restart(args: argparse.Namespace) -> int:
+    if not _search_runtime_ready(load_config()):
+        return 1
     _stop(argparse.Namespace(with_qdrant=args.with_qdrant))
     _wait_port_closed(args.host, int(args.port))
     return _start(args)
@@ -566,6 +598,8 @@ def _restart(args: argparse.Namespace) -> int:
 def _restart_bot(args: argparse.Namespace) -> int:
     """Restart only Telegram without touching web, Qdrant, or index workers."""
     _runtime_dir()
+    if args.bot != "off" and not _search_runtime_ready(load_config()):
+        return 1
     print(_stop_bot())
     result = _start_bot(args.bot)
     print(result)
@@ -576,6 +610,8 @@ def _restart_web(args: argparse.Namespace) -> int:
     """Restart only NiceGUI without touching Telegram, Qdrant, or index workers."""
     _runtime_dir()
     cfg = load_config()
+    if not _search_runtime_ready(cfg):
+        return 1
     print(_stop_web())
     if not _wait_port_closed(args.host, int(args.port)):
         print(f"web=restart-failed (port still open: {args.host}:{int(args.port)})")

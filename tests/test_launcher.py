@@ -3,8 +3,45 @@ from __future__ import annotations
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from rag_catalog.cli import launcher
+
+
+@pytest.mark.parametrize("command", ["restart-web", "restart-bot", "restart", "start"])
+def test_missing_search_runtime_does_not_stop_or_start_services(monkeypatch, command, capsys):
+    monkeypatch.setattr(launcher, "load_config", lambda: {"embedding_backend": "onnx"})
+    monkeypatch.setattr(launcher, "_runtime_dir", lambda: None)
+    def missing_module(name):
+        raise ImportError(f"No module named {name}")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Services must remain untouched")
+    monkeypatch.setattr(launcher.importlib, "import_module", missing_module)
+    for name in ("_stop_web", "_stop_bot", "_start_web", "_start_bot", "_start_qdrant_if_needed"):
+        monkeypatch.setattr(launcher, name, forbidden)
+    assert launcher.main([command]) == 1
+    assert "search-runtime=not-ready" in capsys.readouterr().out
+
+
+def test_search_runtime_requires_configured_provider(monkeypatch):
+    modules = {"onnxruntime": SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+               "optimum.onnxruntime": SimpleNamespace(ORTModelForFeatureExtraction=object,
+                                                      ORTModelForSequenceClassification=object)}
+    monkeypatch.setattr(launcher.importlib, "import_module", modules.__getitem__)
+    assert launcher._search_runtime_ready({"embedding_backend": "onnx", "embedding_onnx_provider": "CPUExecutionProvider"})
+    assert not launcher._search_runtime_ready({"embedding_backend": "onnx", "embedding_onnx_provider": "DmlExecutionProvider"})
+    assert not launcher._search_runtime_ready({"retrieval_reranker_enabled": True, "retrieval_reranker_backend": "onnx",
+                                              "retrieval_reranker_onnx_provider": "DmlExecutionProvider"})
+
+
+def test_search_runtime_without_onnx_needs_no_optional_dependencies(monkeypatch):
+    def forbidden(name):
+        raise AssertionError("No optional imports expected")
+    monkeypatch.setattr(launcher.importlib, "import_module", forbidden)
+    assert launcher._search_runtime_ready({})
+    assert launcher._search_runtime_ready({"embedding_backend": "onnx", "embedding_model": "ollama:local"})
 
 
 def test_spawned_services_use_local_model_cache(monkeypatch, tmp_path: Path) -> None:
@@ -156,6 +193,7 @@ def test_stop_bot_discovers_unmanaged_process(monkeypatch, tmp_path: Path) -> No
 
 def test_restart_bot_does_not_restart_other_services(monkeypatch) -> None:
     events: list[str] = []
+    monkeypatch.setattr(launcher, "load_config", lambda: {})
     monkeypatch.setattr(launcher, "_runtime_dir", lambda: events.append("runtime"))
     monkeypatch.setattr(launcher, "_stop_bot", lambda: events.append("stop_bot") or "bot=stopped")
     monkeypatch.setattr(
@@ -234,6 +272,7 @@ def test_start_web_waits_longer_than_ten_seconds_under_load(monkeypatch, tmp_pat
 
 def test_restart_waits_for_web_port_to_close_before_start(monkeypatch) -> None:
     events: list[str] = []
+    monkeypatch.setattr(launcher, "load_config", lambda: {})
 
     def fake_stop(args) -> int:
         events.append("stop")
