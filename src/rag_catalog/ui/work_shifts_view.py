@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from nicegui import run, ui
 from rag_catalog.core.roles import can_manage_shifts
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
 
-from .state import PageState, _get_auth_db
+from .state import PageState, _get_auth_db, _log_app_event
 from .work_shifts_admin import show_shift_administration, show_shift_history
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,15 @@ def render_work_shifts(state: PageState) -> None:
             button.set_enabled(allowed[key])
 
     async def call(method, *args, **kwargs):
-        return await run.io_bound(method, state.auth_token, *args, **kwargs)
+        started = time.perf_counter()
+        ok = False
+        try:
+            result = await run.io_bound(method, state.auth_token, *args, **kwargs)
+            ok = True
+            return result
+        finally:
+            _log_app_event(state, "shifts", method.__name__, ok=ok,
+                           details={"duration_ms": round((time.perf_counter() - started) * 1000)})
 
     def error(exc):
         if isinstance(exc, (ValueError, PermissionError)):
@@ -218,7 +227,7 @@ def render_work_shifts(state: PageState) -> None:
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Смены и путевые листы").classes("text-xl font-semibold")
             with ui.row():
-                new_button = ui.button("Новая смена", icon="add", on_click=lambda: edit(new=True))
+                new_button = ui.button("Новая смена", icon="add", on_click=lambda: edit(new=True)).props("data-rag-usage=shifts.create")
                 new_button.disable()
                 ui.button(icon="download", on_click=export).props('flat aria-label="Выгрузить CSV"').tooltip("Выгрузить CSV")
                 if admin:

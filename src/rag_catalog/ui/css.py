@@ -12,6 +12,7 @@ from nicegui import ui
 
 _INTERACTION_SCRIPT_CACHE = ""
 INTERACTION_JS_PATH = Path(__file__).with_name("static") / "rag_interactions.js"
+USAGE_JS_PATH = Path(__file__).with_name("static") / "usage_analytics.js"
 
 
 def _install_interaction_javascript() -> None:
@@ -59,6 +60,7 @@ def _install_css(initial_theme: str = "light") -> None:
     except OSError:
         interactions_version = 0
     ui.add_head_html(f'<script defer src="/rag-interactions.js?v={interactions_version}"></script>')
+    ui.add_head_html(f'<script defer src="/rag-usage.js?v={int(USAGE_JS_PATH.stat().st_mtime)}"></script>')
     ui.add_head_html("""<style>
         :root {
           --rag-font-display: 'Manrope', system-ui, -apple-system, sans-serif;

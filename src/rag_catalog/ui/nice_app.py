@@ -32,6 +32,7 @@ from . import index_view as _index_view
 from . import jobs_view as _jobs_view
 from . import settings_view as _settings_view
 from . import stats_view as _stats_view
+from . import usage_api as _usage_routes  # noqa: F401
 from . import work_shifts_view as _work_shifts_view
 from .auth_session import (
     apply_login_session,
@@ -40,7 +41,7 @@ from .auth_session import (
     restore_session,
     touch_session,
 )
-from .css import INTERACTION_JS_PATH, _install_css, _install_interaction_javascript
+from .css import INTERACTION_JS_PATH, USAGE_JS_PATH, _install_css, _install_interaction_javascript
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
@@ -227,6 +228,7 @@ def _log_nicegui_client_lifecycle(action: str, client: Any) -> None:
 
 
 app.on_connect(lambda client: _log_nicegui_client_lifecycle("connect", client))
+app.add_static_file(local_file=USAGE_JS_PATH, url_path="/rag-usage.js")
 app.on_disconnect(lambda client: _log_nicegui_client_lifecycle("disconnect", client))
 app.on_delete(lambda client: _log_nicegui_client_lifecycle("delete", client))
 
@@ -753,7 +755,7 @@ def _build_page(
                     tab = ui.button(
                         str(spec["label"]), icon=str(spec["icon"]),
                         on_click=lambda s=key: set_screen(s),
-                    ).props("flat no-caps").classes(f"rag-nav-tab {active_cls}")
+                    ).props(f"flat no-caps data-rag-usage=navigation.{key}").classes(f"rag-nav-tab {active_cls}")
                     tab._props["style"] = "font-size:13px;font-weight:500"
 
         # ── Avatar label ────────────────────────────────────
@@ -774,7 +776,7 @@ def _build_page(
                 label = str(spec["label"])
                 icon_name = str(spec.get("drawer_icon") or spec["icon"])
                 color = "primary" if state.screen == screen else None
-                ui.button(label, icon=icon_name, on_click=lambda s=screen: set_screen(s, close_drawer=True), color=color).props("flat align=left no-caps").classes("rag-nav-button w-full")
+                ui.button(label, icon=icon_name, on_click=lambda s=screen: set_screen(s, close_drawer=True), color=color).props(f"flat align=left no-caps data-rag-usage=navigation.{screen}").classes("rag-nav-button w-full")
 
         settings_area.clear()
 
@@ -1523,7 +1525,7 @@ def _build_page(
                     schedule_search(str(search_input.value or ""))
 
                 ui.button(icon="search", on_click=submit_click, color="primary").props(
-                    "unelevated round aria-label='Найти документы'"
+                    "unelevated round data-rag-usage=search.submit aria-label='Найти документы'"
                 ).tooltip("Поиск (Ctrl+K для фокуса)")
 
             def handle_input(_: events.GenericEventArguments | None = None) -> None:
@@ -3170,6 +3172,8 @@ def _build_page(
         render_started = _time.perf_counter()
         if state.auth_token:
             state.current_user = _get_auth_db(state).get_user_by_session(state.auth_token)
+        if not state.current_user:
+            ui.run_javascript("window.ragUsage?.ready('', false)")
         identity = ((state.current_user or {}).get("username"), tuple(sorted(user_roles(state.current_user))))
         if rendered_identity[0] != identity:
             dirty_screens.update(initialized_screens)
@@ -3359,6 +3363,8 @@ def _build_page(
                 "has_error": bool(state.search_error),
             },
         )
+        usage_enabled = state.cfg.get("usage_analytics_enabled", True) is not False
+        ui.run_javascript(f"window.ragUsage?.ready({json.dumps(current_screen)}, {json.dumps(usage_enabled)})")
 
     # ── Preview drawer (живёт вне content, не сбрасывается при render()) ──
     preview_drawer = ui.element("div").classes("rag-preview-drawer closed")

@@ -287,6 +287,9 @@ def _log_app_event(
     details: Optional[Dict[str, Any]] = None,
 ) -> None:
     event_details = details or {}
+    from rag_catalog.core.usage_analytics import record_app_event
+
+    record_app_event(state.cfg, _username(state), state.screen, feature, action, ok, event_details)
     try:
         _get_telemetry(state).log_app_event(
             username=_username(state),

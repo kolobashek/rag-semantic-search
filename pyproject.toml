@@ -86,7 +86,7 @@ where = ["src"]
 include = ["rag_catalog*"]
 
 [tool.setuptools.package-data]
-rag_catalog = ["py.typed", "core/*.json"]
+rag_catalog = ["py.typed", "core/*.json", "ui/static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

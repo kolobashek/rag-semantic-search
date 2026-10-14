@@ -30,6 +30,7 @@ from .state import (
     _get_telemetry,
 )
 from .system import _telemetry_db_path
+from .usage_view import render_usage_panel
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -92,7 +93,7 @@ def render_stats_screen(
                 ui.label(label).classes("rag-meta")
             ui.label(value).classes(f"rag-kpi-value {color}".strip())
 
-    with ui.row().classes("w-full gap-3"):
+    with ui.row().classes("w-full gap-3") as search_kpis:
         render_kpi("Запросов", str(int(overview_row.get("searches") or 0)), "search")
         render_kpi("Средняя задержка", f"{int(float(overview_row.get('avg_ms') or 0))} мс", "speed")
         render_kpi("Пользователей", str(int(overview_row.get("users") or 0)), "group")
@@ -103,6 +104,7 @@ def render_stats_screen(
 
     # ── Табы ───────────────────────────────────────────────────────
     with ui.tabs().classes("w-full").props("align=left dense") as tabs:
+        tab_usage = ui.tab("Использование", icon="touch_app")
         tab_overview = ui.tab("Обзор", icon="bar_chart")
         tab_quality = ui.tab("Качество поиска", icon="thumbs_up_down")
         tab_synonyms = ui.tab("Синонимы", icon="auto_awesome")
@@ -111,7 +113,11 @@ def render_stats_screen(
         tab_audit = ui.tab("Аудит", icon="security")
         tab_cd = ui.tab("Cloud Drive", icon="cloud") if bool(state.cfg.get("cloud_drive_enabled")) else None
 
-    with ui.tab_panels(tabs, value=tab_overview).classes("w-full"):
+    search_kpis.bind_visibility_from(tabs, "value", lambda value: value not in (tab_usage, tab_usage.props["name"]))
+
+    with ui.tab_panels(tabs, value=tab_usage).classes("w-full"):
+        with ui.tab_panel(tab_usage):
+            render_usage_panel(state)
 
         # ── Обзор ─────────────────────────────────────────────────
         with ui.tab_panel(tab_overview):
