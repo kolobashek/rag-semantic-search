@@ -12,3 +12,5 @@ CfSetInSyncState
 CfSetPinState
 CfUnregisterSyncRoot
 CfUpdatePlaceholder
+GetTokenInformation
+TOKEN_STATISTICS

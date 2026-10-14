@@ -16,6 +16,26 @@ internal static class Program
         }
 
         Dictionary<string, string> options = ParseOptions(args);
+        if (options.TryGetValue("launch-after-pid", out string? previousPid))
+            await WindowsBootstrap.WaitForPreviousLaunchAsync(int.Parse(previousPid),
+                long.Parse(options.GetValueOrDefault("launch-after-ticks", "0")));
+        if (options.ContainsKey("check-recovery"))
+        {
+            ProviderRecovery.Check();
+            return 0;
+        }
+        if (options.TryGetValue("check-recovery-fixture", out string? checkedFixture))
+        {
+            ProviderRecovery.CheckFixture(options["fixture-task"], checkedFixture, options["fixture-mode"]);
+            return 0;
+        }
+        if (options.ContainsKey("self-test-recovery"))
+        {
+            await RecoverySmoke.RunAsync(options.GetValueOrDefault("recovery-report", ""));
+            return 0;
+        }
+        if (options.TryGetValue("recovery-fixture", out string? fixture))
+            return await RecoverySmoke.RunChildAsync(fixture, options["fixture-mode"], options["fixture-task"]);
         if (options.ContainsKey("self-test-cloud"))
         {
             await CloudFilesProvider.TestNativePlaceholdersAsync(options.GetValueOrDefault("native-fixture"));
@@ -109,6 +129,18 @@ internal static class Program
             return 2;
         }
 
+        if (WindowsBootstrap.IsRunningInstalled && !options.ContainsKey("managed-provider")
+            && options.Keys.All(key => key is "installed" or "launch-after-pid" or "launch-after-ticks"))
+        {
+            if (EventWaitHandle.TryOpenExisting(SingleInstanceName, out EventWaitHandle? running))
+            {
+                running.Dispose();
+                WindowsBootstrap.OpenRoot(config.RootPath);
+                return 0;
+            }
+            if (ProviderRecovery.TryStart()) return 0;
+        }
+
         using EventWaitHandle singleInstance = new(
             initialState: false,
             EventResetMode.ManualReset,
@@ -138,6 +170,8 @@ internal static class Program
 
         void RequestStop(bool restart, string oldRoot = "")
         {
+            // Disable queued failure retries before intentional shutdown or maintenance.
+            if (WindowsBootstrap.IsRunningInstalled) ProviderRecovery.SuppressRestarts();
             lock (runtimeSync)
             {
                 restartRequested |= restart;
@@ -449,9 +483,12 @@ internal static class Program
             if (name is "once"
                 or "self-test"
                 or "self-test-cloud"
+                or "self-test-recovery"
                 or "unregister"
                 or "uninstall"
                 or "installed"
+                or "managed-provider"
+                or "check-recovery"
                 or "keep-all-offline"
                 or "apply-update"
                 or "apply-uninstall")

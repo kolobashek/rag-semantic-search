@@ -13,8 +13,15 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "RAG Cloud Files"
 $InstalledExe = Join-Path $InstallDir "RagCloudFiles.exe"
 $RegistryPath = "HKCU:\Software\RAGCloudFiles"
 $RunPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$RecoveryTaskName = 'RAGCloudFiles-' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$ShortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'RAG Cloud Files.lnk'
 
 function Stop-InstalledProvider {
+    $recoveryTask = Get-ScheduledTask -TaskName $RecoveryTaskName -ErrorAction SilentlyContinue
+    if ($recoveryTask) {
+        $recoveryTask | Disable-ScheduledTask | Out-Null
+        $recoveryTask | Stop-ScheduledTask
+    }
     Get-Process -Name "RagCloudFiles" -ErrorAction SilentlyContinue | ForEach-Object {
         try {
             if ([string]::Equals($_.Path, $InstalledExe, [StringComparison]::OrdinalIgnoreCase)) {
@@ -33,6 +40,10 @@ if ($Uninstall) {
         & $InstalledExe --root $RootPath --unregister
     }
     Remove-ItemProperty -Path $RunPath -Name "RAGCloudFiles" -ErrorAction SilentlyContinue
+    if (Get-ScheduledTask -TaskName $RecoveryTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $RecoveryTaskName -Confirm:$false
+    }
+    Remove-Item -LiteralPath $ShortcutPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $InstalledExe -Force -ErrorAction SilentlyContinue
     Write-Host "RAG Cloud Files удалён. Гидратированные локальные файлы сохранены в $RootPath."
     exit 0
@@ -59,9 +70,18 @@ Set-ItemProperty -Path $RegistryPath -Name Server -Value $Server.TrimEnd('/')
 Set-ItemProperty -Path $RegistryPath -Name RootPath -Value $RootPath
 Set-ItemProperty -Path $RegistryPath -Name DeviceId -Value $existingDeviceId
 
-$escapedExe = $InstalledExe.Replace("'", "''")
-$runCommand = "powershell.exe -NoProfile -WindowStyle Hidden -Command `"& '$escapedExe'`""
+$runCommand = '"' + $InstalledExe + '" --installed'
 Set-ItemProperty -Path $RunPath -Name "RAGCloudFiles" -Value $runCommand
+
+$shortcutShell = New-Object -ComObject WScript.Shell
+$shortcut = $shortcutShell.CreateShortcut($ShortcutPath)
+$shortcut.TargetPath = $InstalledExe
+$shortcut.Arguments = '--installed'
+$shortcut.WorkingDirectory = $InstallDir
+$shortcut.IconLocation = $InstalledExe + ',0'
+$shortcut.Save()
+[Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) | Out-Null
+[Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcutShell) | Out-Null
 
 if (-not $NoStart) {
     Start-Process -FilePath $InstalledExe -WindowStyle Hidden

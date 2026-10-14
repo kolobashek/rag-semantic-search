@@ -112,6 +112,7 @@ internal static class WindowsBootstrap
 
     private static void StopInstalledProvider()
     {
+        ProviderRecovery.Stop();
         foreach (Process process in Process.GetProcessesByName("RagCloudFiles"))
         {
             using (process)
@@ -181,15 +182,36 @@ internal static class WindowsBootstrap
         ApplyStartup(config.StartWithWindows);
         RefreshContextMenu(config.RootPath);
         RegisterInstalledApplication();
+        StartMenuShortcut.EnsureInstalled();
     }
 
     public static void RestartInstalled()
     {
-        Process.Start(new ProcessStartInfo(InstalledExecutable, "--installed")
+        ProcessStartInfo start = new(InstalledExecutable)
         {
             UseShellExecute = true,
             WorkingDirectory = InstallDirectory,
-        });
+        };
+        start.ArgumentList.Add("--installed");
+        start.ArgumentList.Add("--launch-after-pid");
+        start.ArgumentList.Add(Environment.ProcessId.ToString());
+        start.ArgumentList.Add("--launch-after-ticks");
+        using Process current = Process.GetCurrentProcess();
+        start.ArgumentList.Add(current.StartTime.ToUniversalTime().Ticks.ToString());
+        Process.Start(start);
+    }
+
+    internal static async Task WaitForPreviousLaunchAsync(int processId, long startTicks)
+    {
+        if (processId <= 0 || processId == Environment.ProcessId) return;
+        try
+        {
+            using Process previous = Process.GetProcessById(processId);
+            if (previous.StartTime.ToUniversalTime().Ticks != startTicks) return;
+            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(30));
+            await previous.WaitForExitAsync(timeout.Token);
+        }
+        catch (ArgumentException) { /* The previous instance already exited. */ }
     }
 
     public static void LaunchStagedUpdate(string stagedExecutable, string sha256)
@@ -473,6 +495,8 @@ internal static class WindowsBootstrap
 
     private static void RemovePreferences()
     {
+        ProviderRecovery.Remove();
+        StartMenuShortcut.Remove();
         using (RegistryKey runKey = Registry.CurrentUser.CreateSubKey(RunPath))
         {
             runKey.DeleteValue(RunValueName, throwOnMissingValue: false);
