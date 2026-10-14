@@ -71,7 +71,10 @@ internal static class SyncRootRegistrar
         try
         {
             int hidden = 0;
-            foreach ((string id, string path) in ReadShellRoots())
+            IReadOnlyList<(string Id, string Path)> roots = ReadShellRoots();
+            foreach ((string id, string path) in roots.Take(20))
+                AppLog.Info($"Explorer root entry: {id}; path={path}.");
+            foreach ((string id, string path) in roots)
             {
                 bool? pinned = NavigationVisibility(id, path, expectedId, root, config.PreservedRoot);
                 if (pinned is null) continue;
@@ -85,7 +88,7 @@ internal static class SyncRootRegistrar
                     AppLog.Warn($"Could not update Explorer entry {id} (0x{exception.HResult:X8}): {exception.Message}");
                 }
             }
-            AppLog.Info($"Explorer navigation reconciled: active={root}; archived entries hidden={hidden}.");
+            AppLog.Info($"Explorer navigation reconciled: active={root}; preserved={config.PreservedRoot}; inactive entries hidden={hidden}; registered roots={roots.Count}; active id={expectedId}.");
         }
         catch (Exception exception)
         {
@@ -114,8 +117,8 @@ internal static class SyncRootRegistrar
     {
         if (!id.StartsWith(CurrentUserIdPrefix(), StringComparison.OrdinalIgnoreCase))
             return null;
-        if (CanReuseRegistration(id, expectedId) && SamePath(path, root)) return true;
-        if (!CanReuseRegistration(id, expectedId) && !SamePath(path, root) && SamePath(path, preservedRoot))
+        if (SamePath(path, root)) return CanReuseRegistration(id, expectedId);
+        if (!CanReuseRegistration(id, expectedId) && SamePath(path, preservedRoot))
             return false;
         return null;
     }

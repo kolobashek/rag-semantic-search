@@ -315,7 +315,8 @@ internal static class SelfTest
         Equal<bool?>(false, SyncRootRegistrar.NavigationVisibility(old, @"C:\Old", active, @"C:\Cloud", @"c:\OLD\"));
         Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(old, @"C:\Other", active, @"C:\Cloud", @"C:\Old"));
         Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(old, @"C:\Old", active, @"C:\Cloud", ""));
-        Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(old, @"C:\Cloud", active, @"C:\Cloud", @"C:\Cloud"));
+        Equal<bool?>(false, SyncRootRegistrar.NavigationVisibility(old, @"C:\Cloud", active, @"C:\Cloud", @"C:\Cloud"));
+        Equal<bool?>(false, SyncRootRegistrar.NavigationVisibility(old, @"C:\Cloud", active, @"C:\Cloud", ""));
         Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility("Other.Provider!root", @"C:\Old", active, @"C:\Cloud", @"C:\Old"));
         Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility("TSK.RagCloudFiles!S-1-0-0!OTHER", @"C:\Old", active, @"C:\Cloud", @"C:\Old"));
         Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(active, @"C:\Old", active, @"C:\Cloud", @"C:\Old"));
