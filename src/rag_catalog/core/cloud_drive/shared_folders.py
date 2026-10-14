@@ -177,21 +177,27 @@ class SharedFolders:
         root = base or share.physical(share.path)
         found = {}
 
-        def fail(error):
-            raise error
-
-        for directory, dirs, files in os.walk(root, onerror=fail, followlinks=False):
-            parent = Path(directory)
-            dirs[:] = [name for name in dirs if name != PRIVATE and name not in share.exclude_names]
-            files = [name for name in files if name not in share.exclude_names]
-            for name in dirs + files:
-                child = parent / name
-                info = child.lstat()
-                if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
-                    raise RuntimeError(f'Redirected entry in shared folder: {child.name}')
-                relative = child.relative_to(share.root).as_posix()
-                logical = clean_path(share.path + '/' + relative)
-                found[logical] = (child, info, 'folder' if stat.S_ISDIR(info.st_mode) else 'file')
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            if _is_link(directory):
+                raise RuntimeError(f'Redirected entry in shared folder: {directory.name}')
+            # Windows enumeration already supplies size/mtime/attributes. Path.lstat
+            # would discard that cache and issue an SMB request for every entry.
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.name == PRIVATE or entry.name in share.exclude_names:
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                        raise RuntimeError(f'Redirected entry in shared folder: {entry.name}')
+                    child = Path(entry.path)
+                    relative = child.relative_to(share.root).as_posix()
+                    logical = clean_path(share.path + '/' + relative)
+                    kind = 'folder' if stat.S_ISDIR(info.st_mode) else 'file'
+                    found[logical] = (child, info, kind)
+                    if kind == 'folder':
+                        pending.append(child)
         return found
 
     def _check_unchanged(self, service, share, path, physical):

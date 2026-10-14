@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -178,14 +182,50 @@ def test_partial_enumeration_cannot_propagate_deletions(shared, monkeypatch):
     (root / 'scan.txt').write_text('keep')
     settle(service, root)
 
-    def broken_walk(*args, **kwargs):
-        yield str(root), [], []
-        kwargs['onerror'](PermissionError('SMB ACL error'))
+    @contextmanager
+    def broken_scandir(*args, **kwargs):
+        def entries():
+            yield from ()
+            raise PermissionError('SMB ACL error')
+        yield entries()
 
-    monkeypatch.setattr(os, 'walk', broken_walk)
+    monkeypatch.setattr(os, 'scandir', broken_scandir)
     with pytest.raises(PermissionError):
         service.shared_folders.scan(service, service.shared_folders.shares[0])
     assert not service.registry.get_file_by_path('Scans/scan.txt').deleted_at
+
+
+def test_inventory_uses_cached_entry_metadata(shared, monkeypatch):
+    service, root = shared
+    (root / 'nested').mkdir()
+    (root / 'nested' / 'scan.txt').write_text('cached metadata')
+    original_lstat = Path.lstat
+
+    def root_only_lstat(path, *args, **kwargs):
+        assert path in (root, root / 'nested'), 'Files must use cached DirEntry.stat metadata'
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'lstat', root_only_lstat)
+    inventory = service.shared_folders._inventory(service.shared_folders.shares[0])
+    assert set(inventory) == {'Scans/nested', 'Scans/nested/scan.txt'}
+    assert inventory['Scans/nested/scan.txt'][1].st_size == len('cached metadata')
+
+
+@pytest.mark.parametrize('mode,attributes', [(stat.S_IFLNK, 0), (stat.S_IFDIR, 0x400)])
+def test_inventory_rejects_links_and_windows_reparse_points(shared, monkeypatch, mode, attributes):
+    service, root = shared
+
+    def entry_stat(*, follow_symlinks):
+        assert follow_symlinks is False
+        return SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
+
+    @contextmanager
+    def redirected_scandir(path):
+        yield iter([SimpleNamespace(name='redirect', path=str(root / 'redirect'), stat=entry_stat)])
+
+    monkeypatch.setattr(os, 'scandir', redirected_scandir)
+    with pytest.raises(RuntimeError, match='Redirected entry'):
+        service.shared_folders._inventory(service.shared_folders.shares[0])
 
 
 def test_storage_failure_does_not_remove_smb_original(shared, tmp_path, monkeypatch):
