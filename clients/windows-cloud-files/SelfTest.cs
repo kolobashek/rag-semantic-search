@@ -8,6 +8,7 @@ internal static class SelfTest
     {
         Equal(true, SyncRootRegistrar.CanReuseRegistration("Provider!A", "provider!a"));
         Equal(false, SyncRootRegistrar.CanReuseRegistration("other", "Provider!A"));
+        TestNavigationVisibility();
         Equal(true, PlaceholderRecovery.IsCorruptMetadata(unchecked((int)0x8007016B)));
         Equal(false, PlaceholderRecovery.IsCorruptMetadata(unchecked((int)0x80070005)));
         LocalTreeScan scan = LocalTreeScan.Read("root", (_, _) => { },
@@ -304,6 +305,20 @@ internal static class SelfTest
                 Directory.Delete(temporary, true);
             }
         }
+    }
+
+    private static void TestNavigationVisibility()
+    {
+        string active = SyncRootRegistrar.BuildSyncRootId("https://catalog.example", Guid.NewGuid().ToString("N"));
+        string old = SyncRootRegistrar.BuildSyncRootId("https://catalog.example");
+        Equal<bool?>(true, SyncRootRegistrar.NavigationVisibility(active, @"C:\Cloud", active, @"c:\CLOUD\", @"C:\Old"));
+        Equal<bool?>(false, SyncRootRegistrar.NavigationVisibility(old, @"C:\Old", active, @"C:\Cloud", @"c:\OLD\"));
+        Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(old, @"C:\Other", active, @"C:\Cloud", @"C:\Old"));
+        Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(old, @"C:\Old", active, @"C:\Cloud", ""));
+        Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(old, @"C:\Cloud", active, @"C:\Cloud", @"C:\Cloud"));
+        Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility("Other.Provider!root", @"C:\Old", active, @"C:\Cloud", @"C:\Old"));
+        Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility("TSK.RagCloudFiles!S-1-0-0!OTHER", @"C:\Old", active, @"C:\Cloud", @"C:\Old"));
+        Equal<bool?>(null, SyncRootRegistrar.NavigationVisibility(active, @"C:\Old", active, @"C:\Cloud", @"C:\Old"));
     }
 
     private static async Task TestSessionAuthorizationAsync()

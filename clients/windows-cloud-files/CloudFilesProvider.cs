@@ -133,6 +133,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         string root = Path.Combine(fixture, "original");
         Directory.CreateDirectory(root);
         ProviderConfig config = new() { RootPath = root, Server = "https://" + Guid.NewGuid().ToString("N") + ".invalid" };
+        string originalId = SyncRootRegistrar.BuildSyncRootId(config.Server);
         bool registered = false;
         string? replacement = null;
         try
@@ -191,10 +192,22 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             string preserved = PlaceholderRecovery.Preserve(root, "test.pdf");
             if (!File.Exists(preserved) || File.Exists(file)) throw new InvalidOperationException("Native preservation failed");
             File.Move(preserved, file);
+            string localOnly = Path.Combine(root, "local-only.txt");
+            File.WriteAllText(localOnly, "unsynchronized edit");
             ConfigStore store = new(Path.Combine(fixture, "config", "config.json"));
             NamespaceRecovery.Prepare(config, store, Guid.NewGuid().ToString("N"));
             replacement = config.RootPath;
             await SyncRootRegistrar.EnsureRegisteredAsync(config, replacement, CancellationToken.None);
+            string replacementId = SyncRootRegistrar.BuildSyncRootId(config.Server, config.RootKey);
+            for (int restart = 0; restart < 3; restart++)
+            {
+                await SyncRootRegistrar.EnsureRegisteredAsync(config, replacement, CancellationToken.None);
+                if (SyncRootRegistrar.IsNavigationPinned(originalId, root)
+                    || !SyncRootRegistrar.IsNavigationPinned(replacementId, replacement)
+                    || !CloudFilePinning.ReadPlaceholderState(file, out _)
+                    || File.ReadAllText(localOnly) != "unsynchronized edit")
+                    throw new InvalidOperationException("Restart duplicated Explorer navigation or damaged preserved placeholders");
+            }
             using NativePlaceholderBatch replacementBatch = new([
                 new CloudNode { Path = "fresh.pdf", NodeType = "file", SizeBytes = 1024 },
             ]);
