@@ -38,6 +38,7 @@ internal sealed class ConfigStore
         ProviderConfig config = LoadRegistryDefaults();
         if (!File.Exists(ConfigPath))
         {
+            config.PreservedRoot = NamespaceRecovery.FindPreservedRoot(ConfigPath, config.RootPath);
             SelectStateNamespace(config.RootKey);
             return config;
         }
@@ -59,6 +60,8 @@ internal sealed class ConfigStore
         config.ClientId = saved.ClientId;
         config.RootKey = saved.RootKey;
         config.PreservedRoot = saved.PreservedRoot;
+        if (config.PreservedRoot.Length == 0)
+            config.PreservedRoot = NamespaceRecovery.FindPreservedRoot(ConfigPath, config.RootPath);
         SelectStateNamespace(config.RootKey);
         config.PollSeconds = saved.PollSeconds;
         config.KeepAllOffline = saved.KeepAllOffline;

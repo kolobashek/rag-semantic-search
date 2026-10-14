@@ -197,6 +197,10 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             ConfigStore store = new(Path.Combine(fixture, "config", "config.json"));
             NamespaceRecovery.Prepare(config, store, Guid.NewGuid().ToString("N"));
             replacement = config.RootPath;
+            config.PreservedRoot = "";
+            store.SaveConfig(config);
+            config = store.LoadConfig();
+            if (config.PreservedRoot != root) throw new InvalidOperationException("Lost recovery navigation history was not restored");
             await SyncRootRegistrar.EnsureRegisteredAsync(config, replacement, CancellationToken.None);
             string replacementId = SyncRootRegistrar.BuildSyncRootId(config.Server, config.RootKey);
             for (int restart = 0; restart < 3; restart++)

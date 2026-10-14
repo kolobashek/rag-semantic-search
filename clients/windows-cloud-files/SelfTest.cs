@@ -444,6 +444,26 @@ internal static class SelfTest
             string collision = Guid.NewGuid().ToString("N");
             Directory.CreateDirectory(Path.Combine(temporary, "RAG Cloud Drive - " + collision[..8]));
             Throws<IOException>(() => NamespaceRecovery.Prepare(restored, newStore, collision));
+            // A downgrade can erase the new config fields, but not the immutable recovery intent.
+            restored.RootKey = "";
+            restored.PreservedRoot = "";
+            store.SaveConfig(restored);
+            ConfigStore downgradedStore = new(store.ConfigPath);
+            ProviderConfig downgraded = downgradedStore.LoadConfig();
+            Equal(original, downgraded.PreservedRoot);
+            Equal("", downgraded.RootKey);
+            Equal(Path.Combine(temporary, "config", "state.json"), downgradedStore.StatePath);
+            Equal("", NamespaceRecovery.FindPreservedRoot(store.ConfigPath, original));
+            string intent = Path.Combine(temporary, "config", $"recovery-{request}.json");
+            File.WriteAllText(intent, "{broken-json");
+            Equal("", NamespaceRecovery.FindPreservedRoot(store.ConfigPath, restored.RootPath));
+            File.WriteAllText(intent, JsonSerializer.Serialize(new
+            {
+                requestId = request,
+                oldRoot = Path.Combine(temporary, "unrelated", "folder"),
+                newRoot = restored.RootPath,
+            }));
+            Equal("", NamespaceRecovery.FindPreservedRoot(store.ConfigPath, restored.RootPath));
         }
         finally { Directory.Delete(temporary, recursive: true); }
     }
