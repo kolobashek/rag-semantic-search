@@ -4,6 +4,131 @@ namespace RagCloudFiles;
 
 internal static class SelfTest
 {
+    internal sealed class HydrationTestHandler : HttpMessageHandler
+    {
+        private int _active;
+        private int _peak;
+        public int PeakActiveRequests => Volatile.Read(ref _peak);
+        internal static byte ExpectedByte(long offset, bool second) => (byte)((offset * 31 + (second ? 73 : 19)) % 251);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            string query = request.RequestUri!.Query;
+            bool second = query.Contains("hydration-b.pdf", StringComparison.Ordinal);
+            if (!second && !query.Contains("hydration-a.pdf", StringComparison.Ordinal))
+                return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+            long size = second ? 350809 : 301561;
+            var range = request.Headers.Range!.Ranges.Single();
+            long start = range.From!.Value;
+            long end = range.To!.Value;
+            if (start < 0 || end >= size || end < start)
+                return new HttpResponseMessage(System.Net.HttpStatusCode.RequestedRangeNotSatisfiable);
+            int active = Interlocked.Increment(ref _active);
+            int peak;
+            do { peak = Volatile.Read(ref _peak); }
+            while (active > peak && Interlocked.CompareExchange(ref _peak, active, peak) != peak);
+            try
+            {
+                await Task.Delay(100, token); // Keep concurrent native FETCH_DATA callbacks overlapping.
+                byte[] bytes = new byte[checked((int)(end - start + 1))];
+                for (int i = 0; i < bytes.Length; i++) bytes[i] = ExpectedByte(start + i, second);
+                ByteArrayContent content = new(bytes);
+                content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(start, end, size);
+                return new HttpResponseMessage(System.Net.HttpStatusCode.PartialContent) { Content = content };
+            }
+            finally { Interlocked.Decrement(ref _active); }
+        }
+    }
+
+    internal static async Task TestNativeHydrationReadsAsync(string root)
+    {
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(30));
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        Task[] reads = (from second in new[] { false, true }
+                        from offset in new long[] { 0, 8192, 4096, 4096, 12288, 286720 }
+                        select Task.Run(async () =>
+                        {
+                            string name = second ? "hydration-b.pdf" : "hydration-a.pdf";
+                            using var handle = File.OpenHandle(Path.Combine(root, name), FileMode.Open,
+                                FileAccess.Read, FileShare.ReadWrite, FileOptions.Asynchronous | FileOptions.RandomAccess);
+                            byte[] bytes = new byte[4096];
+                            int total = 0;
+                            while (total < bytes.Length)
+                            {
+                                int count = await RandomAccess.ReadAsync(handle, bytes.AsMemory(total), offset + total, timeout.Token);
+                                if (count == 0) throw new EndOfStreamException("Native hydration returned a short range.");
+                                total += count;
+                            }
+                            for (int i = 0; i < bytes.Length; i++)
+                                Equal(HydrationTestHandler.ExpectedByte(offset + i, second), bytes[i]);
+                        })).ToArray();
+        await Task.WhenAll(reads).WaitAsync(timeout.Token);
+        foreach (bool second in new[] { false, true })
+        {
+            string name = second ? "hydration-b.pdf" : "hydration-a.pdf";
+            byte[] bytes = await File.ReadAllBytesAsync(Path.Combine(root, name), timeout.Token);
+            Equal(second ? 350809 : 301561, bytes.Length);
+            for (int i = 0; i < bytes.Length; i++) Equal(HydrationTestHandler.ExpectedByte(i, second), bytes[i]);
+        }
+        Console.WriteLine($"Native hydration: 12 concurrent range reads and 2 complete files verified in {timer.ElapsedMilliseconds} ms.");
+    }
+
+    private static void TestHydrationRequests()
+    {
+        using HydrationRequests requests = new();
+        HydrationRequests.Pending first = requests.Add(10, 7, 0, 4096);
+        HydrationRequests.Pending middle = requests.Add(10, 7, 4096, 4096);
+        HydrationRequests.Pending tail = requests.Add(10, 7, 8192, 293369);
+        HydrationRequests.Pending otherFile = requests.Add(20, 7, 4096, 4096);
+        HydrationRequests.Pending otherOperation = requests.Add(10, 8, 4096, 4096);
+        HydrationRequests.Pending repeated = requests.Add(10, 7, 4096, 4096);
+        Equal(false, ReferenceEquals(middle, repeated));
+        requests.Complete(first);
+        Equal(0, requests.Cancel(10, 7, 8192, 4096));
+        Equal(false, tail.Token.IsCancellationRequested);
+        Equal(2, requests.Cancel(10, 7, 4096, 4096));
+        Equal(true, middle.Token.IsCancellationRequested);
+        Equal(true, repeated.Token.IsCancellationRequested);
+        Equal(false, tail.Token.IsCancellationRequested);
+        Equal(false, otherFile.Token.IsCancellationRequested);
+        Equal(false, otherOperation.Token.IsCancellationRequested);
+        requests.Complete(middle);
+        requests.Complete(repeated);
+        Equal(1, requests.Cancel(10, 7, 8192, -1));
+        Equal(true, tail.Token.IsCancellationRequested);
+        requests.Complete(tail);
+        requests.Dispose();
+        Equal(true, otherFile.Token.IsCancellationRequested);
+        Equal(true, otherOperation.Token.IsCancellationRequested);
+        Throws<ObjectDisposedException>(() => requests.Add(30, 9, 0, 4096));
+        requests.Complete(otherFile);
+        requests.Complete(otherOperation);
+        Equal(0, requests.Cancel(10, 7, 0, -1));
+
+        using HydrationRequests concurrent = new();
+        HydrationRequests.Pending[] callbacks = new HydrationRequests.Pending[100];
+        Parallel.For(0, callbacks.Length, i => callbacks[i] = concurrent.Add(1, 1, i * 4096, 4096));
+        Equal(100, concurrent.Cancel(1, 1, 0, -1));
+        foreach (HydrationRequests.Pending callback in callbacks)
+        {
+            Equal(true, callback.Token.IsCancellationRequested);
+        }
+        Parallel.ForEach(callbacks, concurrent.Complete);
+        Equal(0, concurrent.Cancel(1, 1, 0, -1));
+
+        Equal((0L, 4096L), CloudFilesProvider.HydrationRange(301561, 0, 4096));
+        Equal((4096L, 8192L), CloudFilesProvider.HydrationRange(301561, 4096, 4096));
+        Equal((8192L, 301561L), CloudFilesProvider.HydrationRange(301561, 8192, -1));
+        Equal((4096L, 12288L), CloudFilesProvider.HydrationRange(301561, 4097, 4096));
+        Equal((0L, 123L), CloudFilesProvider.HydrationRange(123, 0, long.MaxValue));
+        Equal((0L, 0L), CloudFilesProvider.HydrationRange(0, 0, -1));
+        Equal((10L, 10L), CloudFilesProvider.HydrationRange(123, 10, 0));
+        Equal((12288L, long.MaxValue), CloudFilesProvider.HydrationRange(long.MaxValue, 12345, -1));
+        Throws<ArgumentOutOfRangeException>(() => CloudFilesProvider.HydrationRange(123, -1, 1));
+        Throws<ArgumentOutOfRangeException>(() => CloudFilesProvider.HydrationRange(123, 0, -2));
+        Throws<ArgumentOutOfRangeException>(() => CloudFilesProvider.HydrationRange(123, 124, 1));
+    }
+
     public static void Run()
     {
         Equal(true, SyncRootRegistrar.CanReuseRegistration("Provider!A", "provider!a"));
@@ -39,6 +164,7 @@ internal static class SelfTest
         TestNetworkRecoveryAsync().GetAwaiter().GetResult();
         TestSnapshotRetryAsync().GetAwaiter().GetResult();
         TestNamespaceRecovery();
+        TestHydrationRequests();
         Equal("https://cloud.tsk-nsk.ru", new ProviderConfig().Server);
         Equal(false, WindowsBootstrap.IsInteractiveInstall(["--self-test"]));
         Equal("Folder/file.txt", CloudPath.Normalize("/Folder\\file.txt/"));

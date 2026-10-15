@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Windows.Win32;
@@ -22,7 +23,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private readonly ProviderState _state;
     private readonly object _nodesSync = new();
     private readonly Dictionary<string, CloudNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<long, CancellationTokenSource> _hydrations = new();
+    private readonly HydrationRequests _hydrations = new();
+    private readonly SemaphoreSlim _hydrationSlots = new(4, 4);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _pendingLocalChanges =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _internalDeletePaths =
@@ -230,7 +232,12 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                             .Select(_ => letters[random.Next(letters.Length)]).ToArray()) + ".pdf",
                         NodeType = "file", SizeBytes = 663418,
                     }).ToArray();
-                using CloudDriveApi api = new(config.Server, "native-test-no-network");
+                nodes = [.. nodes,
+                    new CloudNode { Path = "hydration-a.pdf", NodeType = "file", SizeBytes = 301561 },
+                    new CloudNode { Path = "hydration-b.pdf", NodeType = "file", SizeBytes = 350809 },
+                ];
+                SelfTest.HydrationTestHandler hydrationHandler = new();
+                using CloudDriveApi api = new(config.Server, "native-test-no-network", hydrationHandler);
                 await using CloudFilesProvider provider = new(config, store, api);
                 foreach (CloudNode node in nodes)
                 {
@@ -258,6 +265,9 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 }
                 if (errors > 0 || provider._namespaceIncomplete)
                     throw new InvalidOperationException($"Native fixture failed: {errors} unreadable entries");
+                await SelfTest.TestNativeHydrationReadsAsync(replacement);
+                if (hydrationHandler.PeakActiveRequests is < 2 or > 4)
+                    throw new InvalidOperationException("Hydration did not respect bounded concurrent downloads.");
             }
         }
         finally
@@ -641,13 +651,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         await _refreshLock.WaitAsync();
         try
         {
-            foreach (CancellationTokenSource source in _hydrations.Values)
-            {
-                source.Cancel();
-                source.Dispose();
-            }
-
-            _hydrations.Clear();
+            _hydrations.Dispose();
             if (_connected)
             {
                 PInvoke.CfDisconnectSyncRoot(_connectionKey).ThrowOnFailure();
@@ -1737,27 +1741,32 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private void QueueHydration(HydrationRequest request)
     {
-        CancellationTokenSource source = new();
-        if (!_hydrations.TryAdd(request.RequestKey, source))
-        {
-            source.Dispose();
-            return;
-        }
-
+        (long start, long end) = HydrationRange(request.FileSize, request.Offset, request.Length);
+        long requiredLength = request.Length == -1
+            ? request.FileSize - request.Offset
+            : Math.Min(request.Length, request.FileSize - request.Offset);
+        HydrationRequests.Pending pending = _hydrations.Add(
+            request.TransferKey, request.RequestKey, request.Offset, requiredLength);
+        long queuedAt = Stopwatch.GetTimestamp();
         _ = Task.Run(async () =>
         {
             Exception? transferError = null;
-            _status.BeginTransfer(request.CloudPath);
+            string outcome = "completed";
             try
             {
-                await HydrateAsync(request, source.Token);
+                _status.BeginTransfer(request.CloudPath);
+                AppLog.Info($"Hydration started: {request.CloudPath}; transfer={request.TransferKey}; "
+                    + $"request={request.RequestKey}; offset={start}; bytes={end - start}; "
+                    + $"queue_ms={Stopwatch.GetElapsedTime(queuedAt).TotalMilliseconds:F0}.");
+                await HydrateAsync(request, pending.Token);
             }
-            catch (OperationCanceledException) when (source.IsCancellationRequested)
+            catch (OperationCanceledException) when (pending.Token.IsCancellationRequested)
             {
-                // CfAPI has cancelled the pending fetch.
+                outcome = "cancelled";
             }
             catch (Exception exception)
             {
+                outcome = "failed";
                 transferError = exception;
                 AppLog.Error($"Не удалось загрузить {request.CloudPath}.", exception);
                 Console.Error.WriteLine($"Не удалось загрузить {request.CloudPath}: {exception.Message}");
@@ -1765,34 +1774,56 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
             finally
             {
+                _hydrations.Complete(pending);
+                AppLog.Info($"Hydration {outcome}: {request.CloudPath}; transfer={request.TransferKey}; "
+                    + $"request={request.RequestKey}; offset={start}; bytes={end - start}; "
+                    + $"elapsed_ms={Stopwatch.GetElapsedTime(queuedAt).TotalMilliseconds:F0}.");
                 Interlocked.Exchange(ref _cacheCheckRequested, 1);
                 _status.EndTransfer(request.CloudPath, transferError);
-                if (_hydrations.TryRemove(request.RequestKey, out CancellationTokenSource? removed))
-                {
-                    removed.Dispose();
-                }
             }
         });
     }
 
     private async Task HydrateAsync(HydrationRequest request, CancellationToken cancellationToken)
     {
-        long start = request.Offset / Alignment * Alignment;
-        long requestedEnd = checked(request.Offset + request.Length);
-        long end = Math.Min(request.FileSize, AlignUp(requestedEnd, Alignment));
+        (long start, long end) = HydrationRange(request.FileSize, request.Offset, request.Length);
         long position = start;
         while (position < end)
         {
             int length = checked((int)Math.Min(TransferChunkBytes, end - position));
-            byte[] bytes = await _api.DownloadRangeAsync(request.CloudPath, position, length, cancellationToken);
-            if (bytes.Length != length)
+            // Bound 4 MB buffers without dropping callbacks or blocking other files for a whole download.
+            await _hydrationSlots.WaitAsync(cancellationToken);
+            try
             {
-                throw new EndOfStreamException($"Получено {bytes.Length} байт вместо {length}.");
+                byte[] bytes = await _api.DownloadRangeAsync(request.CloudPath, position, length, cancellationToken);
+                if (bytes.Length != length)
+                {
+                    throw new EndOfStreamException($"Получено {bytes.Length} байт вместо {length}.");
+                }
+                TransferData(request, position, bytes);
+                position += bytes.Length;
             }
-
-            TransferData(request, position, bytes);
-            position += bytes.Length;
+            finally
+            {
+                _hydrationSlots.Release();
+            }
         }
+    }
+
+    internal static (long Start, long End) HydrationRange(long fileSize, long offset, long length)
+    {
+        if (fileSize < 0 || offset < 0 || offset > fileSize || length < -1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset), "Invalid hydration range.");
+        }
+        if (length == 0 || offset == fileSize)
+        {
+            return (offset, offset);
+        }
+        long end = length == -1 || length >= fileSize - offset ? fileSize : offset + length;
+        long padding = (Alignment - end % Alignment) % Alignment;
+        end += Math.Min(padding, fileSize - end);
+        return (offset / Alignment * Alignment, end);
     }
 
     private static unsafe void TransferData(HydrationRequest request, long offset, byte[] bytes)
@@ -1815,6 +1846,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private static unsafe void CompleteTransferFailure(HydrationRequest request)
     {
+        (long start, long end) = HydrationRange(request.FileSize, request.Offset, request.Length);
+        if (start == end) return;
         CF_OPERATION_INFO operation = CreateOperationInfo(request);
         CF_OPERATION_PARAMETERS parameters = new()
         {
@@ -1823,8 +1856,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         parameters.TransferData.Flags = CF_OPERATION_TRANSFER_DATA_FLAGS.CF_OPERATION_TRANSFER_DATA_FLAG_NONE;
         parameters.TransferData.CompletionStatus = (NTSTATUS)UnsuccessfulNtStatus;
         parameters.TransferData.Buffer = null;
-        parameters.TransferData.Offset = request.Offset / Alignment * Alignment;
-        parameters.TransferData.Length = Math.Max(Alignment, AlignUp(request.Length, Alignment));
+        parameters.TransferData.Offset = start;
+        parameters.TransferData.Length = end - start;
         PInvoke.CfExecute(operation, ref parameters);
     }
 
@@ -1840,8 +1873,6 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private static unsafe uint TransferDataParameterSize() => checked((uint)(
         Marshal.OffsetOf<CF_OPERATION_PARAMETERS>(nameof(CF_OPERATION_PARAMETERS.Anonymous)).ToInt32()
         + sizeof(CF_OPERATION_PARAMETERS._Anonymous_e__Union._TransferData_e__Struct)));
-
-    private static long AlignUp(long value, int alignment) => checked((value + alignment - 1) / alignment * alignment);
 
     private int GetObjectCount()
     {
@@ -1880,9 +1911,14 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private static unsafe void OnCancelFetchData(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
     {
-        if (_current is not null && info is not null && _current._hydrations.TryGetValue(info->RequestKey, out CancellationTokenSource? source))
+        CloudFilesProvider? provider = _current;
+        if (provider is not null && info is not null && parameters is not null)
         {
-            source.Cancel();
+            int cancelled = provider._hydrations.Cancel(info->TransferKey, info->RequestKey,
+                parameters->Cancel.FetchData.FileOffset, parameters->Cancel.FetchData.Length);
+            AppLog.Info($"Hydration cancellation: transfer={info->TransferKey}; request={info->RequestKey}; "
+                + $"offset={parameters->Cancel.FetchData.FileOffset}; bytes={parameters->Cancel.FetchData.Length}; "
+                + $"flags={parameters->Cancel.Flags}; cancelled_callbacks={cancelled}.");
         }
     }
 
