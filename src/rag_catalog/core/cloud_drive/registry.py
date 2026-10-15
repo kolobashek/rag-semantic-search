@@ -688,7 +688,7 @@ class CloudDriveRegistryDB:
         source_mtime: float, created_by: str,
     ) -> CloudDriveFile:
         """Atomically publish verified bytes only if this Windows filename is still absent."""
-        if not name or name == '..' or '\x00' in name or name != self._normalize_path(name) or '/' in name:
+        if not name.strip() or name in {'.', '..'} or '\x00' in name or '/' in name or '\\' in name:
             raise ValueError('Invalid import filename')
         if not math.isfinite(source_mtime) or source_mtime <= 0:
             raise ValueError('Source modification time is unknown')

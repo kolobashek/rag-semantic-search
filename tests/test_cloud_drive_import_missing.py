@@ -47,6 +47,15 @@ def test_preview_creates_nothing(setup):
     assert service.registry.get_file_by_path('Staff/report.txt') is None
 
 
+def test_leading_space_in_filename_is_preserved(setup):
+    service, source = setup
+    result = service.import_missing_file_from_source(path='Staff/ report.txt', source_path=str(source), apply=True)
+    assert result['path'] == 'Staff/ report.txt'
+    row = service.registry.get_file_by_path(result['path'])
+    assert row.name == ' report.txt'
+    assert service.registry.get_file_by_path('Staff/report.txt') is None
+
+
 @pytest.mark.parametrize('deleted', [False, True])
 def test_existing_or_deleted_file_cannot_be_overwritten(setup, deleted):
     service, source = setup
