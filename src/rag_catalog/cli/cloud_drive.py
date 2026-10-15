@@ -44,6 +44,11 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap_cmd.add_argument('--max-files', type=int, default=0, help='Import only first N files')
     bootstrap_cmd.add_argument('--import-files', action='store_true', help='Copy files into storage backend')
 
+    reconcile_cmd = sub.add_parser('reconcile-file', help='Keep the newest copy of an existing file, preserving history')
+    reconcile_cmd.add_argument('--path', required=True, help='Existing Cloud Drive file path')
+    reconcile_cmd.add_argument('--source', required=True, help='Source file to compare')
+    reconcile_cmd.add_argument('--apply', action='store_true', help='Verify stored copies and apply; otherwise preview metadata only')
+
     import_add_cmd = sub.add_parser('import-source-add', help='Register a scanner/import folder')
     import_add_cmd.add_argument('--name', default='', help='Human-readable import source name')
     import_add_cmd.add_argument('--source-path', required=True, help='Local/network folder to import from')
@@ -980,6 +985,12 @@ def main(argv: list[str] | None = None) -> int:
         return _init_cloud(cfg, args)
     if args.command == 'bootstrap':
         return _bootstrap_cloud(cfg, args)
+    if args.command == 'reconcile-file':
+        result = _cloud_service_from_cfg(cfg).reconcile_file_from_source(
+            path=args.path, source_path=args.source, apply=bool(args.apply), actor='cli',
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.command == 'stats':
         return _stats_cloud(cfg)
     if args.command == 'compact-versions':

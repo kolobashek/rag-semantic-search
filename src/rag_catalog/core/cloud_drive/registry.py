@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import secrets
 import sqlite3
 import threading
@@ -24,7 +25,7 @@ from .models import (
     CloudDriveSyncPair,
 )
 
-CLOUD_DRIVE_SCHEMA_VERSION = 8
+CLOUD_DRIVE_SCHEMA_VERSION = 9
 _CHANGE_CURSOR_PREFIX = "v1."
 ACL_BOOTSTRAP_META_KEY = "acl_bootstrapped"
 
@@ -379,6 +380,12 @@ class CloudDriveRegistryDB:
             conn.execute("ALTER TABLE cloud_folders ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
         if not self._has_column(conn, "cloud_files", "source_mtime"):
             conn.execute("ALTER TABLE cloud_files ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
+        if not self._has_column(conn, "cloud_file_versions", "source_mtime"):
+            conn.execute("ALTER TABLE cloud_file_versions ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
+            # Only the current version has a known original modification time.
+            conn.execute("""UPDATE cloud_file_versions SET source_mtime=files.source_mtime
+                FROM cloud_files AS files
+                WHERE cloud_file_versions.id=files.current_version_id""")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS cloud_user_folders (
@@ -607,10 +614,10 @@ class CloudDriveRegistryDB:
                 if not same_content:
                     conn.execute(
                         '''
-                        INSERT INTO cloud_file_versions (id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, '', ?)
+                        INSERT INTO cloud_file_versions (id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at, source_mtime)
+                        VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)
                         ''',
-                        (version_id, file_id, storage_key, checksum, int(size_bytes), source_path, now),
+                        (version_id, file_id, storage_key, checksum, int(size_bytes), source_path, now, float(source_mtime)),
                     )
                 conn.execute(
                     '''
@@ -634,6 +641,83 @@ class CloudDriveRegistryDB:
                 saved = conn.execute('SELECT * FROM cloud_files WHERE path=?', (clean_path,)).fetchone()
                 assert saved is not None
                 return self._file_from_row(saved)
+
+    def reconcile_file_version(
+        self, *, path: str, expected_version_id: str, expected_updated_at: str,
+        storage_key: str, checksum: str, size_bytes: int, source_path: str,
+        source_mtime: float, created_by: str,
+    ) -> dict:
+        """Archive a verified source copy, activating it only if it is newer.
+
+        The caller must verify both stored objects before this atomic commit.
+        A concurrent edit/delete aborts the operation instead of overwriting it.
+        """
+        if not math.isfinite(source_mtime) or source_mtime <= 0:
+            raise ValueError('Source modification time is unknown')
+        clean_path = self._normalize_path(path)
+        with self._lock, self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute('SELECT * FROM cloud_files WHERE path=?', (clean_path,)).fetchone()
+            if (current is None or current['deleted_at']
+                    or current['current_version_id'] != expected_version_id
+                    or current['updated_at'] != expected_updated_at):
+                raise RuntimeError('Cloud file changed during reconciliation; retry after a fresh comparison')
+            folder = conn.execute('SELECT deleted_at FROM cloud_folders WHERE id=?', (current['folder_id'],)).fetchone()
+            if folder is None or folder['deleted_at']:
+                raise RuntimeError('Cloud folder was deleted during reconciliation')
+            previous = conn.execute('SELECT * FROM cloud_file_versions WHERE id=? AND file_id=?',
+                                    (expected_version_id, current['id'])).fetchone()
+            if (previous is None or previous['checksum'] != current['checksum']
+                    or previous['storage_key'] != current['storage_key']
+                    or previous['size_bytes'] != current['size_bytes']):
+                raise RuntimeError('Current version history is inconsistent; refusing to replace it')
+            current_mtime = float(current['source_mtime'] or previous['source_mtime'] or 0)
+            time_basis = 'source_mtime'
+            if not math.isfinite(current_mtime) or current_mtime <= 0:
+                # Browser/client uploads have no original mtime: retain their
+                # server save time, not a later folder rename/import timestamp.
+                time_basis = 'version_saved_at'
+                try:
+                    saved_at = datetime.fromisoformat(previous['created_at'])
+                    current_mtime = saved_at.timestamp() if saved_at.tzinfo else 0
+                except (ValueError, TypeError, OverflowError):
+                    current_mtime = 0
+            same_content = current['checksum'] == checksum and current['size_bytes'] == size_bytes
+            newer = current_mtime > 0 and source_mtime > current_mtime + 0.001
+            result = {'path': clean_path, 'previous_version_id': expected_version_id,
+                      'current_version_id': expected_version_id, 'source_mtime': source_mtime,
+                      'cloud_mtime': current_mtime, 'cloud_time_basis': time_basis}
+            if same_content:
+                if newer:
+                    conn.execute('UPDATE cloud_files SET source_mtime=?,source_path=? WHERE id=?',
+                                 (source_mtime, source_path, current['id']))
+                    conn.execute('UPDATE cloud_file_versions SET source_mtime=? WHERE id=?',
+                                 (source_mtime, expected_version_id))
+                return {**result, 'action': 'unchanged', 'version_id': expected_version_id}
+            archived = conn.execute('''SELECT id FROM cloud_file_versions
+                WHERE file_id=? AND checksum=? AND size_bytes=? AND storage_key=? AND source_mtime=?''',
+                (current['id'], checksum, size_bytes, storage_key, source_mtime)).fetchone()
+            version_id = str(archived['id']) if archived else str(uuid.uuid4())
+            now = _utc_now()
+            if not archived:
+                conn.execute('''INSERT INTO cloud_file_versions
+                    (id,file_id,storage_key,checksum,size_bytes,source_path,source_mtime,created_by,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)''',
+                    (version_id, current['id'], storage_key, checksum, size_bytes,
+                     source_path, source_mtime, created_by, now))
+            if newer:
+                conn.execute('''UPDATE cloud_files SET storage_key=?,checksum=?,size_bytes=?,source_path=?,
+                    source_mtime=?,current_version_id=?,updated_at=? WHERE id=?''',
+                    (storage_key, checksum, size_bytes, source_path, source_mtime, version_id, now, current['id']))
+                action = 'updated'
+                result['current_version_id'] = version_id
+            elif current_mtime <= 0:
+                action = 'archived_unknown_date'
+            elif abs(source_mtime - current_mtime) <= 0.001:
+                action = 'archived_equal_date'
+            else:
+                action = 'archived_older'
+            return {**result, 'action': action, 'version_id': version_id}
 
     def update_folder_mtime(self, folder_id: str, source_mtime: float) -> None:
         """Cheaply update only the source_mtime of a folder after a successful scan."""
@@ -912,7 +996,7 @@ class CloudDriveRegistryDB:
         with self._connect() as conn:
             rows = conn.execute(
                 '''
-                SELECT id, file_id, storage_key, checksum, size_bytes, source_path, created_by, created_at
+                SELECT id, file_id, storage_key, checksum, size_bytes, source_path, source_mtime, created_by, created_at
                 FROM cloud_file_versions
                 WHERE file_id=?
                 ORDER BY created_at DESC
@@ -927,6 +1011,7 @@ class CloudDriveRegistryDB:
                 'checksum': str(row['checksum'] or ''),
                 'size_bytes': int(row['size_bytes'] or 0),
                 'source_path': str(row['source_path'] or ''),
+                'source_mtime': float(row['source_mtime'] or 0),
                 'created_by': str(row['created_by'] or ''),
                 'created_at': str(row['created_at'] or ''),
                 'is_current': str(row['id']) == str(file_row.current_version_id),

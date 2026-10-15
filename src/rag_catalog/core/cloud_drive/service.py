@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import mimetypes
 import shutil
 import sqlite3
@@ -1367,6 +1368,67 @@ class CloudDriveService:
             },
             'versions': versions,
         }
+
+    def reconcile_file_from_source(
+        self, *, path: str, source_path: str, apply: bool = False, actor: str = 'cli',
+    ) -> dict:
+        """Reconcile one existing file, retaining both copies in immutable history."""
+        current = self.registry.get_file_by_path(path)
+        if current is None or current.deleted_at:
+            raise RuntimeError('Reconciliation requires an existing active cloud file')
+        if self.shared_folders and self.shared_folders.mount(current.path):
+            raise RuntimeError('Live shared folders must use their own synchronization worker')
+        source = Path(source_path)
+        before = source.stat()
+        if not source.is_file():
+            raise RuntimeError('Reconciliation source must be a file')
+        if not math.isfinite(before.st_mtime) or not 0 < before.st_mtime <= time.time() + 300:
+            raise RuntimeError('Source modification time is unknown or in the future')
+        preview = {'path': current.path, 'source_path': str(source),
+                   'source_mtime': before.st_mtime, 'cloud_source_mtime': current.source_mtime,
+                   'source_size': before.st_size, 'cloud_size': current.size_bytes,
+                   'current_version_id': current.current_version_id, 'applied': False}
+        if not apply:
+            return preview
+        # Verify the old bytes before replacing anything. A registry row alone
+        # does not prove that a usable historical version exists in storage.
+        if (not current.checksum or not current.storage_key.startswith('objects/sha256/')
+                or Path(current.storage_key).stem != current.checksum):
+            raise RuntimeError('Current copy is not immutable; preserve it before reconciliation')
+        with tempfile.TemporaryDirectory(prefix='rag-reconcile-') as temp:
+            temp_root = Path(temp)
+            old_copy = temp_root / 'previous'
+            self.storage.download_file(current.storage_key, old_copy)
+            if (old_copy.stat().st_size != current.size_bytes
+                    or compute_file_checksum(old_copy) != current.checksum):
+                raise RuntimeError('Current stored version is damaged; reconciliation aborted')
+            snapshot = temp_root / 'incoming'
+            shutil.copyfile(source, snapshot)
+            after = source.stat()
+            if ((before.st_size, before.st_mtime_ns, before.st_ino)
+                    != (after.st_size, after.st_mtime_ns, after.st_ino)
+                    or snapshot.stat().st_size != before.st_size):
+                raise RuntimeError('Source changed while copying; retry after editing stops')
+            checksum = compute_file_checksum(snapshot)
+            storage_key = self._immutable_storage_key(checksum=checksum, filename=current.name)
+            if not self.storage.exists(storage_key):
+                self.storage.put_file(snapshot, storage_key)
+            verified = temp_root / 'verified'
+            self.storage.download_file(storage_key, verified)
+            if (verified.stat().st_size != before.st_size
+                    or compute_file_checksum(verified) != checksum):
+                raise RuntimeError('Incoming stored version failed checksum verification')
+            result = self.registry.reconcile_file_version(
+                path=current.path, expected_version_id=current.current_version_id,
+                expected_updated_at=current.updated_at, storage_key=storage_key,
+                checksum=checksum, size_bytes=before.st_size, source_path=str(source),
+                source_mtime=before.st_mtime, created_by=actor,
+            )
+        if result['action'] == 'updated':
+            refreshed = self.registry.get_file_by_path(current.path)
+            if refreshed is not None:
+                self._queue_reindex_file(refreshed, reason='source-reconcile')
+        return {**preview, **result, 'applied': True}
 
     @shared_write
     def move_node(self, *, source_path: str, dest_parent_path: str = '', new_name: str = '') -> dict:

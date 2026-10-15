@@ -326,6 +326,8 @@ python cloud_drive.py stats
 python cloud_drive.py bootstrap --max-files 1000
 python cloud_drive.py import-source-add --name "Сканер" --source-path "\\server\scanner" --target-path "Входящие/Сканер"
 python cloud_drive.py import-source-run <source_id> --run-now
+python cloud_drive.py reconcile-file --path "Документы/report.xlsx" --source "O:\Обмен\Документы\report.xlsx"
+python cloud_drive.py reconcile-file --path "Документы/report.xlsx" --source "O:\Обмен\Документы\report.xlsx" --apply
 python cloud_drive.py compact-versions
 python cloud_drive.py backup --output runtime/backups/cloud-drive.zip
 python cloud_drive.py verify-backup runtime/backups/cloud-drive.zip
@@ -342,6 +344,15 @@ python cloud_drive.py provider-restore-drill runtime/backups/s3-provider-latest 
 Для local storage backup использует online SQLite snapshot, включает object files и SHA-256 manifest, а секреты в `config.snapshot.json` заменяет на `[REDACTED]`. Успешный `restore-drill` создаёт рядом с архивом проверяемый artifact, который учитывается в admin storage health. Для S3/MinIO `provider-backup` сохраняет согласованные SQLite snapshots и полный набор объектов с SHA-256. `provider-reconcile` сначала в dry-run режиме находит старые registry keys и исчезнувшие source-файлы; `--apply` перепривязывает только объекты с совпавшим content SHA-256 и мягко удаляет только записи при доступном source drive. `provider-verify` проверяет все хеши и сохраняет artifact, привязанный к manifest SHA-256. После этого `provider-restore-drill` делает content round-trip выборки через временный bucket и удаляет его, не перечитывая весь snapshot повторно.
 
 HTTP API принимает или создаёт `X-Correlation-ID`, возвращает его клиенту и добавляет в API logs и Cloud Drive audit events.
+
+Для сверки изменённых файлов при миграции используйте `reconcile-file`, а не обычный
+`bootstrap`: без `--apply` он показывает метаданные, с `--apply` проверяет обе копии
+по SHA-256 и сохраняет их в истории одного файла. Текущей становится копия с более
+новой датой изменения; для загрузок без исходной даты используется время сохранения
+версии на сервере. При равных или неизвестных датах другая копия остаётся в истории,
+текущая не заменяется. Одновременное редактирование и повреждение хранилища прерывают
+замену. Команда не переносит новые файлы, переименования или удаления и не применяется
+к живым SMB-папкам. Обновление до схемы Cloud Drive 9 требует перезапуска web/bot.
 Telemetry SQLite использует rollback journal: web, bot и background indexer могут писать параллельно без общей WAL/SHM пары, которая ранее блокировала reconnect после принудительного перезапуска процесса.
 
 ### Общие SMB-папки
