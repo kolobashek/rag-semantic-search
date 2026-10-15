@@ -257,16 +257,20 @@ def _spawn_python_module(module: str, args: list[str], cwd: Path, log_name: str)
     env["RAG_LOG_HISTORY_NAME"] = log_name
     env["RAG_LOG_LABEL"] = module
     _runtime_dir()
-    log_fh = open_run_log(log_name, f"start {module} {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    proc = subprocess.Popen(
-        [sys.executable, "-m", module, *args],
-        cwd=str(cwd),
-        env=env,
-        stdout=log_fh,
-        stderr=log_fh,
-        creationflags=_windows_flags(),
-    )
-    log_fh.close()
+    with open_run_log(log_name, f"start {module} {time.strftime('%Y-%m-%d %H:%M:%S')}") as log_fh:
+        options = dict(cwd=str(cwd), env=env, stdout=log_fh, stderr=log_fh, creationflags=_windows_flags())
+        command = [sys.executable, "-m", module, *args]
+        try:
+            proc = subprocess.Popen(command, **options)
+        except OSError as exc:
+            breakaway = int(getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
+            if getattr(exc, "winerror", None) != 5 or not (options["creationflags"] & breakaway):
+                raise
+            # Task Scheduler may forbid leaving its job; remaining in it is sufficient.
+            log_fh.write("Job breakaway denied; retrying inside the existing Windows job.\n")
+            log_fh.flush()
+            options["creationflags"] &= ~breakaway
+            proc = subprocess.Popen(command, **options)
     return int(proc.pid)
 
 

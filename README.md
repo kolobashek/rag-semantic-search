@@ -486,6 +486,14 @@ pwsh -ExecutionPolicy Bypass -File packaging\install_cloud_proxy.ps1 `
 На пограничном маршрутизаторе TCP 80/443 должны быть направлены на Windows-сервер. Само
 приложение остаётся привязанным к loopback; TLS завершается на Caddy.
 
+На основном Windows-сервере Docker и launcher запускаются отдельными задачами
+`RAG Docker Desktop` и `RAG Catalog Server`, а не дочерними процессами редактора.
+Задачи выполняются при входе серверного пользователя с обычным приоритетом; это не
+заменяет службу, работающую до входа в Windows. Для ручного запуска используйте
+`Start-ScheduledTask -TaskName 'RAG Catalog Server'`, для проверки состояния —
+`python -m rag_catalog.cli.launcher status`. Вывод запуска сохраняется в
+`logs/runtime/scheduled-start.log`, журналы служб — в `logs/history/`.
+
 Если таблица `cloud_permissions` пуста, Cloud Drive сохраняет прежний open-access режим для совместимости.
 После первой grant-записи доступ к API проверяется по registry ACL с наследованием прав от папок.
 Разрешённые чувствительные операции и ACL-отказы записываются в audit telemetry; для публичных ссылок хранится только отпечаток токена, сам токен в журнал не попадает.

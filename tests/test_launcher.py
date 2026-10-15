@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import zipfile
 from pathlib import Path
@@ -64,6 +65,46 @@ def test_spawned_services_use_local_model_cache(monkeypatch, tmp_path: Path) -> 
     env = captured["kwargs"]["env"]
     assert env["HF_HUB_OFFLINE"] == "1"
     assert env["TRANSFORMERS_OFFLINE"] == "1"
+
+
+@pytest.mark.parametrize("winerror,breakaway_enabled,retry_fails", [
+    (5, True, False), (5, True, True), (2, True, False), (5, False, False),
+])
+def test_spawn_handles_windows_job_restrictions(monkeypatch, tmp_path, winerror, breakaway_enabled, retry_fails):
+    breakaway = 0x01000000
+    hidden = 0x08000000
+    flags = hidden | (breakaway if breakaway_enabled else 0)
+    calls = []
+    log = io.StringIO()
+    error = OSError("Cannot create process")
+    error.winerror = winerror
+
+    def popen(command, **options):
+        calls.append((command, options.copy()))
+        if len(calls) == 1 or retry_fails:
+            raise error
+        return SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr(launcher, "RUNTIME_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "open_run_log", lambda *args: log)
+    monkeypatch.setattr(launcher, "_windows_flags", lambda: flags)
+    monkeypatch.setattr(launcher.subprocess, "CREATE_BREAKAWAY_FROM_JOB", breakaway, raising=False)
+    monkeypatch.setattr(launcher.subprocess, "Popen", popen)
+    should_retry = winerror == 5 and breakaway_enabled
+    if should_retry and not retry_fails:
+        assert launcher._spawn_python_module("example.module", ["--test"], tmp_path, "web.log") == 4242
+    else:
+        with pytest.raises(OSError) as caught:
+            launcher._spawn_python_module("example.module", ["--test"], tmp_path, "web.log")
+        assert caught.value is error
+    assert log.closed
+    assert len(calls) == (2 if should_retry else 1)
+    assert calls[0][1]["creationflags"] == flags
+    if should_retry:
+        assert calls[1][0] == calls[0][0]
+        assert calls[1][1]["creationflags"] == hidden
+        assert calls[1][1]["env"] == calls[0][1]["env"]
+        assert calls[1][1]["cwd"] == calls[0][1]["cwd"]
 
 
 def test_shared_runtime_dir_uses_telemetry_parent(tmp_path: Path) -> None:
