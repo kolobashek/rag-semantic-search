@@ -642,6 +642,81 @@ class CloudDriveRegistryDB:
                 assert saved is not None
                 return self._file_from_row(saved)
 
+    def ensure_import_folder(self, *, path: str, source_path: str = '') -> CloudDriveFolder:
+        """Create missing parents without reviving tombstones or altering ACL identities."""
+        clean_path = self._normalize_path(path)
+        parts = clean_path.split('/') if clean_path else []
+        if any(part == '..' or '\x00' in part for part in parts):
+            raise ValueError('Invalid import folder path')
+        with self._lock, self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            parent = conn.execute("SELECT * FROM cloud_folders WHERE is_root=1 AND deleted_at='' LIMIT 1").fetchone()
+            if parent is None:
+                raise RuntimeError('Cloud root is missing')
+            for index, name in enumerate(parts):
+                siblings = conn.execute('SELECT * FROM cloud_folders WHERE parent_id=?', (parent['id'],)).fetchall()
+                matches = [row for row in siblings if row['name'].casefold() == name.casefold()]
+                exact = [row for row in matches if row['name'] == name]
+                if exact or len(matches) == 1:
+                    existing = (exact or matches)[0]
+                    if existing['deleted_at']:
+                        raise RuntimeError('Import would restore a deleted folder')
+                    parent = existing
+                    continue
+                if matches:
+                    raise RuntimeError('Ambiguous folder spelling during import')
+                files = conn.execute('SELECT name FROM cloud_files WHERE folder_id=?', (parent['id'],)).fetchall()
+                if any(row['name'].casefold() == name.casefold() for row in files):
+                    raise RuntimeError('Import folder conflicts with an existing or deleted file')
+                next_path = f"{parent['path']}/{name}" if parent['path'] else name
+                new_id = str(uuid.uuid4())
+                now = _utc_now()
+                source = Path(source_path) if source_path else None
+                for _ in parts[index + 1:]:
+                    source = source.parent if source else None
+                conn.execute('''INSERT INTO cloud_folders
+                    (id,parent_id,name,path,depth,source_path,is_root,source_mtime,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,0,0,?,?)''',
+                    (new_id, parent['id'], name, next_path, int(parent['depth']) + 1,
+                     str(source) if source else '', now, now))
+                parent = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (new_id,)).fetchone()
+            return self._folder_from_row(parent)
+
+    def insert_import_file(
+        self, *, parent_id: str, parent_path: str, name: str, storage_key: str,
+        mime_type: str, size_bytes: int, checksum: str, source_path: str,
+        source_mtime: float, created_by: str,
+    ) -> CloudDriveFile:
+        """Atomically publish verified bytes only if this Windows filename is still absent."""
+        if not name or name == '..' or '\x00' in name or name != self._normalize_path(name) or '/' in name:
+            raise ValueError('Invalid import filename')
+        if not math.isfinite(source_mtime) or source_mtime <= 0:
+            raise ValueError('Source modification time is unknown')
+        with self._lock, self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            parent = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (parent_id,)).fetchone()
+            if parent is None or parent['deleted_at'] or parent['path'] != parent_path:
+                raise RuntimeError('Cloud parent changed during import')
+            siblings = conn.execute('''SELECT name FROM cloud_files WHERE folder_id=?
+                UNION ALL SELECT name FROM cloud_folders WHERE parent_id=?''', (parent_id, parent_id)).fetchall()
+            if any(row['name'].casefold() == name.casefold() for row in siblings):
+                raise RuntimeError('Import target already exists or was deleted; reconcile explicitly')
+            path = f'{parent_path}/{name}' if parent_path else name
+            file_id, version_id = str(uuid.uuid4()), str(uuid.uuid4())
+            now = _utc_now()
+            conn.execute('''INSERT INTO cloud_file_versions
+                (id,file_id,storage_key,checksum,size_bytes,source_path,created_by,created_at,source_mtime)
+                VALUES (?,?,?,?,?,?,?,?,?)''',
+                (version_id, file_id, storage_key, checksum, size_bytes, source_path, created_by, now, source_mtime))
+            conn.execute('''INSERT INTO cloud_files
+                (id,folder_id,name,path,storage_key,mime_type,size_bytes,checksum,source_path,
+                 source_mtime,current_version_id,created_at,updated_at,deleted_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'')''',
+                (file_id, parent_id, name, path, storage_key, mime_type, size_bytes, checksum,
+                 source_path, source_mtime, version_id, now, now))
+            saved = conn.execute('SELECT * FROM cloud_files WHERE id=?', (file_id,)).fetchone()
+            return self._file_from_row(saved)
+
     def reconcile_file_version(
         self, *, path: str, expected_version_id: str, expected_updated_at: str,
         storage_key: str, checksum: str, size_bytes: int, source_path: str,

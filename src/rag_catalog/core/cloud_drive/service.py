@@ -1369,6 +1369,57 @@ class CloudDriveService:
             'versions': versions,
         }
 
+    def import_missing_file_from_source(
+        self, *, path: str, source_path: str, apply: bool = False, actor: str = 'cli',
+    ) -> dict:
+        """Import a missing file with stable-copy/readback checks and an insert-only commit."""
+        clean_path = self.registry._normalize_path(path)
+        if not clean_path or any(part == '..' or '\x00' in part for part in clean_path.split('/')):
+            raise ValueError('Import requires a destination filename')
+        if self.shared_folders and self.shared_folders.mount(clean_path):
+            raise RuntimeError('Live shared folders must use their own synchronization worker')
+        source = Path(source_path)
+        before = source.stat()
+        if not source.is_file():
+            raise RuntimeError('Import source must be a file')
+        if not math.isfinite(before.st_mtime) or not 0 < before.st_mtime <= time.time() + 300:
+            raise RuntimeError('Source modification time is unknown or in the future')
+        preview = {'path': clean_path, 'source_path': str(source),
+                   'source_size': before.st_size, 'source_mtime': before.st_mtime, 'applied': False}
+        if not apply:
+            return preview
+        parent_path, _, name = clean_path.rpartition('/')
+        parent = self.registry.ensure_import_folder(path=parent_path, source_path=str(source.parent))
+        actual_path = f'{parent.path}/{name}' if parent.path else name
+        if self.shared_folders and self.shared_folders.mount(actual_path):
+            raise RuntimeError('Live shared folders must use their own synchronization worker')
+        if self.registry.get_file_by_path(actual_path) or self.registry.get_folder_by_path(actual_path, include_deleted=True):
+            raise RuntimeError('Import target already exists or was deleted; reconcile explicitly')
+        with tempfile.TemporaryDirectory(prefix='rag-import-') as temp:
+            snapshot = Path(temp) / 'incoming'
+            shutil.copyfile(source, snapshot)
+            after = source.stat()
+            if ((before.st_size, before.st_mtime_ns, before.st_ino)
+                    != (after.st_size, after.st_mtime_ns, after.st_ino)
+                    or snapshot.stat().st_size != before.st_size):
+                raise RuntimeError('Source changed while copying; retry after editing stops')
+            checksum = compute_file_checksum(snapshot)
+            storage_key = self._immutable_storage_key(checksum=checksum, filename=name)
+            if not self.storage.exists(storage_key):
+                self.storage.put_file(snapshot, storage_key)
+            verified = Path(temp) / 'verified'
+            self.storage.download_file(storage_key, verified)
+            if verified.stat().st_size != before.st_size or compute_file_checksum(verified) != checksum:
+                raise RuntimeError('Incoming stored version failed checksum verification')
+            saved = self.registry.insert_import_file(
+                parent_id=parent.id, parent_path=parent.path, name=name, storage_key=storage_key,
+                mime_type=guess_mime_type(source), size_bytes=before.st_size, checksum=checksum,
+                source_path=str(source), source_mtime=before.st_mtime, created_by=actor,
+            )
+        self._queue_reindex_file(saved, reason='source-import')
+        return {**preview, 'path': saved.path, 'action': 'created', 'id': saved.id,
+                'current_version_id': saved.current_version_id, 'checksum': saved.checksum, 'applied': True}
+
     def reconcile_file_from_source(
         self, *, path: str, source_path: str, apply: bool = False, actor: str = 'cli',
     ) -> dict:
