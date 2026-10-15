@@ -110,6 +110,71 @@ def test_token_consumption_serialized_across_connections(db):
     assert sum(response["ok"] for response in responses) == 1
 
 
+def test_explicit_reset_preserves_identity_and_revokes_old_credentials(client, db):
+    db.admin_create_user(username="kris", display_name="Existing Name", telegram_chat_id="777",
+                         password="old-password", roles=["user", "driver"], must_change_password=False)
+    db.save_user_settings(username="kris", settings={"theme": "dark"})
+    session = db.create_session(username="kris")
+    tg_link = db.create_telegram_link_token(username="kris")
+    verification = db.request_telegram_link_code(username="kris", password="old-password", telegram_chat_id="777")
+    reset = db.request_password_reset(username="kris", telegram_chat_id="777")
+    assert db.confirm_password_reset(telegram_chat_id="777", code=reset["code"])["ok"]
+    with db._connect() as conn:
+        before = dict(conn.execute("SELECT * FROM users WHERE username='kris'").fetchone())
+    result = db.create_account_activation(username="kris", display_name="Must Not Replace", created_by="admin", reset_existing=True)
+    assert result["ok"]
+    with db._connect() as conn:
+        after = dict(conn.execute("SELECT * FROM users WHERE username='kris'").fetchone())
+    for key in before.keys() - {"password_hash", "must_change_password", "status"}:
+        assert after[key] == before[key]
+    assert db.get_user_settings(username="kris") == {"theme": "dark"}
+    assert db.login(username="kris", password="old-password") is None
+    assert db.login(username="kris", password="") is None
+    assert db.get_user_by_session(session) is None
+    assert not db.confirm_verification(telegram_chat_id="777", code=verification["code"])["ok"]
+    assert not db.complete_password_reset(username="kris", code=reset["code"], new_password="stale-reset-password")["ok"]
+    assert not db.consume_telegram_start_token(token=tg_link["token"], telegram_chat_id="999")["ok"]
+    response = client.post("/api/auth/activate", json={"token": result["token"], "new_password": "new-password"})
+    assert response.status_code == 200
+    assert db.login(username="kris", password="new-password")["roles"] == ["driver", "user"]
+    assert db.login(username="kris", password="old-password") is None
+    assert db.get_user_by_session(session) is None
+
+
+def test_reset_link_replaces_previous_invitation(db):
+    original = invite(db)
+    replacement = db.create_account_activation(username="staff", display_name="", created_by="admin", reset_existing=True)
+    assert replacement["ok"]
+    assert not db.activate_account(token=original["token"], new_password="old-link-password")["ok"]
+    assert db.activate_account(token=replacement["token"], new_password="new-link-password")["ok"]
+    assert not db.activate_account(token=replacement["token"], new_password="replayed-password")["ok"]
+
+
+@pytest.mark.parametrize("target", ["missing", "blocked"])
+def test_reset_does_not_create_or_unblock_accounts(db, target):
+    if target == "blocked":
+        db.admin_create_user(username=target, password="blocked-password", status="blocked")
+    result = db.create_account_activation(username=target, display_name="", created_by="admin", reset_existing=True)
+    assert result == {"ok": False, "reason": "not_found" if target == "missing" else "blocked"}
+    if target == "missing":
+        assert db.get_user(username=target) is None
+    else:
+        assert db.get_user(username=target)["status"] == "blocked"
+
+
+def test_reset_requires_active_admin_and_does_not_affect_other_accounts(db):
+    db.admin_create_user(username="staff", password="original-password")
+    session = db.create_session(username="staff")
+    denied = db.create_account_activation(username="staff", display_name="", created_by="staff", reset_existing=True)
+    assert denied["reason"] == "not_admin"
+    assert db.login(username="staff", password="original-password")
+    assert db.get_user_by_session(session)
+    db.admin_create_user(username="target", password="target-password")
+    assert db.create_account_activation(username="target", display_name="", created_by="admin", reset_existing=True)["ok"]
+    assert db.login(username="staff", password="original-password")
+    assert db.get_user_by_session(session)
+
+
 def test_activation_page_does_not_consume_token(client, db):
     result = invite(db)
     response = client.get("/auth/activate")

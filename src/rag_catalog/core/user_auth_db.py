@@ -1789,8 +1789,9 @@ class UserAuthDB:
 
     def create_account_activation(
         self, *, username: str, display_name: str, created_by: str, ttl_hours: int = 72,
+        reset_existing: bool = False,
     ) -> Dict[str, Any]:
-        """Create a passwordless, inactive staff account; never reset an existing account."""
+        """Issue password setup for a new staff account, or explicitly reset an existing one."""
         usr = str(username or "").strip().lower()
         actor = str(created_by or "").strip().lower()
         if not re.fullmatch(r"[a-z][a-z0-9._-]{2,63}", usr):
@@ -1805,24 +1806,48 @@ class UserAuthDB:
             admin = conn.execute("SELECT * FROM users WHERE username=?", (actor,)).fetchone()
             if admin is None or admin["status"] != "active" or "admin" not in user_roles(dict(admin)):
                 return {"ok": False, "reason": "not_admin"}
-            if conn.execute("SELECT 1 FROM users WHERE username=?", (usr,)).fetchone():
+            existing = conn.execute("SELECT status FROM users WHERE username=?", (usr,)).fetchone()
+            if existing is not None and not reset_existing:
                 return {"ok": False, "reason": "already_exists"}
-            conn.execute(
-                """INSERT INTO users
-                   (username, display_name, password_hash, role, roles_json,
-                    must_change_password, status, created_at)
-                   VALUES (?, ?, '', 'user', '["user"]', 1, 'pending', ?)""",
-                (usr, str(display_name or "").strip(), now.isoformat()),
-            )
+            if reset_existing:
+                if existing is None:
+                    return {"ok": False, "reason": "not_found"}
+                if existing["status"] not in {"active", "pending"}:
+                    return {"ok": False, "reason": "blocked"}
+                conn.execute(
+                    "UPDATE users SET password_hash='', must_change_password=1, status='pending' WHERE username=?",
+                    (usr,),
+                )
+                conn.execute(
+                    "UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
+                    (now.isoformat(), usr),
+                )
+                for table in ("verification_tokens", "password_reset_tokens", "telegram_tokens"):
+                    conn.execute(
+                        f"UPDATE {table} SET status='expired' WHERE username=? AND status IN ('pending','confirmed')",
+                        (usr,),
+                    )
+            else:
+                conn.execute(
+                    """INSERT INTO users
+                       (username, display_name, password_hash, role, roles_json,
+                        must_change_password, status, created_at)
+                       VALUES (?, ?, '', 'user', '["user"]', 1, 'pending', ?)""",
+                    (usr, str(display_name or "").strip(), now.isoformat()),
+                )
             conn.execute(
                 """INSERT INTO account_activations
                    (token_hash, username, created_by, created_at, expires_at)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(username) DO UPDATE SET token_hash=excluded.token_hash,
+                     created_by=excluded.created_by, created_at=excluded.created_at,
+                     expires_at=excluded.expires_at, used_at=NULL""",
                 (hashlib.sha256(token.encode("ascii")).hexdigest(), usr, actor, now.isoformat(), expires_at),
             )
             conn.execute(
                 "INSERT INTO auth_events(ts, username, event_type, ok, error) VALUES (?, ?, ?, 1, ?)",
-                (now.isoformat(), actor, "account_invited", json.dumps({"target": usr})),
+                (now.isoformat(), actor, "account_password_reset_link" if reset_existing else "account_invited",
+                 json.dumps({"target": usr})),
             )
         return {"ok": True, "username": usr, "token": token, "expires_at": expires_at}
 
