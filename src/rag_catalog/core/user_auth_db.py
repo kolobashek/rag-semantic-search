@@ -12,6 +12,7 @@ import re
 import secrets
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -227,6 +228,15 @@ class UserAuthDB:
                         error TEXT NOT NULL DEFAULT ''
                     );
 
+                    CREATE TABLE IF NOT EXISTS account_activations (
+                        token_hash TEXT PRIMARY KEY,
+                        username TEXT NOT NULL UNIQUE,
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        used_at TEXT
+                    );
+
                     CREATE INDEX IF NOT EXISTS idx_users_status
                       ON users(status);
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_user_groups_name
@@ -330,6 +340,8 @@ class UserAuthDB:
                     (usr,),
                 ).fetchone()
                 is_new = row is None
+                if conn.execute("SELECT 1 FROM account_activations WHERE username=?", (usr,)).fetchone():
+                    raise ValueError("Используйте персональную ссылку активации")
                 if row is not None and str(row["status"]) == "active":
                     raise ValueError("Пользователь уже существует")
                 if is_new:
@@ -1774,6 +1786,79 @@ class UserAuthDB:
                     ),
                 )
                 return cur.rowcount > 0
+
+    def create_account_activation(
+        self, *, username: str, display_name: str, created_by: str, ttl_hours: int = 72,
+    ) -> Dict[str, Any]:
+        """Create a passwordless, inactive staff account; never reset an existing account."""
+        usr = str(username or "").strip().lower()
+        actor = str(created_by or "").strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9._-]{2,63}", usr):
+            raise ValueError("Use a Latin login of 3 to 64 characters")
+        if not 1 <= ttl_hours <= 168:
+            raise ValueError("Activation lifetime must be between 1 and 168 hours")
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        expires_at = (now + timedelta(hours=ttl_hours)).isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            admin = conn.execute("SELECT * FROM users WHERE username=?", (actor,)).fetchone()
+            if admin is None or admin["status"] != "active" or "admin" not in user_roles(dict(admin)):
+                return {"ok": False, "reason": "not_admin"}
+            if conn.execute("SELECT 1 FROM users WHERE username=?", (usr,)).fetchone():
+                return {"ok": False, "reason": "already_exists"}
+            conn.execute(
+                """INSERT INTO users
+                   (username, display_name, password_hash, role, roles_json,
+                    must_change_password, status, created_at)
+                   VALUES (?, ?, '', 'user', '["user"]', 1, 'pending', ?)""",
+                (usr, str(display_name or "").strip(), now.isoformat()),
+            )
+            conn.execute(
+                """INSERT INTO account_activations
+                   (token_hash, username, created_by, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (hashlib.sha256(token.encode("ascii")).hexdigest(), usr, actor, now.isoformat(), expires_at),
+            )
+            conn.execute(
+                "INSERT INTO auth_events(ts, username, event_type, ok, error) VALUES (?, ?, ?, 1, ?)",
+                (now.isoformat(), actor, "account_invited", json.dumps({"target": usr})),
+            )
+        return {"ok": True, "username": usr, "token": token, "expires_at": expires_at}
+
+    def activate_account(self, *, token: str, new_password: str) -> Dict[str, Any]:
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+            return {"ok": False, "reason": "invalid_activation"}
+        if not isinstance(new_password, str) or not 8 <= len(new_password) <= 128 or not new_password.strip():
+            return {"ok": False, "reason": "invalid_password"}
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        now = _utc_now()
+        with self._lock, closing(self._connect()) as conn, conn:
+            # Serialize consumption across web workers and independent DB instances.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT a.username FROM account_activations a JOIN users u ON u.username=a.username
+                   WHERE a.token_hash=? AND a.used_at IS NULL AND a.expires_at>?
+                     AND u.status='pending' AND u.password_hash='' AND u.must_change_password=1""",
+                (token_hash, now),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "reason": "invalid_activation"}
+            username = str(row["username"])
+            conn.execute(
+                """UPDATE users SET password_hash=?, status='active', must_change_password=0,
+                   verified_at=? WHERE username=?""",
+                (_hash_password(new_password), now, username),
+            )
+            conn.execute("UPDATE account_activations SET used_at=? WHERE token_hash=?", (now, token_hash))
+            conn.execute(
+                "UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, username),
+            )
+            conn.execute(
+                "INSERT INTO auth_events(ts, username, event_type, ok) VALUES (?, ?, 'account_activated', 1)",
+                (now, username),
+            )
+        return {"ok": True, "username": username}
 
     def admin_set_password(self, *, username: str, new_password: str, must_change_password: bool = True) -> bool:
         usr = (username or "").strip().lower()

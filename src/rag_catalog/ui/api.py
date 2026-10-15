@@ -36,6 +36,7 @@ from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from . import helpers as _helpers
+from .account_activation import register_activation_routes
 from .cloud_download import storage_download_response
 from .helpers import _cd_registry_acl_allows, _cd_registry_acl_filter, _resolve_catalog_file
 from .state import _users_db_path
@@ -150,6 +151,9 @@ def _require_public_links_enabled(cfg: Dict[str, Any]) -> None:
 
 def _get_api_auth_db(cfg: Dict[str, Any]) -> UserAuthDB:
     return UserAuthDB(str(_users_db_path(cfg)))
+
+
+register_activation_routes(app, lambda: _get_api_auth_db(load_config()))
 
 
 def _require_cloud_drive_api_user(
