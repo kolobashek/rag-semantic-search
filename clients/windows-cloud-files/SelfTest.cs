@@ -131,6 +131,7 @@ internal static class SelfTest
 
     public static void Run()
     {
+        Equal(typeof(SelfTest).Assembly.GetName().Version!.ToString(3), AppDefaults.Version);
         Equal(true, SyncRootRegistrar.CanReuseRegistration("Provider!A", "provider!a"));
         Equal(false, SyncRootRegistrar.CanReuseRegistration("other", "Provider!A"));
         TestNavigationVisibility();
