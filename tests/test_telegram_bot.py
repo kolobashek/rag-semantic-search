@@ -1,5 +1,6 @@
 import time
 import traceback
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -25,6 +26,47 @@ from telegram_bot import (
 
 def test_opening_file_is_neutral_feedback() -> None:
     assert OPEN_FILE_FEEDBACK == 0
+
+
+def test_startup_waits_for_remote_qdrant_and_closes_failed_clients(monkeypatch, caplog):
+    closed = []
+    sleeps = []
+    attempts = iter([
+        SimpleNamespace(connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(1))),
+        SimpleNamespace(connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(2))),
+        SimpleNamespace(connected=True),
+    ])
+    monkeypatch.setattr(telegram_bot, "RAGSearcher", lambda cfg: next(attempts))
+    monkeypatch.setattr(telegram_bot.time, "sleep", sleeps.append)
+    with caplog.at_level("INFO"):
+        searcher = telegram_bot._wait_for_searcher({"qdrant_url": "http://localhost:6333"})
+    assert searcher.connected
+    assert closed == [1, 2]
+    assert sleeps == [30, 30]
+    assert "после 2 повторов" in caplog.text
+
+
+def test_startup_does_not_retry_broken_local_qdrant(monkeypatch):
+    closed = []
+    monkeypatch.setattr(telegram_bot, "RAGSearcher", lambda cfg: SimpleNamespace(
+        connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(True))))
+    def unexpected_sleep(seconds):
+        pytest.fail("Local database errors must not loop forever")
+    monkeypatch.setattr(telegram_bot.time, "sleep", unexpected_sleep)
+    assert telegram_bot._wait_for_searcher({}) is None
+    assert closed == [True]
+
+
+def test_startup_wait_can_be_interrupted_without_a_client_leak(monkeypatch):
+    closed = []
+    monkeypatch.setattr(telegram_bot, "RAGSearcher", lambda cfg: SimpleNamespace(
+        connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(True))))
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(telegram_bot.time, "sleep", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        telegram_bot._wait_for_searcher({"qdrant_url": "http://localhost:6333"})
+    assert closed == [True]
 
 
 def test_tg_call_does_not_expose_token_in_transport_errors(monkeypatch) -> None:

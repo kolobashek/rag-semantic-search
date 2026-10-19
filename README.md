@@ -524,6 +524,9 @@ pwsh -ExecutionPolicy Bypass -File packaging\install_cloud_proxy.ps1 `
 `Start-ScheduledTask -TaskName 'RAG Catalog Server'`, для проверки состояния —
 `python -m rag_catalog.cli.launcher status`. Вывод запуска сохраняется в
 `logs/runtime/scheduled-start.log`, журналы служб — в `logs/history/`.
+При недоступности серверного Qdrant Telegram-бот остаётся запущенным и повторяет
+подключение каждые 30 секунд. Во время восстановления коллекций процесс бота может
+быть активен, но обработка сообщений начнётся только после успешного подключения.
 
 Если таблица `cloud_permissions` пуста, Cloud Drive сохраняет прежний open-access режим для совместимости.
 После первой grant-записи доступ к API проверяется по registry ACL с наследованием прав от папок.

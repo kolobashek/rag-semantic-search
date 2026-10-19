@@ -1841,6 +1841,29 @@ def process_message(
     )
 
 
+def _wait_for_searcher(cfg: Dict[str, Any]) -> RAGSearcher | None:
+    attempts = 0
+    while True:
+        searcher = RAGSearcher(cfg)
+        if searcher.connected:
+            if attempts:
+                logger.info("Qdrant готов; запуск Telegram продолжается после %s повторов", attempts)
+            return searcher
+        # Failed attempts must not accumulate HTTP connection pools during recovery.
+        client = getattr(searcher, "qdrant", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.warning("Не удалось закрыть неактивное соединение Qdrant")
+        if not str(cfg.get("qdrant_url") or "").strip():
+            logger.error("Нет подключения к локальному Qdrant")
+            return None
+        attempts += 1
+        logger.warning("Qdrant пока недоступен; повтор запуска Telegram через 30 секунд")
+        time.sleep(30)
+
+
 def main() -> int:
     cfg = load_config()
     token = (cfg.get("telegram_bot_token") or "").strip()
@@ -1855,11 +1878,10 @@ def main() -> int:
         logger.error("telegram_enabled=false. Включите бота в настройках.")
         return 1
 
-    searcher = RAGSearcher(cfg)
-    auth_db = UserAuthDB(_users_db_path(cfg))
-    if not searcher.connected:
-        logger.error("Нет подключения к Qdrant")
+    searcher = _wait_for_searcher(cfg)
+    if searcher is None:
         return 1
+    auth_db = UserAuthDB(_users_db_path(cfg))
 
     try:
         set_bot_commands(token)
