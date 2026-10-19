@@ -1,4 +1,5 @@
 import time
+import traceback
 
 import pytest
 import requests
@@ -38,6 +39,41 @@ def test_tg_call_does_not_expose_token_in_transport_errors(monkeypatch) -> None:
         telegram_bot.tg_call(token, "getUpdates", {})
 
     assert token not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("operation", ["call", "upload", "download"])
+def test_telegram_http_error_never_leaks_token_in_traceback(monkeypatch, tmp_path, operation):
+    token = "123456789:private-test-token"
+    response = requests.Response()
+    response.status_code = 502
+    response.url = f"https://api.telegram.org/bot{token}/getUpdates"
+    response._content = b"Bad Gateway"
+    response._content_consumed = True
+    monkeypatch.setattr(telegram_bot.requests, "post", lambda *a, **kw: response)
+    monkeypatch.setattr(telegram_bot.requests, "get", lambda *a, **kw: response)
+    monkeypatch.setattr(telegram_bot, "send_chat_action", lambda *a, **kw: None)
+    document = tmp_path / "document.txt"
+    document.write_text("fixture")
+    with pytest.raises(telegram_bot.TelegramAPIError, match="HTTP 502") as caught:
+        if operation == "call":
+            telegram_bot.tg_call(token, "getUpdates", {})
+        elif operation == "upload":
+            telegram_bot.send_document(token, "123", str(document))
+        else:
+            telegram_bot.download_file(token, "document.txt", tmp_path / "download.txt")
+    assert token not in "".join(traceback.format_exception(caught.value))
+
+
+@pytest.mark.parametrize("body", [b'not json', b'{"ok":false,"description":"private-test-token"}', b'[]'])
+def test_telegram_invalid_responses_do_not_log_response_body(monkeypatch, body):
+    token = "private-test-token"
+    response = requests.Response()
+    response.status_code = 200
+    response._content = body
+    monkeypatch.setattr(telegram_bot.requests, "post", lambda *a, **kw: response)
+    with pytest.raises(telegram_bot.TelegramAPIError) as caught:
+        telegram_bot.tg_call(token, "getUpdates", {})
+    assert "private-test-token" not in "".join(traceback.format_exception(caught.value))
 
 
 class _FakeSearcher:

@@ -328,6 +328,8 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_source_path_active
                         ON cloud_files(source_path) WHERE deleted_at='';
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_storage_key ON cloud_files(storage_key);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_folders_changes ON cloud_folders(updated_at, path, id);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_files_changes ON cloud_files(updated_at, path, id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_resource ON cloud_permissions(resource_type, resource_id);
@@ -1769,12 +1771,18 @@ class CloudDriveRegistryDB:
         clean_since = str(since or '').strip()
         cursor_key = _decode_change_cursor(clean_since)
         max_rows = max(1, min(int(limit or 500), 5000))
-        timestamp_floor = cursor_key[0] if cursor_key is not None else clean_since
-        if cursor_key is not None:
-            where = "WHERE updated_at >= ?"
-        else:
-            where = "WHERE updated_at > ?" if clean_since else ""
-        params: tuple[Any, ...] = (timestamp_floor,) if timestamp_floor else ()
+        def page_filter(node_type: str) -> tuple[str, tuple[Any, ...]]:
+            if cursor_key is None:
+                return ("WHERE updated_at > ?", (clean_since, max_rows)) if clean_since else ("", (max_rows,))
+            timestamp, cursor_type, path, row_id = cursor_key
+            if node_type == cursor_type:
+                return "WHERE (updated_at, path, id) > (?, ?, ?)", (timestamp, path, row_id, max_rows)
+            operator = ">=" if node_type > cursor_type else ">"
+            return f"WHERE updated_at {operator} ?", (timestamp, max_rows)
+
+        # Each indexed branch contributes at most one page to the merged feed.
+        folder_where, folder_params = page_filter("folder")
+        file_where, file_params = page_filter("file")
         with self._connect() as conn:
             folder_rows = conn.execute(
                 f"""
@@ -1791,9 +1799,10 @@ class CloudDriveRegistryDB:
                     0 AS size_bytes,
                     '' AS checksum
                 FROM cloud_folders
-                {where}
+                {folder_where}
+                ORDER BY updated_at, path, id LIMIT ?
                 """,
-                params,
+                folder_params,
             ).fetchall()
             file_rows = conn.execute(
                 f"""
@@ -1810,14 +1819,13 @@ class CloudDriveRegistryDB:
                     size_bytes,
                     checksum
                 FROM cloud_files
-                {where}
+                {file_where}
+                ORDER BY updated_at, path, id LIMIT ?
                 """,
-                params,
+                file_params,
             ).fetchall()
         rows = [*folder_rows, *file_rows]
         rows.sort(key=_change_sort_key)
-        if cursor_key is not None:
-            rows = [row for row in rows if _change_sort_key(row) > cursor_key]
         return [
             {
                 'node_type': str(row['node_type']),

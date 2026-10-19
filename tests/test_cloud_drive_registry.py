@@ -757,6 +757,49 @@ def test_service_change_cursor_pages_equal_timestamps_without_loss(tmp_path: Pat
     assert set(seen_ids) == expected_ids
 
 
+def test_change_feed_reads_bounded_pages_with_equal_timestamps(tmp_path, monkeypatch):
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    root = registry.ensure_root_folder(root_name='Root', source_path='')
+    for index in range(24):
+        path = f'item-{index:02}'
+        registry.upsert_folder(path=path, name=path, parent_id=root.id, depth=1)
+        registry.upsert_file(folder_id=root.id, path=path + '.txt', name=path + '.txt',
+                             storage_key=path, size_bytes=1, checksum=path, mime_type='text/plain')
+    stamp = '2026-10-19T00:00:00+00:00'
+    with registry._connect() as conn:
+        conn.execute('UPDATE cloud_folders SET updated_at=?', (stamp,))
+        conn.execute('UPDATE cloud_files SET updated_at=?, deleted_at=? WHERE name=?',
+                     (stamp, stamp, 'item-03.txt'))
+        conn.execute('UPDATE cloud_files SET updated_at=?', (stamp,))
+    expected = registry.list_changes(limit=500)
+    row_reads = []
+    original_connect = registry._connect
+
+    def connect():
+        conn = original_connect()
+        def row_factory(cursor, values):
+            row_reads.append(1)
+            return sqlite3.Row(cursor, values)
+        conn.row_factory = row_factory
+        return conn
+
+    monkeypatch.setattr(registry, '_connect', connect)
+    cursor = ''
+    actual = []
+    for _ in range(30):
+        row_reads.clear()
+        page = registry.list_changes(since=cursor, limit=3)
+        assert len(row_reads) <= 6
+        if not page:
+            break
+        actual.extend(page)
+        cursor = registry.change_cursor(page[-1])
+    else:
+        pytest.fail('feed did not terminate')
+    assert actual == expected
+    assert registry.list_changes(since=stamp) == []
+
+
 def test_sync_client_uses_server_cursor_even_for_empty_filtered_page() -> None:
     import rag_sync_client
 

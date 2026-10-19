@@ -131,16 +131,38 @@ def _api_url(token: str, method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
 
 
-def tg_call(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+class TelegramAPIError(RuntimeError):
+    pass
+
+
+@contextmanager
+def _telegram_errors(method: str) -> Iterator[None]:
+    """Requests exceptions contain credential-bearing URLs, including HTTP errors."""
     try:
-        resp = requests.post(_api_url(token, method), json=payload, timeout=API_TIMEOUT)
+        yield
     except requests.RequestException as exc:
-        raise RuntimeError(f"Telegram API {method} unavailable: {type(exc).__name__}") from None
+        status = getattr(exc.response, "status_code", None)
+        detail = f"HTTP {status}" if isinstance(status, int) and status >= 400 else type(exc).__name__
+        raise TelegramAPIError(f"Telegram API {method} unavailable: {detail}") from None
+
+
+def _telegram_data(resp: requests.Response, method: str) -> Dict[str, Any]:
     resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram API error: {data}")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise TelegramAPIError(f"Telegram API {method}: invalid JSON response") from None
+    if not isinstance(data, dict) or not data.get("ok"):
+        code = data.get("error_code") if isinstance(data, dict) else None
+        code = code if isinstance(code, int) else "unknown"
+        raise TelegramAPIError(f"Telegram API {method} rejected request (code={code})")
     return data
+
+
+def tg_call(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    with _telegram_errors(method):
+        resp = requests.post(_api_url(token, method), json=payload, timeout=API_TIMEOUT)
+        return _telegram_data(resp, method)
 
 
 def send_message(token: str, chat_id: str, text: str, reply_markup: Dict[str, Any] | None = None) -> int:
@@ -234,31 +256,28 @@ def send_document(token: str, chat_id: str, path: str, caption: str = "") -> Non
         send_message(token, chat_id, f"Файл недоступен:\n{path}")
         return
     send_chat_action(token, chat_id, "upload_document")
-    with file_path.open("rb") as fh:
+    with _telegram_errors("sendDocument"), file_path.open("rb") as fh:
         resp = requests.post(
             _api_url(token, "sendDocument"),
             data={"chat_id": chat_id, "caption": caption[:1000]},
             files={"document": (file_path.name, fh)},
             timeout=API_TIMEOUT,
         )
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram API error: {data}")
+        _telegram_data(resp, "sendDocument")
 
 
 def get_file_info(token: str, file_id: str) -> Dict[str, Any]:
     data = tg_call(token, "getFile", {"file_id": file_id})
     result = data.get("result") or {}
     if not result.get("file_path"):
-        raise RuntimeError(f"Telegram getFile did not return file_path: {data}")
+        raise TelegramAPIError("Telegram getFile did not return file_path")
     return result
 
 
 def download_file(token: str, file_path: str, destination: Path) -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-    with requests.get(url, stream=True, timeout=API_TIMEOUT) as resp:
+    with _telegram_errors("downloadFile"), requests.get(url, stream=True, timeout=API_TIMEOUT) as resp:
         resp.raise_for_status()
         total = 0
         with destination.open("wb") as fh:
@@ -1849,12 +1868,20 @@ def main() -> int:
 
     logger.info("Telegram бот запущен. Ограничение chat_id: %s", allowed_chat_id or "нет")
     offset = 0
+    polling_failures = 0
+    polling_started = False
     from rag_catalog.core.indexing.monitor import IndexHeartbeatMonitor
     index_monitor = IndexHeartbeatMonitor(cfg, auth_db, lambda chat, text: send_message(token, chat, text))
     while True:
         try:
             index_monitor.poll()
             updates = get_updates(token, offset)
+            if polling_failures:
+                logger.info("Telegram polling восстановлен после %s ошибок", polling_failures)
+                polling_failures = 0
+            elif not polling_started:
+                logger.info("Telegram polling: первый запрос выполнен успешно")
+            polling_started = True
             for upd in updates:
                 offset = max(offset, int(upd.get("update_id", 0)) + 1)
                 callback_query = upd.get("callback_query") if isinstance(upd.get("callback_query"), dict) else None
@@ -2065,6 +2092,11 @@ def main() -> int:
         except KeyboardInterrupt:
             logger.info("Остановлено пользователем.")
             return 0
+        except TelegramAPIError as exc:
+            polling_failures += 1
+            delay = min(60.0, POLL_SLEEP_SEC * 2 ** min(polling_failures - 1, 6))
+            logger.warning("Telegram polling: %s; повтор через %.0f с", exc, delay)
+            time.sleep(delay)
         except Exception as exc:
             logger.exception("Ошибка цикла polling: %s", exc)
             time.sleep(POLL_SLEEP_SEC)
