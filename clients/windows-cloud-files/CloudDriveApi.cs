@@ -291,6 +291,13 @@ internal sealed class CloudDriveApi : IDisposable
         form.Add(file, "file", fileName);
         string path = "api/cloud-drive/upload?parent_path=" + Uri.EscapeDataString(parentPath);
         using HttpResponseMessage response = await _http.PostAsync(path, form, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            string location = parentPath.Length == 0 ? "в корень облака" : "в эту папку";
+            throw new HttpRequestException(
+                $"Нет прав на загрузку {location}. Локальный файл сохранён. Перенесите его в папку с правом редактирования или обратитесь к администратору.",
+                null, response.StatusCode);
+        }
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<CloudNode>(JsonOptions, cancellationToken)
             ?? throw new InvalidOperationException("Сервер не вернул загруженный файл.");
@@ -404,6 +411,17 @@ internal static class CloudPath
     }
 
     public static int Depth(string path) => path.Count(character => character == '/') + 1;
+
+    public static bool IsLocalMetadata(string path)
+    {
+        string name = Path.GetFileName(path.Replace('/', Path.DirectorySeparatorChar));
+        if (name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase)) return true;
+        return name.StartsWith("~$", StringComparison.Ordinal)
+            && Path.GetExtension(name).ToLowerInvariant() is
+                ".doc" or ".docx" or ".docm" or ".dot" or ".dotx" or ".dotm"
+                or ".xls" or ".xlsx" or ".xlsm" or ".xlsb" or ".ppt" or ".pptx" or ".pptm";
+    }
 
     public static string LocalPath(string root, string cloudPath)
     {

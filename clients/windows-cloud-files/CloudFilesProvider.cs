@@ -183,6 +183,23 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                     if (!CloudFilePinning.ReadPlaceholderState(CloudPath.LocalPath(root, node.Path), out _))
                         throw new InvalidOperationException("Nested native file metadata is invalid");
             }
+            string longRelative = string.Join('/', Enumerable.Repeat(new string('x', 72), 4));
+            string longParent = CloudPath.LocalPath(root, longRelative);
+            Directory.CreateDirectory(longParent);
+            using (NativePlaceholderBatch longBatch = new([
+                new CloudNode { Path = longRelative + "/long-file.txt", NodeType = "file", SizeBytes = 0 },
+            ]))
+            {
+                PInvoke.CfCreatePlaceholders(CloudFilePinning.NativePath(longParent), longBatch.Infos,
+                    CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE, out uint longCount).ThrowOnFailure();
+                longBatch.Infos[0].Result.ThrowOnFailure();
+                string longFile = Path.Combine(longParent, "long-file.txt");
+                if (longCount != 1 || longFile.Length <= 260 || !CloudFilePinning.ReadPlaceholderState(longFile, out _))
+                    throw new InvalidOperationException("Long native path metadata failed");
+                CloudFilePinning.MarkInSync(longFile);
+                CloudFilePinning.SetPinState(longFile, pinned: false, recursive: false);
+                if (!CloudFilePinning.IsInSync(longFile)) throw new InvalidOperationException("Long path lost in-sync state");
+            }
             using NativePlaceholderBatch mixed = new([
                 new CloudNode { Path = "test.pdf", NodeType = "file", SizeBytes = 1024 },
                 new CloudNode { Path = "after-collision.pdf", NodeType = "file", SizeBytes = 1024 },
@@ -306,13 +323,16 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         try
         {
             _status.SetState(ClientRunState.Syncing, "Проверка изменений…");
-            if (_namespaceIncomplete || _localScanIncomplete || DateTimeOffset.UtcNow - _lastFullSnapshot >= TimeSpan.FromMinutes(30))
+            TimeSpan snapshotInterval = _namespaceIncomplete || _localScanIncomplete
+                ? TimeSpan.FromMinutes(5) : TimeSpan.FromMinutes(30);
+            if (DateTimeOffset.UtcNow - _lastFullSnapshot >= snapshotInterval)
             {
                 await RefreshFullSnapshotAsync(cancellationToken);
             }
             else
             {
                 await ApplyIncrementalChangesAsync(cancellationToken);
+                ReportIncompleteNamespace();
                 _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
             }
             await _api.HeartbeatAsync(_config.ClientId, cancellationToken);
@@ -332,9 +352,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private void ReportIncompleteNamespace()
     {
-        if (_namespaceIncomplete || _localScanIncomplete)
-            _status.SetState(ClientRunState.Error, "Часть папок недоступна; повторим синхронизацию",
-                "Другие файлы доступны. Подробности в журнале клиента.");
+        _status.SetSyncIssues(_namespaceIncomplete || _localScanIncomplete ? 1 : 0,
+            "Не все файлы синхронизированы. Подробности в журнале клиента; повторим автоматически.");
     }
 
     public IReadOnlyList<string> GetTopLevelFolders()
@@ -878,6 +897,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                     try
                     {
                         await SyncLocalPathAsync(cloudPath, explicitDelete, cancellationToken);
+                        _status.ClearFileError(cloudPath);
                         _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
                     }
                     finally
@@ -896,6 +916,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                         _explicitLocalDeletes[cloudPath] = 0;
                     }
                     _pendingLocalChanges[cloudPath] = DateTimeOffset.UtcNow.AddSeconds(5);
+                    _status.RecordFileError(cloudPath, exception);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
                     AppLog.Error($"Не удалось синхронизировать локальный путь {cloudPath}.", exception);
                 }
@@ -940,6 +961,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 }
                 catch (Exception exception)
                 {
+                    _localScanIncomplete = true;
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать папку", exception.Message);
                     AppLog.Error($"Не удалось восстановить локальную папку {cloudPath}.", exception);
                 }
@@ -955,6 +977,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 try
                 {
                     await SyncLocalFileAsync(cloudPath, cancellationToken);
+                    _status.ClearFileError(cloudPath);
                 }
                 catch (Exception exception)
                 {
@@ -968,6 +991,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
             }
         }
         if (failedFiles > 0) AppLog.Warn($"Deferred {failedFiles} files with local errors; no cloud content overwritten.");
+        ReportIncompleteNamespace();
         // Missing placeholders after an upgrade are not proof of user deletion.
         // Only explicit CfAPI/FilesystemWatcher notifications propagate deletes.
     }
@@ -1386,7 +1410,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
 
         return CloudPath.TryNormalize(Path.GetRelativePath(_root, fullPath), out cloudPath)
-            && cloudPath.Length > 0 && !PlaceholderRecovery.IsRecoveryPath(cloudPath);
+            && cloudPath.Length > 0 && !PlaceholderRecovery.IsRecoveryPath(cloudPath)
+            && !CloudPath.IsLocalMetadata(cloudPath);
     }
 
     private bool HasRemoteNode(string cloudPath) => GetRemoteNode(cloudPath) is not null;
@@ -1596,7 +1621,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
                 using NativePlaceholderBatch native = new(create);
                 HRESULT result = PInvoke.CfCreatePlaceholders(
-                    localParent,
+                    CloudFilePinning.NativePath(localParent),
                     native.Infos,
                     CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE,
                     out uint processed);

@@ -23,6 +23,9 @@ internal sealed record ClientStatusSnapshot(
 internal sealed class ClientStatusModel
 {
     private readonly object _sync = new();
+    private readonly Dictionary<string, string> _fileErrors = new(StringComparer.OrdinalIgnoreCase);
+    private int _syncIssues;
+    private string _syncIssueMessage = "";
     private ClientStatusSnapshot _current = new(
         ClientRunState.Starting,
         "Запуск клиента…",
@@ -70,8 +73,36 @@ internal sealed class ClientStatusModel
                 ? $"Загружается файлов: {current.ActiveTransfers}"
                 : "Синхронизировано",
             ObjectCount = objectCount,
-            LastSync = lastSync,
+            LastSync = _syncIssues == 0 && _fileErrors.Count == 0 ? lastSync : current.LastSync,
             LastError = "",
+        });
+    }
+
+    public void SetSyncIssues(int count, string message)
+    {
+        Update(current =>
+        {
+            _syncIssues = Math.Max(0, count);
+            _syncIssueMessage = message;
+            return current;
+        });
+    }
+
+    public void ClearFileError(string cloudPath)
+    {
+        Update(current =>
+        {
+            _fileErrors.Remove(cloudPath);
+            return current;
+        });
+    }
+
+    public void RecordFileError(string cloudPath, Exception error)
+    {
+        Update(current =>
+        {
+            _fileErrors[cloudPath] = error.Message;
+            return current;
         });
     }
 
@@ -98,6 +129,7 @@ internal sealed class ClientStatusModel
             int active = Math.Max(0, current.ActiveTransfers - 1);
             if (error is not null)
             {
+                _fileErrors[cloudPath] = error.Message;
                 return current with
                 {
                     State = ClientRunState.Error,
@@ -107,6 +139,8 @@ internal sealed class ClientStatusModel
                     LastError = error.Message,
                 };
             }
+
+            _fileErrors.Remove(cloudPath);
 
             return current with
             {
@@ -125,6 +159,16 @@ internal sealed class ClientStatusModel
         lock (_sync)
         {
             _current = updater(_current);
+            if ((_syncIssues > 0 || _fileErrors.Count > 0)
+                && _current.State is ClientRunState.UpToDate or ClientRunState.Syncing or ClientRunState.Error)
+            {
+                _current = _current with
+                {
+                    State = ClientRunState.Error,
+                    Message = "Есть несинхронизированные файлы",
+                    LastError = _syncIssues > 0 ? _syncIssueMessage : _fileErrors.Values.First(),
+                };
+            }
             snapshot = _current;
         }
 

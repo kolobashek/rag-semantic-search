@@ -24,6 +24,15 @@ internal static partial class CloudFilePinning
     private const uint ShcnfPathW = 0x0005;
     private const uint ShcnfFlushNoWait = 0x2000;
 
+    internal static string NativePath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith(@"\\?\", StringComparison.Ordinal)) return fullPath;
+        return fullPath.StartsWith(@"\\", StringComparison.Ordinal)
+            ? @"\\?\UNC\" + fullPath[2..]
+            : @"\\?\" + fullPath;
+    }
+
     public static bool IsPlaceholder(string path) => TryGetPlaceholderInfo(path, out _);
 
     public static bool IsInSync(string path) =>
@@ -57,7 +66,7 @@ internal static partial class CloudFilePinning
     {
         // Opening the reparse point avoids requesting enumeration/hydration from
         // an old placeholder. Change population policy only, never file data.
-        using SafeFileHandle handle = CreateFile(Path.GetFullPath(path), FileWriteData | FileReadAttributes,
+        using SafeFileHandle handle = CreateFile(NativePath(path), FileWriteData | FileReadAttributes,
             FileShareRead | FileShareWrite | FileShareDelete, 0, OpenExisting,
             FileFlagBackupSemantics | 0x00200000, 0); // FILE_FLAG_OPEN_REPARSE_POINT
         if (handle.IsInvalid) throw new IOException("Cannot repair cloud folder: " + path, Marshal.GetHRForLastWin32Error());
@@ -79,7 +88,7 @@ internal static partial class CloudFilePinning
     public static void SetPinState(string path, bool pinned, bool recursive)
     {
         using SafeFileHandle handle = CreateFile(
-            Path.GetFullPath(path),
+            NativePath(path),
             FileReadData | FileReadAttributes,
             FileShareRead | FileShareWrite | FileShareDelete,
             0,
@@ -106,7 +115,7 @@ internal static partial class CloudFilePinning
     public static void HydrateFile(string path)
     {
         using SafeFileHandle handle = CreateFile(
-            Path.GetFullPath(path),
+            NativePath(path),
             FileReadData | FileReadAttributes,
             FileShareRead | FileShareWrite | FileShareDelete,
             0,
@@ -132,7 +141,7 @@ internal static partial class CloudFilePinning
     {
         uint high;
         Marshal.SetLastPInvokeError(0);
-        uint low = GetCompressedFileSize(Path.GetFullPath(path), out high);
+        uint low = GetCompressedFileSize(NativePath(path), out high);
         int error = Marshal.GetLastPInvokeError();
         if (low == uint.MaxValue && error != 0)
         {
@@ -178,7 +187,7 @@ internal static partial class CloudFilePinning
     {
         inSyncState = CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_NOT_IN_SYNC;
         using SafeFileHandle handle = CreateFile(
-            Path.GetFullPath(path),
+            NativePath(path),
             FileReadAttributes,
             FileShareRead | FileShareWrite | FileShareDelete,
             0,
@@ -209,7 +218,7 @@ internal static partial class CloudFilePinning
     private static SafeFileHandle OpenForPlaceholderManagement(string path)
     {
         SafeFileHandle handle = CreateFile(
-            Path.GetFullPath(path),
+            NativePath(path),
             FileReadData | FileWriteData | FileReadAttributes | FileWriteAttributes,
             FileShareRead | FileShareWrite | FileShareDelete,
             0,
