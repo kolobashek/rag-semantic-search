@@ -1741,11 +1741,18 @@ class CloudDriveRegistryDB:
             file_ids = {clean_file_id} if clean_file_id else set()
             if file_row is not None:
                 file_ids.add(str(file_row["id"]))
-            folder_ids = {
-                folder_id
-                for prefix, folder_id in folder_ids_by_path.items()
-                if not prefix or effective_path == prefix or effective_path.startswith(f"{prefix}/")
-            }
+            folder_ids = set()
+            prefix = ""
+            root_id = folder_ids_by_path.get(prefix)
+            if root_id is not None:
+                folder_ids.add(root_id)
+            for segment in effective_path.split("/"):
+                if not segment:
+                    continue
+                prefix = f"{prefix}/{segment}" if prefix else segment
+                folder_id = folder_ids_by_path.get(prefix)
+                if folder_id is not None:
+                    folder_ids.add(folder_id)
             if file_row is not None and str(file_row["folder_id"] or ""):
                 folder_ids.add(str(file_row["folder_id"]))
 

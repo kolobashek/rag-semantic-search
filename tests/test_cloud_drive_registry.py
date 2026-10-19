@@ -398,6 +398,19 @@ def test_registry_bulk_acl_matches_path_folder_file_and_group_grants(tmp_path: P
     assert bob[('', private_file.id)]
 
 
+def test_batch_folder_acl_uses_only_actual_ancestors(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    root = registry.ensure_root_folder(root_name='Root', source_path='')
+    team = registry.upsert_folder(path='Team', name='Team', parent_id=root.id, depth=1)
+    registry.upsert_folder(path='Teamwork', name='Teamwork', parent_id=root.id, depth=1)
+    registry.grant_permission(subject_type='role', subject_id='user', resource_type='folder',
+                              resource_id=team.id, access_level='editor')
+    paths = ['Team', 'Team/deep/nested/new.txt', 'Teamwork/new.txt', 'Other/Team/new.txt']
+    decisions = registry.user_access_map(username='alice', role='user',
+                                         nodes=[(path, '') for path in paths], required_level='editor')
+    assert [decisions[(path, '')] for path in paths] == [True, True, False, False]
+
+
 def test_registry_user_home_folder_is_restored_after_rename(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     home = registry.ensure_user_home_folder(username='Alice')
