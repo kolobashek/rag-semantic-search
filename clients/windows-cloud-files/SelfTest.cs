@@ -8,11 +8,14 @@ internal static class SelfTest
     {
         private int _active;
         private int _peak;
+        private int _requests;
+        public int Requests => Volatile.Read(ref _requests);
         public int PeakActiveRequests => Volatile.Read(ref _peak);
         internal static byte ExpectedByte(long offset, bool second) => (byte)((offset * 31 + (second ? 73 : 19)) % 251);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            Interlocked.Increment(ref _requests);
             string query = request.RequestUri!.Query;
             bool second = query.Contains("hydration-b.pdf", StringComparison.Ordinal);
             if (!second && !query.Contains("hydration-a.pdf", StringComparison.Ordinal))
@@ -165,6 +168,7 @@ internal static class SelfTest
         TestNetworkRecoveryAsync().GetAwaiter().GetResult();
         TestSnapshotRetryAsync().GetAwaiter().GetResult();
         TestNamespaceRecovery();
+        CloudFilesProvider.TestRemoteRemovalAsync().GetAwaiter().GetResult();
         TestHydrationRequests();
         Equal("https://cloud.tsk-nsk.ru", new ProviderConfig().Server);
         Equal(false, WindowsBootstrap.IsInteractiveInstall(["--self-test"]));

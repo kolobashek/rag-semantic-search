@@ -9,7 +9,7 @@ using Windows.Win32.Storage.FileSystem;
 
 namespace RagCloudFiles;
 
-internal sealed class CloudFilesProvider : IAsyncDisposable
+internal sealed partial class CloudFilesProvider : IAsyncDisposable
 {
     private const int Alignment = 4096;
     private const int TransferChunkBytes = 4 * 1024 * 1024;
@@ -23,6 +23,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private readonly ProviderState _state;
     private readonly object _nodesSync = new();
     private readonly Dictionary<string, CloudNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _visiblePaths = new(StringComparer.OrdinalIgnoreCase);
+    private bool _hasSnapshot;
     private readonly HydrationRequests _hydrations = new();
     private readonly SemaphoreSlim _hydrationSlots = new(4, 4);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _pendingLocalChanges =
@@ -285,6 +287,7 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
                 await SelfTest.TestNativeHydrationReadsAsync(replacement);
                 if (hydrationHandler.PeakActiveRequests is < 2 or > 4)
                     throw new InvalidOperationException("Hydration did not respect bounded concurrent downloads.");
+                await provider.TestNativeRemoteRemovalAsync(hydrationHandler);
             }
         }
         finally
@@ -777,6 +780,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         lock (_nodesSync)
         {
             desired = BuildDesiredNodes(_nodes.Values);
+            _visiblePaths = desired.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _hasSnapshot = true;
         }
         HashSet<string> nextManaged = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, string> nextVersions = new(StringComparer.OrdinalIgnoreCase);
@@ -801,10 +806,14 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
         foreach (string stalePath in _state.ManagedPaths
                      .Where(path => !desired.ContainsKey(path))
-                     .OrderByDescending(CloudPath.Depth))
+                     .OrderBy(CloudPath.Depth).ToArray())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            RemoveManagedPath(stalePath);
+            if (!RetireMissingPath(stalePath))
+            {
+                nextManaged.Add(stalePath);
+                nextVersions[stalePath] = _state.ManagedVersions.GetValueOrDefault(stalePath, "");
+            }
         }
 
         _state.ManagedPaths = nextManaged;
@@ -1139,6 +1148,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
     private async Task SyncLocalDirectoryAsync(string cloudPath, CancellationToken cancellationToken)
     {
         string localPath = CloudPath.LocalPath(_root, cloudPath);
+        if (!Directory.Exists(localPath)) return;
+        if (TryRetireAbsentEntry(cloudPath, localPath)) return;
         bool placeholder = CloudFilePinning.ReadPlaceholderState(localPath, out _);
         if (_state.ManagedPaths.Contains(cloudPath)
             && !HasRemoteNode(cloudPath)
@@ -1201,6 +1212,8 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         {
             return;
         }
+
+        if (TryRetireAbsentEntry(cloudPath, localPath)) return;
 
         bool managed = _state.ManagedPaths.Contains(cloudPath);
         bool placeholder;
@@ -1692,6 +1705,81 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
         }
     }
 
+    private bool TryRetireAbsentEntry(string cloudPath, string localPath)
+    {
+        lock (_nodesSync)
+        {
+            if (!_hasSnapshot || _visiblePaths.Contains(cloudPath) || _nodes.ContainsKey(cloudPath)) return false;
+        }
+        bool retiredAncestor = false;
+        for (string parent = CloudPath.Parent(cloudPath); parent.Length > 0; parent = CloudPath.Parent(parent))
+        {
+            if (_state.ManagedPaths.Contains(parent) && !_visiblePaths.Contains(parent) && !HasRemoteNode(parent))
+            {
+                retiredAncestor = true;
+                break;
+            }
+        }
+        // Also recover orphan placeholders whose tracking was lost by older clients.
+        if (!_state.ManagedPaths.Contains(cloudPath) && !retiredAncestor)
+        {
+            if (!CloudFilePinning.ReadPlaceholderState(localPath, out _)) return false;
+            // A local rename/copy carries its original identity and is not a stale
+            // placeholder for the destination. Leave it to the normal upload path.
+            if (!CloudFilePinning.ReadPlaceholderIdentity(localPath)
+                    .Equals(cloudPath, StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        if (!RetireMissingPath(cloudPath))
+        {
+            _store.SaveState(_state);
+            throw new IOException($"Remote removal is deferred; local data preserved: {cloudPath}");
+        }
+        _store.SaveState(_state);
+        return true;
+    }
+
+    private bool RetireMissingPath(string cloudPath)
+    {
+        string localPath = CloudPath.LocalPath(_root, cloudPath);
+        // Never discard ownership on a sharing violation: otherwise recovery uploads
+        // the orphan as a new file and hydrates a remote path that no longer exists.
+        _state.ManagedPaths.Add(cloudPath);
+        _internalDeletePaths[cloudPath] = DateTimeOffset.UtcNow.AddMinutes(5);
+        try
+        {
+            bool exists;
+            try { File.GetAttributes(localPath); exists = true; }
+            catch (FileNotFoundException) { exists = false; }
+            catch (DirectoryNotFoundException) { exists = false; }
+            if (exists)
+            {
+                if (HasRemoteNode(PlaceholderRecovery.FolderName))
+                    throw new IOException("Recovery folder name conflicts with a cloud folder; originals preserved.");
+                // A rename preserves dirty and partially hydrated data without reading
+                // missing ranges or racing an editor by copying then deleting its file.
+                string preserved = PlaceholderRecovery.Preserve(_root, cloudPath);
+                AppLog.Warn($"Remote entry removed or no longer visible: {cloudPath}; local entry preserved at {preserved}.");
+            }
+            _state.ManagedPaths.Remove(cloudPath);
+            _state.ManagedVersions.Remove(cloudPath);
+            _state.LocalFingerprints.Remove(cloudPath);
+            _state.AppliedOfflineVersions.Remove(cloudPath);
+            _pendingLocalChanges.TryRemove(cloudPath, out _);
+            _explicitLocalDeletes.TryRemove(cloudPath, out _);
+            _status.ClearFileError(cloudPath);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _internalDeletePaths.TryRemove(cloudPath, out _);
+            _namespaceIncomplete = true;
+            _status.RecordFileError(cloudPath, ex);
+            if (++_deferredPlaceholders <= 5)
+                AppLog.Error($"Remote removal deferred; tracking and local data preserved: {cloudPath}", ex);
+            return false;
+        }
+    }
+
     private bool IsInternalDelete(string cloudPath)
     {
         if (!_internalDeletePaths.TryGetValue(cloudPath, out DateTimeOffset expiresAt))
@@ -1811,6 +1899,11 @@ internal sealed class CloudFilesProvider : IAsyncDisposable
 
     private async Task HydrateAsync(HydrationRequest request, CancellationToken cancellationToken)
     {
+        lock (_nodesSync)
+        {
+            if (_hasSnapshot && !_nodes.ContainsKey(request.CloudPath))
+                throw new FileNotFoundException("Cloud entry was removed or is no longer visible; local data is preserved.");
+        }
         (long start, long end) = HydrationRange(request.FileSize, request.Offset, request.Length);
         long position = start;
         while (position < end)

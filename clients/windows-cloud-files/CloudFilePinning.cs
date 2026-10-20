@@ -62,6 +62,22 @@ internal static partial class CloudFilePinning
         RefreshShell(path);
     }
 
+    internal static string ReadPlaceholderIdentity(string path)
+    {
+        using SafeFileHandle handle = CreateFile(NativePath(path), FileReadAttributes,
+            FileShareRead | FileShareWrite | FileShareDelete, 0, OpenExisting,
+            FileFlagBackupSemantics | 0x00200000, 0);
+        if (handle.IsInvalid)
+            throw new IOException("Cannot inspect cloud identity: " + path, Marshal.GetHRForLastWin32Error());
+        Span<byte> buffer = stackalloc byte[8192];
+        PInvoke.CfGetPlaceholderInfo(handle, CF_PLACEHOLDER_INFO_CLASS.CF_PLACEHOLDER_INFO_BASIC, buffer).ThrowOnFailure();
+        CF_PLACEHOLDER_BASIC_INFO info = MemoryMarshal.Read<CF_PLACEHOLDER_BASIC_INFO>(buffer);
+        int offset = (int)Marshal.OffsetOf<CF_PLACEHOLDER_BASIC_INFO>(nameof(CF_PLACEHOLDER_BASIC_INFO.FileIdentity));
+        if (info.FileIdentityLength > buffer.Length - offset)
+            throw new InvalidDataException("Cloud identity exceeds the metadata buffer.");
+        return FileIdentityCodec.Decode(buffer.Slice(offset, (int)info.FileIdentityLength));
+    }
+
     public static unsafe void RepairDirectoryPopulation(string path)
     {
         // Opening the reparse point avoids requesting enumeration/hydration from

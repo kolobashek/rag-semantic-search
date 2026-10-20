@@ -1,6 +1,7 @@
 CfConnectSyncRoot
 CfConvertToPlaceholder
 CfGetPlaceholderInfo
+CF_PLACEHOLDER_BASIC_INFO
 CfCreatePlaceholders
 CfDehydratePlaceholder
 CfDisconnectSyncRoot

@@ -26,7 +26,8 @@ internal static class PlaceholderRecovery
         if (!File.Exists(marker)) File.WriteAllText(marker, "RAG Cloud Files: preserved local entries, never uploaded or automatically deleted.");
         string destination = CloudPath.LocalPath(Path.Combine(recovery, Guid.NewGuid().ToString("N")), cloudPath);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        File.Move(source, destination, overwrite: false);
+        if (Directory.Exists(source)) Directory.Move(source, destination);
+        else File.Move(source, destination, overwrite: false);
         return destination;
     }
 }
