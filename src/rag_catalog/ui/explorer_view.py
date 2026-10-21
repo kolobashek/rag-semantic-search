@@ -547,7 +547,11 @@ def render_explorer_screen(
                 ).props("dense outlined autofocus").classes("w-full")
 
                 async def _do_create() -> None:
-                    if not _cd_can(page_state.explorer_cd_path or "", "editor"):
+                    root_folder = item_type == "folder" and not page_state.explorer_cd_path
+                    if root_folder and not _username(page_state):
+                        ui.notify("Не определён создатель папки.", type="negative")
+                        return
+                    if not root_folder and not _cd_can(page_state.explorer_cd_path or "", "editor"):
                         ui.notify("Нет прав на создание здесь.", type="negative")
                         return
                     name = str(name_input.value or "").strip()
@@ -560,6 +564,7 @@ def render_explorer_screen(
                                 svc.create_folder,
                                 parent_path=page_state.explorer_cd_path or "",
                                 name=name,
+                                created_by=_username(page_state) if root_folder else "",
                             )
                         else:
                             await run.io_bound(

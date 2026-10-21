@@ -1071,8 +1071,8 @@ class CloudDriveService:
         )
 
     @shared_write
-    def create_folder(self, *, parent_path: str = '', name: str) -> dict:
-        folder = self.registry.create_folder(parent_path=parent_path, name=name)
+    def create_folder(self, *, parent_path: str = '', name: str, created_by: str = '') -> dict:
+        folder = self.registry.create_folder(parent_path=parent_path, name=name, created_by=created_by)
         return {
             'node_type': 'folder',
             'id': folder.id,

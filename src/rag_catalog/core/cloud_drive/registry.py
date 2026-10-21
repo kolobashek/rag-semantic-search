@@ -454,13 +454,18 @@ class CloudDriveRegistryDB:
             row = conn.execute("SELECT * FROM cloud_folders WHERE is_root=1 AND deleted_at='' LIMIT 1").fetchone()
             return self._folder_from_row(row) if row else None
 
-    def create_folder(self, *, parent_path: str = '', name: str) -> CloudDriveFolder:
+    def create_folder(self, *, parent_path: str = '', name: str, created_by: str = '') -> CloudDriveFolder:
         clean_name = str(name or '').strip().strip('/\\')
         if not clean_name:
             raise RuntimeError('Не задано имя каталога.')
-        if '/' in clean_name or '\\' in clean_name:
+        if clean_name in {'.', '..'} or '/' in clean_name or '\\' in clean_name:
             raise RuntimeError('Имя каталога не должно содержать разделители пути.')
         clean_parent = self._normalize_path(parent_path)
+        creator = self._clean_username(created_by)
+        if creator:
+            if clean_parent:
+                raise RuntimeError('Права создателя назначаются только новой папке в корне.')
+            return self._create_owned_root_folder(name=clean_name, username=creator)
         parent = self.get_root_folder() if not clean_parent else self.get_folder_by_path(clean_parent)
         if parent is None:
             raise RuntimeError(f'Родительский каталог не найден: {clean_parent or "/"}')
@@ -478,6 +483,42 @@ class CloudDriveRegistryDB:
             source_path=source_path,
             is_root=False,
         )
+
+    def _create_owned_root_folder(self, *, name: str, username: str) -> CloudDriveFolder:
+        now = _utc_now()
+        with self._lock:
+            with self._connect() as conn:
+                # Serialize name checks and grant with the insert across registry instances.
+                conn.execute('BEGIN IMMEDIATE')
+                parent = conn.execute(
+                    "SELECT * FROM cloud_folders WHERE is_root=1 AND deleted_at='' LIMIT 1"
+                ).fetchone()
+                if parent is None:
+                    raise RuntimeError('Корневой каталог не найден.')
+                names = conn.execute(
+                    '''SELECT name FROM cloud_folders WHERE parent_id=?
+                       UNION ALL SELECT name FROM cloud_files WHERE folder_id=?''',
+                    (parent['id'], parent['id']),
+                )
+                if any(str(row['name']).casefold() == name.casefold() for row in names):
+                    raise RuntimeError('Имя уже занято. Выберите другое имя папки.')
+                folder_id = str(uuid.uuid4())
+                source = str(Path(parent['source_path']) / name) if parent['source_path'] else ''
+                conn.execute(
+                    '''INSERT INTO cloud_folders
+                       (id, parent_id, name, path, depth, source_path, is_root, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 1, ?, 0, ?, ?)''',
+                    (folder_id, parent['id'], name, name, source, now, now),
+                )
+                conn.execute(
+                    '''INSERT INTO cloud_permissions
+                       (id, subject_type, subject_id, resource_type, resource_id, access_level, created_at)
+                       VALUES (?, 'user', ?, 'folder', ?, 'editor', ?)''',
+                    (str(uuid.uuid4()), username, folder_id, now),
+                )
+                self._write_meta(conn, ACL_BOOTSTRAP_META_KEY, '1')
+                row = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (folder_id,)).fetchone()
+                return self._folder_from_row(row)
 
     @staticmethod
     def _clean_username(value: str) -> str:

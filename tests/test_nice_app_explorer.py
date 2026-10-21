@@ -2532,6 +2532,45 @@ def test_cloud_drive_registry_acl_filters_api_and_write_level(monkeypatch, tmp_p
     assert created["path"] == "Allowed/Draft"
 
 
+def test_cloud_user_can_create_root_folder_without_root_write_access(monkeypatch, tmp_path) -> None:
+    cfg = {
+        "cloud_drive_db_path": str(tmp_path / "cloud.db"),
+        "cloud_drive_storage": "local",
+        "cloud_drive_storage_root": str(tmp_path / "storage"),
+    }
+    service = CloudDriveService.from_config(cfg)
+    service.registry.ensure_root_folder(root_name="Cloud")
+    service.create_folder(name="Other")
+    service.grant_path_permission(subject_type="user", subject_id="bob", path="Other", access_level="editor")
+    user = {"username": "kris", "role": "user", "status": "active"}
+    monkeypatch.setattr(cloud_api, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(cloud_api, "_require_cloud_drive_api_user", lambda *a, **kw: dict(user))
+    monkeypatch.setattr(cloud_api, "_audit_cloud_drive_api_event", lambda *a, **kw: None)
+
+    def allowed(path, level="editor", username="kris"):
+        return service.user_can_access(username=username, role="user", groups=[], path=path, required_level=level)
+
+    assert not allowed("")
+    created = api_cloud_drive_create_folder(parent_path="", name="TTN")
+    assert created["path"] == "TTN"
+    assert allowed("TTN")
+    assert not allowed("")
+    assert not allowed("Other")
+    assert not allowed("TTN", username="bob")
+    assert api_cloud_drive_create_folder(parent_path="TTN", name="Nested")["path"] == "TTN/Nested"
+    with pytest.raises(HTTPException) as denied:
+        api_cloud_drive_create_folder(parent_path="Other", name="Nested")
+    assert denied.value.status_code == 403
+    with pytest.raises(HTTPException) as collision:
+        api_cloud_drive_create_folder(parent_path="", name="Other")
+    assert collision.value.status_code == 400
+    assert not allowed("Other")
+    user["username"] = ""
+    with pytest.raises(HTTPException) as anonymous:
+        api_cloud_drive_create_folder(parent_path="", name="Anonymous")
+    assert anonymous.value.status_code == 403
+
+
 def test_cloud_drive_permissions_endpoint_grants_path_acl(monkeypatch, tmp_path) -> None:
     cfg = {
         "cloud_drive_db_path": str(tmp_path / "cloud_drive.db"),

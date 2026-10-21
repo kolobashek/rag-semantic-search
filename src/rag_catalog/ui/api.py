@@ -2251,11 +2251,16 @@ def api_cloud_drive_create_folder(
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization, write=True)
     service = CloudDriveService.from_config(cfg)
-    _require_cloud_drive_path_access(
-        cfg, user, parent_path, service=service, required_level="editor", audit_action="create_folder"
-    )
+    is_root = not str(parent_path or "").strip().replace("\\", "/").strip("/")
+    creator = str(user.get("username") or "").strip() if is_root else ""
+    if is_root and not creator:
+        raise HTTPException(status_code=403, detail="Не определён создатель папки.")
+    if not is_root:
+        _require_cloud_drive_path_access(
+            cfg, user, parent_path, service=service, required_level="editor", audit_action="create_folder"
+        )
     try:
-        result = service.create_folder(parent_path=parent_path, name=name)
+        result = service.create_folder(parent_path=parent_path, name=name, created_by=creator)
         _audit_cloud_drive_api_event(
             cfg, user, "create_folder", details={"parent_path": parent_path, "name": name, "path": result.get("path")}
         )

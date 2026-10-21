@@ -38,6 +38,62 @@ def test_registry_root_folder_and_stats(tmp_path: Path) -> None:
     assert root.is_root is True
 
 
+def test_root_folder_creator_grant_is_atomic_and_scoped(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'cloud.db'))
+    registry.ensure_root_folder(root_name='Cloud')
+    folder = registry.create_folder(name='TTN', created_by='kris')
+    grants = registry.list_permissions()
+    assert len(grants) == 1
+    assert grants[0]['subject_id'] == 'kris'
+    assert grants[0]['resource_id'] == folder.id
+    assert grants[0]['access_level'] == 'editor'
+    assert grants[0]['resource_type'] == 'folder'
+    assert registry.acl_is_bootstrapped()
+    with pytest.raises(RuntimeError, match='занято'):
+        registry.create_folder(name='TTN', created_by='other')
+    with pytest.raises(RuntimeError, match='занято'):
+        registry.create_folder(name='ttn', created_by='other')
+    assert registry.list_permissions() == grants
+    registry.delete_folder('TTN')
+    with pytest.raises(RuntimeError, match='занято'):
+        registry.create_folder(name='TTN', created_by='other')
+    assert registry.get_folder_by_path('TTN') is None
+    for name in ('.', '..'):
+        with pytest.raises(RuntimeError):
+            registry.create_folder(name=name, created_by='other')
+
+    with sqlite3.connect(str(registry.db_path)) as conn:
+        conn.execute("""CREATE TRIGGER reject_grant BEFORE INSERT ON cloud_permissions
+                        BEGIN SELECT RAISE(ABORT, 'grant failed'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match='grant failed'):
+        registry.create_folder(name='Failed', created_by='kris')
+    assert registry.get_folder_by_path('Failed', include_deleted=True) is None
+
+
+def test_concurrent_root_creators_cannot_claim_same_folder(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = str(tmp_path / 'cloud.db')
+    first, second = CloudDriveRegistryDB(path), CloudDriveRegistryDB(path)
+    first.ensure_root_folder(root_name='Cloud')
+
+    def create(registry, username):
+        try:
+            return registry.create_folder(name='Same', created_by=username), username
+        except RuntimeError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda args: create(*args), [(first, 'alice'), (second, 'bob')]))
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+    folder, username = winners[0]
+    grants = first.list_permissions()
+    assert len(grants) == 1
+    assert grants[0]['resource_id'] == folder.id
+    assert grants[0]['subject_id'] == username
+
+
 def test_registry_folder_size_bytes_map_sums_descendants(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     root = registry.ensure_root_folder(root_name='Обмен', source_path='O:/Обмен')
