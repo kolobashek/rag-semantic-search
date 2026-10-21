@@ -265,6 +265,13 @@ internal sealed class CloudDriveApi : IDisposable
             "api/cloud-drive/folders?" + query,
             null,
             cancellationToken);
+        if (response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            string location = parentPath.Length == 0 ? "в корне облака" : "в родительской папке";
+            throw new HttpRequestException(
+                $"Нет прав на создание папки {location}. Локальные файлы сохранены. Обратитесь к администратору.",
+                null, response.StatusCode);
+        }
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<CloudNode>(JsonOptions, cancellationToken)
             ?? throw new InvalidOperationException("Сервер не вернул созданную папку.");

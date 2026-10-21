@@ -39,6 +39,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _localSyncShutdown = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly AccessDeniedRetries _accessDeniedRetries = new();
     private readonly string _root;
     private FileSystemWatcher? _watcher;
     private Task? _localSyncTask;
@@ -709,7 +710,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         }
 
         _cursor = snapshot.Cursor;
-        _aclRevision = snapshot.AclRevision;
+        UpdateAclRevision(snapshot.AclRevision);
         ReconcileNamespace(cancellationToken);
         AppLog.Info($"Placeholder pass: created={_createdPlaceholders}, preserved={_preservedPlaceholders}, deferred={_deferredPlaceholders}.");
         await RecoverLocalChangesAsync(cancellationToken);
@@ -717,6 +718,18 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         AppLog.Info($"Namespace reconciled: {_state.ManagedPaths.Count} managed paths.");
         _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
         Console.WriteLine($"Доступно объектов: {_nodes.Count:N0}; содержимое файлов остаётся в облаке до открытия.");
+    }
+
+    private void UpdateAclRevision(string revision)
+    {
+        if (!string.Equals(_aclRevision, revision, StringComparison.Ordinal))
+        {
+            _accessDeniedRetries.Clear();
+            // Permission changes wake deferred watcher events, including explicit deletions.
+            foreach (string path in _pendingLocalChanges.Keys)
+                _pendingLocalChanges[path] = DateTimeOffset.UtcNow;
+        }
+        _aclRevision = revision;
     }
 
     private async Task ApplyIncrementalChangesAsync(CancellationToken cancellationToken)
@@ -924,10 +937,12 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                     {
                         _explicitLocalDeletes[cloudPath] = 0;
                     }
-                    _pendingLocalChanges[cloudPath] = DateTimeOffset.UtcNow.AddSeconds(5);
+                    _pendingLocalChanges[cloudPath] = exception is AccessDeniedSyncException denied
+                        ? denied.RetryAt : DateTimeOffset.UtcNow.AddSeconds(5);
                     _status.RecordFileError(cloudPath, exception);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
-                    AppLog.Error($"Не удалось синхронизировать локальный путь {cloudPath}.", exception);
+                    if (exception is not AccessDeniedSyncException { RequestAttempted: false })
+                        AppLog.Error($"Не удалось синхронизировать локальный путь {cloudPath}.", exception);
                 }
             }
         }
@@ -967,12 +982,16 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                 try
                 {
                     await SyncLocalDirectoryAsync(cloudPath, cancellationToken);
+                    _status.ClearFileError(cloudPath);
                 }
                 catch (Exception exception)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     _localScanIncomplete = true;
+                    _status.RecordFileError(cloudPath, exception);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать папку", exception.Message);
-                    AppLog.Error($"Не удалось восстановить локальную папку {cloudPath}.", exception);
+                    if (exception is not AccessDeniedSyncException { RequestAttempted: false })
+                        AppLog.Error($"Не удалось восстановить локальную папку {cloudPath}.", exception);
                 }
             }
         }
@@ -993,8 +1012,9 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                     cancellationToken.ThrowIfCancellationRequested();
                     failedFiles++;
                     _localScanIncomplete = true;
+                    _status.RecordFileError(cloudPath, exception);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
-                    if (failedFiles <= 5)
+                    if (failedFiles <= 5 && exception is not AccessDeniedSyncException { RequestAttempted: false })
                         AppLog.Error($"Не удалось восстановить локальный файл {cloudPath} (0x{exception.HResult:X8}).", exception);
                 }
             }
@@ -1065,7 +1085,11 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         _status.BeginTransfer(target);
         try
         {
-            await _api.DeleteNodeAsync(target, cancellationToken);
+            await _accessDeniedRetries.ExecuteAsync(target, async () =>
+            {
+                await _api.DeleteNodeAsync(target, cancellationToken);
+                return true;
+            });
             lock (_nodesSync)
             {
                 foreach (string path in _nodes.Keys
@@ -1190,10 +1214,13 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                     throw new IOException($"Облачный путь занят файлом: {current}");
                 }
 
+                _accessDeniedRetries.Forget(current);
+                _status.ClearFileError(current);
                 continue;
             }
 
-            CloudNode created = await _api.CreateFolderAsync(parent, segment, cancellationToken);
+            CloudNode created = await _accessDeniedRetries.ExecuteAsync(
+                current, () => _api.CreateFolderAsync(parent, segment, cancellationToken));
             created.Path = CloudPath.Normalize(created.Path);
             lock (_nodesSync)
             {
@@ -1202,6 +1229,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
             _state.ManagedPaths.Add(created.Path);
             _state.ManagedVersions[created.Path] = NodeSignature(created);
             _store.SaveState(_state);
+            _status.ClearFileError(created.Path);
         }
     }
 
@@ -1262,7 +1290,8 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         _status.BeginTransfer(cloudPath);
         try
         {
-            CloudNode uploaded = await _api.UploadFileAsync(cloudPath, localPath, cancellationToken);
+            CloudNode uploaded = await _accessDeniedRetries.ExecuteAsync(
+                cloudPath, () => _api.UploadFileAsync(cloudPath, localPath, cancellationToken));
             uploaded.Path = CloudPath.Normalize(uploaded.Path);
             if (!uploaded.Path.Equals(cloudPath, StringComparison.OrdinalIgnoreCase))
             {

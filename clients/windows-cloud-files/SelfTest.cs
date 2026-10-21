@@ -4,6 +4,53 @@ namespace RagCloudFiles;
 
 internal static class SelfTest
 {
+    private static async Task TestAccessDeniedRetriesAsync()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        AccessDeniedRetries policy = new(() => now);
+        int calls = 0;
+        Task<int> Denied()
+        {
+            calls++;
+            throw new HttpRequestException("No editor access", null, System.Net.HttpStatusCode.Forbidden);
+        }
+        async Task CheckDenied(string path, bool attempted)
+        {
+            try
+            {
+                await policy.ExecuteAsync(path, Denied);
+                throw new InvalidOperationException("Expected access denial");
+            }
+            catch (AccessDeniedSyncException ex)
+            {
+                Equal(attempted, ex.RequestAttempted);
+                Equal(System.Net.HttpStatusCode.Forbidden, ex.StatusCode!.Value);
+                Equal(true, ex.RetryAt > now);
+            }
+        }
+        await CheckDenied("folder", true);
+        await CheckDenied("FOLDER", false);
+        Equal(1, calls);
+        Equal(7, await policy.ExecuteAsync("unrelated", () => Task.FromResult(7)));
+        now += AccessDeniedRetries.Delay;
+        await CheckDenied("folder", true);
+        Equal(2, calls);
+        policy.Clear();
+        Equal(3, await policy.ExecuteAsync("folder", () => Task.FromResult(3)));
+        await CheckDenied("folder", true);
+        policy.Forget("folder");
+        Equal(4, await policy.ExecuteAsync("folder", () => Task.FromResult(4)));
+        for (int i = 0; i < 2; i++)
+        {
+            try
+            {
+                await policy.ExecuteAsync<int>("temporary", () =>
+                    throw new HttpRequestException("Busy", null, System.Net.HttpStatusCode.ServiceUnavailable));
+            }
+            catch (HttpRequestException ex) { Equal(false, ex is AccessDeniedSyncException); }
+        }
+    }
+
     internal sealed class HydrationTestHandler : HttpMessageHandler
     {
         private int _active;
@@ -169,6 +216,8 @@ internal static class SelfTest
         TestSnapshotRetryAsync().GetAwaiter().GetResult();
         TestNamespaceRecovery();
         CloudFilesProvider.TestRemoteRemovalAsync().GetAwaiter().GetResult();
+        CloudFilesProvider.TestAccessDeniedSyncAsync().GetAwaiter().GetResult();
+        TestAccessDeniedRetriesAsync().GetAwaiter().GetResult();
         TestHydrationRequests();
         Equal("https://cloud.tsk-nsk.ru", new ProviderConfig().Server);
         Equal(false, WindowsBootstrap.IsInteractiveInstall(["--self-test"]));

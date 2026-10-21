@@ -166,7 +166,7 @@ internal sealed class ClientStatusModel
                 {
                     State = ClientRunState.Error,
                     Message = "Есть несинхронизированные файлы",
-                    LastError = _syncIssues > 0 ? _syncIssueMessage : _fileErrors.Values.First(),
+                    LastError = _fileErrors.Count > 0 ? _fileErrors.Values.First() : _syncIssueMessage,
                 };
             }
             snapshot = _current;
