@@ -50,7 +50,7 @@ from .state import (
 
 _EXPLORER_PAGE_SIZE = 40
 _TREE_CHILD_LIMIT = 24
-_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.6.17"
+_CLOUD_FILES_DOWNLOAD_URL = "/api/cloud-drive/sync/client-download?format=cloud-files-exe&v=0.6.18"
 
 
 def _cloud_drive_internal_share_links(

@@ -8,9 +8,22 @@ internal static class AccessDeniedTest
     internal sealed class Handler : HttpMessageHandler
     {
         internal int Requests;
+        internal int DeltaRequests;
+        internal int SnapshotRequests;
         internal bool AllowFolders;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/changes"))
+            {
+                if (request.RequestUri.Query.EndsWith("since=")) SnapshotRequests++;
+                else DeltaRequests++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = JsonContent.Create(new ChangePage { NextCursor = "cursor", AclRevision = "first" }),
+                });
+            }
+            if (request.RequestUri!.AbsolutePath.EndsWith("/heartbeat"))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
             Requests++;
             HttpResponseMessage response = new(HttpStatusCode.Forbidden);
             if (AllowFolders && request.RequestUri!.AbsolutePath.EndsWith("/folders"))
@@ -43,6 +56,33 @@ internal sealed partial class CloudFilesProvider
             CheckRemoval(handler.Requests == 1, "each child retried denied parent creation");
             CheckRemoval(provider._status.Current.State == ClientRunState.Error, "denial reported synchronized");
             CheckRemoval(provider._status.Current.LastError.Contains("blocked"), "denied path hidden");
+            CheckRemoval(!provider._localScanIncomplete, "one denied path invalidated the local tree scan");
+            CheckRemoval(provider._pendingLocalChanges.Count == 21, "failed paths not queued individually");
+            CheckRemoval(provider._pendingLocalChanges.Values.All(at => at > DateTimeOffset.UtcNow),
+                "deferred paths lost their backoff");
+            provider._lastFullSnapshot = DateTimeOffset.UtcNow.AddMinutes(-6);
+            provider._nextCacheCheck = DateTimeOffset.UtcNow.AddHours(1);
+            provider._cursor = "cursor";
+            DateTimeOffset lastRecovery = provider._lastLocalRecovery;
+            await provider.SyncNowAsync(CancellationToken.None);
+            CheckRemoval(handler.DeltaRequests == 1 && handler.SnapshotRequests == 0,
+                "single-path denial triggered a full catalog download");
+            CheckRemoval(provider._lastLocalRecovery == lastRecovery, "single-path denial rescanned the local tree");
+            CheckRemoval(provider._status.Current.State == ClientRunState.Error
+                && provider._status.Current.LastSync is null, "delta success concealed denied files");
+
+            // A genuinely incomplete tree scan still repairs locally, without refetching the catalog.
+            provider._localScanIncomplete = true;
+            provider._lastLocalRecovery = DateTimeOffset.UtcNow.AddMinutes(-6);
+            await provider.SyncNowAsync(CancellationToken.None);
+            CheckRemoval(handler.DeltaRequests == 2 && handler.SnapshotRequests == 0
+                && provider._lastLocalRecovery > lastRecovery && !provider._localScanIncomplete,
+                "local scan repair downloaded the remote namespace or was skipped");
+            Interlocked.Increment(ref provider._localChangeOverflowVersion);
+            provider._lastLocalRecovery = DateTimeOffset.UtcNow.AddMinutes(-6);
+            await provider.SyncNowAsync(CancellationToken.None);
+            CheckRemoval(!provider.NeedsLocalRecovery && handler.SnapshotRequests == 0,
+                "watcher overflow did not recover locally");
             await provider.RecoverLocalChangesAsync(CancellationToken.None);
             CheckRemoval(handler.Requests == 1, "full scan bypassed cooldown");
             for (int i = 0; i < 20; i++)
@@ -57,6 +97,19 @@ internal sealed partial class CloudFilesProvider
             }
             CheckRemoval(handler.Requests == 1, "watcher bypassed cooldown");
             CheckRemoval(store.LoadState().ManagedPaths.Count == 0, "denied paths marked synchronized");
+
+            // A vanished unsent file is cleared by the same bounded watcher queue, not a full scan.
+            File.Delete(Path.Combine(root, "blocked", "19.txt"));
+            provider._pendingLocalChanges["blocked/19.txt"] = DateTimeOffset.UtcNow.AddSeconds(-2);
+            using (CancellationTokenSource timeout = new(TimeSpan.FromSeconds(2)))
+            {
+                try { await provider.LocalChangeLoopAsync(timeout.Token); }
+                catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
+            }
+            CheckRemoval(!provider._pendingLocalChanges.ContainsKey("blocked/19.txt"),
+                "isolated retry did not clear a removed local file");
+            CheckRemoval(handler.Requests == 1 && handler.SnapshotRequests == 0,
+                "isolated retry touched unrelated remote entries");
             provider.UpdateAclRevision("first");
             try { await provider.EnsureRemoteFoldersAsync("blocked", CancellationToken.None); }
             catch (AccessDeniedSyncException) { }

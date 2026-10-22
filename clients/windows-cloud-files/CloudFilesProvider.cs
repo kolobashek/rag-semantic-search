@@ -23,6 +23,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
     private readonly ProviderState _state;
     private readonly object _nodesSync = new();
     private readonly Dictionary<string, CloudNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _pendingRemoteChanges = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _visiblePaths = new(StringComparer.OrdinalIgnoreCase);
     private bool _hasSnapshot;
     private readonly HydrationRequests _hydrations = new();
@@ -48,10 +49,13 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
     private string _cursor = "";
     private string _aclRevision = "";
     private DateTimeOffset _lastFullSnapshot = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastLocalRecovery = DateTimeOffset.MinValue;
     private DateTimeOffset _nextCacheCheck = DateTimeOffset.MinValue;
     private int _cacheCheckRequested = 1;
     private bool _namespaceIncomplete;
     private bool _localScanIncomplete;
+    private int _localChangeOverflowVersion;
+    private int _recoveredOverflowVersion;
     private int _deferredPlaceholders;
     private int _preservedPlaceholders;
     private int _createdPlaceholders;
@@ -289,6 +293,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                 if (hydrationHandler.PeakActiveRequests is < 2 or > 4)
                     throw new InvalidOperationException("Hydration did not respect bounded concurrent downloads.");
                 await provider.TestNativeRemoteRemovalAsync(hydrationHandler);
+                provider.TestNativeIncrementalReconcile();
             }
         }
         finally
@@ -327,15 +332,20 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         try
         {
             _status.SetState(ClientRunState.Syncing, "Проверка изменений…");
-            TimeSpan snapshotInterval = _namespaceIncomplete || _localScanIncomplete
-                ? TimeSpan.FromMinutes(5) : TimeSpan.FromMinutes(30);
-            if (DateTimeOffset.UtcNow - _lastFullSnapshot >= snapshotInterval)
+            if (DateTimeOffset.UtcNow - _lastFullSnapshot >= TimeSpan.FromMinutes(30))
             {
                 await RefreshFullSnapshotAsync(cancellationToken);
             }
             else
             {
                 await ApplyIncrementalChangesAsync(cancellationToken);
+                if (NeedsLocalRecovery
+                    && DateTimeOffset.UtcNow - _lastLocalRecovery >= TimeSpan.FromMinutes(5))
+                {
+                    // Repair local metadata without downloading the whole catalog again.
+                    if (_namespaceIncomplete) ReconcileNamespace(cancellationToken);
+                    await RecoverLocalChangesAsync(cancellationToken);
+                }
                 ReportIncompleteNamespace();
                 _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
             }
@@ -356,9 +366,12 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
 
     private void ReportIncompleteNamespace()
     {
-        _status.SetSyncIssues(_namespaceIncomplete || _localScanIncomplete ? 1 : 0,
+        _status.SetSyncIssues(NeedsLocalRecovery ? 1 : 0,
             "Не все файлы синхронизированы. Подробности в журнале клиента; повторим автоматически.");
     }
+
+    private bool NeedsLocalRecovery => _namespaceIncomplete || _localScanIncomplete
+        || Volatile.Read(ref _localChangeOverflowVersion) != _recoveredOverflowVersion;
 
     public IReadOnlyList<string> GetTopLevelFolders()
     {
@@ -697,9 +710,11 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
 
     private async Task RefreshFullSnapshotAsync(CancellationToken cancellationToken)
     {
+        Stopwatch timer = Stopwatch.StartNew();
         AppLog.Info("Refreshing visible cloud namespace and access permissions.");
         VisibleSnapshot snapshot = await _api.GetVisibleSnapshotAsync(cancellationToken);
-        AppLog.Info($"Received {snapshot.Nodes.Count} visible objects; reconciling local placeholders.");
+        long fetchMs = timer.ElapsedMilliseconds;
+        AppLog.Info($"Received {snapshot.Nodes.Count} visible objects in {fetchMs} ms; reconciling local placeholders.");
         lock (_nodesSync)
         {
             _nodes.Clear();
@@ -712,10 +727,12 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         _cursor = snapshot.Cursor;
         UpdateAclRevision(snapshot.AclRevision);
         ReconcileNamespace(cancellationToken);
+        _pendingRemoteChanges.Clear();
+        long placeholdersMs = timer.ElapsedMilliseconds - fetchMs;
         AppLog.Info($"Placeholder pass: created={_createdPlaceholders}, preserved={_preservedPlaceholders}, deferred={_deferredPlaceholders}.");
         await RecoverLocalChangesAsync(cancellationToken);
         _lastFullSnapshot = DateTimeOffset.UtcNow;
-        AppLog.Info($"Namespace reconciled: {_state.ManagedPaths.Count} managed paths.");
+        AppLog.Info($"Namespace reconciled: {_state.ManagedPaths.Count} managed paths; fetch_ms={fetchMs}, placeholders_ms={placeholdersMs}, recovery_ms={timer.ElapsedMilliseconds - fetchMs - placeholdersMs}, total_ms={timer.ElapsedMilliseconds}.");
         _status.SetInventory(GetObjectCount(), DateTimeOffset.Now);
         Console.WriteLine($"Доступно объектов: {_nodes.Count:N0}; содержимое файлов остаётся в облаке до открытия.");
     }
@@ -734,7 +751,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
 
     private async Task ApplyIncrementalChangesAsync(CancellationToken cancellationToken)
     {
-        bool changed = false;
+        HashSet<string> changed = _pendingRemoteChanges;
         for (int pageNumber = 0; pageNumber < 1000; pageNumber++)
         {
             ChangePage page = await _api.GetChangesAsync(_cursor, cancellationToken);
@@ -756,14 +773,14 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                     node.Path = path;
                     if (node.DeletedAt.Length == 0)
                     {
+                        if (!_nodes.TryGetValue(path, out CloudNode? previous)
+                            || NodeSignature(previous) != NodeSignature(node)) changed.Add(path);
                         _nodes[path] = node;
                     }
                     else
                     {
-                        _nodes.Remove(path);
+                        if (_nodes.Remove(path)) changed.Add(path);
                     }
-
-                    changed = true;
                 }
             }
 
@@ -776,16 +793,18 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
             _cursor = next;
         }
 
-        if (changed)
+        if (changed.Count > 0)
         {
-            ReconcileNamespace(cancellationToken);
-            await RecoverLocalChangesAsync(cancellationToken);
+            Stopwatch timer = Stopwatch.StartNew();
+            ReconcileNamespace(cancellationToken, changed);
+            AppLog.Info($"Incremental namespace: changed={changed.Count}, elapsed_ms={timer.ElapsedMilliseconds}; no full local scan.");
+            changed.Clear();
         }
     }
 
-    private void ReconcileNamespace(CancellationToken cancellationToken)
+    private void ReconcileNamespace(CancellationToken cancellationToken, HashSet<string>? changedPaths = null)
     {
-        _namespaceIncomplete = false;
+        if (changedPaths is null) _namespaceIncomplete = false;
         _deferredPlaceholders = 0;
         _preservedPlaceholders = 0;
         _createdPlaceholders = 0;
@@ -796,10 +815,21 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
             _visiblePaths = desired.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
             _hasSnapshot = true;
         }
-        HashSet<string> nextManaged = new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, string> nextVersions = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> nextManaged = changedPaths is null
+            ? new(StringComparer.OrdinalIgnoreCase) : new(_state.ManagedPaths, StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> nextVersions = changedPaths is null
+            ? new(StringComparer.OrdinalIgnoreCase) : new(_state.ManagedVersions, StringComparer.OrdinalIgnoreCase);
+        IEnumerable<CloudNode> candidates = desired.Values;
+        if (changedPaths is not null)
+        {
+            HashSet<string> affected = new(changedPaths, StringComparer.OrdinalIgnoreCase);
+            foreach (string path in changedPaths)
+                for (string parent = CloudPath.Parent(path); parent.Length > 0; parent = CloudPath.Parent(parent))
+                    affected.Add(parent);
+            candidates = affected.Where(desired.ContainsKey).Select(path => desired[path]).ToArray();
+        }
 
-        foreach (IGrouping<int, CloudNode> depthGroup in desired.Values
+        foreach (IGrouping<int, CloudNode> depthGroup in candidates
                      .Where(node => node.IsFolder)
                      .OrderBy(node => CloudPath.Depth(node.Path))
                      .GroupBy(node => CloudPath.Depth(node.Path)))
@@ -808,7 +838,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
             CreateMissingPlaceholders(depthGroup, nextManaged, nextVersions);
         }
 
-        foreach (IGrouping<string, CloudNode> parentGroup in desired.Values
+        foreach (IGrouping<string, CloudNode> parentGroup in candidates
                      .Where(node => !node.IsFolder)
                      .OrderBy(node => node.Path, StringComparer.OrdinalIgnoreCase)
                      .GroupBy(node => CloudPath.Parent(node.Path), StringComparer.OrdinalIgnoreCase))
@@ -827,7 +857,19 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                 nextManaged.Add(stalePath);
                 nextVersions[stalePath] = _state.ManagedVersions.GetValueOrDefault(stalePath, "");
             }
+            else
+            {
+                nextManaged.Remove(stalePath);
+                nextVersions.Remove(stalePath);
+            }
         }
+
+        if (changedPaths is not null)
+            foreach (CloudNode node in candidates.Where(node => !nextManaged.Contains(node.Path)))
+            {
+                string localPath = CloudPath.LocalPath(_root, node.Path);
+                if (File.Exists(localPath) || Directory.Exists(localPath)) QueueLocalChange(localPath);
+            }
 
         _state.ManagedPaths = nextManaged;
         _state.ManagedVersions = nextVersions;
@@ -858,6 +900,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         };
         _watcher.Error += (_, eventArgs) =>
         {
+            Interlocked.Increment(ref _localChangeOverflowVersion);
             Exception exception = eventArgs.GetException();
             _status.SetState(ClientRunState.Error, "Ошибка наблюдения за папкой", exception.Message);
             AppLog.Error("FileSystemWatcher пропустил локальные изменения.", exception);
@@ -937,9 +980,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                     {
                         _explicitLocalDeletes[cloudPath] = 0;
                     }
-                    _pendingLocalChanges[cloudPath] = exception is AccessDeniedSyncException denied
-                        ? denied.RetryAt : DateTimeOffset.UtcNow.AddSeconds(5);
-                    _status.RecordFileError(cloudPath, exception);
+                    DeferLocalChange(cloudPath, exception);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
                     if (exception is not AccessDeniedSyncException { RequestAttempted: false })
                         AppLog.Error($"Не удалось синхронизировать локальный путь {cloudPath}.", exception);
@@ -948,8 +989,16 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
         }
     }
 
+    private void DeferLocalChange(string cloudPath, Exception exception)
+    {
+        _pendingLocalChanges[cloudPath] = exception is AccessDeniedSyncException denied
+            ? denied.RetryAt : DateTimeOffset.UtcNow.AddSeconds(5);
+        _status.RecordFileError(cloudPath, exception);
+    }
+
     private async Task RecoverLocalChangesAsync(CancellationToken cancellationToken)
     {
+        int overflowVersion = Volatile.Read(ref _localChangeOverflowVersion);
         int folderErrors = 0;
         int repairs = 0;
         LocalTreeScan scan = LocalTreeScan.Read(_root, (path, error) =>
@@ -987,8 +1036,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                 catch (Exception exception)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    _localScanIncomplete = true;
-                    _status.RecordFileError(cloudPath, exception);
+                    DeferLocalChange(cloudPath, exception);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать папку", exception.Message);
                     if (exception is not AccessDeniedSyncException { RequestAttempted: false })
                         AppLog.Error($"Не удалось восстановить локальную папку {cloudPath}.", exception);
@@ -1011,8 +1059,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     failedFiles++;
-                    _localScanIncomplete = true;
-                    _status.RecordFileError(cloudPath, exception);
+                    DeferLocalChange(cloudPath, exception);
                     _status.SetState(ClientRunState.Error, "Не удалось синхронизировать файл", exception.Message);
                     if (failedFiles <= 5 && exception is not AccessDeniedSyncException { RequestAttempted: false })
                         AppLog.Error($"Не удалось восстановить локальный файл {cloudPath} (0x{exception.HResult:X8}).", exception);
@@ -1020,6 +1067,8 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
             }
         }
         if (failedFiles > 0) AppLog.Warn($"Deferred {failedFiles} files with local errors; no cloud content overwritten.");
+        _lastLocalRecovery = DateTimeOffset.UtcNow;
+        _recoveredOverflowVersion = overflowVersion;
         ReportIncompleteNamespace();
         // Missing placeholders after an upgrade are not proof of user deletion.
         // Only explicit CfAPI/FilesystemWatcher notifications propagate deletes.
@@ -1535,6 +1584,7 @@ internal sealed partial class CloudFilesProvider : IAsyncDisposable
 
             File.SetAttributes(localPath, File.GetAttributes(localPath) & ~FileAttributes.ReadOnly);
             File.Copy(localPath, candidate, overwrite: false);
+            QueueLocalChange(candidate);
             AppLog.Warn(
                 $"Обнаружены несинхронизированные локальные правки {cloudPath}: сохранены как {candidate}.");
             Console.Error.WriteLine($"Конфликт: локальная версия сохранена как {candidate}");

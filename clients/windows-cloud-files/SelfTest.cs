@@ -63,6 +63,7 @@ internal static class SelfTest
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Interlocked.Increment(ref _requests);
+            Equal(0, request.Headers.AcceptEncoding.Count); // Never gzip a file byte range.
             string query = request.RequestUri!.Query;
             bool second = query.Contains("hydration-b.pdf", StringComparison.Ordinal);
             if (!second && !query.Contains("hydration-a.pdf", StringComparison.Ordinal))
@@ -214,6 +215,8 @@ internal static class SelfTest
         TestSessionAuthorizationAsync().GetAwaiter().GetResult();
         TestNetworkRecoveryAsync().GetAwaiter().GetResult();
         TestSnapshotRetryAsync().GetAwaiter().GetResult();
+        TestCompressedChangesAsync().GetAwaiter().GetResult();
+        CloudFilesProvider.TestIncrementalSyncAsync().GetAwaiter().GetResult();
         TestNamespaceRecovery();
         CloudFilesProvider.TestRemoteRemovalAsync().GetAwaiter().GetResult();
         CloudFilesProvider.TestAccessDeniedSyncAsync().GetAwaiter().GetResult();
@@ -623,6 +626,63 @@ internal static class SelfTest
             {
                 Content = new StringContent(JsonSerializer.Serialize(new { changes = nodes, next_cursor = cursor, acl_revision = "stable" })),
             });
+        }
+    }
+
+    private static async Task TestCompressedChangesAsync()
+    {
+        foreach (bool gzip in new[] { true, false })
+        {
+            using CloudDriveApi api = new("https://test.invalid", "test", new CompressedChangesHandler(gzip));
+            VisibleSnapshot snapshot = await api.GetVisibleSnapshotAsync(CancellationToken.None);
+            Equal("Каталог/документ.pdf", snapshot.Nodes.Single().Path);
+            Equal("cursor", snapshot.Cursor);
+            ChangePage delta = await api.GetChangesAsync("cursor", CancellationToken.None);
+            Equal(0, delta.Changes.Count);
+        }
+        using CloudDriveApi interrupted = new("https://test.invalid", "test", new InterruptedChangesHandler());
+        try
+        {
+            await interrupted.GetChangesAsync("cursor", CancellationToken.None);
+            throw new InvalidOperationException("Interrupted change feed accepted");
+        }
+        catch (HttpRequestException error)
+        {
+            Equal(true, NetworkRecovery.IsTransient(error, CancellationToken.None));
+        }
+    }
+
+    private sealed class InterruptedChangesHandler : HttpMessageHandler
+    {
+        private sealed class BrokenStream : MemoryStream
+        {
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default) =>
+                ValueTask.FromException<int>(new IOException("Response ended early"));
+        }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                { Content = new StreamContent(new BrokenStream()) });
+    }
+
+    private sealed class CompressedChangesHandler(bool gzip) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Equal("gzip", request.Headers.AcceptEncoding.Single().Value);
+            CloudNode[] nodes = request.RequestUri!.Query.EndsWith("since=")
+                ? [new() { Path = "Каталог/документ.pdf", NodeType = "file" }] : [];
+            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(new ChangePage
+                { Changes = nodes.ToList(), NextCursor = "cursor", AclRevision = "acl" });
+            if (gzip)
+            {
+                using MemoryStream buffer = new();
+                using (var compressor = new System.IO.Compression.GZipStream(
+                    buffer, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true)) compressor.Write(bytes);
+                bytes = buffer.ToArray();
+            }
+            ByteArrayContent content = new(bytes);
+            if (gzip) content.Headers.ContentEncoding.Add("gzip");
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = content });
         }
     }
 

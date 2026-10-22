@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -188,6 +189,7 @@ internal sealed class CloudDriveApi : IDisposable
 
     public async Task<VisibleSnapshot> GetVisibleSnapshotAsync(CancellationToken cancellationToken)
     {
+        Stopwatch timer = Stopwatch.StartNew();
         Dictionary<string, CloudNode> nodes = new(StringComparer.OrdinalIgnoreCase);
         string cursor = "";
         string aclRevision = "";
@@ -198,10 +200,7 @@ internal sealed class CloudDriveApi : IDisposable
             {
                 using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(60));
-                using HttpResponseMessage response = await _http.GetAsync(path, timeout.Token);
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadFromJsonAsync<ChangePage>(JsonOptions, cancellationToken)
-                    ?? throw new InvalidOperationException("Сервер вернул пустую страницу change feed.");
+                return await ReadChangePageAsync(path, timeout.Token);
             }, cancellationToken, (error, wait) => RetryingRead?.Invoke(error, wait), maxAttempts: 3);
             if (aclRevision.Length == 0)
             {
@@ -233,6 +232,7 @@ internal sealed class CloudDriveApi : IDisposable
             string next = page.NextCursor ?? "";
             if (string.Equals(next, cursor, StringComparison.Ordinal))
             {
+                AppLog.Info($"Cloud snapshot downloaded: pages={pageNumber + 1}, objects={nodes.Count}, elapsed_ms={timer.ElapsedMilliseconds}.");
                 return new VisibleSnapshot(nodes.Values.ToList(), cursor, aclRevision);
             }
 
@@ -245,10 +245,40 @@ internal sealed class CloudDriveApi : IDisposable
     public async Task<ChangePage> GetChangesAsync(string cursor, CancellationToken cancellationToken)
     {
         string path = "api/cloud-drive/changes?limit=5000&since=" + Uri.EscapeDataString(cursor);
-        using HttpResponseMessage response = await _http.GetAsync(path, cancellationToken);
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(60));
+        return await ReadChangePageAsync(path, timeout.Token);
+    }
+
+    private async Task<ChangePage> ReadChangePageAsync(string path, CancellationToken cancellationToken)
+    {
+        Stopwatch timer = Stopwatch.StartNew();
+        using HttpRequestMessage request = new(HttpMethod.Get, path);
+        // Only metadata is compressed. File range requests must retain their byte offsets.
+        request.Headers.AcceptEncoding.ParseAdd("gzip");
+        using HttpResponseMessage response = await _http.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<ChangePage>(JsonOptions, cancellationToken)
-            ?? throw new InvalidOperationException("Сервер вернул пустую страницу change feed.");
+        long headersMs = timer.ElapsedMilliseconds;
+        string encoding = string.Join(",", response.Content.Headers.ContentEncoding).ToLowerInvariant();
+        if (encoding is not ("" or "identity" or "gzip"))
+            throw new InvalidDataException("Unsupported change feed content encoding: " + encoding);
+        await using Stream source = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using GZipStream? compressed = encoding == "gzip" ? new(source, CompressionMode.Decompress, leaveOpen: true) : null;
+        ChangePage page;
+        try
+        {
+            page = await JsonSerializer.DeserializeAsync<ChangePage>(compressed ?? source, JsonOptions, cancellationToken)
+                ?? throw new InvalidOperationException("Сервер вернул пустую страницу change feed.");
+        }
+        catch (IOException error)
+        {
+            // Streaming bodies must retain the transient-read retry behavior of buffered HTTP.
+            throw new HttpRequestException("Change feed response interrupted.", error);
+        }
+        if (timer.ElapsedMilliseconds >= 2000)
+            AppLog.Info($"Slow change page: objects={page.Changes.Count}, encoding={encoding}, headers_ms={headersMs}, body_ms={timer.ElapsedMilliseconds - headersMs}, total_ms={timer.ElapsedMilliseconds}.");
+        return page;
     }
 
     public async Task<CloudNode> CreateFolderAsync(
