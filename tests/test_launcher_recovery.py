@@ -243,6 +243,23 @@ def test_recovery_errors_do_not_leak_dependency_secrets(cfg, monkeypatch):
     assert "test-secret" not in log
 
 
+@pytest.mark.parametrize("second_boot,expected_attempts", [(100.001, 1), (200.0, 2)])
+def test_recovery_preserves_backoff_across_boot_time_jitter(cfg, monkeypatch, second_boot, expected_attempts):
+    boot = [100.0]
+    attempts = []
+    monkeypatch.setattr(recovery.psutil, "boot_time", lambda: boot[0])
+    def dependencies(config, state, now):
+        if recovery._due(state, "docker", 1000, 300):
+            attempts.append("start")
+        return {"qdrant": "ready"}
+    monkeypatch.setattr(recovery, "_recover_dependencies", dependencies)
+    monkeypatch.setattr(recovery, "_recover_services", lambda *args: {"web": "ready"})
+    assert launcher.main(["recover"]) == 0
+    boot[0] = second_boot
+    assert launcher.main(["recover"]) == 0
+    assert len(attempts) == expected_attempts
+
+
 def test_native_process_crash_recovers_without_duplicates(cfg, monkeypatch):
     """Use an isolated loopback server, never the production port or services."""
     cfg["telegram_enabled"] = False

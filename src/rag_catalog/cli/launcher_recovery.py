@@ -193,8 +193,11 @@ def recover(args) -> int:
     path = directory / "recovery.json"
     state = launcher._read_pid_payload(path)
     now = time.time()
-    if state.get("boot") != psutil.boot_time():
-        state = {"boot": psutil.boot_time()}
+    boot = psutil.boot_time()
+    # Windows boot_time can drift by milliseconds between processes. An exact
+    # comparison would reset retry backoff on every scheduled pass.
+    if abs(float(state.get("boot") or 0) - boot) >= 2:
+        state = {"boot": boot}
     logger = logging.getLogger("rag.launcher.recovery")
     logger.setLevel(logging.INFO)
     handler = RotatingFileHandler(launcher._runtime_dir() / "launcher-recovery.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
