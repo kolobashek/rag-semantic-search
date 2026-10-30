@@ -11,6 +11,15 @@ import pytest
 from rag_catalog.cli import launcher
 
 
+@pytest.fixture(autouse=True)
+def isolated_control_lock(monkeypatch, tmp_path):
+    from filelock import FileLock
+
+    from rag_catalog.cli import launcher_recovery
+
+    monkeypatch.setattr(launcher_recovery, "control_lock", lambda cfg: FileLock(str(tmp_path / "control.lock"), timeout=0))
+
+
 @pytest.mark.parametrize("command", ["restart-web", "restart-bot", "restart", "start"])
 def test_missing_search_runtime_does_not_stop_or_start_services(monkeypatch, command, capsys):
     monkeypatch.setattr(launcher, "load_config", lambda: {"embedding_backend": "onnx"})

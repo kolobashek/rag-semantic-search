@@ -565,6 +565,16 @@ def _status(host: str, port: int) -> int:
             print(f"- bot.last_error: {last_error}")
     print(f"- bot.enabled.config: {bool(cfg.get('telegram_enabled'))}")
     print(f"- bot.token.config: {'set' if str(cfg.get('telegram_bot_token') or '').strip() else 'empty'}")
+    from rag_catalog.cli.launcher_recovery import maintenance
+
+    recovery = _read_pid_payload(_shared_runtime_dir(cfg) / "recovery.json")
+    checked_at = float(recovery.get("checked_at") or 0)
+    print(f"- recovery.maintenance: {'yes' if maintenance(cfg) else 'no'}")
+    if checked_at:
+        print(f"- recovery.last_check_age_sec: {max(0, int(time.time() - checked_at))}")
+        print(f"- recovery.last_state: {json.dumps(recovery.get('status', {}), sort_keys=True)}")
+    else:
+        print("- recovery.last_check: not-run")
     return 0
 
 
@@ -735,6 +745,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_status.add_argument("--host", default="127.0.0.1")
     p_status.add_argument("--port", type=int, default=8080)
 
+    p_recover = sub.add_parser("recover", help="Recover exited services once (scheduled watchdog)")
+    p_recover.add_argument("--host", default="127.0.0.1")
+    p_recover.add_argument("--port", type=int, default=8080)
+    p_recover.add_argument("--proxy-task", default="", help="Existing IgnoreNew HTTPS proxy task")
+
     p_restart = sub.add_parser("restart", help="Restart services")
     p_restart.add_argument("--host", default="127.0.0.1")
     p_restart.add_argument("--port", type=int, default=8080)
@@ -756,21 +771,30 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_support.add_argument("--log-chars", type=int, default=20000, help="Tail characters per logical log")
 
     args = parser.parse_args(argv)
-    if args.cmd == "start":
-        return _start(args)
-    if args.cmd == "stop":
-        return _stop(args)
     if args.cmd == "status":
         return _status(args.host, int(args.port))
-    if args.cmd == "restart":
-        return _restart(args)
-    if args.cmd == "restart-bot":
-        return _restart_bot(args)
-    if args.cmd == "restart-web":
-        return _restart_web(args)
     if args.cmd == "support-bundle":
         return _support_bundle(args)
-    return 1
+    from filelock import Timeout
+
+    from rag_catalog.cli.launcher_recovery import control_lock, maintenance, recover
+
+    cfg = load_config()
+    try:
+        # Manual control and watchdog share one OS-backed lock, including startup.
+        with control_lock(cfg):
+            if args.cmd == "stop":
+                maintenance(cfg, enabled=True)
+                return _stop(args)
+            commands = {"start": _start, "restart": _restart, "restart-bot": _restart_bot,
+                        "restart-web": _restart_web, "recover": recover}
+            result = commands[args.cmd](args)
+            if result == 0 and args.cmd in {"start", "restart"}:
+                maintenance(cfg, enabled=False)
+            return result
+    except Timeout:
+        print("launcher=busy (another control operation is active)")
+        return 0 if args.cmd == "recover" else 1
 
 
 if __name__ == "__main__":
