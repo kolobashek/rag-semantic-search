@@ -2464,6 +2464,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # ─────────────────────────── searcher / admin helpers ───────────────────────
 
 _SEARCHER_CACHE: Dict[tuple[str, ...], RAGSearcher] = {}
+_SEARCHER_INIT_LOCK = threading.Lock()
 
 
 def _searcher_cache_key(cfg: Dict[str, Any]) -> tuple[str, ...]:
@@ -2496,11 +2497,7 @@ def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
     try:
         if not _qdrant_http_ready(cfg):
             return
-        key = _searcher_cache_key(cfg)
-        searcher = _SEARCHER_CACHE.get(key)
-        if searcher is None:
-            searcher = RAGSearcher(cfg)
-            _SEARCHER_CACHE[key] = searcher
+        searcher = _get_shared_searcher(cfg)
         if searcher.connected:
             searcher.warm_retrieval_cache()
             searcher.embedder.encode(["warmup"])
@@ -2509,25 +2506,31 @@ def _warm_searcher_cache(cfg: Dict[str, Any]) -> None:
         pass
 
 
-def _cached_searcher_if_ready(cfg: Dict[str, Any]) -> Optional[RAGSearcher]:
+def _get_shared_searcher(cfg: Dict[str, Any]) -> RAGSearcher:
+    key = _searcher_cache_key(cfg)
+    with _SEARCHER_INIT_LOCK:
+        searcher = _SEARCHER_CACHE.get(key)
+        if searcher is None or not searcher.connected:
+            searcher = RAGSearcher(cfg)
+            if searcher.connected:
+                _SEARCHER_CACHE[key] = searcher
+        return searcher
+
+
+def _cached_searcher_if_ready(cfg: Dict[str, Any], *, connect_on_miss: bool = False) -> Optional[RAGSearcher]:
     if not _qdrant_http_ready(cfg):
         return None
-    searcher = _SEARCHER_CACHE.get(_searcher_cache_key(cfg))
+    searcher = _get_shared_searcher(cfg) if connect_on_miss else _SEARCHER_CACHE.get(_searcher_cache_key(cfg))
     if searcher is not None and searcher.connected:
         return searcher
     return None
 
 
 def _ensure_searcher(state: PageState) -> Optional[RAGSearcher]:
-    if state.searcher is not None:
+    if state.searcher is not None and state.searcher.connected:
         return state.searcher
     try:
-        key = _searcher_cache_key(state.cfg)
-        cached = _SEARCHER_CACHE.get(key)
-        if cached is None or not cached.connected:
-            cached = RAGSearcher(state.cfg)
-            _SEARCHER_CACHE[key] = cached
-        state.searcher = cached
+        state.searcher = _get_shared_searcher(state.cfg)
     except Exception as exc:
         state.searcher_error = str(exc)
         return None

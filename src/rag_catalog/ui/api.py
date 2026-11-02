@@ -723,10 +723,9 @@ def _get_api_searcher(cfg: Dict[str, Any]) -> RAGSearcher:
         if not _helpers._qdrant_http_ready(cfg):
             raise HTTPException(status_code=503, detail="Qdrant недоступен. Повторите запрос позже.")
         try:
-            searcher = RAGSearcher(cfg)
+            searcher = _helpers._get_shared_searcher(cfg)
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Поисковик не инициализирован: {exc}") from exc
-        _helpers._SEARCHER_CACHE[key] = searcher
     if not searcher.connected:
         raise HTTPException(status_code=503, detail="Нет подключения к Qdrant.")
     return searcher

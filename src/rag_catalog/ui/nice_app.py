@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
 from fastapi import Request
-from nicegui import app, events, run, ui
+from nicegui import app, background_tasks, events, run, ui
 
 from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config, save_config
@@ -475,22 +475,6 @@ async def _run_io_bound_with_ui_timeout(func: Any, *args: Any, timeout: float, *
     return _IO_TIMEOUT
 
 
-def _client_alive() -> bool:
-    """Return True if the current NiceGUI client is still connected.
-
-    When a browser disconnects and reconnects mid-search, the old async
-    handler continues but the client has been removed from Client.instances.
-    Calling render() on a deleted client logs a warning and rebuilds dead UI
-    elements — we skip those renders instead.
-    """
-    try:
-        from nicegui.client import Client  # noqa: PLC0415
-        c = Client.current
-        return c is not None and c.id in Client.instances
-    except Exception:
-        return True  # assume alive if we can't inspect
-
-
 def _build_page(
     initial_screen: str = "search",
     *,
@@ -573,6 +557,10 @@ def _build_page(
             bottom_nav_area = ui.column().classes("rag-drawer-bottom w-full gap-2")
 
     page_root = ui.column().classes("rag-page gap-5")
+
+    def _client_alive() -> bool:
+        return not page_root.is_deleted
+
     with page_root:
         content = ui.column().classes("rag-page-content w-full gap-5")
     screen_containers: Dict[str, Any] = {}
@@ -899,14 +887,30 @@ def _build_page(
         _client_diag("search_run_start", _search_diag({"query": query}))
         _persist_search_recovery(state, "run_start")
         render_results_loading()
-        searcher = state.searcher if state.searcher is not None and state.searcher.connected else _cached_searcher_if_ready(state.cfg)
+        searcher = state.searcher
+        connect_timed_out = False
+        if searcher is None or not searcher.connected:
+            searcher = await _run_io_bound_with_ui_timeout(
+                _cached_searcher_if_ready, state.cfg, connect_on_miss=True,
+                timeout=_ui_search_timeout_seconds(state.cfg),
+            )
+            if state.search_request_id != request_id or not _client_alive():
+                return
+            if searcher is _IO_TIMEOUT:
+                connect_timed_out = True
+                searcher = None
         if searcher is not None:
             state.searcher = searcher
         if searcher is None or not searcher.connected:
-            if not _qdrant_http_ready(state.cfg):
-                state.search_error = "Qdrant восстанавливает индекс. Повторите запрос через несколько секунд."
+            qdrant_ready = await run.io_bound(_qdrant_http_ready, state.cfg)
+            if state.search_request_id != request_id or not _client_alive():
+                return
+            if not qdrant_ready:
+                state.search_error = "Поисковый индекс недоступен. Повторите запрос через несколько секунд."
+            elif connect_timed_out:
+                state.search_error = "Подключение к поисковому индексу заняло слишком много времени. Повторите запрос."
             else:
-                state.search_error = state.searcher_error or "Поисковик подключается. Повторите запрос через несколько секунд."
+                state.search_error = "Не удалось открыть поисковую коллекцию. Проверьте состояние индекса."
             state.search_lazy_loading = False
             _log_app_event(
                 state,
@@ -915,7 +919,7 @@ def _build_page(
                 ok=False,
                 details=_search_diag(
                     {
-                        "qdrant_ready": _qdrant_http_ready(state.cfg),
+                        "qdrant_ready": qdrant_ready,
                         "searcher_error": state.searcher_error,
                     }
                 ),
@@ -1327,17 +1331,20 @@ def _build_page(
             _client_diag("search_run_done", _search_diag())
             render_safely()
 
-    def schedule_search(query: str) -> None:
-        _log_app_event(state, "search", "schedule", details=_search_diag({"query": query}))
-        _client_diag("search_schedule", _search_diag({"query": query}))
-        task = asyncio.create_task(run_search(query))
-
-        def _handle_search_exception(done_task: asyncio.Task[Any]) -> None:
+    async def run_page_search(query: str) -> None:
+        if not _client_alive():
+            return
+        # NiceGUI slots belong to an asyncio task; the submitting button is rebuilt during search.
+        with page_root:
+            previous_request = state.search_request_id
             try:
-                done_task.result()
+                await run_search(query)
             except Exception as exc:
+                logger.exception("Background search failed")
+                if not _client_alive() or state.search_request_id > previous_request + 1:
+                    return
                 state.search_lazy_loading = False
-                state.search_error = f"Ошибка поиска: {exc}"
+                state.search_error = "Не удалось выполнить поиск. Повторите запрос."
                 _log_app_event(
                     state,
                     "search",
@@ -1347,7 +1354,10 @@ def _build_page(
                 )
                 render_safely()
 
-        task.add_done_callback(_handle_search_exception)
+    def schedule_search(query: str) -> None:
+        _log_app_event(state, "search", "schedule", details=_search_diag({"query": query}))
+        _client_diag("search_schedule", _search_diag({"query": query}))
+        background_tasks.create(run_page_search(query), name="catalog search")
 
     async def choose_query(query: str) -> None:
         # Schedule search work outside the click event so the websocket stays responsive.

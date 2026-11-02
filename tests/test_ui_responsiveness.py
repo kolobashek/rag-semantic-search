@@ -379,7 +379,7 @@ def test_search_keeps_websocket_responsive_while_semantic_pass_runs() -> None:
     assert "_qdrant_http_ready" in source
     assert "_run_io_bound_with_ui_timeout" in source
     assert "schedule_search" in source
-    assert "asyncio.create_task(run_search(query))" in source
+    assert "background_tasks.create(run_page_search(query)" in source
     assert "await run_search(typed)" not in source
     assert "asyncio.wait_for" not in source
     assert "run_quick_timeout" in source
@@ -555,6 +555,52 @@ def test_search_warmup_builds_metadata_cache_before_loading_model(monkeypatch) -
 
     assert events == ["searcher", "metadata", "embedder"]
     helpers._SEARCHER_CACHE.clear()
+
+
+def test_search_retries_after_missed_warmup_and_failed_connection(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    cfg = {"qdrant_url": "http://localhost:6333"}
+    cache = {}
+    outcomes = iter([False, True])
+    monkeypatch.setattr(helpers, "_SEARCHER_CACHE", cache)
+    monkeypatch.setattr(helpers, "RAGSearcher", lambda cfg: SimpleNamespace(connected=next(outcomes)))
+    monkeypatch.setattr(helpers, "_qdrant_http_ready", lambda cfg: False)
+    helpers._warm_searcher_cache(cfg)
+    assert not cache
+    monkeypatch.setattr(helpers, "_qdrant_http_ready", lambda cfg: True)
+    assert helpers._cached_searcher_if_ready(cfg) is None  # read-only stats must not connect
+    assert helpers._cached_searcher_if_ready(cfg, connect_on_miss=True) is None
+    assert not cache
+    searcher = helpers._cached_searcher_if_ready(cfg, connect_on_miss=True)
+    assert searcher.connected and helpers._cached_searcher_if_ready(cfg) is searcher
+
+
+def test_concurrent_cold_searches_share_one_connection(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from types import SimpleNamespace
+
+    cfg = {"collection_name": "test"}
+    constructed = []
+    start = Barrier(4)
+
+    def construct(cfg):
+        import time
+        time.sleep(0.04)
+        instance = SimpleNamespace(connected=True)
+        constructed.append(instance)
+        return instance
+
+    def connect(_):
+        start.wait(timeout=5)
+        return helpers._get_shared_searcher(cfg)
+
+    monkeypatch.setattr(helpers, "_SEARCHER_CACHE", {})
+    monkeypatch.setattr(helpers, "RAGSearcher", construct)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(connect, range(4)))
+    assert len(constructed) == 1 and all(x is constructed[0] for x in results)
 
 
 def test_render_does_not_attach_busy_timers_to_rebuilt_content() -> None:
