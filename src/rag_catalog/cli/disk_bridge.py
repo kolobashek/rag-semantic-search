@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import ntpath
 import time
+from collections import Counter
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -14,6 +16,58 @@ from filelock import Timeout
 from rag_catalog.core.cloud_drive.disk_bridge import DiskBridge
 from rag_catalog.core.cloud_drive.service import CloudDriveService
 from rag_catalog.core.rag_core import load_config
+
+_MIB = 1024 * 1024
+_TOP = 10
+
+
+def _process_memory_snapshot():
+    rss_by_name = Counter()
+    instances = Counter()
+    rows = []
+    unreadable = 0
+    for proc in psutil.process_iter():
+        try:
+            info = proc.as_dict(attrs=['name', 'memory_info'], ad_value=None)
+        except (psutil.Error, OSError):
+            unreadable += 1
+            continue
+        mem = info['memory_info']
+        if mem is None:
+            unreadable += 1
+            continue
+        name = ntpath.basename(info['name'] or '')[:96] or '<unknown>'
+        rss_by_name[name.casefold()] += mem.rss
+        instances[name.casefold()] += 1
+        rows.append((mem.rss, proc.pid, name, getattr(mem, 'private', None)))
+    top = sorted(rows, key=lambda r: (-r[0], r[1]))[:_TOP]
+    return {
+        'sampled_processes': len(rows), 'unreadable_processes': unreadable,
+        'top_processes': [
+            {'pid': pid, 'name': name, 'rss_mib': round(rss / _MIB, 1),
+             'private_commit_mib': round(private / _MIB, 1) if private is not None else None}
+            for rss, pid, name, private in top
+        ],
+        'top_groups': [
+            {'name': name, 'processes': instances[name], 'rss_sum_mib': round(rss / _MIB, 1)}
+            for name, rss in rss_by_name.most_common(_TOP)
+        ],
+    }
+
+
+def _memory_deferral(memory, threshold_mib, apply):
+    # Preserve the exact sample that tripped the guard, not a later free-RAM reading.
+    pressure = {'sampled_at': time.time(), 'available_bytes': memory.available,
+                'available_mib': memory.available // _MIB, 'total_mib': memory.total // _MIB,
+                'threshold_mib': threshold_mib}
+    try:
+        pressure.update(_process_memory_snapshot())
+    except Exception as exc:
+        # Diagnostics are best effort. A collection error must never allow the exchange.
+        pressure['process_snapshot_error'] = type(exc).__name__
+    return {'finished_at': time.time(), 'complete': False, 'applied': apply,
+            'errors': [{'error': 'Low available host memory; exchange deferred'}],
+            'memory_pressure': pressure}
 
 
 def main(argv=None):
@@ -39,9 +93,12 @@ def main(argv=None):
         with bridge.lock:
             while True:
                 try:
-                    if psutil.virtual_memory().available < spec.get('min_free_memory_mb', 1536) * 1024 * 1024:
-                        raise RuntimeError('Low available host memory; exchange deferred')
-                    report = bridge.run(apply=args.apply, max_files=args.max_files)
+                    threshold_mib = spec.get('min_free_memory_mb', 1536)
+                    memory = psutil.virtual_memory()
+                    if memory.available < threshold_mib * _MIB:
+                        report = _memory_deferral(memory, threshold_mib, args.apply)
+                    else:
+                        report = bridge.run(apply=args.apply, max_files=args.max_files)
                 except Exception as exc:
                     report = {'finished_at': time.time(), 'complete': False, 'applied': args.apply,
                               'errors': [{'error': str(exc)[:1000]}]}
