@@ -18,6 +18,7 @@ from zipfile import ZipFile
 from qdrant_client.models import PointStruct
 from tqdm import tqdm
 
+from ..document_facts import compact_facts
 from ..exact_tokens import add_numeric_tokens, repair_zip_member_name
 from ..extractors import ExtractedDocument, extract_doc_meta, is_unreadable_source_error
 from ..indexer_control import read_indexer_control
@@ -1365,6 +1366,10 @@ class IndexStageRunner:
                     ),
                 }
                 add_numeric_tokens(chunk_payload, clean_chunk, relative_path.name, logical_path_text)
+                chunk_payload["document_facts"] = compact_facts(clean_chunk, filename=relative_path.name)
+                if meta_payload.get("archive_path"):
+                    for archive_key in ("archive_path", "archive_member", "archive_member_display"):
+                        chunk_payload[archive_key] = meta_payload[archive_key]
                 content_payloads.append(chunk_payload)
             return {
                 "filepath": source_path,

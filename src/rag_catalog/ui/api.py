@@ -26,6 +26,7 @@ from typing import Annotated, Any, Dict, List
 from fastapi import File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from nicegui import app
+from starlette.background import BackgroundTask
 
 from rag_catalog.core.client_diagnostics import MAX_LOG_BYTES, ClientDiagnosticsDB
 from rag_catalog.core.client_logs import MAX_EVENTS_PER_BATCH, ingest_client_events
@@ -2273,7 +2274,8 @@ def api_cloud_drive_create_folder(
 
 @app.get("/api/cloud-drive/download")
 def api_cloud_drive_download(
-    path: str, authorization: AuthHeader = "", byte_range: Annotated[str, Header(alias="Range")] = ""
+    path: str, authorization: AuthHeader = "", byte_range: Annotated[str, Header(alias="Range")] = "",
+    member: str = "",
 ):
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
@@ -2284,6 +2286,8 @@ def api_cloud_drive_download(
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "download", ok=False, details={"path": path, "error": str(exc)})
         raise HTTPException(status_code=404, detail=str(exc))
+    if member:
+        return _archive_member_response(service, descriptor, member, inline=False)
     if descriptor.get("mode") == "storage_stream":
         response = storage_download_response(service.storage, descriptor, byte_range)
         _audit_cloud_drive_api_event(cfg, user, "download", details={"path": path, "mode": "storage_stream"})
@@ -2311,7 +2315,8 @@ def api_cloud_drive_download(
 
 @app.get("/api/cloud-drive/preview")
 def api_cloud_drive_preview(
-    path: str, authorization: AuthHeader = "", byte_range: Annotated[str, Header(alias="Range")] = ""
+    path: str, authorization: AuthHeader = "", byte_range: Annotated[str, Header(alias="Range")] = "",
+    member: str = "",
 ):
     cfg = load_config()
     user = _require_cloud_drive_api_user(cfg, authorization=authorization)
@@ -2322,6 +2327,8 @@ def api_cloud_drive_preview(
     except RuntimeError as exc:
         _audit_cloud_drive_api_event(cfg, user, "preview", ok=False, details={"path": path, "error": str(exc)})
         raise HTTPException(status_code=404, detail=str(exc))
+    if member:
+        return _archive_member_response(service, descriptor, member, inline=True)
     if descriptor.get("mode") == "storage_stream":
         media_type, headers = _safe_preview_response_options(descriptor['filename'], descriptor['mime_type'])
         return storage_download_response(
@@ -2351,6 +2358,28 @@ def api_cloud_drive_preview(
         filename=str(descriptor["filename"]),
         content_disposition_type="inline",
         headers=headers,
+    )
+
+
+def _archive_member_response(service, descriptor: dict, member: str, *, inline: bool):
+    from rag_catalog.core.archive_preview import prepare_member
+
+    try:
+        temp, target = prepare_member(service.storage, descriptor, member)
+    except BlockingIOError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    filename = member.replace("\\", "/").rsplit("/", 1)[-1]
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    media_type, headers = _safe_preview_response_options(filename, mime)
+    return FileResponse(
+        path=target, filename=filename, media_type=media_type,
+        content_disposition_type="inline" if inline else "attachment",
+        headers={**headers, "Cache-Control": "private, no-store"},
+        background=BackgroundTask(temp.cleanup),
     )
 
 

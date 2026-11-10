@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from rag_catalog.core.document_facts import facts_for_result, matches_query, parse_fact_query
 from rag_catalog.core.exact_tokens import numeric_query_has_trusted_context
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.indexing.heartbeat import (
@@ -39,6 +40,7 @@ from rag_catalog.core.log_history import (
     read_history_tail_lines,
 )
 from rag_catalog.core.rag_core import DEFAULT_CONFIG, RAGSearcher
+from rag_catalog.core.retrieval.terms import term_matches, tokenize
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .state import (
@@ -894,7 +896,8 @@ def _run_quick_name_search(
             continue
         name = str(item.get("filename") or "").lower().replace("ё", "е")
         path = str(item.get("path") or item.get("full_path") or "").lower().replace("ё", "е")
-        if needle and (needle in name or needle in path):
+        terms = tokenize(query)
+        if needle and (needle in name or needle in path or (terms and all(term_matches(f"{name} {path}", term) for term in terms))):
             confident.append(item)
     return confident[:limit]
 
@@ -1155,6 +1158,7 @@ def _cd_list_children(
     *,
     cfg: Dict[str, Any] | None = None,
     user: Dict[str, Any] | None = None,
+    folders_only: bool = False,
 ) -> "tuple[list, list]":
     try:
         if cd_path:
@@ -1164,7 +1168,7 @@ def _cd_list_children(
         if folder is None:
             return [], []
         folders = service.registry.list_child_folders(folder.id)
-        files = service.registry.list_files_in_folder(folder.id)
+        files = [] if folders_only else service.registry.list_files_in_folder(folder.id)
         if cfg is not None and user is not None:
             folders = [
                 item for item in folders
@@ -1245,16 +1249,21 @@ def _cd_search_by_name(
     max_folders: int = 5,
     max_files: int = 5,
 ) -> "tuple[list, list]":
-    pattern = f"%{query.lower()}%"
+    terms = tokenize(query)
+    if not terms:
+        return [], []
     try:
         with registry._connect() as conn:
+            conn.create_function("rag_path_matches", 1, lambda value: int(all(
+                term_matches(str(value or "").casefold().replace("ё", "е"), term) for term in terms
+            )))
             folder_rows = conn.execute(
-                "SELECT * FROM cloud_folders WHERE lower(name) LIKE ? AND is_root=0 AND deleted_at='' LIMIT ?",
-                (pattern, max_folders),
+                "SELECT * FROM cloud_folders WHERE rag_path_matches(path) AND is_root=0 AND deleted_at='' ORDER BY length(path), path LIMIT ?",
+                (max_folders,),
             ).fetchall()
             file_rows = conn.execute(
-                "SELECT * FROM cloud_files WHERE lower(name) LIKE ? AND deleted_at='' LIMIT ?",
-                (pattern, max_files),
+                "SELECT * FROM cloud_files WHERE rag_path_matches(path) AND deleted_at='' ORDER BY length(path), path LIMIT ?",
+                (max_files,),
             ).fetchall()
         folders = [registry._folder_from_row(r) for r in folder_rows]
         files = [registry._file_from_row(r) for r in file_rows]
@@ -1455,12 +1464,15 @@ def _cd_registry_node_for_search_item(
             return node
 
     raw_path = str(
+        item.get("archive_path")
+        or
         item.get("source_path")
         or item.get("full_path")
         or item.get("filepath")
         or item.get("path")
         or ""
     ).strip()
+    raw_path = raw_path.split("::", 1)[0]
     if not raw_path:
         return None
 
@@ -1542,6 +1554,10 @@ def _filter_cloud_drive_search_results(
             False,
         )
         if allowed:
+            virtual_path = str(item.get("full_path") or "")
+            if "::" in virtual_path:
+                item["archive_path"] = item.get("archive_path") or virtual_path.split("::", 1)[0]
+                item["archive_member"] = item.get("archive_member") or virtual_path.split("::", 1)[1]
             item.setdefault("cloud_path", node_path)
             if cloud_file_id:
                 item.setdefault("cloud_file_id", cloud_file_id)
@@ -1637,6 +1653,14 @@ def _run_authorized_catalog_search(
     username: str = "",
 ) -> List[Dict[str, Any]]:
     """Run full retrieval and ACL filtering without blocking NiceGUI."""
+    plan = parse_fact_query(query_original or query)
+    structured = []
+    if plan.active and not title_only:
+        structured = searcher.search_document_facts(query_original or query, limit=limit, file_type=file_type,
+                                                    result_filter=_cd_acl_result_filter(cfg, user))
+    # Explicit facts do not require a second, memory-heavy model call.
+    if structured:
+        return _filter_cloud_drive_search_results(cfg, user, structured)
     results = _run_catalog_search(
         searcher,
         query=query,
@@ -1649,6 +1673,8 @@ def _run_authorized_catalog_search(
         username=username,
         result_filter=_cd_acl_result_filter(cfg, user),
     )
+    if plan.dates and not title_only:
+        results = [row for row in results if matches_query(plan, row, facts_for_result(row))]
     return _filter_cloud_drive_search_results(cfg, user, results)
 
 

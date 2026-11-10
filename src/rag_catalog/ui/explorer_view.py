@@ -1669,6 +1669,7 @@ def render_explorer_screen(
                             folder.path,
                             cfg=page_state.cfg,
                             user=page_state.current_user,
+                            folders_only=True,
                         )
                         if not page_state.explorer_show_hidden:
                             children = [child for child in children if not _is_hidden("cd", child.path)]
@@ -2212,7 +2213,8 @@ def render_explorer_screen(
                                     label.set_text(f"Общий размер с вложенными папками: {total_text}")
                                 except RuntimeError:
                                     pass
-                        render_fn()
+                        if page_state.explorer_sort == "По размеру":
+                            render_fn()
                 except Exception as exc:
                     _log_app_event(
                         page_state,

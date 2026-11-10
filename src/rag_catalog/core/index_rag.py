@@ -31,6 +31,7 @@ from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
 
 from .chunking import chunk_text, semantic_chunk_end
+from .document_facts import compact_facts
 from .embedding_collections import resolve_embedding_collection_name
 from .exact_tokens import add_numeric_tokens
 from .extractors import (
@@ -1575,6 +1576,7 @@ class RAGIndexer:
                     **(payload_extra or {}),
                 }
             add_numeric_tokens(chunk_payload, clean_chunk, filepath.name, str(relative_path))
+            chunk_payload["document_facts"] = compact_facts(clean_chunk, filename=filepath.name)
             payloads.append(chunk_payload)
         vectors = self.embedder.encode(
             prepare_passage_texts(str(getattr(self, "embedding_model", "") or ""), texts),

@@ -653,6 +653,36 @@ boot-триггер сам по себе не доказывает готовн�
 - RAG answer mode with citations and weak-source fallback;
 - Telegram assistant mode.
 
+### Факты и местоположение документов
+
+Поиск имени учитывает слова в разных частях пути, кириллицу и вариант `TSK` / `ТСК`.
+Переход из архивного результата ведёт к папке архива, а просмотр и скачивание выбирают
+конкретное вложение ZIP/RAR/7z с правами самого архива. Онлайн-извлечение ограничено:
+архив до 256 МиБ, вложение до 32 МиБ, извлечение до 30 секунд, не более двух одновременно.
+Зашифрованные, многотомные и превышающие лимит архивы могут потребовать скачивания целиком.
+
+При обычной индексации текстовых фрагментов сохраняется `document_facts` версии 1:
+тип документа, упоминания людей/организаций, явно обозначенные роли сторон, даты,
+номера документов/паспортов/СТС, ИНН, VIN, госномера, кадастровые номера, города, улицы
+и адреса. Для упоминания хранятся исходное значение, нормализованное значение,
+позиция в тексте и метод извлечения; источник, страница и версия наследуются от фрагмента.
+Цитата восстанавливается из исходного текста, а не дублируется для каждого поля.
+
+Общий запрос по дате проверяет **все упоминания дат**, включая дату рождения;
+явный запрос «дата выдачи» требует соответствующей роли. Дата изменения файла не
+подменяет дату из текста. Продавец и покупатель различаются; арендатор не считается
+собственником. Ответ относится к источнику, а не утверждает актуальность прав сегодня.
+Права доступа проверяются до чтения дополнительных фрагментов и перед ответом.
+
+Это ограниченный первый этап, не полный реестр объектов и не универсальное NER:
+поддерживаются явные поля/формулировки, ФИО и инициалы, но не все формы OCR и склонения.
+Уже существующий текст разбирается при запросе без повторного OCR/эмбеддингов;
+запрос проверяет ограниченный набор кандидатов и начальных фрагментов. Полнота
+широких запросов и диапазонов дат пока не гарантируется. Массовое заполнение фактов
+в старых записях, сквозные связи между документами и подтверждённые справочники
+субъектов/объектов требуют отдельной миграции и размеченной проверки качества.
+Коллекция, retrieval preset и release gates этим механизмом не переключаются.
+
 Release retrieval preset: set `retrieval_preset=release_v2` to enable retrieval v2 + BM25/RRF defaults. Reranker remains opt-in (`retrieval_reranker_enabled=true`) until latency/eval thresholds are accepted. Interactive search can fail open when full-text or reranking is unavailable (`retrieval_fulltext_fail_open=true`, `retrieval_reranker_fail_open=true`), while `scripts/search_eval.py` forces both enabled stages to fail closed so a broken channel cannot produce a candidate artifact.
 Evaluation artifacts record both `retrieval_preset` and the effective `retrieval_pipeline`; CLI `--config-set retrieval_preset=release_v2` reapplies preset defaults unless a pipeline setting is explicitly overridden. Startup warmup prepares the metadata token index and BM25 tokens so the warm-search SLO does not include avoidable per-query scans of the full catalog.
 Baseline comparisons also require the same non-empty evaluation fingerprint, derived from the current source fingerprint, exact golden-file SHA-256, evaluation protocol version and `top-k` limit. A stale, fingerprint-less or differently configured `--baseline-report` keeps the decision at `NO_GO`.

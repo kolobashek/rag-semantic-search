@@ -234,6 +234,17 @@
   if (window.__ragContextMenuInstalled) return;
   window.__ragContextMenuInstalled = true;
 
+  document.addEventListener('dblclick', (event) => {
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!target || target.closest('button, a, input, textarea, select, [role="button"], .q-checkbox')) return;
+    const item = target.closest('[data-rag-context="explorer-item"]');
+    const opener = item?.querySelector('[data-rag-open]');
+    if (opener) {
+      event.preventDefault();
+      opener.click();
+    }
+  });
+
   const menu = () => document.getElementById('rag-global-context-menu');
   const hide = () => { const m = menu(); if (m) m.style.display = 'none'; };
   const addButton = (m, label, action) => {

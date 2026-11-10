@@ -13,6 +13,7 @@ import math
 import os
 import re
 import sqlite3
+import threading
 import time
 from bisect import bisect_left
 from collections import OrderedDict
@@ -24,8 +25,9 @@ from ._platform_compat import apply_windows_platform_workarounds
 
 apply_windows_platform_workarounds()
 
-from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchText, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchText, MatchValue, Range
 
+from .document_facts import answer_from_facts, facts_for_result, matches_query, parse_fact_query
 from .embedding_collections import resolve_collection_name_from_config
 from .exact_tokens import (
     numeric_exact_tokens,
@@ -1033,6 +1035,11 @@ class RAGSearcher:
         return freshness, adjustment
 
     def _refresh_fs_cache(self) -> List[Dict[str, Any]]:
+        lock = self.__dict__.setdefault('_fs_refresh_lock', threading.RLock())
+        with lock:
+            return self._refresh_fs_cache_locked()
+
+    def _refresh_fs_cache_locked(self) -> List[Dict[str, Any]]:
         now = time.time()
         cache = getattr(self, "_fs_cache", {"ts": 0.0, "items": []})
         cached = cache.get("items") or []
@@ -1045,9 +1052,6 @@ class RAGSearcher:
             self._fs_cache = {"ts": now, "items": []}
             return []
         root = Path(catalog_path)
-        if not root.exists():
-            self._fs_cache = {"ts": now, "items": []}
-            return []
 
         items: List[Dict[str, Any]] = []
         max_items = int(config.get("filesystem_search_max_items", FS_CACHE_MAX_ITEMS))
@@ -1077,8 +1081,9 @@ class RAGSearcher:
                     full_path_str = str(entry.get("full_path") or "").strip()
                     if not full_path_str:
                         continue
-                    full_path = Path(full_path_str)
-                    filename = full_path.name
+                    physical_path, _separator, member = full_path_str.partition('::')
+                    full_path = Path(physical_path)
+                    filename = Path(member.replace('\\', '/')).name if member else full_path.name
                     ext = str(entry.get("extension") or full_path.suffix.lower() or "")
                     try:
                         rel = str(full_path.relative_to(root))
@@ -1086,11 +1091,12 @@ class RAGSearcher:
                         rel = str(full_path)
                     size_b = int(entry.get("size_bytes") or 0)
                     mtime = float(entry.get("mtime") or 0.0)
+                    logical_rel = rel + '/' + member.replace('\\', '/') if member else rel
                     items.append(
                         {
                             "kind": "file",
                             "filename": filename,
-                            "path": rel,
+                            "path": logical_rel,
                             "full_path": full_path_str,
                             "extension": ext,
                             "size_mb": round(size_b / 1_048_576, 2) if size_b > 0 else None,
@@ -1746,6 +1752,9 @@ class RAGSearcher:
         retrieval_source: str = "",
     ) -> Dict[str, Any]:
         result = {
+            "document_facts": payload.get("document_facts"),
+            "archive_path": payload.get("archive_path", ""),
+            "archive_member": payload.get("archive_member", ""),
             "score": round(float(score), 6),
             "type": payload.get("type", ""),
             "text": payload.get("text", ""),
@@ -2315,7 +2324,7 @@ class RAGSearcher:
         ]
         return "\n".join(part for part in parts if part).strip()[:4000]
 
-    def _content_chunks_for_paths(self, paths: List[str], max_chunks: int = 100) -> List[Dict[str, Any]]:
+    def _content_chunks_for_paths(self, paths: List[str], max_chunks: int = 100, *, header_first: bool = False) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         seen = set()
         for full_path in paths:
@@ -2330,7 +2339,8 @@ class RAGSearcher:
                             FieldCondition(
                                 key="full_path",
                                 match=MatchValue(value=full_path),
-                            )
+                            ),
+                            *([FieldCondition(key="chunk_index", range=Range(gte=0, lt=max_chunks))] if header_first else []),
                         ],
                         must_not=[
                             FieldCondition(
@@ -2350,6 +2360,9 @@ class RAGSearcher:
                 payload = point.payload or {}
                 out.append({
                     "score": 0.92,
+                    "document_facts": payload.get("document_facts"),
+                    "archive_path": payload.get("archive_path", ""),
+                    "archive_member": payload.get("archive_member", ""),
                     "type": payload.get("type", ""),
                     "text": payload.get("text", ""),
                     "filename": payload.get("filename", ""),
@@ -2379,6 +2392,54 @@ class RAGSearcher:
                     "rank_reason": "content by exact entity path",
                 })
         return out
+
+    def search_document_facts(self, query: str, *, limit: int = 30, file_type=None, result_filter=None) -> List[Dict[str, Any]]:
+        """Bounded evidence retrieval over already indexed text, without an embedding model.
+
+        This is a candidate search, not a complete register export. ACL is
+        applied before expanding document chunks and again before extraction.
+        """
+        plan = parse_fact_query(query)
+        if not plan.active or not self.connected:
+            return []
+        candidates = []
+        if plan.lookup:
+            metadata = self._lexical_catalog_search(query=plan.lookup, limit=24, file_type=file_type, content_only=False)
+            metadata = self._apply_result_filter(metadata, result_filter)
+            paths = [str(row['full_path']) for row in metadata if row.get('type') == 'file_metadata' and row.get('full_path')]
+            candidates.extend(self._content_chunks_for_paths(paths[:24], max_chunks=8, header_first=True))
+            candidates.extend(self._fulltext_content_search(query=plan.lookup, limit=48, file_type=file_type, content_only=True))
+        if plan.dates and not plan.date_range and getattr(self, '_fulltext_available', False):
+            # The text index handles punctuation, but not numeric vs written months.
+            from .document_facts import _MONTHS
+            options = []
+            for value in plan.dates:
+                year, month, day = value.split('-')
+                month_name = next(name for name, number in _MONTHS.items() if number == int(month))
+                for spelling in (f'{day}.{month}.{year}', f'{int(day)} {month_name} {year}', value):
+                    options.append(FieldCondition(key='text', match=MatchText(text=spelling)))
+            conditions = [FieldCondition(key='extension', match=MatchValue(value=file_type))] if file_type else None
+            points, _ = self.qdrant.scroll(collection_name=self.collection_name,
+                                         scroll_filter=Filter(should=options, must=conditions),
+                                         limit=96, with_payload=True, with_vectors=False)
+            candidates.extend(self._result_from_payload(dict(p.payload or {}), score=0.99) for p in points)
+        candidates = self._apply_result_filter(candidates, result_filter)
+        selected, seen = [], set()
+        for item in candidates:
+            facts = facts_for_result(item)
+            if not facts['mentions'] or not matches_query(plan, item, facts):
+                continue
+            key = (item.get('full_path'), item.get('chunk_index'), item.get('text'))
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append({**item, 'document_facts': facts, 'retrieval_source': 'document_facts',
+                             'rank_reason': 'Подтверждено текстом документа', 'score': 0.99,
+                             'fact_search_bounded': True})
+        selected.sort(key=lambda row: any(
+            fact['role'] == plan.role or plan.role == 'date' and fact['kind'] == 'date'
+            for fact in row['document_facts']['mentions']), reverse=True)
+        return selected[:limit]
 
     # ── stats ─────────────────────────────────────────────────────────
 
@@ -2436,6 +2497,10 @@ class RAGSearcher:
             return {"ok": False, "answer": "Пустой вопрос.", "sources": [], "error": "empty_question"}
         if not self.connected:
             return {"ok": False, "answer": "Нет подключения к Qdrant.", "sources": [], "error": "not_connected"}
+
+        if parse_fact_query(q).role:
+            evidence = self.search_document_facts(q, limit=limit, result_filter=result_filter)
+            return answer_from_facts(q, self._apply_result_filter(evidence, result_filter))
 
         # При активном фильтре доступа берём запас кандидатов: часть отсеется,
         # и без запаса ответ строился бы по обрезанному контексту.

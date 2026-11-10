@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.pilot_ui_smoke import SRC, _browser_executable, _free_port, _prepare_contour, _wait_http
+from scripts.pilot_ui_smoke import SRC, _browser_executable, _prepare_contour, _wait_http
 
 
 def test_search_recovers_in_same_tab_after_index_becomes_available(tmp_path):
@@ -47,7 +47,18 @@ helpers._qdrant_http_ready = nice_app._qdrant_http_ready = lambda cfg: Path('ind
 helpers._warm_searcher_cache(nice_app.load_config())
 nice_app.ui.run(host='127.0.0.1', port=int(sys.argv[1]), reload=False, show=False, storage_secret='isolated-test')
 '''
-    port = _free_port()
+    # Avoid Windows dynamic-port exclusions used by Hyper-V/WSL.
+    import socket
+    port = None
+    for candidate in range(18800, 18900):
+        with socket.socket() as probe:
+            try:
+                probe.bind(('127.0.0.1', candidate))
+                port = candidate
+                break
+            except OSError:
+                continue
+    assert port is not None
     env = {**os.environ, 'PYTHONPATH': str(SRC), 'RAG_CONFIG_PATH': contour['config_path'],
            'HF_HUB_OFFLINE': '1', 'RAG_UI_SESSION_HTTPS_ONLY': '0', 'NICEGUI_STORAGE_PATH': str(tmp_path / 'nicegui'),
            'NICEGUI_SCREEN_TEST_PORT': str(port)}
@@ -67,6 +78,14 @@ nice_app.ui.run(host='127.0.0.1', port=int(sys.argv[1]), reload=False, show=Fals
                     page.get_by_label('Логин или email', exact=True).fill(contour['username'])
                     page.get_by_label('Пароль', exact=True).fill(contour['password'])
                     page.get_by_role('button', name='Войти', exact=True).click()
+                    page.get_by_role('button', name='Файлы', exact=True).click()
+                    folder = page.locator('[data-rag-context="explorer-item"][data-rag-type="folder"]', has_text='Документы').first
+                    folder.locator('[data-rag-open]').first.wait_for(state='attached')
+                    # Double-click the non-interactive row, not its existing single-click button.
+                    folder.screenshot(path=str(tmp_path / 'folder-before.png'))
+                    folder.dblclick(position={'x': 600, 'y': 20})
+                    page.get_by_role('button', name='Карточка предприятия.txt', exact=True).wait_for()
+                    page.get_by_role('button', name='Поиск', exact=True).click()
                     box = page.locator('.rag-search-box input:not([type=checkbox]):visible').first
                     box.fill('Договор')
                     page.locator('[data-rag-usage="search.submit"]:visible').click()
@@ -81,6 +100,12 @@ nice_app.ui.run(host='127.0.0.1', port=int(sys.argv[1]), reload=False, show=Fals
                     page.get_by_text('после догрузки: 1', exact=False).wait_for()
                     page.get_by_text('Договор поставки.txt', exact=False).first.wait_for()
                     assert 'slot stack' not in page.locator('body').inner_text()
+                    box.fill('Карточка предприятия')
+                    box.press('Enter')
+                    result = page.locator('.rag-result', has_text='Карточка предприятия.txt').first
+                    result.get_by_role('button', name='В Cloud Drive', exact=True).click()
+                    page.get_by_role('button', name='Карточка предприятия.txt', exact=True).wait_for()
+                    page.screenshot(path=str(tmp_path / 'explorer-location.png'), full_page=True)
                 finally:
                     browser.close()
         finally:

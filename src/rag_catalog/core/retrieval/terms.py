@@ -15,6 +15,8 @@ STOPWORDS = frozenset({"и", "или", "по", "на", "в", "во", "от", "д
 _VOWELS = "аеиоуыьъйяю"
 
 TERM_ALIASES: Dict[str, List[str]] = {
+    "tsk": ["тск"],
+    "тск": ["tsk"],
     "touareg": ["туарег", "volkswagen", "фольксваген", "vw"],
     "туарег": ["touareg", "volkswagen", "фольксваген", "vw"],
     "volkswagen": ["фольксваген", "vw"],

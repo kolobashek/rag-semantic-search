@@ -22,6 +22,7 @@ from urllib.parse import quote, urlparse
 from fastapi import Request
 from nicegui import app, background_tasks, events, run, ui
 
+from rag_catalog.core.document_facts import answer_from_facts, facts_for_result, matches_query, parse_fact_query
 from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.roles import can_open_screen, can_use_catalog, user_roles
@@ -53,6 +54,7 @@ from .helpers import (
     _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
+    _cd_registry_node_for_search_item,
     _cd_search_by_name,
     _clean_text,
     _cloud_query_set,
@@ -623,7 +625,7 @@ def _build_page(
         _save_ui_settings(state)
         _log_app_event(state, "ui", "theme_toggle", details={"theme": state.theme})
 
-    def set_screen(screen: str, *, close_drawer: bool = False) -> None:
+    def set_screen(screen: str, *, close_drawer: bool = False, restore: bool = True) -> None:
         if screen == "cloud":
             screen = "explorer"
         ui.run_javascript(
@@ -644,7 +646,8 @@ def _build_page(
             except Exception:
                 pass
         state.screen = screen
-        restore_screen_state(state, screen)
+        if restore:
+            restore_screen_state(state, screen)
         ui.run_javascript(f"history.pushState(null, '', '/{screen}')")
         _log_app_event(state, "navigation", "open_screen", details={"screen": screen})
         render()
@@ -666,12 +669,20 @@ def _build_page(
     def go_explorer(path: str) -> None:
         value = str(path or "").strip()
         if value:
-            p = Path(value)
+            service = _cd_get_service(state.cfg)
+            if service is not None:
+                node = _cd_registry_node_for_search_item(state.cfg, service, {"full_path": value})
+                if node is None:
+                    ui.notify("Местоположение документа в облаке не найдено.", type="warning")
+                    return
+                go_cloud_explorer_path(node.path, is_folder=not hasattr(node, "folder_id"))
+                return
+            p = Path(value.split("::", 1)[0])
             state.explorer_path = str(p.parent if p.is_file() else p)
             state.explorer_page = 0
             state.explorer_visible_count = 40
             mark_screen_dirty("explorer")
-        set_screen("explorer")
+        set_screen("explorer", restore=False)
 
     def go_cloud_explorer_path(cloud_item_path: str, *, is_folder: bool = False) -> None:
         item_path = str(cloud_item_path or "").strip().strip("/")
@@ -684,7 +695,9 @@ def _build_page(
         state.explorer_page = 0
         state.explorer_visible_count = 40
         mark_screen_dirty("explorer")
-        set_screen("explorer")
+        state.explorer_selected_paths = []
+        state.explorer_filter = ""
+        set_screen("explorer", restore=False)
 
     def apply_header_index_status(telemetry: Optional[Dict[str, Any]] = None) -> None:
         header_status_chip.set_visibility(False)
@@ -980,7 +993,9 @@ def _build_page(
                 return
             render_safely()
             has_numeric_exact = _has_confident_numeric_exact_match(query, quick_results)
-            if has_numeric_exact:
+            fact_intent = parse_fact_query(query)
+            needs_fact_evidence = bool(fact_intent.role or fact_intent.dates or fact_intent.parties)
+            if has_numeric_exact and not needs_fact_evidence:
                 state.search_lazy_loading = False
                 exact_item = quick_results[0]
                 fname = str(exact_item.get("filename") or exact_item.get("path") or "файле")
@@ -1017,7 +1032,7 @@ def _build_page(
                     "duration_ms": round((_time.perf_counter() - quick_started) * 1000),
                 },
             )
-            if exact_count > 0 and not state.content_only:
+            if exact_count > 0 and not state.content_only and not needs_fact_evidence:
                 state.search_lazy_loading = False
                 _persist_search_recovery(state, "exact_name_results")
                 _log_app_event(
@@ -1168,6 +1183,9 @@ def _build_page(
             if state.search_request_id != request_id:
                 return
             merged = _merge_search_results(state.results, full_results, limit=state.limit)
+            fact_plan = parse_fact_query(query)
+            if fact_plan.dates and not state.title_only:
+                merged = [row for row in merged if matches_query(fact_plan, row, facts_for_result(row))]
             state.results = _apply_query_operators(merged, parsed_query)
             cloud_semantic_count = sum(
                 1
@@ -1180,6 +1198,8 @@ def _build_page(
             )
             if cloud_semantic_count:
                 state.search_stats_hint = f"{state.search_stats_hint} · Cloud Drive: {cloud_semantic_count}"
+            if any(row.get('fact_search_bounded') for row in state.results):
+                state.search_stats_hint += " · факты: проверены найденные фрагменты, не полный реестр"
             _persist_search_recovery(state, "full_results")
             _log_app_event(
                 state,
@@ -1261,8 +1281,18 @@ def _build_page(
 
         # RAG Q&A — только после полной догрузки
         rag_answer_changed = False
+        fact_plan = parse_fact_query(query)
+        if fact_plan.role and state.search_request_id == request_id:
+            allowed = await run.io_bound(_cd_acl_result_filter(state.cfg, state.current_user), list(state.results))
+            ans = answer_from_facts(query, allowed)
+            if state.search_request_id == request_id:
+                state.rag_answer_text = str(ans.get('answer') or '')
+                state.rag_answer_ok = bool(ans.get('ok'))
+                state.rag_answer_sources = list(ans.get('sources') or [])
+                rag_answer_changed = True
         if (
             llm_enabled
+            and not fact_plan.role
             and llm_available
             and state.results
             and not state.search_error
@@ -1713,8 +1743,10 @@ def _build_page(
                 )
                 ui.label(str(v)).style("font-family:var(--rag-font-mono);font-size:12px;word-break:break-all")
 
-    def _render_cloud_preview_body(cloud_path: str, name: str, mime_type: str) -> None:
+    def _render_cloud_preview_body(cloud_path: str, name: str, mime_type: str, member: str = "") -> None:
         preview_url = f"/api/cloud-drive/preview?path={quote(cloud_path, safe='')}"
+        if member:
+            preview_url += f"&member={quote(member, safe='')}"
         ext = Path(name or cloud_path).suffix.lower()
         mime = str(mime_type or "").lower()
         if ext == ".pdf" or mime == "application/pdf":
@@ -1895,7 +1927,7 @@ def _build_page(
         preview_drawer.classes(remove="closed")
         preview_drawer_scrim.classes(remove="closed")
 
-    def open_cloud_file_viewer(file_value: Any) -> None:
+    def open_cloud_file_viewer(file_value: Any, *, member: str = "") -> None:
         file_info: Dict[str, Any] = {}
         if isinstance(file_value, str):
             cloud_path = str(file_value or "").strip()
@@ -1927,12 +1959,17 @@ def _build_page(
                 "source_path": str(getattr(file_value, "source_path", "") or ""),
             }
         cloud_path = str(file_info.get("path") or "").strip()
+        if member:
+            file_info.update(name=member.replace("\\", "/").rsplit("/", 1)[-1], mime_type="", size_bytes=None)
         name = str(file_info.get("name") or cloud_path.rsplit("/", 1)[-1] or "Файл")
         if not cloud_path:
             ui.notify("Файл Cloud Drive недоступен для просмотра.", type="warning")
             return
         preview_url = f"/api/cloud-drive/preview?path={quote(cloud_path, safe='')}"
         download_url = f"/api/cloud-drive/download?path={quote(cloud_path, safe='')}"
+        if member:
+            preview_url += f"&member={quote(member, safe='')}"
+            download_url += f"&member={quote(member, safe='')}"
 
         preview_drawer.clear()
         active_tab: List[str] = ["preview"]
@@ -1956,7 +1993,7 @@ def _build_page(
                 with body_el:
                     try:
                         if active_tab[0] == "preview":
-                            _render_cloud_preview_body(cloud_path, name, str(file_info.get("mime_type") or ""))
+                            _render_cloud_preview_body(cloud_path, name, str(file_info.get("mime_type") or ""), member)
                         elif active_tab[0] == "meta":
                             _render_cloud_meta_body(file_info)
                         else:
@@ -2081,22 +2118,12 @@ def _build_page(
         cloud_file_id = str(result.get("cloud_file_id") or "")
         cloud_version_id = str(result.get("cloud_version_id") or "")
         cloud_path = str(result.get("cloud_path") or "")
+        archive_member = str(result.get("archive_member") or (full_path.split("::", 1)[1] if "::" in full_path else ""))
         is_cloud_result = bool(cloud_file_id or cloud_path)
         cloud_job = (cloud_jobs or {}).get(cloud_file_id) if cloud_file_id else None
 
         def go_cloud_explorer(cloud_item_path: str) -> None:
-            item_path = str(cloud_item_path or "").strip().strip("/")
-            if not item_path:
-                state.explorer_cd_path = ""
-            elif kind == "Каталог":
-                state.explorer_cd_path = item_path
-            else:
-                state.explorer_cd_path = item_path.rsplit("/", 1)[0] if "/" in item_path else ""
-            state.explorer_page = 0
-            state.explorer_visible_count = 40
-            state.screen = "explorer"
-            ui.run_javascript("history.pushState(null, '', '/explorer')")
-            render()
+            go_cloud_explorer_path(cloud_item_path, is_folder=kind == "Каталог")
 
         def render_cloud_job_badge() -> None:
             if not cloud_job:
@@ -2173,12 +2200,12 @@ def _build_page(
                 else:
                     go_explorer(full_path)
                 return
-            if p and p.exists() and p.is_file():
+            if is_cloud_result and cloud_path:
+                track_result_use("open_cloud_preview")
+                open_cloud_file_viewer(cloud_path, member=archive_member)
+            elif p and p.exists() and p.is_file():
                 track_result_use("open_viewer")
                 open_file_viewer(p)
-            elif is_cloud_result and cloud_path:
-                track_result_use("open_cloud_preview")
-                open_cloud_file_viewer(cloud_path)
 
         result_key = full_path or path or name
         llm_on = bool(state.cfg.get("llm_enabled"))
@@ -2235,7 +2262,7 @@ def _build_page(
                         if kind != "Каталог":
                             def _cd_preview(pth: str = cloud_path) -> None:
                                 track_result_use("cloud_preview")
-                                open_cloud_file_viewer(pth)
+                                open_cloud_file_viewer(pth, member=archive_member)
 
                             ui.button(
                                 "Просмотр",
@@ -2243,6 +2270,8 @@ def _build_page(
                                 on_click=_cd_preview,
                             ).props("outline dense no-caps")
                             _dl_url = f"/api/cloud-drive/download?path={quote(cloud_path, safe='')}"
+                            if archive_member:
+                                _dl_url += f"&member={quote(archive_member, safe='')}"
                             def _cd_download(url: str = _dl_url, pth: str = cloud_path) -> None:
                                 track_result_use("cloud_download")
                                 ui.navigate.to(url, new_tab=True)
@@ -2260,7 +2289,7 @@ def _build_page(
                                 go_explorer(pth)
 
                             ui.button("В проводник приложения", icon="folder", on_click=open_in_app_explorer).props("outline dense")
-                            if p and p.exists() and p.is_file():
+                            if not is_cloud_result and p and p.exists() and p.is_file():
                                 def download_local_file(pth: Path = p) -> None:
                                     track_result_use("local_download")
                                     ui.download(pth, filename=pth.name)
@@ -2497,13 +2526,14 @@ def _build_page(
                     with ui.element("div").classes("rag-ai-badge"):
                         ui.icon("auto_awesome", size="14px")
                     with ui.column().classes("gap-0 min-w-0 flex-1"):
-                        ui.label("AI ответ").classes("rag-ai-title")
+                        fact_answer = bool(parse_fact_query(state.searched_query).role)
+                        ui.label("По документам" if fact_answer else "AI ответ").classes("rag-ai-title")
                         _rag_model = str(state.cfg.get("llm_rag_model") or "qwen3:8b")
                         _src_count = len(state.rag_answer_sources or [])
                         if state.rag_answer_loading:
                             _ai_meta = f"{_rag_model} · думает…"
                         else:
-                            _ai_meta = f"{_rag_model} · {_src_count} источник{'ов' if _src_count != 1 else ''}"
+                            _ai_meta = f"{'Цитаты' if fact_answer else _rag_model} · {_src_count} источник{'ов' if _src_count != 1 else ''}"
                         ui.label(_ai_meta).classes("rag-ai-meta")
                     if not state.rag_answer_ok and not state.rag_answer_loading:
                         ui.label("⚠ может быть неточным").classes("rag-chip").style("color:#b45309;background:rgba(251,191,36,.15)")
@@ -2525,11 +2555,15 @@ def _build_page(
                                 _fpath = Path(str(_src.get("full_path") or ""))
                                 _page = _src.get("page")
                                 _prov = f" · стр.{_page}" if _page is not None else ""
-                                _chip = ui.label(_fname + _prov).classes("rag-chip rag-chip-active").style(
+                                _source_label = f"[{_src['source_id']}] " if _src.get('source_id') else ""
+                                _chip = ui.label(_source_label + _fname + _prov).classes("rag-chip rag-chip-active").style(
                                     "max-width:240px;overflow:hidden;text-overflow:ellipsis;cursor:pointer"
                                 )
-                                _chip.tooltip(str(_src.get("full_path") or _fname))
-                                if _fpath.exists() and _fpath.is_file():
+                                _chip.tooltip(str(_src.get("excerpt") or _src.get("full_path") or _fname))
+                                if _src.get('cloud_path'):
+                                    _member = str(_src.get('archive_member') or (str(_fpath).split('::', 1)[1] if '::' in str(_fpath) else ''))
+                                    _chip.on('click', lambda path=str(_src['cloud_path']), member=_member: open_cloud_file_viewer(path, member=member))
+                                elif str(_fpath) not in {'', '.'}:
                                     _chip.on("click", lambda p=_fpath: open_file_viewer(p))
                             if len(state.rag_answer_sources) > 6:
                                 ui.label(f"+{len(state.rag_answer_sources) - 6} ещё").classes("rag-chip")
@@ -3297,6 +3331,10 @@ def _build_page(
         dark_mode.set_value(state.theme == "dark")
         touch_activity()
 
+        # Login/password screens are outside the per-screen cache. Remove their
+        # fixed overlay before creating the first authenticated screen.
+        if not screen_containers:
+            content.clear()
         target = screen_container(current_screen)
         for screen_name, container in screen_containers.items():
             container.set_visibility(screen_name == current_screen)
