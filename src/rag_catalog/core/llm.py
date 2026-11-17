@@ -27,6 +27,8 @@ DEFAULT_EXPAND_MODEL = "phi3:mini"
 DEFAULT_RAG_MODEL = "qwen3:8b"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 NOMIC_VECTOR_SIZE = 768
+DEFAULT_CONTEXT_LENGTH = 4096
+DEFAULT_KEEP_ALIVE = "1m"
 
 
 # ─────────────────────────── HTTP helper ───────────────────────────────────
@@ -64,6 +66,8 @@ def expand_query(
     model: str = DEFAULT_EXPAND_MODEL,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     timeout: int = 15,
+    context_length: int = DEFAULT_CONTEXT_LENGTH,
+    keep_alive: str = DEFAULT_KEEP_ALIVE,
 ) -> str:
     """
     Расширить поисковый запрос через LLM.
@@ -77,7 +81,8 @@ def expand_query(
         t0 = time.perf_counter()
         result = _ollama_post(
             f"{ollama_url}/api/generate",
-            {"model": model, "prompt": prompt, "stream": False, "options": {"temperature": 0.2, "num_predict": 120}},
+            {"model": model, "prompt": prompt, "stream": False, "keep_alive": keep_alive,
+             "options": {"temperature": 0.2, "num_predict": 120, "num_ctx": context_length}},
             timeout=timeout,
         )
         _lines = str(result.get("response") or "").strip().splitlines()
@@ -119,6 +124,8 @@ def rag_answer(
     top_k: int = 5,
     max_chars_per_chunk: int = 800,
     timeout: int = 90,
+    context_length: int = DEFAULT_CONTEXT_LENGTH,
+    keep_alive: str = DEFAULT_KEEP_ALIVE,
 ) -> str:
     """
     Сгенерировать ответ на вопрос по найденным документам.
@@ -172,7 +179,8 @@ def rag_answer(
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0.3, "num_predict": 512},
+                "keep_alive": keep_alive,
+                "options": {"temperature": 0.3, "num_predict": 512, "num_ctx": context_length},
             },
             timeout=timeout,
         )

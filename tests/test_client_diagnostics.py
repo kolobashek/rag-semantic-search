@@ -1,4 +1,7 @@
 import time
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi import FastAPI
@@ -165,6 +168,33 @@ def test_heartbeat_reports_registration_failure_without_new_registration(diagnos
     assert client.post('/heartbeat', params=params, headers=tokens['veronika'], content=b'x' * 8193).status_code == 413
     for bad in [[], {}, {**payload, 'state': []}, {**payload, 'phase': 'fake'}, {**payload, 'state': 'fake'}]:
         assert client.post('/heartbeat', params=params, headers=tokens['veronika'], json=bad).status_code == 400
+
+
+def test_sqlite_writer_lock_does_not_stall_ping(diagnostic_api, monkeypatch):
+    client, tokens, params, cfg = diagnostic_api
+    client.app.get('/ping')(api.api_ping)
+    store = ClientDiagnosticsDB.from_config(cfg)
+    entered = threading.Event()
+    original = ClientDiagnosticsDB.from_config
+
+    def signal(cfg):
+        entered.set()
+        return original(cfg)
+
+    monkeypatch.setattr(ClientDiagnosticsDB, 'from_config', signal)
+    with sqlite3.connect(store.path) as lock, ThreadPoolExecutor(max_workers=1) as pool:
+        lock.execute('BEGIN IMMEDIATE')
+        pending = pool.submit(client.post, '/heartbeat', params=params, headers=tokens['veronika'],
+                              json=dict(app_version='test', phase='running', state='UpToDate', last_error=''))
+        try:
+            assert entered.wait(3)
+            start = time.perf_counter()
+            assert client.get('/ping').json()['ok'] is True
+            assert time.perf_counter() - start < 1
+            assert not pending.done()
+        finally:
+            lock.rollback()
+        assert pending.result(timeout=5).status_code == 200
 
 
 def test_recovery_requires_admin_and_exact_ack(diagnostic_api):

@@ -27,6 +27,7 @@ from fastapi import File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from nicegui import app
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from rag_catalog.core.client_diagnostics import MAX_LOG_BYTES, ClientDiagnosticsDB
 from rag_catalog.core.client_logs import MAX_EVENTS_PER_BATCH, ingest_client_events
@@ -40,10 +41,12 @@ from . import helpers as _helpers
 from .account_activation import register_activation_routes
 from .cloud_download import storage_download_response
 from .helpers import _cd_registry_acl_allows, _cd_registry_acl_filter, _resolve_catalog_file
+from .loop_health import register_loop_watchdog
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
 
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+register_loop_watchdog(app)
 _RFC2047_FILENAME_PATTERN = re.compile(r"=\?[^?\s]+\?[bBqQ]\?[^?]*\?=")
 
 
@@ -55,10 +58,10 @@ def _cloud_drive_max_upload_bytes(cfg: Dict[str, Any]) -> int:
     return max(1, min(max_mb, 102_400)) * 1024 * 1024
 
 
-async def _write_bounded_upload(file: UploadFile, target: Any, *, max_bytes: int) -> int:
+def _write_bounded_upload(file: UploadFile, target: Any, *, max_bytes: int) -> int:
     written = 0
     while True:
-        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        chunk = file.file.read(_UPLOAD_CHUNK_BYTES)
         if not chunk:
             return written
         written += len(chunk)
@@ -356,7 +359,7 @@ def api_device_code(request: Request) -> Dict[str, Any]:
 
 
 @app.get("/api/ping")
-def api_ping() -> Dict[str, Any]:
+async def api_ping() -> Dict[str, Any]:
     """Health check — no auth required. Used by sync clients to test connectivity."""
     return {"ok": True, "service": "rag-catalog"}
 
@@ -384,14 +387,23 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
         payload = {}
     if not isinstance(payload, dict):
         payload = {"payload": payload}
+    return await run_in_threadpool(
+        _store_ui_event, payload,
+        client_host=request.client.host if request.client else "",
+        user_agent=str(request.headers.get("user-agent") or "")[:500],
+        referer=str(request.headers.get("referer") or "")[:1000],
+    )
+
+
+def _store_ui_event(payload: dict, *, client_host: str, user_agent: str, referer: str) -> Dict[str, Any]:
     cfg = load_config()
     action = str(payload.get("action") or "client_event").strip()[:80] or "client_event"
     details = _compact_ui_event_value(payload)
     if not isinstance(details, dict):
         details = {"payload": details}
-    details["client_host"] = request.client.host if request.client else ""
-    details["user_agent"] = str(request.headers.get("user-agent") or "")[:500]
-    details["referer"] = str(request.headers.get("referer") or "")[:1000]
+    details["client_host"] = client_host
+    details["user_agent"] = user_agent
+    details["referer"] = referer
     username = ""
     try:
         token = str(app.storage.user.get("auth_token") or "").strip()
@@ -433,7 +445,7 @@ async def api_client_logs(request: Request, authorization: AuthHeader = "") -> D
     записать событие от чужого имени.
     """
     cfg = load_config()
-    user = _require_cloud_drive_api_user(cfg, authorization=authorization)
+    user = await run_in_threadpool(_require_cloud_drive_api_user, cfg, authorization=authorization)
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > 1024 * 1024:
@@ -455,15 +467,18 @@ async def api_client_logs(request: Request, authorization: AuthHeader = "") -> D
             detail=f"Слишком большая пачка: максимум {MAX_EVENTS_PER_BATCH} событий за запрос.",
         )
 
-    stored = ingest_client_events(
-        TelemetryDB(str(_telemetry_db_path(cfg))),
-        username=str(user.get("username") or ""),
-        client=str(payload.get("client") or ""),
-        device_id=str(payload.get("device_id") or ""),
-        events=events,
-        client_host=request.client.host if request.client else "",
-        app_version=str(payload.get("app_version") or ""),
-    )
+    def store_events():
+        return ingest_client_events(
+            TelemetryDB(str(_telemetry_db_path(cfg))),
+            username=str(user.get("username") or ""),
+            client=str(payload.get("client") or ""),
+            device_id=str(payload.get("device_id") or ""),
+            events=events,
+            client_host=request.client.host if request.client else "",
+            app_version=str(payload.get("app_version") or ""),
+        )
+
+    stored = await run_in_threadpool(store_events)
     return {"ok": True, "stored": stored, "received": len(events)}
 
 
@@ -488,7 +503,7 @@ def api_client_diagnostics_pending(client_id: str, authorization: AuthHeader = '
 @app.post('/api/cloud-drive/sync/diagnostics/heartbeat')
 async def api_client_diagnostics_heartbeat(request: Request, client_id: str, authorization: AuthHeader = ''):
     cfg = load_config()
-    _diagnostics_access(cfg, authorization, client_id, admin=False)
+    await run_in_threadpool(_diagnostics_access, cfg, authorization, client_id, admin=False)
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > 8192:
@@ -508,10 +523,13 @@ async def api_client_diagnostics_heartbeat(request: Request, client_id: str, aut
     root_key = payload.get('root_key', '')
     if not isinstance(root_key, str) or (root_key and not re.fullmatch(r'[a-f0-9]{32}', root_key)):
         raise HTTPException(400, 'Invalid root key')
-    store = ClientDiagnosticsDB.from_config(cfg)
-    store.heartbeat(client_id, **{k: payload[k] for k in fields})
-    return {'request_id': store.read(client_id)['request_id'],
-            'recovery_request_id': store.poll_recovery(client_id, root_key)}
+    def record_heartbeat():
+        store = ClientDiagnosticsDB.from_config(cfg)
+        store.heartbeat(client_id, **{k: payload[k] for k in fields})
+        return {'request_id': store.read(client_id)['request_id'],
+                'recovery_request_id': store.poll_recovery(client_id, root_key)}
+
+    return await run_in_threadpool(record_heartbeat)
 
 
 @app.post('/api/cloud-drive/sync/recovery/request')
@@ -552,7 +570,7 @@ def api_client_diagnostics_request(client_id: str, authorization: AuthHeader = '
 @app.post('/api/cloud-drive/sync/diagnostics')
 async def api_client_diagnostics_upload(request: Request, client_id: str, authorization: AuthHeader = ''):
     cfg = load_config()
-    _diagnostics_access(cfg, authorization, client_id, admin=False)
+    await run_in_threadpool(_diagnostics_access, cfg, authorization, client_id, admin=False)
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > 1024 * 1024:
@@ -566,10 +584,13 @@ async def api_client_diagnostics_upload(request: Request, client_id: str, author
         raise HTTPException(400, 'Expected log_text string')
     if len(payload['log_text'].encode('utf-8')) > MAX_LOG_BYTES:
         raise HTTPException(413, 'Log exceeds 256 KiB')
-    ClientDiagnosticsDB.from_config(cfg).submit(
-        client_id, payload['log_text'], request_id=str(payload.get('request_id') or '')[:64],
-        app_version=str(payload.get('app_version') or '')[:40],
-    )
+    def store_log():
+        ClientDiagnosticsDB.from_config(cfg).submit(
+            client_id, payload['log_text'], request_id=str(payload.get('request_id') or '')[:64],
+            app_version=str(payload.get('app_version') or '')[:40],
+        )
+
+    await run_in_threadpool(store_log)
     return {'ok': True}
 
 
@@ -2387,6 +2408,11 @@ def _archive_member_response(service, descriptor: dict, member: str, *, inline: 
 async def api_cloud_drive_upload(
     parent_path: str = "", file: UploadFile = File(...), authorization: AuthHeader = ""
 ) -> Dict[str, Any]:
+    # Keep copying, storage commits and cleanup in one worker, including on cancellation.
+    return await run_in_threadpool(_store_cloud_drive_upload, parent_path, file, authorization)
+
+
+def _store_cloud_drive_upload(parent_path: str, file: UploadFile, authorization: str) -> Dict[str, Any]:
     filename = _decode_upload_filename(str(file.filename or "")) if file is not None else ""
     if not filename:
         raise HTTPException(status_code=400, detail="Не передан файл для загрузки.")
@@ -2412,7 +2438,7 @@ async def api_cloud_drive_upload(
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
-            await _write_bounded_upload(file, tmp, max_bytes=max_upload_bytes)
+            _write_bounded_upload(file, tmp, max_bytes=max_upload_bytes)
         require_upload_access()
         result = service.upload_file(
             parent_path=parent_path,
