@@ -534,6 +534,31 @@ def test_batch_acl_queries_use_covering_indexes(tmp_path: Path) -> None:
             assert any('USING COVERING INDEX' in row['detail'] for row in plan), [dict(r) for r in plan]
 
 
+def test_changes_pages_use_covering_indexes(tmp_path: Path, monkeypatch) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    root = registry.ensure_root_folder(root_name='Root', source_path='')
+    registry.upsert_file(folder_id=root.id, path='report.txt', name='report.txt', storage_key='report',
+                         mime_type='text/plain', size_bytes=1)
+    queries = []
+    connect = registry._connect
+
+    def traced_connect():
+        conn = connect()
+        conn.set_trace_callback(queries.append)
+        return conn
+
+    monkeypatch.setattr(registry, '_connect', traced_connect)
+    page = registry.list_changes(limit=1)
+    registry.list_changes(since=registry.change_cursor(page[-1]), limit=1)
+    selects = [q for q in queries if 'ORDER BY updated_at, path, id LIMIT' in q]
+    assert len(selects) == 4
+    with connect() as conn:
+        for query in selects:
+            plan = conn.execute('EXPLAIN QUERY PLAN ' + query).fetchall()
+            assert any('USING COVERING INDEX' in row['detail'] for row in plan), [dict(r) for r in plan]
+            assert not any('TEMP B-TREE' in row['detail'] for row in plan)
+
+
 def test_registry_user_home_folder_is_restored_after_rename(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     home = registry.ensure_user_home_folder(username='Alice')

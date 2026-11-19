@@ -334,6 +334,11 @@ class CloudDriveRegistryDB:
                         ON cloud_folders(path, id) WHERE deleted_at='';
                     CREATE INDEX IF NOT EXISTS idx_cloud_folders_changes ON cloud_folders(updated_at, path, id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_changes ON cloud_files(updated_at, path, id);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_folders_changes_cover
+                        ON cloud_folders(updated_at, path, id, name, created_at, deleted_at);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_files_changes_cover
+                        ON cloud_files(updated_at, path, id, name, created_at, deleted_at,
+                                       current_version_id, mime_type, size_bytes, checksum);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_subject ON cloud_permissions(subject_type, subject_id, access_level);
                     CREATE INDEX IF NOT EXISTS idx_cloud_permissions_resource ON cloud_permissions(resource_type, resource_id);
