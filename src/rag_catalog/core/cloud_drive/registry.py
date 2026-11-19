@@ -328,6 +328,10 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_source_path_active
                         ON cloud_files(source_path) WHERE deleted_at='';
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_storage_key ON cloud_files(storage_key);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_files_acl_id_cover ON cloud_files(id, folder_id, path);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_files_acl_path_cover ON cloud_files(path, id, folder_id);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_folders_acl_path_cover
+                        ON cloud_folders(path, id) WHERE deleted_at='';
                     CREATE INDEX IF NOT EXISTS idx_cloud_folders_changes ON cloud_folders(updated_at, path, id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_files_changes ON cloud_files(updated_at, path, id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_versions_file ON cloud_file_versions(file_id, created_at);
@@ -1704,10 +1708,12 @@ class CloudDriveRegistryDB:
             ).fetchall()
 
             folder_ids_by_path: Dict[str, str] = {}
+            # SQLite prefers the narrower UNIQUE indexes otherwise, causing
+            # thousands of random table-page reads for each sync page.
             for batch in _chunks(sorted(path_prefixes)):
                 placeholders = ",".join("?" for _ in batch)
                 rows = conn.execute(
-                    f"SELECT id, path FROM cloud_folders WHERE deleted_at='' AND path IN ({placeholders})",
+                    f"SELECT id, path FROM cloud_folders INDEXED BY idx_cloud_folders_acl_path_cover WHERE deleted_at='' AND path IN ({placeholders})",
                     batch,
                 ).fetchall()
                 folder_ids_by_path.update({self._normalize_path(str(row["path"] or "")): str(row["id"]) for row in rows})
@@ -1716,28 +1722,33 @@ class CloudDriveRegistryDB:
             for batch in _chunks(sorted(clean_file_ids)):
                 placeholders = ",".join("?" for _ in batch)
                 rows = conn.execute(
-                    f"SELECT id, folder_id, path FROM cloud_files WHERE id IN ({placeholders})",
+                    f"SELECT id, folder_id, path FROM cloud_files INDEXED BY idx_cloud_files_acl_id_cover WHERE id IN ({placeholders})",
                     batch,
                 ).fetchall()
                 file_rows_by_id.update({str(row["id"]): row for row in rows})
 
-            node_paths = sorted({path for path, _file_id in clean_nodes if path})
-            file_rows_by_path: Dict[str, sqlite3.Row] = {}
-            for batch in _chunks(node_paths):
+            node_paths = {path for path, _file_id in clean_nodes if path}
+            file_rows_by_path: Dict[str, sqlite3.Row] = {
+                self._normalize_path(str(row['path'] or '')): row
+                for row in file_rows_by_id.values()
+            }
+            for batch in _chunks(sorted(node_paths - file_rows_by_path.keys())):
                 placeholders = ",".join("?" for _ in batch)
                 rows = conn.execute(
-                    f"SELECT id, folder_id, path FROM cloud_files WHERE path IN ({placeholders})",
+                    f"SELECT id, folder_id, path FROM cloud_files INDEXED BY idx_cloud_files_acl_path_cover WHERE path IN ({placeholders})",
                     batch,
                 ).fetchall()
                 file_rows_by_path.update({self._normalize_path(str(row["path"] or "")): row for row in rows})
 
-            known_folder_paths = set(folder_ids_by_path)
+            # Remember misses too: file paths are not folders and must not be
+            # looked up again while resolving ancestors of ID-only nodes.
+            queried_folder_paths = set(path_prefixes)
             for row in [*file_rows_by_id.values(), *file_rows_by_path.values()]:
                 _add_path_prefixes(self._normalize_path(str(row["path"] or "")))
-            for batch in _chunks(sorted(path_prefixes - known_folder_paths)):
+            for batch in _chunks(sorted(path_prefixes - queried_folder_paths)):
                 placeholders = ",".join("?" for _ in batch)
                 rows = conn.execute(
-                    f"SELECT id, path FROM cloud_folders WHERE deleted_at='' AND path IN ({placeholders})",
+                    f"SELECT id, path FROM cloud_folders INDEXED BY idx_cloud_folders_acl_path_cover WHERE deleted_at='' AND path IN ({placeholders})",
                     batch,
                 ).fetchall()
                 folder_ids_by_path.update({self._normalize_path(str(row["path"] or "")): str(row["id"]) for row in rows})

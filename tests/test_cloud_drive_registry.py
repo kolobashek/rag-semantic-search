@@ -491,6 +491,49 @@ def test_batch_folder_acl_uses_only_actual_ancestors(tmp_path: Path) -> None:
     assert [decisions[(path, '')] for path in paths] == [True, True, False, False]
 
 
+def test_batch_acl_avoids_duplicate_file_and_missing_folder_reads(tmp_path: Path, monkeypatch) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    root = registry.ensure_root_folder(root_name='Root', source_path='')
+    folder = registry.upsert_folder(path='Team', name='Team', parent_id=root.id, depth=1)
+    item = registry.upsert_file(folder_id=folder.id, path='Team/report.txt', name='report.txt',
+                                storage_key='report', mime_type='text/plain', size_bytes=1)
+    grant = registry.grant_permission(subject_type='role', subject_id='user', resource_type='folder',
+                              resource_id=folder.id, access_level='viewer')
+    queries = []
+    connect = registry._connect
+
+    def traced_connect():
+        conn = connect()
+        conn.set_trace_callback(queries.append)
+        return conn
+
+    monkeypatch.setattr(registry, '_connect', traced_connect)
+    node = (item.path, item.id)
+    assert registry.user_access_map(username='alice', role='user', nodes=[node])[node]
+    file_reads = [q for q in queries if 'SELECT id, folder_id, path FROM cloud_files' in q]
+    folder_reads = [q for q in queries if 'SELECT id, path FROM cloud_folders' in q]
+    assert len(file_reads) == 1
+    assert len(folder_reads) == 1
+
+    # Path-only and ID-only callers still resolve file grants and ancestors.
+    for node in [(item.path, ''), ('', item.id)]:
+        assert registry.user_access_map(username='alice', role='user', nodes=[node])[node]
+    registry.revoke_permission(grant['id'])
+    assert not registry.user_access_map(username='alice', role='user', nodes=[node])[node]
+
+
+def test_batch_acl_queries_use_covering_indexes(tmp_path: Path) -> None:
+    registry = CloudDriveRegistryDB(str(tmp_path / 'registry.db'))
+    with registry._connect() as conn:
+        for query in [
+            "SELECT id, folder_id, path FROM cloud_files INDEXED BY idx_cloud_files_acl_id_cover WHERE id IN (?, ?)",
+            "SELECT id, folder_id, path FROM cloud_files INDEXED BY idx_cloud_files_acl_path_cover WHERE path IN (?, ?)",
+            "SELECT id, path FROM cloud_folders INDEXED BY idx_cloud_folders_acl_path_cover WHERE deleted_at='' AND path IN (?, ?)",
+        ]:
+            plan = conn.execute('EXPLAIN QUERY PLAN ' + query, ('a', 'b')).fetchall()
+            assert any('USING COVERING INDEX' in row['detail'] for row in plan), [dict(r) for r in plan]
+
+
 def test_registry_user_home_folder_is_restored_after_rename(tmp_path: Path) -> None:
     registry = CloudDriveRegistryDB(str(tmp_path / 'cloud_drive.db'))
     home = registry.ensure_user_home_folder(username='Alice')
