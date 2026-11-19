@@ -121,7 +121,11 @@ def test_activation_preserves_invited_roles_and_resets_existing_binding(auth):
     assert auth.create_account_activation(created_by="worker", **options)["reason"] == "not_admin"
     invite = auth.create_account_activation(created_by="admin", **options)
     assert invite["ok"] and auth.get_user(username="new_driver")["status"] == "pending"
-    assert auth.activate_account(token=invite["token"], new_password="new-fixture-password")["ok"]
+    replacement = auth.create_account_activation(username="new_driver", display_name="", created_by="admin",
+                                                 renew_pending=True, roles=["admin"])
+    assert not auth.activate_account(token=invite["token"], new_password="wrong-fixture-password")["ok"]
+    assert auth.activate_account(token=replacement["token"], new_password="new-fixture-password")["ok"]
+    assert auth.create_account_activation(created_by="admin", renew_pending=True, **options)["reason"] == "not_pending"
     assert link(auth, "new_driver", 789)["ok"]
     assert auth.get_user_by_max_user_id(789)["roles"] == ["dispatcher", "driver"]
     assert auth.create_account_activation(username="new_driver", display_name="Same", created_by="admin",

@@ -144,3 +144,10 @@ class CloudDriveSyncConflict:
     resolved_at: str = ""
     created_at: str = ""
     updated_at: str = ""
+
+
+def reindex_payload(path: str, storage_key: str, source_path: str, reason: str) -> dict:
+    return {
+        'path': path, 'storage_key': storage_key, 'source_path': source_path, 'reason': reason,
+        'progress': {'status': 'pending', 'action': 'reindex', 'path': path, 'reason': reason},
+    }

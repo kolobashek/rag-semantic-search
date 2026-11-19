@@ -10,6 +10,7 @@ from pathlib import Path
 from nicegui import run, ui
 
 from rag_catalog.core.roles import can_manage_shifts
+from rag_catalog.core.shift_attachments import ShiftAttachments
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
 
 from .state import PageState, _get_auth_db, _log_app_event
@@ -32,6 +33,7 @@ def render_work_shifts(state: PageState) -> None:
         allowed = {
             "edit": status is not None, "submitted": admin and status == "draft", "delete": admin and status is not None,
             "approved": admin and status in {"draft", "submitted"}, "history": status is not None,
+            "attachments": status is not None,
             "draft": admin and status in {"submitted", "approved"},
         }
         for key, button in action_buttons.items():
@@ -207,6 +209,34 @@ def render_work_shifts(state: PageState) -> None:
         except Exception as exc:
             error(exc)
 
+    async def attachments():
+        row = selected()
+        if row is None or journal is None:
+            return
+        try:
+            store = await run.io_bound(ShiftAttachments, journal)
+            items = await call(store.list, row["id"])
+            with ui.dialog() as dialog, ui.card().classes("w-full max-w-xl"):
+                ui.label(f"Путевые листы · смена №{row['id']}").classes("text-lg font-semibold")
+                if not items:
+                    ui.label("К этой смене ещё не приложили путевой лист.")
+
+                def download_action(item):
+                    async def download():
+                        try:
+                            file = await call(store.read, row["id"], item["id"])
+                            ui.download(file["content"], file["filename"], media_type="application/octet-stream")
+                        except Exception as exc:
+                            error(exc)
+                    return download
+
+                for item in items:
+                    ui.button(item["filename"], icon="download", on_click=download_action(item)).props("flat no-caps")
+                ui.button("Закрыть", on_click=dialog.close).props("flat")
+            dialog.open()
+        except Exception as exc:
+            error(exc)
+
     async def export():
         if journal is None:
             return
@@ -256,6 +286,7 @@ def render_work_shifts(state: PageState) -> None:
                 action_buttons["approved"] = ui.button("Подтвердить", icon="check", on_click=lambda: change("approved")).props("flat")
                 action_buttons["draft"] = ui.button("В черновик", icon="undo", on_click=lambda: change("draft")).props("flat")
             action_buttons["history"] = ui.button(icon="history", on_click=history).props('flat aria-label="История изменений"').tooltip("История изменений")
+            action_buttons["attachments"] = ui.button("Путевые листы", icon="attach_file", on_click=attachments).props("flat")
             if admin:
                 action_buttons["delete"] = ui.button(icon="delete", on_click=lambda: change("delete")).props('flat color=negative aria-label="Удалить смену"').tooltip("Удалить смену")
             update_actions()

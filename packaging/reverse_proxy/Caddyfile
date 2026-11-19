@@ -6,7 +6,10 @@
 			roll_keep 4
 			roll_keep_for 336h
 		}
-		format json
+		format filter {
+			wrap json
+			request>headers>X-Max-Bot-Api-Secret delete
+		}
 		level ERROR
 	}
 }
@@ -33,7 +36,10 @@ cloud.tsk-nsk.ru {
 			roll_keep 10
 			roll_keep_for 720h
 		}
-		format json
+		format filter {
+			wrap json
+			request>headers>X-Max-Bot-Api-Secret delete
+		}
 	}
 }
 

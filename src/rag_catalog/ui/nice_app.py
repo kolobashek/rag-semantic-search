@@ -26,6 +26,7 @@ from rag_catalog.core.document_facts import answer_from_facts, facts_for_result,
 from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config, save_config
 from rag_catalog.core.roles import can_open_screen, can_use_catalog, user_roles
+from rag_catalog.integrations.max_settings import public_bot_link
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
 from . import explorer_view as _explorer_view
@@ -43,6 +44,7 @@ from .auth_session import (
     touch_session,
 )
 from .css import INTERACTION_JS_PATH, USAGE_JS_PATH, _install_css, _install_interaction_javascript
+from .max_auth import open_max_account, render_max_login_button
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
@@ -537,6 +539,11 @@ def _build_page(
                     color=None,
                 ).props("flat round dense aria-label='Открыть настройки'").classes("rag-header-button")
                 settings_button.tooltip("Настройки")
+                max_account_button = ui.button(
+                    "MAX", icon="chat", on_click=lambda: open_max_account(state), color=None,
+                ).props("flat dense no-caps aria-label='Аккаунт MAX'").classes("rag-header-button")
+                max_account_button.tooltip("Привязка аккаунта MAX")
+                max_account_button.set_visibility(False)
                 theme_button = ui.button(
                     icon="light_mode" if state.theme == "dark" else "dark_mode",
                     on_click=lambda: toggle_theme(),
@@ -736,6 +743,9 @@ def _build_page(
 
     def update_nav() -> None:
         is_admin = str((state.current_user or {}).get("role") or "") == "admin"
+        user = state.current_user
+        max_account_button.set_visibility(bool(user and not user.get("must_change_password")
+                                               and (public_bot_link(state.cfg) or user.get("max_user_id"))))
         shift_logout_button.set_visibility(bool(state.current_user) and not can_use_catalog(state.current_user))
         nav_items = [
             spec for spec in APP_SCREEN_SPECS
@@ -3145,6 +3155,7 @@ def _build_page(
                             tg_btn = ui.button("Войти через Telegram", icon="send", on_click=request_tg_login).props("outline").classes("w-full")
                             bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
                             tg_btn.set_visibility(bool(bot_link))
+                            render_max_login_button(state, _complete_login)
 
                         with ui.tab_panel(tab_register).classes("w-full gap-3"):
                             reg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")

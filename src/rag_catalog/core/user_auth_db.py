@@ -1400,7 +1400,7 @@ class UserAuthDB:
         row = conn.execute(
             """SELECT u.username, u.display_name, u.telegram_chat_id, u.telegram_username,
                       u.role, u.roles_json, u.must_change_password, u.status, u.verified_at,
-                      u.created_at, u.last_login_at, m.max_user_id
+                      u.created_at, u.last_login_at, m.max_user_id, m.linked_at AS max_linked_at
                FROM max_bindings m JOIN users u ON m.user_id=u.id
                WHERE m.max_user_id=? AND u.status='active' AND u.must_change_password=0""",
             (sender,),
@@ -1994,7 +1994,7 @@ class UserAuthDB:
 
     def create_account_activation(
         self, *, username: str, display_name: str, created_by: str, ttl_hours: int = 72,
-        reset_existing: bool = False, roles: Optional[list[str]] = None,
+        reset_existing: bool = False, roles: Optional[list[str]] = None, renew_pending: bool = False,
     ) -> Dict[str, Any]:
         """Issue password setup for a new staff account, or explicitly reset an existing one."""
         usr = str(username or "").strip().lower()
@@ -2003,6 +2003,8 @@ class UserAuthDB:
             raise ValueError("Use a Latin login of 3 to 64 characters")
         if not 1 <= ttl_hours <= 168:
             raise ValueError("Activation lifetime must be between 1 and 168 hours")
+        if renew_pending and reset_existing:
+            raise ValueError("Choose only one invitation operation")
         new_roles = normalize_roles(roles if roles is not None else ["user"])
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
@@ -2013,9 +2015,16 @@ class UserAuthDB:
             if admin is None or admin["status"] != "active" or "admin" not in user_roles(dict(admin)):
                 return {"ok": False, "reason": "not_admin"}
             existing = conn.execute("SELECT id,status FROM users WHERE username=?", (usr,)).fetchone()
-            if existing is not None and not reset_existing:
-                return {"ok": False, "reason": "already_exists"}
-            if reset_existing:
+            if renew_pending:
+                pending = conn.execute(
+                    """SELECT 1 FROM account_activations a JOIN users u ON u.username=a.username
+                       WHERE a.username=? AND a.used_at IS NULL AND u.status='pending'
+                         AND u.password_hash='' AND u.must_change_password=1""", (usr,),
+                ).fetchone()
+                if not pending:
+                    return {"ok": False, "reason": "not_pending"}
+                event = "account_invite_renewed"
+            elif reset_existing:
                 if existing is None:
                     return {"ok": False, "reason": "not_found"}
                 if existing["status"] not in {"active", "pending"}:
@@ -2034,7 +2043,10 @@ class UserAuthDB:
                         f"UPDATE {table} SET status='expired' WHERE username=? AND status IN ('pending','confirmed')",
                         (usr,),
                     )
+                event = "account_password_reset_link"
             else:
+                if existing is not None:
+                    return {"ok": False, "reason": "already_exists"}
                 conn.execute(
                     """INSERT INTO users
                        (username, display_name, password_hash, role, roles_json,
@@ -2043,6 +2055,7 @@ class UserAuthDB:
                     (usr, str(display_name or "").strip(), primary_role(new_roles),
                      json.dumps(new_roles), now.isoformat()),
                 )
+                event = "account_invited"
             conn.execute(
                 """INSERT INTO account_activations
                    (token_hash, username, created_by, created_at, expires_at)
@@ -2054,8 +2067,7 @@ class UserAuthDB:
             )
             conn.execute(
                 "INSERT INTO auth_events(ts, username, event_type, ok, error) VALUES (?, ?, ?, 1, ?)",
-                (now.isoformat(), actor, "account_password_reset_link" if reset_existing else "account_invited",
-                 json.dumps({"target": usr})),
+                (now.isoformat(), actor, event, json.dumps({"target": usr})),
             )
         return {"ok": True, "username": usr, "token": token, "expires_at": expires_at}
 

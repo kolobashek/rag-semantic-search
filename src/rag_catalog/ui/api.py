@@ -37,6 +37,7 @@ from rag_catalog.core.rag_core import RAGSearcher, load_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 from rag_catalog.core.sqlite_runtime import cached_database
+from rag_catalog.integrations.max_webhook import register_max_webhook
 
 from . import helpers as _helpers
 from .account_activation import register_activation_routes
@@ -159,6 +160,7 @@ def _get_api_auth_db(cfg: Dict[str, Any]) -> UserAuthDB:
 
 
 register_activation_routes(app, lambda: _get_api_auth_db(load_config()))
+register_max_webhook(app, load_config, _get_api_auth_db)
 
 
 def _require_cloud_drive_api_user(

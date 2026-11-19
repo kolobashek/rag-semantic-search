@@ -106,6 +106,11 @@ class WorkShiftJournal:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS shift_events_record ON shift_events(shift_id, id);
+                CREATE TABLE IF NOT EXISTS shift_create_requests (
+                    source_event_id TEXT PRIMARY KEY,
+                    actor TEXT NOT NULL,
+                    shift_id INTEGER NOT NULL REFERENCES shifts(id)
+                );
                 CREATE TABLE IF NOT EXISTS shift_references (
                     id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
                     name_key TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
@@ -161,8 +166,11 @@ class WorkShiftJournal:
         )
         return row
 
-    def save(self, token: str, data: dict, *, shift_id: int | None = None, revision: int | None = None) -> dict:
+    def save(self, token: str, data: dict, *, shift_id: int | None = None, revision: int | None = None,
+             source_event_id: str = "") -> dict:
         user = self._user(token)
+        if source_event_id and (shift_id is not None or len(source_event_id) > 256):
+            raise ValueError("Некорректный идентификатор запроса создания смены")
         values = _payload(data)
         employee = str(data.get("employee") or user["username"]).strip().lower()
         if not can_manage_shifts(user) and employee != user["username"]:
@@ -176,6 +184,14 @@ class WorkShiftJournal:
         try:
             with self._connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                if source_event_id:
+                    previous = conn.execute(
+                        "SELECT actor, shift_id FROM shift_create_requests WHERE source_event_id=?", (source_event_id,)
+                    ).fetchone()
+                    if previous:
+                        if previous["actor"] != user["username"]:
+                            raise PermissionError("Смена недоступна")
+                        return self._row(conn, user, previous["shift_id"])
                 old = {}
                 if shift_id is not None:
                     if revision is None:
@@ -195,6 +211,9 @@ class WorkShiftJournal:
                     shift_id = conn.execute(
                         f"INSERT INTO shifts({fields}) VALUES({placeholders})", tuple(values.values()),
                     ).lastrowid
+                    if source_event_id:
+                        conn.execute("INSERT INTO shift_create_requests(source_event_id, actor, shift_id) VALUES(?,?,?)",
+                                     (source_event_id, user["username"], shift_id))
                     action = "create"
                 else:
                     if old["status"] != "draft":

@@ -50,6 +50,8 @@
   "ocr_tesseract_cmd": "",
   "ocr_poppler_bin": "",
   "telegram_enabled": false,
+  "max_state_dir": "/data/state/max",
+  "work_shifts_db_path": "/data/state/work_shifts.db",
   "telegram_bot_token": "",
   "telegram_allowed_chat_id": "",
   "telegram_bot_link": "",

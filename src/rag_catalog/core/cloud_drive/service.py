@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 from ..embedding_collections import resolve_collection_name_from_config
 from ..sqlite_runtime import cached_database
-from .models import CloudDriveImportSource, CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
+from .models import CloudDriveImportSource, CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth, reindex_payload
 from .registry import CloudDriveRegistryDB
 from .shared_folders import SharedFolders, shared_write
 from .storage import StorageAdapter, compute_file_checksum, guess_mime_type, resolve_storage_adapter
@@ -1307,6 +1307,8 @@ class CloudDriveService:
         filename: str,
         source_path: str,
         mime_type: str = '',
+        create_id: str = '',
+        created_by: str = '',
     ) -> dict:
         clean_name = str(filename or '').strip().strip('/\\')
         if not clean_name:
@@ -1324,9 +1326,7 @@ class CloudDriveService:
         storage_key = self._immutable_storage_key(checksum=checksum, filename=clean_name)
         if not self.storage.exists(storage_key):
             self.storage.put_file(source, storage_key)
-        file_row = self.registry.upsert_file(
-            folder_id=parent.id,
-            path=target_path,
+        file_data = dict(
             name=clean_name,
             storage_key=storage_key,
             mime_type=actual_mime,
@@ -1334,7 +1334,14 @@ class CloudDriveService:
             checksum=checksum,
             source_path=str(Path(parent.source_path) / clean_name) if parent.source_path else '',
         )
-        self._queue_reindex_file(file_row, reason='upload')
+        if create_id:
+            file_row = self.registry.insert_import_file(
+                parent_id=parent.id, parent_path=clean_parent, source_mtime=source.stat().st_mtime,
+                created_by=created_by, create_id=create_id, **file_data,
+            )
+        else:
+            file_row = self.registry.upsert_file(folder_id=parent.id, path=target_path, **file_data)
+            self._queue_reindex_file(file_row, reason='upload')
         return {
             'node_type': 'file',
             'id': file_row.id,
@@ -2314,18 +2321,7 @@ class CloudDriveService:
             job_type='reindex',
             file_id=file_row.id,
             version_id=file_row.current_version_id,
-            payload={
-                'path': file_row.path,
-                'storage_key': file_row.storage_key,
-                'source_path': file_row.source_path,
-                'reason': reason,
-                'progress': {
-                    'status': 'pending',
-                    'action': 'reindex',
-                    'path': file_row.path,
-                    'reason': reason,
-                },
-            },
+            payload=reindex_payload(file_row.path, file_row.storage_key, file_row.source_path, reason),
         )
 
     def _queue_cleanup_file(self, file_row, *, reason: str, path: str) -> CloudDriveJob:

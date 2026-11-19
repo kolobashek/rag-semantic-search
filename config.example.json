@@ -51,6 +51,7 @@
   "ocr_tesseract_cmd": "",
   "ocr_poppler_bin": "",
   "telegram_enabled": false,
+  "max_state_dir": "runtime/max",
   "telegram_bot_token": "",
   "telegram_allowed_chat_id": "",
   "telegram_bot_link": "",

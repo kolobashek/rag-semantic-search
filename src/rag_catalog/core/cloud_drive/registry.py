@@ -23,6 +23,7 @@ from .models import (
     CloudDriveSyncClient,
     CloudDriveSyncConflict,
     CloudDriveSyncPair,
+    reindex_payload,
 )
 
 CLOUD_DRIVE_SCHEMA_VERSION = 9
@@ -34,6 +35,10 @@ ACL_BOOTSTRAP_META_KEY = "acl_bootstrapped"
 SYNC_CLIENT_OFFLINE_AFTER_SECONDS = 300
 # Статусы, которые клиент выставляет сам и которые поэтому могут «залипнуть».
 _SYNC_LIVE_STATUSES = frozenset({"online", "paused", "error"})
+
+
+class CloudFilenameConflict(RuntimeError):
+    """An insert-only delivery would overwrite a live or deleted sibling."""
 
 
 def _utc_now() -> str:
@@ -745,7 +750,7 @@ class CloudDriveRegistryDB:
     def insert_import_file(
         self, *, parent_id: str, parent_path: str, name: str, storage_key: str,
         mime_type: str, size_bytes: int, checksum: str, source_path: str,
-        source_mtime: float, created_by: str,
+        source_mtime: float, created_by: str, create_id: str = '',
     ) -> CloudDriveFile:
         """Atomically publish verified bytes only if this Windows filename is still absent."""
         if not name.strip() or name in {'.', '..'} or '\x00' in name or '/' in name or '\\' in name:
@@ -754,15 +759,19 @@ class CloudDriveRegistryDB:
             raise ValueError('Source modification time is unknown')
         with self._lock, self._connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
+            if create_id:
+                previous = conn.execute('SELECT * FROM cloud_files WHERE id=?', (create_id,)).fetchone()
+                if previous is not None:
+                    return self._file_from_row(previous)
             parent = conn.execute('SELECT * FROM cloud_folders WHERE id=?', (parent_id,)).fetchone()
             if parent is None or parent['deleted_at'] or parent['path'] != parent_path:
                 raise RuntimeError('Cloud parent changed during import')
             siblings = conn.execute('''SELECT name FROM cloud_files WHERE folder_id=?
                 UNION ALL SELECT name FROM cloud_folders WHERE parent_id=?''', (parent_id, parent_id)).fetchall()
             if any(row['name'].casefold() == name.casefold() for row in siblings):
-                raise RuntimeError('Import target already exists or was deleted; reconcile explicitly')
+                raise CloudFilenameConflict('Import target already exists or was deleted; reconcile explicitly')
             path = f'{parent_path}/{name}' if parent_path else name
-            file_id, version_id = str(uuid.uuid4()), str(uuid.uuid4())
+            file_id, version_id = create_id or str(uuid.uuid4()), str(uuid.uuid4())
             now = _utc_now()
             conn.execute('''INSERT INTO cloud_file_versions
                 (id,file_id,storage_key,checksum,size_bytes,source_path,created_by,created_at,source_mtime)
@@ -774,6 +783,13 @@ class CloudDriveRegistryDB:
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'')''',
                 (file_id, parent_id, name, path, storage_key, mime_type, size_bytes, checksum,
                  source_path, source_mtime, version_id, now, now))
+            if create_id:
+                # A retried messenger delivery must publish metadata and schedule search indexing exactly once.
+                payload = json.dumps(reindex_payload(path, storage_key, source_path, 'upload'), ensure_ascii=False)
+                conn.execute("""INSERT INTO cloud_jobs
+                    (id,job_type,status,file_id,version_id,payload_json,created_at,updated_at)
+                    VALUES (?,'reindex','pending',?,?,?,?,?)""",
+                    (str(uuid.uuid4()), file_id, version_id, payload, now, now))
             saved = conn.execute('SELECT * FROM cloud_files WHERE id=?', (file_id,)).fetchone()
             return self._file_from_row(saved)
 

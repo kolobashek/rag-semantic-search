@@ -258,6 +258,8 @@ class SharedFolders:
         else:
             path = params.get('path', params.get('source_path', ''))
         share = self.mount(path)
+        if share is not None and action == 'upload_file' and params.get('create_id'):
+            raise ValueError('Этот способ загрузки доступен только в личной папке, вне общих папок SMB')
         target = ''
         if action == 'move_node':
             node = self.registry.get_node_by_path(path)
