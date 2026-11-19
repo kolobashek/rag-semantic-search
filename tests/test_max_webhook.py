@@ -174,7 +174,7 @@ def test_http_delivery_to_employee_roles_with_real_databases(monkeypatch, tmp_pa
         response._content_consumed = True
         return response
 
-    monkeypatch.setattr(requests, "request", fake_max)
+    monkeypatch.setattr(requests.Session, "request", staticmethod(fake_max))
     app = FastAPI()
     hook.register_max_webhook(app, lambda: cfg, lambda _: auth)
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning", ws="none"))

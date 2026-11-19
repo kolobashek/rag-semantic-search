@@ -1,4 +1,5 @@
 import json
+import ssl
 import traceback
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def scripted(monkeypatch, *responses):
         calls.append((method, url, kwargs))
         return next(replies)
 
-    monkeypatch.setattr(requests, "request", request)
+    monkeypatch.setattr(requests.Session, "request", staticmethod(request))
     monkeypatch.setattr(api.time, "sleep", lambda seconds: None)
     return calls
 
@@ -44,6 +45,17 @@ def private_update():
             {"type": "share", "payload": {"url": "https://example.org"}},
         ]},
     }}
+
+
+def test_default_uses_verified_system_trust_and_respects_custom_bundle(tmp_path):
+    prepared = requests.Request("GET", api.API_BASE + "/me").prepare()
+    adapter = api._MaxTLSAdapter()
+    _, options = adapter.build_connection_pool_key_attributes(prepared, True)
+    assert options["ssl_context"].verify_mode == ssl.CERT_REQUIRED
+    assert options["ssl_context"].check_hostname
+    bundle = str(tmp_path / "operator-ca.pem")
+    _, options = adapter.build_connection_pool_key_attributes(prepared, bundle)
+    assert options.get("ssl_context") is None and options["ca_certs"] == bundle
 
 
 def test_normalization_uses_actual_sender_and_native_file_attachments():
@@ -159,7 +171,7 @@ def test_network_errors_omit_signed_urls_from_tracebacks(monkeypatch, tmp_path):
         raise requests.RequestException(url)
 
     remote = api.MaxFile("a", "https://fd.oneme.ru/example?sig=secret-ticket")
-    monkeypatch.setattr(requests, "request", fail)
+    monkeypatch.setattr(requests.Session, "request", staticmethod(fail))
     with pytest.raises(api.MaxAPIError) as exc:
         api.MaxClient("api-key").download_file(remote, Path(tmp_path / "new"), max_bytes=99)
     printed = "".join(traceback.format_exception(exc.type, exc.value, exc.tb))

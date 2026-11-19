@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import ssl
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 from tempfile import NamedTemporaryFile
 from typing import Any, BinaryIO
@@ -127,10 +129,26 @@ def _media_url(url: str) -> str:
     return url
 
 
+@lru_cache(maxsize=1)
+def _system_tls():
+    return ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+
+
+class _MaxTLSAdapter(requests.adapters.HTTPAdapter):
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        host, options = super().build_connection_pool_key_attributes(request, verify, cert)
+        if verify is True:
+            # The Windows trust store can contain the issuer used by the MAX API.
+            options["ssl_context"] = _system_tls()
+        return host, options
+
+
 def _request(method: str, url: str, *, operation: str, **kwargs) -> requests.Response:
     # Explicit auth prevents requests from silently using unrelated .netrc credentials.
     try:
-        return requests.request(method, url, allow_redirects=False, auth=lambda req: req, **kwargs)
+        with requests.Session() as session:
+            session.mount("https://", _MaxTLSAdapter())
+            return session.request(method, url, allow_redirects=False, auth=lambda req: req, **kwargs)
     except requests.RequestException:
         raise MaxAPIError(f"Сетевая ошибка MAX при операции {operation}") from None
 
