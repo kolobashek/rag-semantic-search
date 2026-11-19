@@ -36,6 +36,7 @@ from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness
 from rag_catalog.core.rag_core import RAGSearcher, load_config
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
+from rag_catalog.core.sqlite_runtime import cached_database
 
 from . import helpers as _helpers
 from .account_activation import register_activation_routes
@@ -154,7 +155,7 @@ def _require_public_links_enabled(cfg: Dict[str, Any]) -> None:
 
 
 def _get_api_auth_db(cfg: Dict[str, Any]) -> UserAuthDB:
-    return UserAuthDB(str(_users_db_path(cfg)))
+    return cached_database(UserAuthDB, str(_users_db_path(cfg)))
 
 
 register_activation_routes(app, lambda: _get_api_auth_db(load_config()))
@@ -214,7 +215,7 @@ def _audit_cloud_drive_api_event(
         correlation_id = _CORRELATION_ID.get()
         if correlation_id:
             event_details.setdefault("correlation_id", correlation_id)
-        TelemetryDB(str(_telemetry_db_path(cfg))).log_app_event(
+        cached_database(TelemetryDB, str(_telemetry_db_path(cfg))).log_app_event(
             username=str(user.get("username") or ""),
             screen="api",
             feature="cloud_drive",
@@ -502,7 +503,7 @@ def api_client_diagnostics_pending(client_id: str, authorization: AuthHeader = '
 
 @app.post('/api/cloud-drive/sync/diagnostics/heartbeat')
 async def api_client_diagnostics_heartbeat(request: Request, client_id: str, authorization: AuthHeader = ''):
-    cfg = load_config()
+    cfg = await run_in_threadpool(load_config)
     await run_in_threadpool(_diagnostics_access, cfg, authorization, client_id, admin=False)
     body = bytearray()
     async for chunk in request.stream():
@@ -569,7 +570,7 @@ def api_client_diagnostics_request(client_id: str, authorization: AuthHeader = '
 
 @app.post('/api/cloud-drive/sync/diagnostics')
 async def api_client_diagnostics_upload(request: Request, client_id: str, authorization: AuthHeader = ''):
-    cfg = load_config()
+    cfg = await run_in_threadpool(load_config)
     await run_in_threadpool(_diagnostics_access, cfg, authorization, client_id, admin=False)
     body = bytearray()
     async for chunk in request.stream():

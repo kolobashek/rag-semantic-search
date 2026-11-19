@@ -4,6 +4,49 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import threading
+from collections import OrderedDict
+from pathlib import Path
+
+
+_DATABASES = OrderedDict()
+_DATABASES_LOCK = threading.RLock()
+
+
+class ClosingConnection(sqlite3.Connection):
+    """Commit/rollback and release file handles when leaving a transaction."""
+
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
+def cached_database(factory, path):
+    """Reuse initialized stores, not connections or query results.
+
+    A replaced/deleted database must run initialization again. Never cache a
+    failed initialization. The lock also prevents concurrent first-use DDL.
+    """
+    resolved = Path(path).resolve()
+    key = (factory, str(resolved))
+    with _DATABASES_LOCK:
+        stat = resolved.stat() if resolved.exists() else None
+        identity = (stat.st_dev, stat.st_ino) if stat else None
+        cached = _DATABASES.get(key)
+        if cached and identity and identity == cached[0]:
+            _DATABASES.move_to_end(key)
+            return cached[1]
+        store = factory(str(resolved))
+        if not resolved.exists():
+            return store
+        stat = resolved.stat()
+        _DATABASES[key] = ((stat.st_dev, stat.st_ino), store)
+        _DATABASES.move_to_end(key)
+        while len(_DATABASES) > 32:
+            _DATABASES.popitem(last=False)
+        return store
 
 
 def _try_normal_sync(conn: sqlite3.Connection) -> None:

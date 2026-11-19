@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Iterable, Optional
 logger = logging.getLogger(__name__)
 
 from ..embedding_collections import resolve_collection_name_from_config
+from ..sqlite_runtime import cached_database
 from .models import CloudDriveImportSource, CloudDriveJob, CloudDriveStats, CloudDriveStorageHealth
 from .registry import CloudDriveRegistryDB
 from .shared_folders import SharedFolders, shared_write
@@ -58,7 +59,7 @@ class CloudDriveService:
         if not db_path:
             raise RuntimeError('Не задан cloud_drive_db_path.')
         return cls(
-            registry=CloudDriveRegistryDB(db_path),
+            registry=cached_database(CloudDriveRegistryDB, db_path),
             storage=resolve_storage_adapter(config),
             shared_folders=config.get('cloud_drive_shared_folders') or None,
         )

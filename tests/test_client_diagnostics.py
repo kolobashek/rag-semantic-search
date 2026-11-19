@@ -25,6 +25,73 @@ def test_snapshot_bound_redacted_and_overwritten(tmp_path):
     assert 'pass' not in clean_log('https://user:pass@host/')
 
 
+def test_polling_reads_work_while_another_writer_holds_lock(tmp_path):
+    cfg = {'cloud_drive_db_path': str(tmp_path / 'cloud.db')}
+    store = ClientDiagnosticsDB.from_config(cfg)
+    store.submit('pc', 'log')
+    store.heartbeat('pc', app_version='test', phase='running', state='UpToDate', last_error='')
+    with sqlite3.connect(store.path) as writer:
+        writer.execute('BEGIN IMMEDIATE')
+        try:
+            assert ClientDiagnosticsDB.from_config(cfg) is store
+            assert store.read('pc')['log_text'] == 'log'
+            assert store.read_health('pc')['fresh']
+            assert store.poll_update('pc', 'test') == {}
+            assert store.poll_recovery('pc', '') == ''
+        finally:
+            writer.rollback()
+
+
+def test_parallel_heartbeat_upload_and_polling(tmp_path):
+    cfg = {'cloud_drive_db_path': str(tmp_path / 'cloud.db')}
+    store = ClientDiagnosticsDB.from_config(cfg)
+    request = store.request('pc', 'admin')['request_id']
+
+    def work(n):
+        db = ClientDiagnosticsDB.from_config(cfg)
+        db.heartbeat('pc', app_version='test', phase='running', state='UpToDate', last_error='')
+        db.submit('pc', 'bounded snapshot ' * 4000, request_id=request)
+        assert db.read_health('pc')['fresh']
+        assert db.read('pc')['log_text']
+        assert db.poll_update('pc', 'test') == {}
+        assert db.poll_recovery('pc', '') == ''
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(work, range(40)))
+    assert store.read('pc')['request_id'] == ''
+
+
+def test_pruning_is_throttled_and_reads_do_not_prune(tmp_path, monkeypatch):
+    store = ClientDiagnosticsDB(str(tmp_path / 'logs.db'))
+    calls = []
+    prune = store._prune
+    monkeypatch.setattr(store, '_prune', lambda db: (calls.append(1), prune(db)))
+    for _ in range(4):
+        store.submit('pc', 'log')
+        store.heartbeat('pc', app_version='test', phase='running', state='UpToDate', last_error='')
+        store.read('pc')
+        store.read_health('pc')
+    assert len(calls) == 1
+    now = time.time()
+    monkeypatch.setattr('rag_catalog.core.client_diagnostics.time.time', lambda: now + 15 * 86400)
+    assert store.read('pc')['uploaded_at'] == 0
+    assert store.read_health('pc')['last_seen_at'] == 0
+    assert len(calls) == 1
+    store.submit('new', 'fresh')
+    assert len(calls) == 2
+
+
+def test_legacy_journal_migrates_without_losing_pending_requests(tmp_path):
+    path = str(tmp_path / 'logs.db')
+    request = ClientDiagnosticsDB(path).request('pc', 'admin')['request_id']
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
+    store = ClientDiagnosticsDB(path)
+    assert store.read('pc')['request_id'] == request
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+
+
 def test_request_is_durable_idempotent_and_acknowledged_only_by_matching_id(tmp_path):
     path = str(tmp_path / 'logs.db')
     db = ClientDiagnosticsDB(path)
@@ -134,6 +201,7 @@ def test_update_request_survives_restart_and_invalid_version(tmp_path):
     assert not db.poll_update('pc', 'invalid')['completed_at']
     assert not db.poll_update('pc', '0.6.3')['completed_at']
     assert db.poll_update('pc', '0.6.5')['completed_at']
+    assert db.poll_update('pc', '0.6.3')['reported_version'] == '0.6.3'
 
 
 def test_health_freshness_is_independent_of_log_and_request(tmp_path, monkeypatch):

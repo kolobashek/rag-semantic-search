@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 
 from .db_contract import ensure_schema_version
 from .roles import normalize_roles, primary_role, user_roles
-from .sqlite_runtime import prepare_sqlite_connection
+from .sqlite_runtime import ClosingConnection, prepare_sqlite_connection
 
 DEFAULT_SESSION_TTL_DAYS = 7
 MIN_SESSION_TTL_DAYS = 1
@@ -68,7 +68,7 @@ class UserAuthDB:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, factory=ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 

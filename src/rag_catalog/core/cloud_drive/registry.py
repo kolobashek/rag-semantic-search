@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from rag_catalog.core.db_contract import ensure_schema_version
-from rag_catalog.core.sqlite_runtime import prepare_sqlite_connection
+from rag_catalog.core.sqlite_runtime import ClosingConnection, prepare_sqlite_connection
 
 from .models import (
     CloudDriveFile,
@@ -119,7 +119,7 @@ class CloudDriveRegistryDB:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, factory=ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -546,6 +546,14 @@ class CloudDriveRegistryDB:
                     ).fetchone()
                     if folder_row is not None:
                         mapped_folder = self._folder_from_row(folder_row)
+                        owner = conn.execute(
+                            """SELECT 1 FROM cloud_permissions WHERE subject_type='user'
+                               AND subject_id=? AND resource_type='folder'
+                               AND resource_id=? AND access_level='owner' LIMIT 1""",
+                            (clean_username, mapped_folder.id),
+                        ).fetchone()
+                        if mapped_folder.path == expected_path and owner is not None:
+                            return mapped_folder
 
         target = self.get_folder_by_path(expected_path)
         if target is not None:

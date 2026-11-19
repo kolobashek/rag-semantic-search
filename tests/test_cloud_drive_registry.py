@@ -12,6 +12,30 @@ from rag_catalog.core.cloud_drive.service import CloudDriveJobCancelled, CloudDr
 from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter
 
 
+def test_existing_home_folder_does_not_write_on_poll(tmp_path):
+    registry = CloudDriveRegistryDB(str(tmp_path / 'home.db'))
+    home = registry.ensure_user_home_folder(username='driver')
+    with sqlite3.connect(registry.db_path) as writer:
+        writer.execute('BEGIN IMMEDIATE')
+        try:
+            assert registry.ensure_user_home_folder(username='driver').id == home.id
+        finally:
+            writer.rollback()
+
+
+def test_service_reuses_registry_but_not_config_or_permissions(tmp_path):
+    cfg = {'cloud_drive_db_path': str(tmp_path / 'cloud.db'), 'cloud_drive_storage': 'local',
+           'cloud_drive_storage_root': str(tmp_path / 'objects')}
+    first = CloudDriveService.from_config(cfg)
+    second = CloudDriveService.from_config(dict(cfg))
+    assert first.registry is second.registry
+    first.ensure_user_home_folder(username='driver')
+    grant = first.grant_path_permission(subject_type='user', subject_id='reader', path='driver', access_level='viewer')
+    assert second.registry.user_can_access(username='reader', role='user', path='driver/test.txt')
+    first.registry.revoke_permission(grant['id'])
+    assert not second.registry.user_can_access(username='reader', role='user', path='driver/test.txt')
+
+
 def test_registry_root_folder_and_stats(tmp_path: Path) -> None:
     db_path = tmp_path / 'cloud_drive.db'
     registry = CloudDriveRegistryDB(str(db_path))

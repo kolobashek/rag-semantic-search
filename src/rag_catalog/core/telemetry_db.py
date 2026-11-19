@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from .db_contract import ensure_schema_version
 from .process_status import process_is_alive
-from .sqlite_runtime import prepare_sqlite_connection
+from .sqlite_runtime import ClosingConnection, prepare_sqlite_connection
 
 SCHEMA_VERSION = 5
 
@@ -170,7 +170,7 @@ class TelemetryDB:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, factory=ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 

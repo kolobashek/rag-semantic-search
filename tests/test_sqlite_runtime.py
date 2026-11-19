@@ -1,8 +1,61 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
-from rag_catalog.core.sqlite_runtime import prepare_sqlite_connection
+import pytest
+
+from rag_catalog.core.sqlite_runtime import ClosingConnection, cached_database, prepare_sqlite_connection
+
+
+def test_cached_store_initializes_once_across_threads_and_detects_replacement(tmp_path):
+    path = tmp_path / 'cache.db'
+    calls = []
+
+    def factory(name):
+        calls.append(name)
+        with sqlite3.connect(name, factory=ClosingConnection) as db:
+            db.execute('CREATE TABLE IF NOT EXISTS example (id INTEGER)')
+        return object()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        stores = list(pool.map(lambda _: cached_database(factory, path), range(16)))
+    assert len(calls) == 1
+    assert all(s is stores[0] for s in stores)
+    path.rename(tmp_path / 'old.db')
+    assert cached_database(factory, path) is not stores[0]
+    assert len(calls) == 2
+
+
+def test_cached_store_retries_failed_initialization(tmp_path):
+    calls = []
+
+    def factory(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError('locked')
+        with sqlite3.connect(path, factory=ClosingConnection) as db:
+            db.execute('CREATE TABLE example (id INTEGER)')
+        return object()
+
+    with pytest.raises(sqlite3.OperationalError):
+        cached_database(factory, tmp_path / 'db')
+    assert cached_database(factory, tmp_path / 'db')
+    assert len(calls) == 2
+
+
+def test_connection_closes_and_rolls_back_on_error(tmp_path):
+    path = tmp_path / 'transactions.db'
+    with sqlite3.connect(path, factory=ClosingConnection) as db:
+        db.execute('CREATE TABLE example (id INTEGER)')
+        db.execute('INSERT INTO example VALUES (1)')
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.execute('SELECT 1')
+    with pytest.raises(ValueError), sqlite3.connect(path, factory=ClosingConnection) as db:
+        db.execute('INSERT INTO example VALUES (2)')
+        raise ValueError('rollback')
+    with sqlite3.connect(path, factory=ClosingConnection) as db:
+        assert db.execute('SELECT id FROM example').fetchall() == [(1,)]
 
 
 class _Cursor:
