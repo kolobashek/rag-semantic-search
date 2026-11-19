@@ -27,7 +27,7 @@ MAX_SESSION_TTL_DAYS = 7
 SESSION_TTL_SETTING_KEY = "session_ttl_days"
 SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
 ANY_TELEGRAM_CHAT_ID = "*"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 LOGIN_MAX_FAILURES = 5
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 LOGIN_LOCKOUT_SECONDS = 15 * 60
@@ -35,6 +35,19 @@ LOGIN_LOCKOUT_SECONDS = 15 * 60
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _max_token_hash(token: str) -> str:
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+        return ""
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def _max_sender_id(value: str | int) -> str:
+    sender = str(value)
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", sender) or int(sender) > 2**63 - 1:
+        return ""
+    return sender
 
 
 def _hash_password(password: str, salt: Optional[str] = None) -> str:
@@ -74,8 +87,13 @@ class UserAuthDB:
 
     @staticmethod
     def _with_roles(conn, user):
-        row = conn.execute("SELECT roles_json FROM users WHERE username=?", (user["username"],)).fetchone()
-        user["roles_json"] = row[0] if row else ""
+        row = conn.execute(
+            """SELECT u.roles_json, m.max_user_id
+               FROM users u LEFT JOIN max_bindings m ON m.user_id=u.id WHERE u.username=?""",
+            (user["username"],),
+        ).fetchone()
+        user["roles_json"] = row["roles_json"] if row else ""
+        user["max_user_id"] = (row["max_user_id"] or "") if row else ""
         user["roles"] = sorted(user_roles(user))
         return user
 
@@ -196,6 +214,27 @@ class UserAuthDB:
                         reviewed_at TEXT,
                         reviewed_by TEXT
                     );
+
+                    CREATE TABLE IF NOT EXISTS max_bindings (
+                        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        max_user_id TEXT NOT NULL UNIQUE,
+                        linked_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS max_link_tokens (
+                        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        session_token TEXT NOT NULL REFERENCES user_sessions(token) ON DELETE CASCADE,
+                        expires_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS max_login_challenges (
+                        token_hash TEXT PRIMARY KEY,
+                        verifier_hash TEXT NOT NULL UNIQUE,
+                        max_user_id TEXT,
+                        expires_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_max_login_expiry ON max_login_challenges(expires_at);
 
                     CREATE TABLE IF NOT EXISTS user_favorites (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1088,9 +1127,9 @@ class UserAuthDB:
             return {"user": None, "reason": "invalid_credentials"}
         data = dict(row)
         data.pop("password_hash", None)
-        data["roles"] = sorted(user_roles(data))
         with self._lock:
             with self._connect() as conn:
+                data = self._with_roles(conn, data)
                 conn.execute("UPDATE users SET last_login_at=? WHERE username=?", (_utc_now(), usr))
                 data["groups"] = self._list_user_groups_conn(conn, usr)
                 data["group_ids"] = [str(group["id"]) for group in data["groups"]]
@@ -1356,6 +1395,172 @@ class UserAuthDB:
                 user["groups"] = self._list_user_groups_conn(conn, str(user.get("username") or ""))
                 user["group_ids"] = [str(group["id"]) for group in user["groups"]]
                 return user
+
+    def _max_employee(self, conn: sqlite3.Connection, sender: str) -> Optional[Dict[str, Any]]:
+        row = conn.execute(
+            """SELECT u.username, u.display_name, u.telegram_chat_id, u.telegram_username,
+                      u.role, u.roles_json, u.must_change_password, u.status, u.verified_at,
+                      u.created_at, u.last_login_at, m.max_user_id
+               FROM max_bindings m JOIN users u ON m.user_id=u.id
+               WHERE m.max_user_id=? AND u.status='active' AND u.must_change_password=0""",
+            (sender,),
+        ).fetchone()
+        if row is None:
+            return None
+        user = dict(row)
+        user["roles"] = sorted(user_roles(user))
+        user["groups"] = self._list_user_groups_conn(conn, user["username"])
+        user["group_ids"] = [group["id"] for group in user["groups"]]
+        return user
+
+    def get_user_by_max_user_id(self, max_user_id: str | int) -> Optional[Dict[str, Any]]:
+        """The ID must come from the authenticated MAX event sender in a private chat."""
+        with self._connect() as conn:
+            return self._max_employee(conn, _max_sender_id(max_user_id))
+
+    def create_max_link_token(self, *, session_token: str) -> Dict[str, Any]:
+        """Only the current holder of an active catalog session may start linking it."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc)
+            row = conn.execute(
+                """SELECT u.id, m.max_user_id FROM user_sessions s
+                   JOIN users u ON u.username=s.username LEFT JOIN max_bindings m ON m.user_id=u.id
+                   WHERE s.token=? AND s.revoked_at IS NULL AND s.expires_at>?
+                     AND u.status='active' AND u.must_change_password=0""",
+                (session_token, now.isoformat()),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "reason": "invalid_session"}
+            if row["max_user_id"] is not None:
+                return {"ok": False, "reason": "already_linked"}
+            token = self._new_token()
+            expires = (now + timedelta(minutes=10)).isoformat()
+            conn.execute(
+                """INSERT INTO max_link_tokens(user_id, token_hash, session_token, expires_at)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,
+                       session_token=excluded.session_token, expires_at=excluded.expires_at""",
+                (row["id"], _max_token_hash(token), session_token, expires),
+            )
+        return {"ok": True, "token": token, "expires_at": expires}
+
+    def consume_max_link_token(self, *, token: str, max_user_id: str | int) -> Dict[str, Any]:
+        sender = _max_sender_id(max_user_id)
+        token_hash = _max_token_hash(token)
+        if not sender or not token_hash:
+            return {"ok": False, "reason": "invalid_token"}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = _utc_now()
+            row = conn.execute(
+                """SELECT u.id, u.username FROM max_link_tokens t JOIN users u ON u.id=t.user_id
+                   JOIN user_sessions s ON s.token=t.session_token AND s.username=u.username
+                   WHERE t.token_hash=? AND t.expires_at>? AND s.expires_at>? AND s.revoked_at IS NULL
+                     AND u.status='active' AND u.must_change_password=0""",
+                (token_hash, now, now),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "reason": "invalid_token"}
+            if conn.execute("SELECT 1 FROM max_bindings WHERE max_user_id=? OR user_id=?",
+                            (sender, row["id"])).fetchone():
+                return {"ok": False, "reason": "already_linked"}
+            conn.execute("INSERT INTO max_bindings(user_id,max_user_id,linked_at) VALUES (?,?,?)",
+                         (row["id"], sender, now))
+            conn.execute("DELETE FROM max_link_tokens WHERE user_id=?", (row["id"],))
+            conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES (?,?,'max_link')",
+                         (now, row["username"]))
+        return {"ok": True, "username": row["username"]}
+
+    @staticmethod
+    def _remove_max_binding(conn: sqlite3.Connection, user_id: int) -> None:
+        conn.execute("""DELETE FROM max_login_challenges WHERE max_user_id IN
+                        (SELECT max_user_id FROM max_bindings WHERE user_id=?)""", (user_id,))
+        conn.execute("DELETE FROM max_link_tokens WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM max_bindings WHERE user_id=?", (user_id,))
+
+    def unlink_max_user(self, max_user_id: str | int) -> Optional[str]:
+        """Detach the sender's own MAX identity."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT u.id, u.username FROM max_bindings m JOIN users u ON u.id=m.user_id
+                   WHERE m.max_user_id=?""", (_max_sender_id(max_user_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            self._remove_max_binding(conn, row["id"])
+            conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES (?,?,'max_unlink')",
+                         (_utc_now(), row["username"]))
+            return row["username"]
+
+    def unlink_max_for_session(self, *, session_token: str) -> bool:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = _utc_now()
+            row = conn.execute(
+                """SELECT u.id, u.username FROM user_sessions s JOIN users u ON u.username=s.username
+                   WHERE s.token=? AND s.revoked_at IS NULL AND s.expires_at>?
+                     AND u.status='active' AND u.must_change_password=0""", (session_token, now),
+            ).fetchone()
+            if row is None:
+                return False
+            self._remove_max_binding(conn, row["id"])
+            conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES (?,?,'max_unlink')",
+                         (now, row["username"]))
+            return True
+
+    def create_max_login_challenge(self) -> Dict[str, Any]:
+        """Only the bot token leaves the web UI. Its independent verifier redeems the login."""
+        token, verifier = self._new_token(), self._new_token()
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(minutes=5)).isoformat()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM max_login_challenges WHERE expires_at<=?", (now.isoformat(),))
+            conn.execute(
+                """INSERT INTO max_login_challenges(token_hash,verifier_hash,expires_at)
+                   VALUES (?,?,?)""", (_max_token_hash(token), _max_token_hash(verifier), expires),
+            )
+        return {"ok": True, "token": token, "verifier": verifier, "expires_at": expires}
+
+    def confirm_max_login(self, *, token: str, max_user_id: str | int) -> Dict[str, Any]:
+        """Call only after the linked user explicitly confirms the browser login in MAX."""
+        sender = _max_sender_id(max_user_id)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = self._max_employee(conn, sender)
+            if user is None:
+                return {"ok": False, "reason": "not_linked"}
+            changed = conn.execute(
+                """UPDATE max_login_challenges SET max_user_id=?
+                   WHERE token_hash=? AND max_user_id IS NULL AND expires_at>?""",
+                (sender, _max_token_hash(token), _utc_now()),
+            ).rowcount
+            if not changed:
+                return {"ok": False, "reason": "invalid_token"}
+            return {"ok": True, "username": user["username"]}
+
+    def consume_confirmed_max_login(self, *, verifier: str) -> Dict[str, Any]:
+        verifier_hash = _max_token_hash(verifier)
+        if not verifier_hash:
+            return {"ok": False, "reason": "invalid_token"}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT max_user_id,expires_at FROM max_login_challenges WHERE verifier_hash=?",
+                (verifier_hash,),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "reason": "invalid_token"}
+            if row["expires_at"] <= _utc_now():
+                conn.execute("DELETE FROM max_login_challenges WHERE verifier_hash=?", (verifier_hash,))
+                return {"ok": False, "reason": "expired"}
+            if row["max_user_id"] is None:
+                return {"ok": False, "reason": "pending"}
+            user = self._max_employee(conn, row["max_user_id"])
+            conn.execute("DELETE FROM max_login_challenges WHERE verifier_hash=?", (verifier_hash,))
+            if user is None:
+                return {"ok": False, "reason": "invalid_token"}
+            return {"ok": True, "username": user["username"], "user": user}
 
     def _sanitize_username_hint(self, value: str) -> str:
         normalized = re.sub(r"[^a-z0-9_.-]+", "_", str(value or "").strip().lower())
@@ -1789,7 +1994,7 @@ class UserAuthDB:
 
     def create_account_activation(
         self, *, username: str, display_name: str, created_by: str, ttl_hours: int = 72,
-        reset_existing: bool = False,
+        reset_existing: bool = False, roles: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         """Issue password setup for a new staff account, or explicitly reset an existing one."""
         usr = str(username or "").strip().lower()
@@ -1798,6 +2003,7 @@ class UserAuthDB:
             raise ValueError("Use a Latin login of 3 to 64 characters")
         if not 1 <= ttl_hours <= 168:
             raise ValueError("Activation lifetime must be between 1 and 168 hours")
+        new_roles = normalize_roles(roles if roles is not None else ["user"])
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(hours=ttl_hours)).isoformat()
@@ -1806,7 +2012,7 @@ class UserAuthDB:
             admin = conn.execute("SELECT * FROM users WHERE username=?", (actor,)).fetchone()
             if admin is None or admin["status"] != "active" or "admin" not in user_roles(dict(admin)):
                 return {"ok": False, "reason": "not_admin"}
-            existing = conn.execute("SELECT status FROM users WHERE username=?", (usr,)).fetchone()
+            existing = conn.execute("SELECT id,status FROM users WHERE username=?", (usr,)).fetchone()
             if existing is not None and not reset_existing:
                 return {"ok": False, "reason": "already_exists"}
             if reset_existing:
@@ -1822,6 +2028,7 @@ class UserAuthDB:
                     "UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
                     (now.isoformat(), usr),
                 )
+                self._remove_max_binding(conn, existing["id"])
                 for table in ("verification_tokens", "password_reset_tokens", "telegram_tokens"):
                     conn.execute(
                         f"UPDATE {table} SET status='expired' WHERE username=? AND status IN ('pending','confirmed')",
@@ -1832,8 +2039,9 @@ class UserAuthDB:
                     """INSERT INTO users
                        (username, display_name, password_hash, role, roles_json,
                         must_change_password, status, created_at)
-                       VALUES (?, ?, '', 'user', '["user"]', 1, 'pending', ?)""",
-                    (usr, str(display_name or "").strip(), now.isoformat()),
+                       VALUES (?, ?, '', ?, ?, 1, 'pending', ?)""",
+                    (usr, str(display_name or "").strip(), primary_role(new_roles),
+                     json.dumps(new_roles), now.isoformat()),
                 )
             conn.execute(
                 """INSERT INTO account_activations

@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from rag_catalog.core.roles import can_manage_shifts, can_open_screen, can_use_catalog, user_roles
-from rag_catalog.core.user_auth_db import UserAuthDB
+from rag_catalog.core.user_auth_db import SCHEMA_VERSION, UserAuthDB
 from rag_catalog.core.work_shifts import WorkShiftJournal
 
 
@@ -149,7 +149,7 @@ def test_v3_database_migrates_without_losing_existing_users(accounts):
     assert reopened.get_user_by_session(tokens["admin"])["roles"] == ["admin"]
     assert reopened.get_user_by_session(tokens["cloud"])["roles"] == ["user"]
     with sqlite3.connect(auth.db_path) as conn:
-        assert conn.execute("SELECT schema_version FROM schema_meta WHERE db_kind='user_auth'").fetchone()[0] == 4
+        assert conn.execute("SELECT schema_version FROM schema_meta WHERE db_kind='user_auth'").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_manager_can_correct_archived_employee_without_resurrecting_renamed_reference(accounts, tmp_path):
