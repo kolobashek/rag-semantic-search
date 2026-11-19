@@ -11,7 +11,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import psutil
-from filelock import Timeout
+from filelock import FileLock, Timeout
 
 from rag_catalog.core.cloud_drive.disk_bridge import DiskBridge
 from rag_catalog.core.cloud_drive.service import CloudDriveService
@@ -85,12 +85,12 @@ def main(argv=None):
     handler = RotatingFileHandler(str(state) + '.log', maxBytes=2*1024*1024, backupCount=5, encoding='utf-8')
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     log.addHandler(handler)
-    bridge = DiskBridge(CloudDriveService.from_config(load_config()), source_root=spec['source_root'],
-                        mappings=spec['mappings'], state_path=str(state),
-                        settle_seconds=spec.get('settle_seconds', 60))
+    bridge = None
     report_path = Path(str(state) + '.status.json')
     try:
-        with bridge.lock:
+        # Guard even registry initialization: schema/index work can hold the
+        # shared database writer lock while a low-priority bridge is paging.
+        with FileLock(str(state) + '.lock', timeout=0):
             while True:
                 try:
                     threshold_mib = spec.get('min_free_memory_mb', 1536)
@@ -98,6 +98,11 @@ def main(argv=None):
                     if memory.available < threshold_mib * _MIB:
                         report = _memory_deferral(memory, threshold_mib, args.apply)
                     else:
+                        if bridge is None:
+                            bridge = DiskBridge(
+                                CloudDriveService.from_config(load_config()),
+                                source_root=spec['source_root'], mappings=spec['mappings'],
+                                state_path=str(state), settle_seconds=spec.get('settle_seconds', 60))
                         report = bridge.run(apply=args.apply, max_files=args.max_files)
                 except Exception as exc:
                     report = {'finished_at': time.time(), 'complete': False, 'applied': args.apply,

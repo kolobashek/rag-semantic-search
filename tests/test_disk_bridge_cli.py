@@ -122,3 +122,33 @@ def test_real_process_snapshot_in_isolated_guard_log(bridge_cli):
     assert 1 <= len(pressure['top_processes']) <= 10
     assert all(p['name'] and p['pid'] >= 0 and p['rss_mib'] >= 0 for p in pressure['top_processes'])
     assert pressure['top_groups'][0]['rss_sum_mib'] >= pressure['top_processes'][0]['rss_mib']
+
+
+def test_low_memory_does_not_initialize_registry_or_bridge(bridge_cli, monkeypatch):
+    args, state, calls = bridge_cli
+    monkeypatch.setattr(cli.psutil, 'virtual_memory',
+                        lambda: SimpleNamespace(available=MIB, total=32 * 1024 * MIB))
+    monkeypatch.setattr(cli, '_process_memory_snapshot', lambda: {})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Low-memory deferral must precede database initialization')
+
+    monkeypatch.setattr(cli, 'load_config', forbidden)
+    monkeypatch.setattr(cli.CloudDriveService, 'from_config', forbidden)
+    monkeypatch.setattr(cli, 'DiskBridge', forbidden)
+    assert cli.main(args) == 1
+    assert not calls
+    assert not state.exists()
+    assert logged_reports(state)[-1]['memory_pressure']['available_mib'] == 1
+
+
+def test_existing_bridge_lock_prevents_database_initialization(bridge_cli, monkeypatch):
+    args, state, calls = bridge_cli
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Instance lock must precede database initialization')
+
+    monkeypatch.setattr(cli, 'load_config', forbidden)
+    with cli.FileLock(str(state) + '.lock', timeout=0):
+        assert cli.main(args) == 2
+    assert not calls
