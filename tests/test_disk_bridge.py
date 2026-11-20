@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from filelock import Timeout
 
+from rag_catalog.cli import disk_bridge as cli
 from rag_catalog.core.cloud_drive.disk_bridge import PRIVATE, DiskBridge, signature
 from rag_catalog.core.cloud_drive.registry import CloudDriveRegistryDB
 from rag_catalog.core.cloud_drive.service import CloudDriveService
@@ -35,6 +38,31 @@ def setup(tmp_path):
 def contents(service, path='Shared/report.txt'):
     row = service.registry.get_file_by_path(path)
     return Path(service.storage.resolve_path(row.storage_key)).read_bytes()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows non-overwriting publication')
+def test_scheduled_cli_exchanges_both_directions_under_instance_lock(setup, tmp_path, monkeypatch):
+    service, bridge, source, file = setup
+    (file.parent / 'from-disk.txt').write_bytes(b'disk')
+    upload = tmp_path / 'upload.txt'
+    upload.write_bytes(b'cloud')
+    service.upload_file(parent_path='Shared', filename='from-cloud.txt', source_path=str(upload))
+    spec = tmp_path / 'config.json'
+    spec.write_text(json.dumps({'source_root': str(source), 'state_path': str(bridge.state_path),
+                                'mappings': bridge.mappings, 'settle_seconds': 0}), encoding='utf-8')
+    monkeypatch.setattr(cli, 'load_config', lambda: {})
+    monkeypatch.setattr(cli.CloudDriveService, 'from_config', lambda cfg: service)
+    monkeypatch.setattr(cli.psutil, 'virtual_memory', lambda: SimpleNamespace(available=4 * 1024**3))
+    args = ['--config', str(spec), '--apply']
+    assert cli.main(args) == 0
+    status = Path(str(bridge.state_path) + '.status.json')
+    report = json.loads(status.read_text(encoding='utf-8'))
+    assert report['complete'] and not report['errors']
+    assert report['counts']['imported'] == report['counts']['exported'] == 1
+    assert contents(service, 'Shared/from-disk.txt') == b'disk'
+    assert (file.parent / 'from-cloud.txt').read_bytes() == b'cloud'
+    assert cli.main(args) == 0
+    assert not json.loads(status.read_text(encoding='utf-8'))['changes']
 
 
 def test_source_newer_preserves_history(setup):

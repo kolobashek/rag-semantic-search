@@ -74,7 +74,7 @@ def prevent_writes(path: Path):
 
 class DiskBridge:
     def __init__(self, service, *, source_root: str, mappings: list[dict],
-                 state_path: str, settle_seconds: float = 60):
+                 state_path: str, settle_seconds: float = 60, instance_lock: FileLock | None = None):
         self.service = service
         self.registry = service.registry
         self.root = Path(source_root)
@@ -95,7 +95,8 @@ class DiskBridge:
         self.settle_seconds = max(0, settle_seconds)
         self.completed_version = ''
         self.completed_signature = ''
-        self.lock = FileLock(str(self.state_path) + '.lock', timeout=0)
+        # Reentry in run() requires the same lock object as the CLI startup guard.
+        self.lock = instance_lock if instance_lock is not None else FileLock(str(self.state_path) + '.lock', timeout=0)
         with self.connect() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS entries (

@@ -90,7 +90,7 @@ def main(argv=None):
     try:
         # Guard even registry initialization: schema/index work can hold the
         # shared database writer lock while a low-priority bridge is paging.
-        with FileLock(str(state) + '.lock', timeout=0):
+        with FileLock(str(state) + '.lock', timeout=0) as instance_lock:
             while True:
                 try:
                     threshold_mib = spec.get('min_free_memory_mb', 1536)
@@ -102,7 +102,8 @@ def main(argv=None):
                             bridge = DiskBridge(
                                 CloudDriveService.from_config(load_config()),
                                 source_root=spec['source_root'], mappings=spec['mappings'],
-                                state_path=str(state), settle_seconds=spec.get('settle_seconds', 60))
+                                state_path=str(state), settle_seconds=spec.get('settle_seconds', 60),
+                                instance_lock=instance_lock)
                         report = bridge.run(apply=args.apply, max_files=args.max_files)
                 except Exception as exc:
                     report = {'finished_at': time.time(), 'complete': False, 'applied': args.apply,
