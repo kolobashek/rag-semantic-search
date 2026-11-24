@@ -13,26 +13,21 @@ def _explicit_test_bootstrap_admin(monkeypatch) -> None:
     monkeypatch.delenv("RAG_DISABLE_DEFAULT_ADMIN", raising=False)
 
 
-def test_user_verification_and_login_flow(tmp_path) -> None:
+def test_public_registration_requires_review_and_new_password(tmp_path):
     db = UserAuthDB(str(tmp_path / "users.db"))
     req = db.request_verification(
-        username="Ivan.Petrov",
-        display_name="Иван",
-        telegram_chat_id="777",
-        password="secret",
-        ttl_minutes=30,
+        username="Ivan.Petrov", display_name="Ivan", telegram_chat_id="777", password="secret"
     )
-    assert len(req["code"]) == 6
+    assert req["status"] == "pending" and "code" not in req
+    assert db.get_user(username="ivan.petrov") is None
+    assert db.change_password(username="admin", old_password="admin", new_password="changed-test-password")
+    approved = db.review_employee_request(admin_username="admin", request_id=req["id"], approve=True)
+    assert db.activate_account(token=approved["activation_token"], new_password="first-private-password")[
+        "ok"
+    ]
     assert db.login(username="ivan.petrov", password="secret") is None
-
-    out = db.confirm_verification(telegram_chat_id="777", code=req["code"])
-    assert out["ok"] is True
-    assert out["username"] == "ivan.petrov"
-
-    user = db.login(username="IVAN.PETROV", password="secret")
-    assert user is not None
-    assert user["status"] == "active"
-    assert user["role"] == "user"
+    user = db.login(username="ivan.petrov", password="first-private-password")
+    assert user["roles"] == ["driver"] and not user["telegram_chat_id"]
 
 
 def test_admin_is_not_created_without_explicit_bootstrap_password(tmp_path, monkeypatch) -> None:
@@ -342,37 +337,19 @@ def test_telegram_chat_id_can_be_unlinked(tmp_path) -> None:
     assert db.unlink_telegram_chat_id("777") is None
 
 
-def test_upsert_user_from_telegram_contact_creates_active_user(tmp_path) -> None:
+def test_contact_requires_admin_and_matching_sender_before_activation(tmp_path):
     db = UserAuthDB(str(tmp_path / "users.db"))
-    out = db.upsert_user_from_telegram_contact(
-        telegram_chat_id="777",
-        username_hint="Ivan.Petrov",
-        display_name="Ivan Petrov",
-    )
-    assert out["created"] is True
-    assert out["username"].startswith("ivan.petrov")
-    assert out["temp_password"]
-
-    user = db.get_user_by_telegram_chat_id("777")
-    assert user is not None
-    assert user["status"] == "active"
-
-
-def test_upsert_user_from_telegram_contact_updates_existing_binding(tmp_path) -> None:
-    db = UserAuthDB(str(tmp_path / "users.db"))
-    created = db.upsert_user_from_telegram_contact(
-        telegram_chat_id="777",
-        username_hint="ivan",
-        display_name="Ivan",
-    )
-    updated = db.upsert_user_from_telegram_contact(
-        telegram_chat_id="777",
-        username_hint="new_name",
-        display_name="Ivan Updated",
-    )
-    assert updated["created"] is False
-    assert updated["username"] == created["username"]
-    assert updated["temp_password"] == ""
+    contact = dict(telegram_chat_id="777", username_hint="ivan", display_name="Ivan")
+    assert not db.upsert_user_from_telegram_contact(**contact)["ok"]
+    assert db.change_password(username="admin", old_password="admin", new_password="changed-password")
+    invitation = db.upsert_user_from_telegram_contact(**contact, created_by="admin")
+    assert invitation["ok"] and "temp_password" not in invitation
+    assert not db.claim_employee_invite(provider="telegram", sender_id="778", token=invitation["token"])["ok"]
+    claimed = db.claim_employee_invite(provider="telegram", sender_id="777", token=invitation["token"])
+    assert claimed["ok"] and db.get_user_by_telegram_chat_id("777") is None
+    assert db.activate_account(token=claimed["activation_token"], new_password="private-password")["ok"]
+    assert db.get_user_by_telegram_chat_id("777")["username"] == invitation["username"]
+    assert not db.upsert_user_from_telegram_contact(**contact, created_by="admin")["ok"]
 
 
 def test_list_telegram_chats_returns_bound_users(tmp_path) -> None:
@@ -396,13 +373,8 @@ def test_list_telegram_chats_returns_bound_users(tmp_path) -> None:
 
 def test_verification_expired(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
-    req = db.request_verification(
-        username="user1",
-        display_name="U1",
-        telegram_chat_id="111",
-        password="pw",
-        ttl_minutes=1,
-    )
+    assert db.admin_create_user(username="user1", password="pw", must_change_password=False)
+    req = db.request_telegram_link_code(username="user1", password="pw", telegram_chat_id="111")
 
     # Принудительно делаем токен просроченным.
     with db._connect() as conn:  # noqa: SLF001 - тестовая проверка состояния
@@ -418,13 +390,9 @@ def test_verification_expired(tmp_path) -> None:
 
 def test_password_reset_requires_telegram_confirmation(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
-    req = db.request_verification(
-        username="user2",
-        display_name="U2",
-        telegram_chat_id="222",
-        password="old",
+    assert db.admin_create_user(
+        username="user2", password="old", telegram_chat_id="222", must_change_password=False
     )
-    db.confirm_verification(telegram_chat_id="222", code=req["code"])
 
     reset = db.request_password_reset(username="user2", telegram_chat_id="222")
     assert reset["ok"] is True
@@ -470,9 +438,10 @@ def test_registration_cannot_overwrite_active_user_password(tmp_path) -> None:
 
 def test_request_telegram_link_code_for_active_user(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
+    assert db.change_password(username="admin", old_password="admin", new_password="changed-password")
     out = db.request_telegram_link_code(
         username="admin",
-        password="admin",
+        password="changed-password",
         telegram_chat_id="777",
     )
     assert out["ok"] is True
@@ -496,9 +465,10 @@ def test_request_telegram_link_code_rejects_bad_password(tmp_path) -> None:
 
 def test_request_telegram_deeplink_code_confirms_from_any_chat(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
+    assert db.change_password(username="admin", old_password="admin", new_password="changed-password")
     out = db.request_telegram_deeplink_code(
         username="admin",
-        password="admin",
+        password="changed-password",
     )
     assert out["ok"] is True
     confirmed = db.confirm_verification(telegram_chat_id="555", code=str(out["code"]))
@@ -510,7 +480,8 @@ def test_request_telegram_deeplink_code_confirms_from_any_chat(tmp_path) -> None
 
 def test_telegram_link_token_binds_chat_to_active_user(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
-    token = db.create_telegram_link_token(username="admin")
+    assert db.change_password(username="admin", old_password="admin", new_password="changed-password")
+    token = db.create_telegram_link_token(session_token=db.create_session(username="admin"))
     assert token["ok"] is True
 
     out = db.consume_telegram_start_token(
@@ -527,34 +498,26 @@ def test_telegram_link_token_binds_chat_to_active_user(tmp_path) -> None:
     assert user["telegram_username"] == "admin_tg"
 
 
-def test_telegram_login_challenge_requires_linked_active_user(tmp_path) -> None:
+def test_telegram_login_explicit_confirmation_and_independent_browser_verifier(tmp_path):
     db = UserAuthDB(str(tmp_path / "users.db"))
-    challenge = db.create_telegram_login_challenge(target="web")
-    denied = db.consume_telegram_start_token(
-        token=str(challenge["token"]),
-        telegram_chat_id="777",
-        telegram_username="admin_tg",
+    assert db.admin_create_user(
+        username="botuser", password="secret", telegram_chat_id="777", must_change_password=False
     )
-    assert denied["ok"] is False
-    assert denied["reason"] == "telegram_not_linked"
-
-    link = db.create_telegram_link_token(username="admin")
-    db.consume_telegram_start_token(token=str(link["token"]), telegram_chat_id="777", telegram_username="admin_tg")
-    challenge = db.create_telegram_login_challenge(target="web")
-    confirmed = db.consume_telegram_start_token(
-        token=str(challenge["token"]),
-        telegram_chat_id="777",
-        telegram_username="admin_tg",
-    )
-    assert confirmed["ok"] is True
-    assert confirmed["purpose"] == "login"
-    consumed = db.consume_confirmed_telegram_login(token=str(challenge["token"]))
-    assert consumed["ok"] is True
-    assert consumed["username"] == "admin"
+    challenge = db.create_telegram_login_challenge()
+    token, verifier = challenge["token"], challenge["verifier"]
+    assert not db.consume_telegram_start_token(token=token, telegram_chat_id="777")["ok"]
+    assert db.consume_confirmed_telegram_login(verifier=verifier)["reason"] == "pending"
+    assert not db.confirm_telegram_login(token=token, telegram_chat_id="778")["ok"]
+    assert db.confirm_telegram_login(token=token, telegram_chat_id="777")["ok"]
+    assert not db.confirm_telegram_login(token=token, telegram_chat_id="777")["ok"]
+    assert not db.consume_confirmed_telegram_login(verifier=token)["ok"]
+    assert db.consume_confirmed_telegram_login(verifier=verifier)["username"] == "botuser"
+    assert not db.consume_confirmed_telegram_login(verifier=verifier)["ok"]
 
 
 def test_registration_request_can_be_approved(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
+    assert db.change_password(username="admin", old_password="admin", new_password="changed-password")
     req = db.create_registration_request(
         username="ivan",
         display_name="Ivan",
@@ -571,13 +534,16 @@ def test_registration_request_can_be_approved(tmp_path) -> None:
         decision="approved",
     )
     assert approved["ok"] is True
+    assert db.get_user_by_telegram_chat_id("777") is None
+    assert db.activate_account(token=approved["activation_token"], new_password="initial-password")["ok"]
     user = db.get_user_by_telegram_chat_id("777")
     assert user is not None
     assert user["username"] == "ivan"
 
 
-def test_admin_invite_creates_active_user_and_token(tmp_path) -> None:
+def test_admin_invite_requires_sender_claim_and_password(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
+    assert db.change_password(username="admin", old_password="admin", new_password="changed-password")
     out = db.create_admin_invite(
         created_by="admin",
         username="ivan",
@@ -585,12 +551,10 @@ def test_admin_invite_creates_active_user_and_token(tmp_path) -> None:
         telegram_username="@ivan_tg",
     )
     assert out["ok"] is True
-    consumed = db.consume_telegram_start_token(
-        token=str(out["token"]),
-        telegram_chat_id="777",
-        telegram_username="ivan_tg",
-    )
-    assert consumed["ok"] is True
+    assert "temp_password" not in out
+    consumed = db.claim_employee_invite(token=out["token"], provider="telegram", sender_id="777")
+    assert consumed["ok"] and db.get_user_by_telegram_chat_id("777") is None
+    assert db.activate_account(token=consumed["activation_token"], new_password="initial-password")["ok"]
     user = db.get_user_by_telegram_chat_id("777")
     assert user is not None
     assert user["username"] == "ivan"

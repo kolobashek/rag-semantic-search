@@ -3,6 +3,15 @@
 import json
 
 ROLE_LABELS = {"user": "Пользователь облака", "driver": "Водитель", "dispatcher": "Диспетчер", "admin": "Администратор"}
+DEFAULT_EMPLOYEE_ROLE = "driver"
+
+
+def manages_employees(user):
+    if not user:
+        return False
+    return bool(user.get("is_platform_admin") or any(
+        "admin" in roles for roles in user.get("organization_roles", {}).values()
+    ))
 
 
 def normalize_roles(roles):
@@ -33,11 +42,11 @@ def primary_role(roles):
 
 
 def can_manage_shifts(user):
-    return bool(user_roles(user) & {"admin", "dispatcher"})
+    return bool(user_roles(user) & {"admin", "dispatcher"}) or manages_employees(user)
 
 
 def can_use_shifts(user):
-    return bool(user_roles(user) & {"admin", "dispatcher", "driver"})
+    return bool(user_roles(user) & {"admin", "dispatcher", "driver"}) or manages_employees(user)
 
 
 def can_use_catalog(user):

@@ -14,7 +14,8 @@ def accounts(tmp_path, monkeypatch):
     roles = {"driver": ["driver"], "dispatch": ["dispatcher"], "both": ["driver", "user"],
              "admin": ["admin"], "cloud": ["user"]}
     for name, values in roles.items():
-        auth.admin_create_user(username=name, password="test-only-password", roles=values, must_change_password=False)
+        auth.admin_create_user(username=name, password="test-only-password", roles=values,
+                               platform_admin=name == "admin", must_change_password=False)
     return auth, {name: auth.create_session(username=name) for name in roles}
 
 
@@ -126,7 +127,7 @@ def test_cloud_api_rejects_driver_and_dispatcher(accounts, monkeypatch):
     assert api._require_cloud_drive_api_user({}, authorization=tokens["both"])["username"] == "both"
 
 
-def test_driver_cannot_use_catalog_helpers_or_telegram(accounts):
+def test_driver_has_telegram_identity_without_catalog_access(accounts):
     from rag_catalog.integrations.telegram_bot import get_authorized_telegram_user
     from rag_catalog.ui.helpers import _cd_acl_allows, _cd_acl_allows_local_file
 
@@ -137,12 +138,15 @@ def test_driver_cannot_use_catalog_helpers_or_telegram(accounts):
     class TelegramAuth:
         def get_user_by_telegram_chat_id(self, chat):
             return driver
-    assert get_authorized_telegram_user(TelegramAuth(), "123") is None
+    assert get_authorized_telegram_user(TelegramAuth(), "123") == driver
 
 
 def test_v3_database_migrates_without_losing_existing_users(accounts):
     auth, tokens = accounts
     with sqlite3.connect(auth.db_path) as conn:
+        conn.execute("DROP TRIGGER employee_membership_after_insert")
+        conn.execute("DROP TABLE employee_memberships")
+        conn.execute("DROP TABLE employee_platform_admins")
         conn.execute("ALTER TABLE users DROP COLUMN roles_json")
         conn.execute("UPDATE schema_meta SET schema_version=3 WHERE db_kind='user_auth'")
     reopened = UserAuthDB(str(auth.db_path))

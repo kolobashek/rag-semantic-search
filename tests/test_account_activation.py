@@ -38,7 +38,7 @@ def test_invitation_first_password_and_single_use(db):
     result = invite(db)
     user = db.get_user(username="staff")
     assert user["status"] == "pending"
-    assert user["roles"] == ["user"]
+    assert user["roles"] == ["driver"]
     assert user["must_change_password"] == 1
     assert db.login(username="staff", password="") is None
     assert db.login_with_reason(username="staff", password="")["user"] is None
@@ -97,7 +97,7 @@ def test_cannot_overwrite_existing_or_create_without_admin(db):
     assert db.get_user(username="staff")["display_name"] == "Staff Member"
     assert db.create_account_activation(username="other", display_name="Other", created_by="staff")["reason"] == "not_admin"
     assert db.get_user(username="other") is None
-    with pytest.raises(ValueError, match="активации"):
+    with pytest.raises(ValueError, match="already_exists"):
         db.request_verification(username="staff", display_name="Attacker", telegram_chat_id="999", password="attacker-password")
     assert db.activate_account(token=result["token"], new_password="valid-password")["ok"]
 
@@ -115,7 +115,8 @@ def test_explicit_reset_preserves_identity_and_revokes_old_credentials(client, d
                          password="old-password", roles=["user", "driver"], must_change_password=False)
     db.save_user_settings(username="kris", settings={"theme": "dark"})
     session = db.create_session(username="kris")
-    tg_link = db.create_telegram_link_token(username="kris")
+    challenge = db.create_telegram_login_challenge()
+    assert db.confirm_telegram_login(token=challenge["token"], telegram_chat_id="777")["ok"]
     verification = db.request_telegram_link_code(username="kris", password="old-password", telegram_chat_id="777")
     reset = db.request_password_reset(username="kris", telegram_chat_id="777")
     assert db.confirm_password_reset(telegram_chat_id="777", code=reset["code"])["ok"]
@@ -125,7 +126,7 @@ def test_explicit_reset_preserves_identity_and_revokes_old_credentials(client, d
     assert result["ok"]
     with db._connect() as conn:
         after = dict(conn.execute("SELECT * FROM users WHERE username='kris'").fetchone())
-    for key in before.keys() - {"password_hash", "must_change_password", "status"}:
+    for key in before.keys() - {"password_hash", "must_change_password", "status", "telegram_chat_id", "telegram_linked_at"}:
         assert after[key] == before[key]
     assert db.get_user_settings(username="kris") == {"theme": "dark"}
     assert db.login(username="kris", password="old-password") is None
@@ -133,7 +134,8 @@ def test_explicit_reset_preserves_identity_and_revokes_old_credentials(client, d
     assert db.get_user_by_session(session) is None
     assert not db.confirm_verification(telegram_chat_id="777", code=verification["code"])["ok"]
     assert not db.complete_password_reset(username="kris", code=reset["code"], new_password="stale-reset-password")["ok"]
-    assert not db.consume_telegram_start_token(token=tg_link["token"], telegram_chat_id="999")["ok"]
+    assert after["telegram_chat_id"] == ""
+    assert not db.consume_confirmed_telegram_login(verifier=challenge["verifier"])["ok"]
     response = client.post("/api/auth/activate", json={"token": result["token"], "new_password": "new-password"})
     assert response.status_code == 200
     assert db.login(username="kris", password="new-password")["roles"] == ["driver", "user"]

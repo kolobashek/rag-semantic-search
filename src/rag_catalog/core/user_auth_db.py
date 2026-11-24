@@ -18,6 +18,23 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .db_contract import ensure_schema_version
+from .employee_onboarding import (
+    DEFAULT_ORG,
+    EmployeeOnboarding,
+    _all_in_scope,
+    _audit,
+    _binding,
+    _memberships,
+    _scope,
+    assign_new_membership,
+    create_pending,
+    issue_activation,
+    migrate_employee_onboarding,
+    normalize_sender_id,
+    project_roles,
+    token_hash,
+    with_organizations,
+)
 from .roles import normalize_roles, primary_role, user_roles
 from .sqlite_runtime import ClosingConnection, prepare_sqlite_connection
 
@@ -26,8 +43,7 @@ MIN_SESSION_TTL_DAYS = 1
 MAX_SESSION_TTL_DAYS = 7
 SESSION_TTL_SETTING_KEY = "session_ttl_days"
 SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
-ANY_TELEGRAM_CHAT_ID = "*"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 LOGIN_MAX_FAILURES = 5
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 LOGIN_LOCKOUT_SECONDS = 15 * 60
@@ -35,19 +51,6 @@ LOGIN_LOCKOUT_SECONDS = 15 * 60
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _max_token_hash(token: str) -> str:
-    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
-        return ""
-    return hashlib.sha256(token.encode("ascii")).hexdigest()
-
-
-def _max_sender_id(value: str | int) -> str:
-    sender = str(value)
-    if not re.fullmatch(r"[1-9][0-9]{0,18}", sender) or int(sender) > 2**63 - 1:
-        return ""
-    return sender
 
 
 def _hash_password(password: str, salt: Optional[str] = None) -> str:
@@ -71,7 +74,7 @@ def _verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(_hash_password(password, salt), f"{algo}${salt}${digest}")
 
 
-class UserAuthDB:
+class UserAuthDB(EmployeeOnboarding):
     """Потокобезопасное хранилище пользователей и verification-кодов."""
 
     def __init__(self, db_path: str) -> None:
@@ -88,14 +91,15 @@ class UserAuthDB:
     @staticmethod
     def _with_roles(conn, user):
         row = conn.execute(
-            """SELECT u.roles_json, m.max_user_id
+            """SELECT u.roles_json, u.telegram_linked_at, m.max_user_id
                FROM users u LEFT JOIN max_bindings m ON m.user_id=u.id WHERE u.username=?""",
             (user["username"],),
         ).fetchone()
         user["roles_json"] = row["roles_json"] if row else ""
         user["max_user_id"] = (row["max_user_id"] or "") if row else ""
+        user["telegram_linked_at"] = row["telegram_linked_at"] if row else ""
         user["roles"] = sorted(user_roles(user))
-        return user
+        return with_organizations(conn, user)
 
     def _prepare_connection(self, conn: sqlite3.Connection) -> None:
         prepare_sqlite_connection(conn)
@@ -113,7 +117,7 @@ class UserAuthDB:
                         telegram_chat_id TEXT NOT NULL DEFAULT '',
                         telegram_username TEXT NOT NULL DEFAULT '',
                         password_hash TEXT NOT NULL DEFAULT '',
-                        role TEXT NOT NULL DEFAULT 'user',
+                        role TEXT NOT NULL DEFAULT 'driver',
                         must_change_password INTEGER NOT NULL DEFAULT 0,
                         status TEXT NOT NULL DEFAULT 'pending',
                         created_at TEXT NOT NULL,
@@ -303,6 +307,7 @@ class UserAuthDB:
                     """
                 )
                 self._migrate_schema(conn)
+                migrate_employee_onboarding(conn)
                 ensure_schema_version(
                     conn,
                     db_kind="user_auth",
@@ -330,7 +335,9 @@ class UserAuthDB:
             conn.execute("ALTER TABLE user_sessions ADD COLUMN last_seen_at TEXT")
 
     def _ensure_default_admin(self, conn: sqlite3.Connection) -> None:
-        row = conn.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()
+        row = conn.execute(
+            "SELECT username FROM users WHERE username='admin' UNION SELECT username FROM employee_platform_admins LIMIT 1"
+        ).fetchone()
         if row is not None:
             return
         disable_default = str(os.environ.get("RAG_DISABLE_DEFAULT_ADMIN") or "").strip().lower()
@@ -351,74 +358,16 @@ class UserAuthDB:
             (_hash_password(bootstrap_password), now, now),
         )
 
+        conn.execute("INSERT INTO employee_platform_admins VALUES('admin')")
+
     def request_verification(
-        self,
-        *,
-        username: str,
-        display_name: str,
-        telegram_chat_id: str,
-        password: str = "",
-        ttl_minutes: int = 30,
-    ) -> Dict[str, Any]:
-        usr = (username or "").strip().lower()
-        dname = (display_name or "").strip()
-        chat = str(telegram_chat_id or "").strip()
-        if not usr or not chat:
-            raise ValueError("username и telegram_chat_id обязательны")
-        if not password:
-            raise ValueError("password обязателен")
-
-        now = _utc_now()
-        expires = (datetime.now(timezone.utc) + timedelta(minutes=max(1, int(ttl_minutes)))).isoformat()
-        code = f"{secrets.randbelow(1_000_000):06d}"
-
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT id, status FROM users WHERE username=?",
-                    (usr,),
-                ).fetchone()
-                is_new = row is None
-                if conn.execute("SELECT 1 FROM account_activations WHERE username=?", (usr,)).fetchone():
-                    raise ValueError("Используйте персональную ссылку активации")
-                if row is not None and str(row["status"]) == "active":
-                    raise ValueError("Пользователь уже существует")
-                if is_new:
-                    conn.execute(
-                        """
-                        INSERT INTO users (
-                            username, display_name, telegram_chat_id, password_hash,
-                            role, must_change_password, status, created_at
-                        )
-                        VALUES (?, ?, ?, ?, 'user', 0, 'pending', ?)
-                        """,
-                        (usr, dname, chat, _hash_password(password), now),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        UPDATE users
-                        SET display_name=?, telegram_chat_id=?, password_hash=?,
-                            status=CASE WHEN status='active' THEN status ELSE 'pending' END
-                        WHERE username=?
-                        """,
-                        (dname, chat, _hash_password(password), usr),
-                    )
-
-                conn.execute(
-                    "UPDATE verification_tokens SET status='expired' WHERE username=? AND status='pending'",
-                    (usr,),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO verification_tokens (
-                        username, telegram_chat_id, code, status, created_at, expires_at
-                    ) VALUES (?, ?, ?, 'pending', ?, ?)
-                    """,
-                    (usr, chat, code, now, expires),
-                )
-
-        return {"username": usr, "code": code, "expires_at": expires, "is_new_user": is_new}
+        self, *, username, display_name, telegram_chat_id="", password="", ttl_minutes=30
+    ):
+        """Legacy public registration now queues administrator review."""
+        result = self.create_registration_request(username=username, display_name=display_name, source="web")
+        if not result["ok"]:
+            raise ValueError(result["reason"])
+        return result
 
     def request_telegram_link_code(
         self,
@@ -429,7 +378,7 @@ class UserAuthDB:
         ttl_minutes: int = 30,
     ) -> Dict[str, Any]:
         usr = (username or "").strip().lower()
-        chat = str(telegram_chat_id or "").strip()
+        chat = normalize_sender_id(telegram_chat_id)
         if not usr or not chat or not password:
             raise ValueError("username, password и telegram_chat_id обязательны")
 
@@ -441,7 +390,7 @@ class UserAuthDB:
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT status, password_hash
+                    SELECT status, password_hash, must_change_password
                     FROM users
                     WHERE username=?
                     """,
@@ -452,6 +401,8 @@ class UserAuthDB:
                 if not _verify_password(password, str(row["password_hash"] or "")):
                     return {"ok": False, "reason": "bad_credentials"}
 
+                if row["must_change_password"]:
+                    return {"ok": False, "reason": "password_change_required"}
                 conn.execute(
                     "UPDATE verification_tokens SET status='expired' WHERE username=? AND status='pending'",
                     (usr,),
@@ -467,329 +418,179 @@ class UserAuthDB:
 
         return {"ok": True, "username": usr, "code": code, "expires_at": expires}
 
-    def request_telegram_deeplink_code(
-        self,
-        *,
-        username: str,
-        password: str,
-        ttl_minutes: int = 30,
-    ) -> Dict[str, Any]:
-        usr = (username or "").strip().lower()
-        if not usr or not password:
-            raise ValueError("username и password обязательны")
-
-        now = _utc_now()
-        expires = (datetime.now(timezone.utc) + timedelta(minutes=max(1, int(ttl_minutes)))).isoformat()
-        code = f"{secrets.randbelow(1_000_000):06d}"
-
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT status, password_hash
-                    FROM users
-                    WHERE username=?
-                    """,
-                    (usr,),
-                ).fetchone()
-                if row is None or str(row["status"]) != "active":
-                    return {"ok": False, "reason": "user_not_found"}
-                if not _verify_password(password, str(row["password_hash"] or "")):
-                    return {"ok": False, "reason": "bad_credentials"}
-
-                conn.execute(
-                    "UPDATE verification_tokens SET status='expired' WHERE username=? AND status='pending'",
-                    (usr,),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO verification_tokens (
-                        username, telegram_chat_id, code, status, created_at, expires_at
-                    ) VALUES (?, ?, ?, 'pending', ?, ?)
-                    """,
-                    (usr, ANY_TELEGRAM_CHAT_ID, code, now, expires),
-                )
-
-        return {"ok": True, "username": usr, "code": code, "expires_at": expires}
+    def request_telegram_deeplink_code(self, *, username, password, ttl_minutes=10):
+        """Legacy result shape for password-authenticated deep links."""
+        result = self.request_telegram_link(username=username, password=password, ttl_minutes=ttl_minutes)
+        if result["ok"]:
+            result["code"] = result["token"]
+        return result
 
     def _new_token(self) -> str:
         return secrets.token_urlsafe(32)
 
-    def create_telegram_token(
-        self,
-        *,
-        purpose: str,
-        username: str = "",
-        telegram_chat_id: str = "",
-        telegram_username: str = "",
-        display_name: str = "",
-        created_by: str = "",
-        target: str = "",
-        payload: Optional[Dict[str, Any]] = None,
-        ttl_minutes: int = 30,
-    ) -> Dict[str, Any]:
-        purpose_value = str(purpose or "").strip().lower()
-        if purpose_value not in {"link", "invite", "login", "register"}:
-            raise ValueError("unknown telegram token purpose")
-        token = self._new_token()
+    def create_telegram_link_token(self, *, session_token: str, ttl_minutes: int = 10):
         now = datetime.now(timezone.utc)
-        expires = now + timedelta(minutes=max(1, int(ttl_minutes)))
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO telegram_tokens (
-                        token, purpose, status, username, telegram_chat_id, telegram_username,
-                        display_name, created_by, target, payload_json, created_at, expires_at
-                    )
-                    VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        token,
-                        purpose_value,
-                        (username or "").strip().lower(),
-                        str(telegram_chat_id or "").strip(),
-                        self._normalize_telegram_username(telegram_username),
-                        (display_name or "").strip(),
-                        (created_by or "").strip().lower(),
-                        (target or "").strip().lower(),
-                        json.dumps(payload or {}, ensure_ascii=False, sort_keys=True),
-                        now.isoformat(),
-                        expires.isoformat(),
-                    ),
-                )
-        return {"ok": True, "token": token, "purpose": purpose_value, "expires_at": expires.isoformat()}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute(
+                """SELECT u.username,u.telegram_chat_id FROM users u JOIN user_sessions s
+                ON s.username=u.username WHERE s.token=? AND s.revoked_at IS NULL AND s.expires_at>?
+                AND u.status='active' AND u.must_change_password=0""",
+                (session_token, now.isoformat()),
+            ).fetchone()
+            if not user:
+                return {"ok": False, "reason": "unauthorized"}
+            if user["telegram_chat_id"]:
+                return {"ok": False, "reason": "already_linked"}
+            token = self._new_token()
+            expires = (now + timedelta(minutes=min(30, max(1, ttl_minutes)))).isoformat()
+            conn.execute(
+                "UPDATE telegram_tokens SET status='expired' WHERE username=? AND purpose='link' AND status='pending'",
+                (user["username"],),
+            )
+            conn.execute(
+                """INSERT INTO telegram_tokens(token,purpose,username,source_session,created_at,expires_at)
+                            VALUES(?,'link',?,?,?,?)""",
+                (token_hash(token), user["username"], session_token, now.isoformat(), expires),
+            )
+            return {"ok": True, "purpose": "link", "token": token, "expires_at": expires}
 
-    def create_telegram_link_token(self, *, username: str, ttl_minutes: int = 30) -> Dict[str, Any]:
-        usr = (username or "").strip().lower()
-        if not usr:
-            raise ValueError("username is required")
-        user = self.get_user(username=usr)
-        if user is None or str(user.get("status") or "") != "active":
-            return {"ok": False, "reason": "user_not_found"}
-        return self.create_telegram_token(purpose="link", username=usr, ttl_minutes=ttl_minutes)
-
-    def request_telegram_link(self, *, username: str, password: str, ttl_minutes: int = 30) -> Dict[str, Any]:
+    def request_telegram_link(self, *, username, password, ttl_minutes=10):
         user = self.login(username=username, password=password, update_login=False)
-        if user is None:
+        if not user or user["must_change_password"]:
             return {"ok": False, "reason": "bad_credentials"}
-        return self.create_telegram_link_token(username=str(user.get("username") or ""), ttl_minutes=ttl_minutes)
+        session = self.create_session(username=user["username"], ttl_days=1)
+        return self.create_telegram_link_token(session_token=session, ttl_minutes=ttl_minutes)
 
-    def create_telegram_login_challenge(self, *, target: str = "web", ttl_minutes: int = 5) -> Dict[str, Any]:
-        target_value = str(target or "web").strip().lower()
-        if target_value not in {"web", "native"}:
-            target_value = "web"
-        return self.create_telegram_token(purpose="login", target=target_value, ttl_minutes=ttl_minutes)
+    def create_telegram_login_challenge(self, *, target="web", ttl_minutes=5):
+        now = datetime.now(timezone.utc)
+        token, verifier = self._new_token(), self._new_token()
+        expires = (now + timedelta(minutes=min(5, max(1, ttl_minutes)))).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO telegram_tokens(token,purpose,verifier_hash,target,created_at,expires_at)
+                         VALUES(?,'login',?,?,?,?)""",
+                (token_hash(token), token_hash(verifier), target, now.isoformat(), expires),
+            )
+        return {"ok": True, "token": token, "verifier": verifier, "expires_at": expires}
 
-    def consume_confirmed_telegram_login(self, *, token: str) -> Dict[str, Any]:
-        token_value = str(token or "").strip()
-        if not token_value:
-            return {"ok": False, "reason": "missing_token"}
-        now = _utc_now()
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT username, expires_at
-                    FROM telegram_tokens
-                    WHERE token=? AND purpose='login' AND status='confirmed'
-                    LIMIT 1
-                    """,
-                    (token_value,),
-                ).fetchone()
-                if row is None:
-                    return {"ok": False, "reason": "pending"}
-                if datetime.now(timezone.utc) > datetime.fromisoformat(str(row["expires_at"])):
-                    conn.execute("UPDATE telegram_tokens SET status='expired' WHERE token=?", (token_value,))
-                    return {"ok": False, "reason": "expired"}
-                username = str(row["username"] or "")
-                conn.execute(
-                    "UPDATE telegram_tokens SET status='used', used_at=? WHERE token=?",
-                    (now, token_value),
-                )
-        user = self.get_user(username=username)
-        if user is None or str(user.get("status") or "") != "active":
-            return {"ok": False, "reason": "user_not_found"}
-        return {"ok": True, "username": username, "user": user}
+    def confirm_telegram_login(self, *, token, telegram_chat_id):
+        chat = normalize_sender_id(telegram_chat_id)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute(
+                """SELECT username FROM users WHERE telegram_chat_id=? AND telegram_chat_id<>''
+                    AND status='active' AND must_change_password=0""",
+                (chat,),
+            ).fetchone()
+            if not user:
+                return {"ok": False, "reason": "not_linked"}
+            approved = conn.execute(
+                """UPDATE telegram_tokens SET status='confirmed',username=?,telegram_chat_id=?
+                WHERE token=? AND purpose='login' AND status='pending' AND verifier_hash<>'' AND expires_at>?""",
+                (user["username"], chat, token_hash(token), _utc_now()),
+            )
+            if not approved.rowcount:
+                return {"ok": False, "reason": "invalid_token"}
+            return {"ok": True, "username": user["username"]}
+
+    def consume_confirmed_telegram_login(self, *, verifier):
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM telegram_tokens WHERE verifier_hash=? AND verifier_hash<>''
+                               AND purpose='login' """,
+                (token_hash(verifier),),
+            ).fetchone()
+            if not row or row["expires_at"] <= _utc_now() or row["status"] not in {"pending", "confirmed"}:
+                return {"ok": False, "reason": "expired"}
+            if row["status"] == "pending":
+                return {"ok": False, "reason": "pending"}
+            conn.execute(
+                "UPDATE telegram_tokens SET status='used',used_at=? WHERE id=?", (_utc_now(), row["id"])
+            )
+            user = conn.execute(
+                """SELECT username,display_name,telegram_chat_id,telegram_username,role,status,
+                must_change_password FROM users WHERE username=? AND telegram_chat_id=? AND status='active'
+                AND must_change_password=0""",
+                (row["username"], row["telegram_chat_id"]),
+            ).fetchone()
+            if not user:
+                return {"ok": False, "reason": "not_linked"}
+            return {"ok": True, "username": user["username"], "user": self._with_roles(conn, dict(user))}
 
     def create_admin_invite(
         self,
         *,
-        created_by: str,
-        username: str,
-        display_name: str = "",
-        telegram_username: str = "",
-        password: str = "",
-        role: str = "user",
-        ttl_minutes: int = 7 * 24 * 60,
-    ) -> Dict[str, Any]:
-        admin = self.get_user(username=created_by)
-        if admin is None or str(admin.get("role") or "") != "admin" or str(admin.get("status") or "") != "active":
-            return {"ok": False, "reason": "not_admin"}
-        usr = (username or "").strip().lower()
-        if not usr:
-            usr = self._sanitize_username_hint(telegram_username)
-        if not usr:
-            return {"ok": False, "reason": "missing_username"}
-        temp_password = password or secrets.token_urlsafe(10)
-        self.admin_create_user(
-            username=usr,
-            display_name=display_name or usr,
-            telegram_chat_id="",
-            telegram_username=telegram_username,
-            password=temp_password,
-            role=role,
-            status="active",
-            must_change_password=True,
-        )
-        token = self.create_telegram_token(
-            purpose="invite",
-            username=usr,
-            telegram_username=telegram_username,
+        created_by,
+        username,
+        display_name="",
+        telegram_username="",
+        password="",
+        role="driver",
+        ttl_minutes=4320,
+    ):
+        return self.create_employee_invite(
+            admin_username=created_by,
+            username=username,
             display_name=display_name,
-            created_by=created_by,
-            payload={"temp_password": temp_password},
-            ttl_minutes=ttl_minutes,
+            roles=[role],
+            provider="telegram",
         )
-        return {**token, "username": usr, "temp_password": temp_password}
 
     def _normalize_telegram_username(self, value: str) -> str:
         return str(value or "").strip().lstrip("@").lower()
 
     def consume_telegram_start_token(
-        self,
-        *,
-        token: str,
-        telegram_chat_id: str,
-        telegram_username: str = "",
-        display_name: str = "",
-    ) -> Dict[str, Any]:
-        token_value = str(token or "").strip()
-        chat = str(telegram_chat_id or "").strip()
-        if not token_value or not chat:
-            return {"ok": False, "reason": "missing_token"}
-        tg_username = self._normalize_telegram_username(telegram_username)
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.isoformat()
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT *
-                    FROM telegram_tokens
-                    WHERE token=? AND status='pending'
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (token_value,),
-                ).fetchone()
-                if row is None:
-                    return {"ok": False, "reason": "not_found"}
-                if now_dt > datetime.fromisoformat(str(row["expires_at"])):
-                    conn.execute("UPDATE telegram_tokens SET status='expired' WHERE id=?", (int(row["id"]),))
-                    return {"ok": False, "reason": "expired"}
-
-                purpose = str(row["purpose"] or "")
-                expected_username = self._normalize_telegram_username(str(row["telegram_username"] or ""))
-                if expected_username and expected_username != tg_username:
-                    return {"ok": False, "reason": "telegram_username_mismatch"}
-
-                if purpose in {"link", "invite"}:
-                    username = str(row["username"] or "").strip().lower()
-                    user = conn.execute("SELECT username, status FROM users WHERE username=?", (username,)).fetchone()
-                    if user is None or str(user["status"]) != "active":
-                        return {"ok": False, "reason": "user_not_found"}
-                    conn.execute(
-                        """
-                        UPDATE users
-                        SET telegram_chat_id=?, telegram_username=?,
-                            verified_at=COALESCE(verified_at, ?)
-                        WHERE username=?
-                        """,
-                        (chat, tg_username, now, username),
-                    )
-                    conn.execute(
-                        "UPDATE telegram_tokens SET status='used', telegram_chat_id=?, telegram_username=?, used_at=? WHERE id=?",
-                        (chat, tg_username, now, int(row["id"])),
-                    )
-                    return {"ok": True, "purpose": purpose, "username": username}
-
-                if purpose == "login":
-                    user = conn.execute(
-                        """
-                        SELECT username, status
-                        FROM users
-                        WHERE telegram_chat_id=? AND status='active'
-                        LIMIT 1
-                        """,
-                        (chat,),
-                    ).fetchone()
-                    if user is None:
-                        return {"ok": False, "reason": "telegram_not_linked"}
-                    username = str(user["username"] or "")
-                    conn.execute(
-                        """
-                        UPDATE telegram_tokens
-                        SET status='confirmed', username=?, telegram_chat_id=?, telegram_username=?, used_at=?
-                        WHERE id=?
-                        """,
-                        (username, chat, tg_username, now, int(row["id"])),
-                    )
-                    return {"ok": True, "purpose": purpose, "username": username, "target": str(row["target"] or "web")}
-
-                if purpose == "register":
-                    req = self.create_registration_request(
-                        username=str(row["username"] or ""),
-                        display_name=display_name or str(row["display_name"] or ""),
-                        telegram_chat_id=chat,
-                        telegram_username=tg_username,
-                        source="telegram_link",
-                        note="",
-                        _conn=conn,
-                    )
-                    conn.execute(
-                        "UPDATE telegram_tokens SET status='used', telegram_chat_id=?, telegram_username=?, used_at=? WHERE id=?",
-                        (chat, tg_username, now, int(row["id"])),
-                    )
-                    return {"ok": True, "purpose": purpose, "request_id": req.get("id")}
-        return {"ok": False, "reason": "unsupported_purpose"}
+        self, *, token, telegram_chat_id, telegram_username="", display_name="", expected_purpose="link"
+    ):
+        chat = normalize_sender_id(telegram_chat_id)
+        if not chat or expected_purpose != "link":
+            return {"ok": False, "reason": "invalid_token"}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = _utc_now()
+            row = conn.execute(
+                """SELECT t.id,u.username,u.telegram_chat_id FROM telegram_tokens t
+                JOIN user_sessions s ON s.token=t.source_session AND s.username=t.username
+                JOIN users u ON u.username=t.username WHERE t.token=? AND t.purpose='link' AND t.status='pending'
+                AND t.expires_at>? AND s.revoked_at IS NULL AND s.expires_at>? AND u.status='active'
+                AND u.must_change_password=0""",
+                (token_hash(token), now, now),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "reason": "invalid_token"}
+            if row["telegram_chat_id"] or _binding(conn, "telegram", chat):
+                return {"ok": False, "reason": "already_linked"}
+            conn.execute(
+                "UPDATE users SET telegram_chat_id=?,telegram_username=?,telegram_linked_at=? WHERE username=?",
+                (chat, self._normalize_telegram_username(telegram_username), now, row["username"]),
+            )
+            conn.execute("UPDATE telegram_tokens SET status='used',used_at=? WHERE id=?", (now, row["id"]))
+            return {"ok": True, "username": row["username"], "purpose": "link"}
 
     def create_registration_request(
         self,
         *,
-        username: str = "",
-        display_name: str = "",
-        telegram_chat_id: str = "",
-        telegram_username: str = "",
-        source: str = "web",
-        note: str = "",
-        _conn: Optional[sqlite3.Connection] = None,
-    ) -> Dict[str, Any]:
-        usr = (username or "").strip().lower()
-        now = _utc_now()
-        params = (
-            usr,
-            (display_name or "").strip(),
-            str(telegram_chat_id or "").strip(),
-            self._normalize_telegram_username(telegram_username),
-            (source or "web").strip(),
-            (note or "").strip(),
-            now,
+        username="",
+        display_name="",
+        telegram_chat_id="",
+        telegram_username="",
+        source="web",
+        organization_id=DEFAULT_ORG,
+        phone="",
+        note="",
+        _conn=None,
+    ):
+        provider = "telegram" if source in {"telegram", "telegram_link"} else "web"
+        return self.submit_employee_request(
+            provider=provider,
+            sender_id=telegram_chat_id,
+            username=username,
+            display_name=display_name or username,
+            phone=phone,
+            organization_id=organization_id,
         )
-        sql = """
-            INSERT INTO registration_requests (
-                username, display_name, telegram_chat_id, telegram_username,
-                source, status, note, requested_at
-            )
-            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-        """
-        if _conn is not None:
-            cur = _conn.execute(sql, params)
-            return {"ok": True, "id": int(cur.lastrowid), "status": "pending"}
-        with self._lock:
-            with self._connect() as conn:
-                cur = conn.execute(sql, params)
-                return {"ok": True, "id": int(cur.lastrowid), "status": "pending"}
 
     def list_registration_requests(self, *, status: str = "pending", limit: int = 100) -> list[Dict[str, Any]]:
         status_value = str(status or "").strip().lower()
@@ -818,106 +619,38 @@ class UserAuthDB:
                     ).fetchall()
                 return [dict(row) for row in rows]
 
-    def review_registration_request(
-        self,
-        *,
-        request_id: int,
-        reviewed_by: str,
-        decision: str,
-        password: str = "",
-        role: str = "user",
-    ) -> Dict[str, Any]:
-        reviewer = self.get_user(username=reviewed_by)
-        if reviewer is None or str(reviewer.get("role") or "") != "admin":
-            return {"ok": False, "reason": "not_admin"}
-        decision_value = str(decision or "").strip().lower()
-        if decision_value not in {"approved", "rejected"}:
+    def review_registration_request(self, *, request_id, reviewed_by, decision, role="driver", password=""):
+        if decision not in {"approved", "rejected"}:
             return {"ok": False, "reason": "bad_decision"}
-        now = _utc_now()
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT * FROM registration_requests WHERE id=? AND status='pending'",
-                    (int(request_id),),
-                ).fetchone()
-                if row is None:
-                    return {"ok": False, "reason": "not_found"}
-                conn.execute(
-                    """
-                    UPDATE registration_requests
-                    SET status=?, reviewed_at=?, reviewed_by=?
-                    WHERE id=?
-                    """,
-                    (decision_value, now, (reviewed_by or "").strip().lower(), int(request_id)),
-                )
-                if decision_value == "rejected":
-                    return {"ok": True, "status": "rejected"}
-                username = str(row["username"] or "").strip().lower() or self._pick_unique_username(
-                    conn,
-                    str(row["telegram_username"] or row["display_name"] or ""),
-                    str(row["telegram_chat_id"] or int(request_id)),
-                )
-                temp_password = password or secrets.token_urlsafe(10)
-                existing = conn.execute("SELECT username FROM users WHERE username=?", (username,)).fetchone()
-                if existing is None:
-                    conn.execute(
-                        """
-                        INSERT INTO users (
-                            username, display_name, telegram_chat_id, telegram_username,
-                            password_hash, role, must_change_password, status, created_at, verified_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?)
-                        """,
-                        (
-                            username,
-                            str(row["display_name"] or username),
-                            str(row["telegram_chat_id"] or ""),
-                            self._normalize_telegram_username(str(row["telegram_username"] or "")),
-                            _hash_password(temp_password),
-                            "admin" if str(role or "").lower() == "admin" else "user",
-                            now,
-                            now,
-                        ),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        UPDATE users
-                        SET status='active',
-                            telegram_chat_id=CASE WHEN ? <> '' THEN ? ELSE telegram_chat_id END,
-                            telegram_username=CASE WHEN ? <> '' THEN ? ELSE telegram_username END,
-                            verified_at=COALESCE(verified_at, ?)
-                        WHERE username=?
-                        """,
-                        (
-                            str(row["telegram_chat_id"] or ""),
-                            str(row["telegram_chat_id"] or ""),
-                            self._normalize_telegram_username(str(row["telegram_username"] or "")),
-                            self._normalize_telegram_username(str(row["telegram_username"] or "")),
-                            now,
-                            username,
-                        ),
-                    )
-        return {"ok": True, "status": "approved", "username": username, "temp_password": temp_password}
+        approve = decision == "approved"
+        return self.review_employee_request(
+            admin_username=reviewed_by, request_id=request_id, approve=approve, roles=[role]
+        )
 
     def confirm_verification(self, *, telegram_chat_id: str, code: str) -> Dict[str, Any]:
-        chat = str(telegram_chat_id or "").strip()
+        chat = normalize_sender_id(telegram_chat_id)
         token = (code or "").strip()
         if not chat or not token:
             raise ValueError("telegram_chat_id и code обязательны")
 
+        if token_hash(token):
+            return self.consume_telegram_start_token(
+                token=token, telegram_chat_id=chat, expected_purpose="link"
+            )
+
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     """
                     SELECT id, username, expires_at
                     FROM verification_tokens
                     WHERE code=? AND status='pending'
-                      AND (telegram_chat_id=? OR telegram_chat_id=?)
-                    ORDER BY CASE WHEN telegram_chat_id=? THEN 0 ELSE 1 END, id DESC
+                      AND telegram_chat_id=?
+                    ORDER BY id DESC
                     LIMIT 1
                     """,
-                    (token, chat, ANY_TELEGRAM_CHAT_ID, chat),
+                    (token, chat),
                 ).fetchone()
                 if row is None:
                     return {"ok": False, "reason": "not_found"}
@@ -931,6 +664,18 @@ class UserAuthDB:
                     return {"ok": False, "reason": "expired"}
 
                 username = str(row["username"])
+                owner = conn.execute(
+                    "SELECT telegram_chat_id,status,must_change_password FROM users WHERE username=?",
+                    (username,),
+                ).fetchone()
+                if (
+                    not owner
+                    or owner["status"] != "active"
+                    or owner["must_change_password"]
+                    or owner["telegram_chat_id"]
+                    or _binding(conn, "telegram", chat)
+                ):
+                    return {"ok": False, "reason": "not_eligible"}
                 now = _utc_now()
                 conn.execute(
                     "UPDATE verification_tokens SET status='confirmed', confirmed_at=? WHERE id=?",
@@ -939,10 +684,10 @@ class UserAuthDB:
                 conn.execute(
                     """
                     UPDATE users
-                    SET status='active', verified_at=?, telegram_chat_id=?
+                    SET telegram_chat_id=?,telegram_linked_at=?
                     WHERE username=?
                     """,
-                    (now, chat, username),
+                    (chat, now, username),
                 )
                 return {"ok": True, "username": username}
 
@@ -990,6 +735,7 @@ class UserAuthDB:
             raise ValueError("telegram_chat_id и code обязательны")
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     """
                     SELECT id, username, expires_at
@@ -1023,14 +769,16 @@ class UserAuthDB:
             raise ValueError("username, code и new_password обязательны")
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     """
-                    SELECT id FROM password_reset_tokens
-                    WHERE username=? AND code=? AND status='confirmed'
-                    ORDER BY id DESC
+                    SELECT t.id FROM password_reset_tokens t JOIN users u ON u.username=t.username
+                    WHERE t.username=? AND t.code=? AND t.status='confirmed' AND t.expires_at>?
+                      AND u.status='active' AND u.telegram_chat_id=t.telegram_chat_id
+                    ORDER BY t.id DESC
                     LIMIT 1
                     """,
-                    (usr, token),
+                    (usr, token, _utc_now()),
                 ).fetchone()
                 if row is None:
                     return {"ok": False, "reason": "not_confirmed"}
@@ -1045,17 +793,17 @@ class UserAuthDB:
                 return {"ok": True, "username": usr}
 
     def change_password(self, *, username: str, old_password: str, new_password: str) -> bool:
-        user = self.login(username=username, password=old_password, update_login=False)
-        if user is None or not new_password:
+        if not new_password:
             return False
         usr = (username or "").strip().lower()
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "UPDATE users SET password_hash=?, must_change_password=0 WHERE username=?",
-                    (_hash_password(new_password), usr),
-                )
-        return True
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT password_hash FROM users WHERE username=? AND status='active'", (usr,)).fetchone()
+            if not row or not _verify_password(old_password, row["password_hash"]):
+                return False
+            conn.execute("UPDATE users SET password_hash=?,must_change_password=0 WHERE username=?",
+                         (_hash_password(new_password), usr))
+            return True
 
     def login(
         self,
@@ -1384,7 +1132,7 @@ class UserAuthDB:
                     SELECT username, display_name, telegram_chat_id, telegram_username, role, must_change_password,
                            status, verified_at, created_at, last_login_at
                     FROM users
-                    WHERE telegram_chat_id=? AND status='active'
+                    WHERE telegram_chat_id=? AND status='active' AND must_change_password=0
                     LIMIT 1
                     """,
                     (chat,),
@@ -1411,12 +1159,12 @@ class UserAuthDB:
         user["roles"] = sorted(user_roles(user))
         user["groups"] = self._list_user_groups_conn(conn, user["username"])
         user["group_ids"] = [group["id"] for group in user["groups"]]
-        return user
+        return with_organizations(conn, user)
 
     def get_user_by_max_user_id(self, max_user_id: str | int) -> Optional[Dict[str, Any]]:
         """The ID must come from the authenticated MAX event sender in a private chat."""
         with self._connect() as conn:
-            return self._max_employee(conn, _max_sender_id(max_user_id))
+            return self._max_employee(conn, normalize_sender_id(max_user_id))
 
     def create_max_link_token(self, *, session_token: str) -> Dict[str, Any]:
         """Only the current holder of an active catalog session may start linking it."""
@@ -1440,14 +1188,14 @@ class UserAuthDB:
                 """INSERT INTO max_link_tokens(user_id, token_hash, session_token, expires_at)
                    VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,
                        session_token=excluded.session_token, expires_at=excluded.expires_at""",
-                (row["id"], _max_token_hash(token), session_token, expires),
+                (row["id"], token_hash(token), session_token, expires),
             )
         return {"ok": True, "token": token, "expires_at": expires}
 
     def consume_max_link_token(self, *, token: str, max_user_id: str | int) -> Dict[str, Any]:
-        sender = _max_sender_id(max_user_id)
-        token_hash = _max_token_hash(token)
-        if not sender or not token_hash:
+        sender = normalize_sender_id(max_user_id)
+        digest = token_hash(token)
+        if not sender or not digest:
             return {"ok": False, "reason": "invalid_token"}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1457,7 +1205,7 @@ class UserAuthDB:
                    JOIN user_sessions s ON s.token=t.session_token AND s.username=u.username
                    WHERE t.token_hash=? AND t.expires_at>? AND s.expires_at>? AND s.revoked_at IS NULL
                      AND u.status='active' AND u.must_change_password=0""",
-                (token_hash, now, now),
+                (digest, now, now),
             ).fetchone()
             if row is None:
                 return {"ok": False, "reason": "invalid_token"}
@@ -1484,11 +1232,11 @@ class UserAuthDB:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """SELECT u.id, u.username FROM max_bindings m JOIN users u ON u.id=m.user_id
-                   WHERE m.max_user_id=?""", (_max_sender_id(max_user_id),),
+                   WHERE m.max_user_id=?""", (normalize_sender_id(max_user_id),),
             ).fetchone()
             if row is None:
                 return None
-            self._remove_max_binding(conn, row["id"])
+            self._revoke_employee_channel(conn, row["username"], "max")
             conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES (?,?,'max_unlink')",
                          (_utc_now(), row["username"]))
             return row["username"]
@@ -1504,7 +1252,7 @@ class UserAuthDB:
             ).fetchone()
             if row is None:
                 return False
-            self._remove_max_binding(conn, row["id"])
+            self._revoke_employee_channel(conn, row["username"], "max")
             conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES (?,?,'max_unlink')",
                          (now, row["username"]))
             return True
@@ -1518,13 +1266,13 @@ class UserAuthDB:
             conn.execute("DELETE FROM max_login_challenges WHERE expires_at<=?", (now.isoformat(),))
             conn.execute(
                 """INSERT INTO max_login_challenges(token_hash,verifier_hash,expires_at)
-                   VALUES (?,?,?)""", (_max_token_hash(token), _max_token_hash(verifier), expires),
+                   VALUES (?,?,?)""", (token_hash(token), token_hash(verifier), expires),
             )
         return {"ok": True, "token": token, "verifier": verifier, "expires_at": expires}
 
     def confirm_max_login(self, *, token: str, max_user_id: str | int) -> Dict[str, Any]:
         """Call only after the linked user explicitly confirms the browser login in MAX."""
-        sender = _max_sender_id(max_user_id)
+        sender = normalize_sender_id(max_user_id)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             user = self._max_employee(conn, sender)
@@ -1533,14 +1281,14 @@ class UserAuthDB:
             changed = conn.execute(
                 """UPDATE max_login_challenges SET max_user_id=?
                    WHERE token_hash=? AND max_user_id IS NULL AND expires_at>?""",
-                (sender, _max_token_hash(token), _utc_now()),
+                (sender, token_hash(token), _utc_now()),
             ).rowcount
             if not changed:
                 return {"ok": False, "reason": "invalid_token"}
             return {"ok": True, "username": user["username"]}
 
     def consume_confirmed_max_login(self, *, verifier: str) -> Dict[str, Any]:
-        verifier_hash = _max_token_hash(verifier)
+        verifier_hash = token_hash(verifier)
         if not verifier_hash:
             return {"ok": False, "reason": "invalid_token"}
         with self._connect() as conn:
@@ -1562,101 +1310,42 @@ class UserAuthDB:
                 return {"ok": False, "reason": "invalid_token"}
             return {"ok": True, "username": user["username"], "user": user}
 
-    def _sanitize_username_hint(self, value: str) -> str:
-        normalized = re.sub(r"[^a-z0-9_.-]+", "_", str(value or "").strip().lower())
-        normalized = re.sub(r"_+", "_", normalized).strip("_.-")
-        return normalized[:48]
-
-    def _pick_unique_username(self, conn: sqlite3.Connection, hint: str, fallback_chat_id: str) -> str:
-        base = self._sanitize_username_hint(hint) or f"tg_{fallback_chat_id}"
-        candidate = base
-        suffix = 1
-        while conn.execute("SELECT 1 FROM users WHERE username=? LIMIT 1", (candidate,)).fetchone():
-            suffix += 1
-            candidate = f"{base}_{suffix}"
-        return candidate
-
     def upsert_user_from_telegram_contact(
-        self,
-        *,
-        telegram_chat_id: str,
-        username_hint: str = "",
-        display_name: str = "",
-    ) -> Dict[str, Any]:
-        chat = str(telegram_chat_id or "").strip()
-        if not chat:
-            raise ValueError("telegram_chat_id is required")
-        display = (display_name or "").strip()
-        now = _utc_now()
-        with self._lock:
-            with self._connect() as conn:
-                existing = conn.execute(
-                    """
-                    SELECT username
-                    FROM users
-                    WHERE telegram_chat_id=?
-                    LIMIT 1
-                    """,
-                    (chat,),
-                ).fetchone()
-                if existing is not None:
-                    username = str(existing["username"] or "")
-                    conn.execute(
-                        """
-                        UPDATE users
-                        SET status='active',
-                            verified_at=COALESCE(verified_at, ?),
-                            display_name=CASE WHEN ? <> '' THEN ? ELSE display_name END
-                        WHERE username=?
-                        """,
-                        (now, display, display, username),
-                    )
-                    return {"username": username, "created": False, "temp_password": ""}
+        self, *, telegram_chat_id, display_name="", telegram_username="", created_by="", **_
+    ):
+        return self.create_employee_invite(
+            admin_username=created_by,
+            username="",
+            display_name=display_name,
+            provider="telegram",
+            expected_sender_id=telegram_chat_id,
+        )
 
-                username = self._pick_unique_username(conn, username_hint, chat)
-                temp_password = secrets.token_urlsafe(10)
-                conn.execute(
-                    """
-                    INSERT INTO users (
-                        username, display_name, telegram_chat_id, password_hash,
-                        role, must_change_password, status, created_at, verified_at
-                    )
-                    VALUES (?, ?, ?, ?, 'user', 1, 'active', ?, ?)
-                    """,
-                    (
-                        username,
-                        display,
-                        chat,
-                        _hash_password(temp_password),
-                        now,
-                        now,
-                    ),
-                )
-                return {"username": username, "created": True, "temp_password": temp_password}
-
-    def unlink_telegram_chat_id(self, telegram_chat_id: str) -> Optional[str]:
-        chat = str(telegram_chat_id or "").strip()
+    def unlink_telegram_chat_id(self, telegram_chat_id):
+        chat = normalize_sender_id(telegram_chat_id)
         if not chat:
             return None
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT username
-                    FROM users
-                    WHERE telegram_chat_id=?
-                    LIMIT 1
-                    """,
-                    (chat,),
-                ).fetchone()
-                if row is None:
-                    return None
-                username = str(row["username"] or "")
-                conn.execute(
-                    "UPDATE users SET telegram_chat_id='' WHERE telegram_chat_id=?",
-                    (chat,),
-                )
-                return username
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = _binding(conn, "telegram", chat)
+            if not row:
+                return None
+            self._revoke_employee_channel(conn, row["username"], "telegram")
+            return row["username"]
+
+    def unlink_telegram_for_session(self, *, session_token):
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT u.username FROM user_sessions s JOIN users u ON u.username=s.username
+                WHERE s.token=? AND s.revoked_at IS NULL AND s.expires_at>? AND u.status='active'
+                AND u.must_change_password=0""",
+                (session_token, _utc_now()),
+            ).fetchone()
+            if not row:
+                return False
+            self._revoke_employee_channel(conn, row["username"], "telegram")
+            return True
 
     def list_telegram_chats(self) -> list[Dict[str, Any]]:
         with self._lock:
@@ -1882,36 +1571,26 @@ class UserAuthDB:
                 )
                 return cur.rowcount > 0
 
-    def update_profile(
+    def update_profile(self, *, username, display_name, telegram_chat_id="", telegram_username=""):
+        with self._connect() as conn:
+            return bool(
+                conn.execute(
+                    "UPDATE users SET display_name=? WHERE username=?",
+                    (str(display_name or "").strip(), username),
+                ).rowcount
+            )
+
+    def save_driver(
         self,
+        token: str,
         *,
         username: str,
         display_name: str,
-        telegram_chat_id: str,
-        telegram_username: str = "",
-    ) -> bool:
-        usr = (username or "").strip().lower()
-        if not usr:
-            return False
-        with self._lock:
-            with self._connect() as conn:
-                cur = conn.execute(
-                    """
-                    UPDATE users
-                    SET display_name=?, telegram_chat_id=?, telegram_username=?
-                    WHERE username=?
-                    """,
-                    (
-                        (display_name or "").strip(),
-                        str(telegram_chat_id or "").strip(),
-                        self._normalize_telegram_username(telegram_username),
-                        usr,
-                    ),
-                )
-                return cur.rowcount > 0
-
-    def save_driver(self, token: str, *, username: str, display_name: str,
-                    password: str = "", create: bool = False, archived: bool = False) -> None:
+        password: str = "",
+        create: bool = False,
+        archived: bool = False,
+        organization_id: str = DEFAULT_ORG,
+    ) -> None:
         """Dispatcher-scoped account changes; authorization and mutation share a transaction."""
         usr, name = str(username).strip().lower(), str(display_name).strip()
         if not usr or len(usr) > 100 or any(c.isspace() for c in usr) or not name or len(name) > 200:
@@ -1925,9 +1604,17 @@ class UserAuthDB:
                 actor_row = conn.execute("""SELECT u.* FROM users u JOIN user_sessions s ON s.username=u.username
                     WHERE s.token=? AND s.revoked_at IS NULL AND s.expires_at>?""", (token, now)).fetchone()
                 actor = dict(actor_row) if actor_row else {}
-                if (actor.get("status") != "active" or actor.get("must_change_password")
-                        or not user_roles(actor).intersection({"admin", "dispatcher"})):
+                if (
+                    actor.get("status") != "active"
+                    or actor.get("must_change_password")
+                    or not actor.get("username")
+                ):
                     raise PermissionError("Недостаточно прав для изменения сотрудников")
+                managed = _scope(conn, actor["username"]) | {
+                    m["id"] for m in _memberships(conn, actor["username"]) if "dispatcher" in m["roles"]
+                }
+                if organization_id not in managed:
+                    raise PermissionError("Недостаточно прав в организации")
                 target = conn.execute("SELECT * FROM users WHERE username=?", (usr,)).fetchone()
                 if create:
                     if target:
@@ -1935,16 +1622,25 @@ class UserAuthDB:
                     conn.execute("""INSERT INTO users(username,display_name,password_hash,role,roles_json,
                         status,must_change_password,created_at,verified_at) VALUES(?,?,?,?,?,?,1,?,?)""",
                         (usr, name, _hash_password(password), "driver", '["driver"]', "active", now, now))
+                    assign_new_membership(conn, usr, organization_id, ["driver"])
                 else:
                     if not target:
                         raise ValueError("Сотрудник не найден")
-                    if user_roles(dict(target)) != {"driver"}:
+                    memberships = _memberships(conn, usr)
+                    if (
+                        organization_id not in {m["id"] for m in memberships}
+                        or any(m["id"] not in managed or set(m["roles"]) != {"driver"} for m in memberships)
+                        or user_roles(dict(target)) != {"driver"}
+                        or target["status"] == "pending"
+                    ):
                         raise PermissionError("Учётную запись с дополнительными ролями изменяет администратор в настройках")
                     conn.execute("UPDATE users SET display_name=?,status=? WHERE username=?",
                                  (name, "blocked" if archived else "active", usr))
                     if password:
                         conn.execute("UPDATE users SET password_hash=?,must_change_password=1 WHERE username=?",
                                      (_hash_password(password), usr))
+                        for provider in ("telegram", "max"):
+                            self._revoke_employee_channel(conn, usr, provider)
                     if archived or password:
                         conn.execute("UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, usr))
                 conn.execute("INSERT INTO auth_events(ts,username,event_type,ok,error) VALUES(?,?,?,1,?)",
@@ -1954,129 +1650,151 @@ class UserAuthDB:
     def admin_update_user(
         self,
         *,
-        username: str,
-        display_name: str,
-        telegram_chat_id: str,
-        telegram_username: str = "",
-        role: str,
-        status: str,
-        must_change_password: bool,
-        roles: Optional[list[str]] = None,
-    ) -> bool:
-        usr = (username or "").strip().lower()
-        role_values = normalize_roles(roles if roles is not None else [role])
-        role_value = primary_role(role_values)
-        status_value = str(status or "").strip().lower()
-        if status_value not in {"active", "pending", "blocked"}:
-            status_value = "active"
-        if not usr:
+        username,
+        display_name,
+        telegram_chat_id="",
+        telegram_username="",
+        role,
+        status,
+        must_change_password,
+        roles=None,
+    ):
+        """Trusted platform settings. Per-organization grants use set_employee_org_roles."""
+        usr = str(username or "").strip().lower()
+        values = normalize_roles([role] if roles is None else roles)
+        if status not in {"pending", "active", "blocked"}:
             return False
-        with self._lock:
-            with self._connect() as conn:
-                cur = conn.execute(
-                    """
-                    UPDATE users
-                    SET display_name=?, telegram_chat_id=?, telegram_username=?, role=?, status=?, must_change_password=?, roles_json=?
-                    WHERE username=?
-                    """,
-                    (
-                        (display_name or "").strip(),
-                        str(telegram_chat_id or "").strip(),
-                        self._normalize_telegram_username(telegram_username),
-                        role_value,
-                        status_value,
-                        1 if must_change_password else 0,
-                        json.dumps(role_values),
-                        usr,
-                    ),
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM users WHERE username=?", (usr,)).fetchone()
+            if not row:
+                return False
+            if row["status"] == "pending" and not row["password_hash"] and status == "active":
+                return False
+            if set(values) != user_roles(dict(row)):
+                memberships = _memberships(conn, usr)
+                if len(memberships) != 1:
+                    return False
+                if "admin" in user_roles(dict(row)) and "admin" not in values:
+                    conn.execute("DELETE FROM employee_platform_admins WHERE username=?", (usr,))
+                conn.execute(
+                    "UPDATE employee_memberships SET roles_json=? WHERE username=?", (json.dumps(values), usr)
                 )
-                return cur.rowcount > 0
+                project_roles(conn, usr)
+            conn.execute(
+                "UPDATE users SET display_name=?,status=?,must_change_password=? WHERE username=?",
+                (str(display_name or "").strip(), status, int(bool(must_change_password)), usr),
+            )
+            if status != "active":
+                conn.execute(
+                    "UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
+                    (_utc_now(), usr),
+                )
+            return True
+
+    def _revoke_employee_channel(self, conn, username, provider):
+        user = conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+        if provider == "max":
+            self._remove_max_binding(conn, user["id"])
+        else:
+            conn.execute(
+                "UPDATE users SET telegram_chat_id='',telegram_username='',telegram_linked_at='' WHERE username=?", (username,)
+            )
+            for table in ("telegram_tokens", "verification_tokens", "password_reset_tokens"):
+                conn.execute(
+                    f"UPDATE {table} SET status='expired' WHERE username=? AND status IN ('pending','confirmed')",
+                    (username,),
+                )
+        conn.execute("DELETE FROM employee_invites WHERE username=? AND provider=?", (username, provider))
+        conn.execute(
+            "DELETE FROM account_activations WHERE username=? AND bound_provider=? AND used_at IS NULL",
+            (username, provider),
+        )
+
+    def reset_employee_channel(self, *, admin_username, username, provider):
+        if provider not in {"max", "telegram"}:
+            return {"ok": False, "reason": "invalid_provider"}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not _all_in_scope(conn, admin_username, username):
+                return {"ok": False, "reason": "not_admin"}
+            self._revoke_employee_channel(conn, username, provider)
+            conn.execute(
+                "UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
+                (_utc_now(), username),
+            )
+            _audit(conn, admin_username, "employee_channel_reset", target=username, provider=provider)
+            return {"ok": True}
 
     def create_account_activation(
-        self, *, username: str, display_name: str, created_by: str, ttl_hours: int = 72,
-        reset_existing: bool = False, roles: Optional[list[str]] = None, renew_pending: bool = False,
-    ) -> Dict[str, Any]:
-        """Issue password setup for a new staff account, or explicitly reset an existing one."""
+        self,
+        *,
+        username,
+        display_name,
+        created_by,
+        ttl_hours=72,
+        reset_existing=False,
+        roles=None,
+        renew_pending=False,
+        organization_id=DEFAULT_ORG,
+    ):
         usr = str(username or "").strip().lower()
-        actor = str(created_by or "").strip().lower()
         if not re.fullmatch(r"[a-z][a-z0-9._-]{2,63}", usr):
             raise ValueError("Use a Latin login of 3 to 64 characters")
-        if not 1 <= ttl_hours <= 168:
-            raise ValueError("Activation lifetime must be between 1 and 168 hours")
-        if renew_pending and reset_existing:
-            raise ValueError("Choose only one invitation operation")
-        new_roles = normalize_roles(roles if roles is not None else ["user"])
-        token = secrets.token_urlsafe(32)
-        now = datetime.now(timezone.utc)
-        expires_at = (now + timedelta(hours=ttl_hours)).isoformat()
-        with self._lock, closing(self._connect()) as conn, conn:
+        if not 1 <= ttl_hours <= 168 or (renew_pending and reset_existing):
+            raise ValueError("Invalid invitation operation")
+        values = normalize_roles(["driver"] if roles is None else roles)
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            admin = conn.execute("SELECT * FROM users WHERE username=?", (actor,)).fetchone()
-            if admin is None or admin["status"] != "active" or "admin" not in user_roles(dict(admin)):
+            if organization_id not in _scope(conn, created_by):
                 return {"ok": False, "reason": "not_admin"}
-            existing = conn.execute("SELECT id,status FROM users WHERE username=?", (usr,)).fetchone()
+            row = conn.execute("SELECT id,status FROM users WHERE username=?", (usr,)).fetchone()
+            if (renew_pending or reset_existing) and row:
+                if not _all_in_scope(conn, created_by, usr) or organization_id not in {
+                    m["id"] for m in _memberships(conn, usr)
+                }:
+                    return {"ok": False, "reason": "not_admin"}
             if renew_pending:
                 pending = conn.execute(
                     """SELECT 1 FROM account_activations a JOIN users u ON u.username=a.username
-                       WHERE a.username=? AND a.used_at IS NULL AND u.status='pending'
-                         AND u.password_hash='' AND u.must_change_password=1""", (usr,),
+                              WHERE a.username=? AND a.used_at IS NULL AND u.status='pending' AND u.password_hash=''
+                              AND u.must_change_password=1 AND a.bound_provider IN ('','web')""",
+                    (usr,),
                 ).fetchone()
                 if not pending:
                     return {"ok": False, "reason": "not_pending"}
                 event = "account_invite_renewed"
             elif reset_existing:
-                if existing is None:
+                if not row:
                     return {"ok": False, "reason": "not_found"}
-                if existing["status"] not in {"active", "pending"}:
+                if row["status"] not in {"pending", "active"}:
                     return {"ok": False, "reason": "blocked"}
+                for provider in ("max", "telegram"):
+                    self._revoke_employee_channel(conn, usr, provider)
                 conn.execute(
-                    "UPDATE users SET password_hash='', must_change_password=1, status='pending' WHERE username=?",
-                    (usr,),
+                    "UPDATE users SET status='pending',must_change_password=1,password_hash='' WHERE id=?",
+                    (row["id"],),
                 )
                 conn.execute(
                     "UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
-                    (now.isoformat(), usr),
+                    (_utc_now(), usr),
                 )
-                self._remove_max_binding(conn, existing["id"])
-                for table in ("verification_tokens", "password_reset_tokens", "telegram_tokens"):
-                    conn.execute(
-                        f"UPDATE {table} SET status='expired' WHERE username=? AND status IN ('pending','confirmed')",
-                        (usr,),
-                    )
                 event = "account_password_reset_link"
             else:
-                if existing is not None:
-                    return {"ok": False, "reason": "already_exists"}
-                conn.execute(
-                    """INSERT INTO users
-                       (username, display_name, password_hash, role, roles_json,
-                        must_change_password, status, created_at)
-                       VALUES (?, ?, '', ?, ?, 1, 'pending', ?)""",
-                    (usr, str(display_name or "").strip(), primary_role(new_roles),
-                     json.dumps(new_roles), now.isoformat()),
-                )
+                user = create_pending(conn, usr, display_name, organization_id, values)
+                if not user["ok"]:
+                    return user
                 event = "account_invited"
-            conn.execute(
-                """INSERT INTO account_activations
-                   (token_hash, username, created_by, created_at, expires_at)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(username) DO UPDATE SET token_hash=excluded.token_hash,
-                     created_by=excluded.created_by, created_at=excluded.created_at,
-                     expires_at=excluded.expires_at, used_at=NULL""",
-                (hashlib.sha256(token.encode("ascii")).hexdigest(), usr, actor, now.isoformat(), expires_at),
-            )
-            conn.execute(
-                "INSERT INTO auth_events(ts, username, event_type, ok, error) VALUES (?, ?, ?, 1, ?)",
-                (now.isoformat(), actor, event, json.dumps({"target": usr})),
-            )
-        return {"ok": True, "username": usr, "token": token, "expires_at": expires_at}
+            result = issue_activation(conn, usr, created_by, ttl_hours=ttl_hours)
+            _audit(conn, created_by, event, target=usr)
+            return {"ok": True, **result}
 
     def activate_account(self, *, token: str, new_password: str) -> Dict[str, Any]:
-        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+        digest = token_hash(token)
+        if not digest:
             return {"ok": False, "reason": "invalid_activation"}
         if not isinstance(new_password, str) or not 8 <= len(new_password) <= 128 or not new_password.strip():
             return {"ok": False, "reason": "invalid_password"}
-        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
         now = _utc_now()
         with self._lock, closing(self._connect()) as conn, conn:
             # Serialize consumption across web workers and independent DB instances.
@@ -2085,7 +1803,7 @@ class UserAuthDB:
                 """SELECT a.username FROM account_activations a JOIN users u ON u.username=a.username
                    WHERE a.token_hash=? AND a.used_at IS NULL AND a.expires_at>?
                      AND u.status='pending' AND u.password_hash='' AND u.must_change_password=1""",
-                (token_hash, now),
+                (digest, now),
             ).fetchone()
             if row is None:
                 return {"ok": False, "reason": "invalid_activation"}
@@ -2095,7 +1813,7 @@ class UserAuthDB:
                    verified_at=? WHERE username=?""",
                 (_hash_password(new_password), now, username),
             )
-            conn.execute("UPDATE account_activations SET used_at=? WHERE token_hash=?", (now, token_hash))
+            conn.execute("UPDATE account_activations SET used_at=? WHERE token_hash=?", (now, digest))
             conn.execute(
                 "UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, username),
             )
@@ -2115,7 +1833,13 @@ class UserAuthDB:
                     "UPDATE users SET password_hash=?, must_change_password=? WHERE username=?",
                     (_hash_password(new_password), 1 if must_change_password else 0, usr),
                 )
-                return cur.rowcount > 0
+                if not cur.rowcount:
+                    return False
+                for provider in ("telegram", "max"):
+                    self._revoke_employee_channel(conn, usr, provider)
+                conn.execute("UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
+                             (_utc_now(), usr))
+                return True
 
     def admin_create_user(
         self,
@@ -2125,11 +1849,17 @@ class UserAuthDB:
         telegram_chat_id: str = "",
         telegram_username: str = "",
         password: str,
-        role: str = "user",
+        role: str = "driver",
+        organization_id: str = DEFAULT_ORG,
+        platform_admin: Optional[bool] = None,
         status: str = "active",
         must_change_password: bool = True,
         roles: Optional[list[str]] = None,
     ) -> bool:
+        """Trusted provisioning. The legacy explicit role='admin' is a platform bootstrap.
+
+        New employee forms pass organization roles and platform_admin=False.
+        """
         usr = (username or "").strip().lower()
         role_values = normalize_roles(roles if roles is not None else [role])
         role_value = primary_role(role_values)
@@ -2141,6 +1871,13 @@ class UserAuthDB:
         now = _utc_now()
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if not conn.execute(
+                    "SELECT 1 FROM employee_organizations WHERE id=?", (organization_id,)
+                ).fetchone():
+                    return False
+                if telegram_chat_id and not normalize_sender_id(telegram_chat_id):
+                    return False
                 try:
                     conn.execute(
                         """
@@ -2165,6 +1902,14 @@ class UserAuthDB:
                             json.dumps(role_values),
                         ),
                     )
+                    if "admin" in role_values and (
+                        platform_admin is True
+                        or (platform_admin is None and role == "admin" and roles is None)
+                    ):
+                        conn.execute("INSERT INTO employee_platform_admins VALUES(?)", (usr,))
+                    if telegram_chat_id:
+                        conn.execute("UPDATE users SET telegram_linked_at=? WHERE username=?", (now, usr))
+                    assign_new_membership(conn, usr, organization_id, role_values)
                 except sqlite3.IntegrityError:
                     return False
         return True
