@@ -37,6 +37,7 @@ from . import stats_view as _stats_view
 from . import usage_api as _usage_routes  # noqa: F401
 from . import work_shifts_view as _work_shifts_view
 from .auth_session import (
+    BrowserSessionStorage,
     apply_login_session,
     logout_session,
     prepare_login_session,
@@ -114,6 +115,7 @@ from .system import (
     _stop_managed_timer,
 )
 
+app.storage = BrowserSessionStorage()
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 APP_ICON_PATH = PROJECT_ROOT / "assets" / "brand" / "ico" / "favicon.ico"
 LOGO_PATH = PROJECT_ROOT / "assets" / "brand" / "svg" / "rag-search-mark.svg"
@@ -2884,7 +2886,8 @@ def _build_page(
                 (_time.perf_counter() - started) * 1000,
             )
             ui.notify("Вход выполнен.", type="positive")
-            render()
+            with content:  # render removes the login form and its event slot
+                render()
 
         async def login() -> None:
             login_button.props("loading")

@@ -10,10 +10,31 @@ sentence_transformers и qdrant_client не установлены в CI-окр�
 from __future__ import annotations
 
 import sys
+import tempfile
 import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+
+def pytest_configure(config):
+    """NiceGUI's test reset deletes its storage files. Never point it at the host store."""
+    root = tempfile.TemporaryDirectory(prefix="rag-pytest-nicegui-")
+    config.add_cleanup(root.cleanup)
+    path = Path(root.name) / "storage"
+    patch = pytest.MonkeyPatch()
+    config.add_cleanup(patch.undo)
+    patch.setenv("NICEGUI_STORAGE_PATH", str(path))
+    patch.delenv("NICEGUI_REDIS_URL", raising=False)
+    # Plugins may have imported NiceGUI before this conftest was discovered.
+    if "nicegui.storage" in sys.modules:
+        from nicegui import app
+        from nicegui.storage import Storage
+
+        patch.setattr(Storage, "path", path)
+        patch.setattr(Storage, "redis_url", None)
+        patch.setattr(app, "storage", Storage())
 
 
 def _install_stub(name: str) -> types.ModuleType:

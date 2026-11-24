@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable, Dict
+from weakref import WeakValueDictionary
 
 from nicegui import app
+from nicegui.storage import USER_PREFIX, Storage
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 
 from .state import PageState, _get_auth_db, _username
+
+
+class BrowserSessionStorage(Storage):
+    """Publish a session to NiceGUI's request middleware only after loading it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._load_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+
+    async def _create_user_storage(self, session_id: str) -> None:
+        # A page request can race an unload beacon with the same signed cookie.
+        async with self._load_locks.setdefault(session_id, asyncio.Lock()):
+            if session_id not in self._users:
+                data = self._create_persistent_dict(f"{USER_PREFIX}{session_id}")
+                await data.initialize()
+                self._users[session_id] = data
 
 
 def ensure_cloud_drive_user_home(state: PageState, user: Dict[str, Any] | None = None) -> None:
