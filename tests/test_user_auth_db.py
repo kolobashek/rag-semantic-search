@@ -515,6 +515,34 @@ def test_telegram_login_explicit_confirmation_and_independent_browser_verifier(t
     assert not db.consume_confirmed_telegram_login(verifier=verifier)["ok"]
 
 
+def test_telegram_browser_completion_retries_one_session_until_revoked(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    db = UserAuthDB(str(tmp_path / "users.db"))
+    assert db.admin_create_user(
+        username="driver", password="private-password", telegram_chat_id="777", must_change_password=False
+    )
+    challenge = db.create_telegram_login_challenge(target="web")
+
+    def finish():
+        return db.consume_confirmed_telegram_login(verifier=challenge["verifier"], browser_session=True)
+
+    assert finish()["reason"] == "pending"
+    assert db.confirm_telegram_login(token=challenge["token"], telegram_chat_id="777")["ok"]
+    assert not db.consume_confirmed_telegram_login(verifier=challenge["token"], browser_session=True)["ok"]
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        jobs = [workers.submit(finish) for _ in range(2)]
+        first, retry = [job.result() for job in jobs]
+    assert first["ok"] and retry["session_token"] == first["session_token"]
+    assert db.get_user_by_session(first["session_token"])["username"] == "driver"
+    assert not db.consume_confirmed_telegram_login(verifier=challenge["verifier"])["ok"]
+    with db._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM user_sessions WHERE username='driver'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM auth_events WHERE event_type='telegram_web_login'").fetchone()[0] == 1
+    db.revoke_session(first["session_token"])
+    assert not finish()["ok"]
+
+
 def test_registration_request_can_be_approved(tmp_path) -> None:
     db = UserAuthDB(str(tmp_path / "users.db"))
     assert db.change_password(username="admin", old_password="admin", new_password="changed-password")

@@ -116,6 +116,7 @@ from .system import (
     _start_recovery_watchdog,
     _stop_managed_timer,
 )
+from .telegram_login import remember_telegram_login
 
 app.storage = BrowserSessionStorage()
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -237,6 +238,7 @@ def _log_nicegui_client_lifecycle(action: str, client: Any) -> None:
 
 app.on_connect(lambda client: _log_nicegui_client_lifecycle("connect", client))
 app.add_static_file(local_file=USAGE_JS_PATH, url_path="/rag-usage.js")
+app.add_static_file(local_file=Path(__file__).parent / "static" / "telegram_login.js", url_path="/rag-telegram-login.js")
 app.on_disconnect(lambda client: _log_nicegui_client_lifecycle("disconnect", client))
 app.on_delete(lambda client: _log_nicegui_client_lifecycle("delete", client))
 
@@ -509,6 +511,7 @@ def _build_page(
     if initial_screen == "search":
         _restore_search_recovery(state)
     _install_css(state.theme)
+    ui.add_head_html('<script defer src="/rag-telegram-login.js"></script>')
     ui.timer(0.0, _install_interaction_javascript, once=True)
 
     dark_mode = ui.dark_mode(state.theme == "dark")
@@ -1616,7 +1619,7 @@ def _build_page(
         # Stop all periodic timers so they don't fire a concurrent render() while we await
         for _timer_attr in (
             "cloud_drive_timer", "scheduler_timer",
-            "index_progress_timer", "stage_status_timer", "tg_login_timer",
+            "index_progress_timer", "stage_status_timer",
         ):
             _t = getattr(state, _timer_attr, None)
             if _t is not None:
@@ -2881,8 +2884,6 @@ def _build_page(
 
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
-        tg_login_verifier = {"value": ""}
-        tg_login_dialog = None
         try:
             login_stats = _read_login_screen_stats(state.cfg)
         except Exception:
@@ -2975,51 +2976,35 @@ def _build_page(
                     login_button.props(remove="loading")
                     login_button.enable()
 
-        def request_tg_login() -> None:
-            nonlocal tg_login_dialog
+        async def request_tg_login() -> None:
             bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-            if not bot_link:
-                ui.notify("Telegram-вход не настроен: задайте telegram_bot_link в config.json.", type="warning")
+            tg_btn.disable()
+            try:
+                out = await run.io_bound(auth_db.create_telegram_login_challenge, target="web")
+            finally:
+                if not tg_btn.is_deleted:
+                    tg_btn.enable()
+            if tg_btn.is_deleted or state.current_user:
                 return
-            out = auth_db.create_telegram_login_challenge(target="web")
             token = str(out.get("token") or "")
             link = _telegram_deeplink(bot_link, "login", token)
             if not token or not link:
                 ui.notify("Не удалось создать Telegram-ссылку входа.", type="negative")
                 return
-            tg_login_verifier["value"] = out["verifier"]
-            with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm"):
+            receipt = remember_telegram_login(out)
+            with ui.dialog().props("persistent") as dialog, ui.card().classes("w-full max-w-sm"):
                 ui.label("Вход через Telegram").classes("text-lg font-semibold")
                 ui.label("Откройте личный чат с ботом и подтвердите вход в этот браузер. Ссылка действует 5 минут.")
                 ui.link("Подтвердить в Telegram", link, new_tab=True).props("rel='noopener noreferrer'")
-                ui.button("Отмена", on_click=dialog.close).props("flat")
-
-            def stop_waiting():
-                if tg_login_verifier["value"] == out["verifier"]:
-                    tg_login_verifier["value"] = ""
-                dialog.delete()
-
-            tg_login_dialog = dialog
-            dialog.on("hide", stop_waiting)
+                ui.label("После подтверждения вернитесь сюда. Кабинет откроется автоматически.").props(
+                    "role=status data-rag-telegram-status"
+                )
+                ui.button("Отмена").props("flat").on("click", dialog.close, js_handler=(
+                    f"() => {{ window.ragTelegramLogin.cancel({json.dumps(receipt)}); emit(); }}"
+                ))
+            dialog.on("hide", dialog.delete)
             dialog.open()
-
-        async def poll_tg_login() -> None:
-            verifier = tg_login_verifier["value"]
-            if not verifier or state.current_user is not None:
-                return
-            out = await run.io_bound(auth_db.consume_confirmed_telegram_login, verifier=verifier)
-            if verifier != tg_login_verifier["value"] or state.current_user or out.get("reason") == "pending":
-                return
-            tg_login_verifier["value"] = ""
-            if tg_login_dialog and not tg_login_dialog.is_deleted:
-                tg_login_dialog.close()
-            if not out.get("ok"):
-                ui.notify("Запрос входа истёк. Начните вход заново.", type="warning")
-                return
-            user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
-            if not user:
-                return
-            await _complete_login(user, event_type="telegram_web_login")
+            ui.run_javascript(f"window.ragTelegramLogin.start({json.dumps(receipt)})")
 
         async def register_request() -> None:
             username = str(reg_username_input.value or "").strip().lower()
@@ -3223,9 +3208,6 @@ def _build_page(
                             ui.label(lbl)
                             ui.label(sub).style("margin-left:auto;font-family:var(--rag-font-mono);font-size:11px;color:var(--rag-muted)")
 
-        _stop_managed_timer(state.tg_login_timer)
-        state.tg_login_timer = ui.timer(2.0, poll_tg_login)
-
 
     # ── Admin / settings screens ──────────────────────────────────────────────
 
@@ -3302,9 +3284,6 @@ def _build_page(
         if state.screen != "settings" or not _is_admin(state):
             _stop_managed_timer(state.cloud_drive_timer)
             state.cloud_drive_timer = None
-        if state.current_user is not None or state.screen != "search":
-            _stop_managed_timer(state.tg_login_timer)
-            state.tg_login_timer = None
         update_nav()
         current_screen = state.screen
         capture_screen_state(state, current_screen)

@@ -494,7 +494,7 @@ class UserAuthDB(EmployeeOnboarding):
                 return {"ok": False, "reason": "invalid_token"}
             return {"ok": True, "username": user["username"]}
 
-    def consume_confirmed_telegram_login(self, *, verifier):
+    def consume_confirmed_telegram_login(self, *, verifier, browser_session=False):
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -502,7 +502,19 @@ class UserAuthDB(EmployeeOnboarding):
                                AND purpose='login' """,
                 (token_hash(verifier),),
             ).fetchone()
-            if not row or row["expires_at"] <= _utc_now() or row["status"] not in {"pending", "confirmed"}:
+            if not row or row["expires_at"] <= _utc_now() or (browser_session and row["target"] != "web"):
+                return {"ok": False, "reason": "expired"}
+            if browser_session and row["status"] == "used" and row["source_session"]:
+                # The original browser can retry after losing the HTTP response.
+                session = conn.execute(
+                    """SELECT s.token FROM user_sessions s JOIN users u ON u.username=s.username
+                       WHERE s.token=? AND s.username=? AND s.revoked_at IS NULL AND s.expires_at>?
+                       AND u.status='active' AND u.must_change_password=0 AND u.telegram_chat_id=?""",
+                    (row["source_session"], row["username"], _utc_now(), row["telegram_chat_id"]),
+                ).fetchone()
+                if session:
+                    return {"ok": True, "session_token": session["token"]}
+            if row["status"] not in {"pending", "confirmed"}:
                 return {"ok": False, "reason": "expired"}
             if row["status"] == "pending":
                 return {"ok": False, "reason": "pending"}
@@ -517,6 +529,12 @@ class UserAuthDB(EmployeeOnboarding):
             ).fetchone()
             if not user:
                 return {"ok": False, "reason": "not_linked"}
+            if browser_session:
+                token = self._insert_session(conn, user["username"], self._session_ttl_days(conn))
+                conn.execute("UPDATE telegram_tokens SET source_session=? WHERE id=?", (token, row["id"]))
+                conn.execute("""INSERT INTO auth_events (ts, username, event_type, ok, ip, user_agent, error)
+                    VALUES (?, ?, 'telegram_web_login', 1, '', '', '')""", (_utc_now(), user["username"]))
+                return {"ok": True, "session_token": token}
             return {"ok": True, "username": user["username"], "user": self._with_roles(conn, dict(user))}
 
     def create_admin_invite(
@@ -947,10 +965,10 @@ class UserAuthDB(EmployeeOnboarding):
     def get_session_ttl_days(self) -> int:
         with self._lock:
             with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT value FROM app_settings WHERE key=?",
-                    (SESSION_TTL_SETTING_KEY,),
-                ).fetchone()
+                return self._session_ttl_days(conn)
+
+    def _session_ttl_days(self, conn) -> int:
+        row = conn.execute("SELECT value FROM app_settings WHERE key=?", (SESSION_TTL_SETTING_KEY,)).fetchone()
         if row is None:
             return DEFAULT_SESSION_TTL_DAYS
         return self._normalize_session_ttl_days(row["value"])
@@ -994,19 +1012,21 @@ class UserAuthDB(EmployeeOnboarding):
         usr = (username or "").strip().lower()
         if not usr:
             raise ValueError("username is required")
-        token = secrets.token_urlsafe(32)
-        now = datetime.now(timezone.utc)
-        ttl = self._normalize_session_ttl_days(ttl_days) if ttl_days is not None else self.get_session_ttl_days()
-        expires = now + timedelta(days=ttl)
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO user_sessions (token, username, created_at, last_seen_at, expires_at, revoked_at)
-                    VALUES (?, ?, ?, ?, ?, NULL)
-                    """,
-                    (token, usr, now.isoformat(), now.isoformat(), expires.isoformat()),
-                )
+                ttl = self._normalize_session_ttl_days(ttl_days) if ttl_days is not None else self._session_ttl_days(conn)
+                return self._insert_session(conn, usr, ttl)
+
+    @staticmethod
+    def _insert_session(conn, username, ttl_days):
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(days=ttl_days)
+        conn.execute(
+            """INSERT INTO user_sessions (token, username, created_at, last_seen_at, expires_at, revoked_at)
+               VALUES (?, ?, ?, ?, ?, NULL)""",
+            (token, username, now.isoformat(), now.isoformat(), expires.isoformat()),
+        )
         return token
 
     def touch_session(

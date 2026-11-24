@@ -34,9 +34,9 @@ from rag_catalog.core.client_logs import MAX_EVENTS_PER_BATCH, ingest_client_eve
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.cloud_drive.operations import cloud_drive_backup_freshness, cloud_drive_operations_health
 from rag_catalog.core.rag_core import RAGSearcher, load_config
+from rag_catalog.core.sqlite_runtime import cached_database
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
-from rag_catalog.core.sqlite_runtime import cached_database
 from rag_catalog.integrations.max_webhook import register_max_webhook
 
 from . import helpers as _helpers
@@ -46,6 +46,7 @@ from .helpers import _cd_registry_acl_allows, _cd_registry_acl_filter, _resolve_
 from .loop_health import register_loop_watchdog
 from .state import _users_db_path
 from .system import _read_cloud_bootstrap_status, _recover_cloud_drive_jobs, _safe_int, _telemetry_db_path
+from .telegram_login import register_telegram_login_route
 
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 register_loop_watchdog(app)
@@ -160,6 +161,7 @@ def _get_api_auth_db(cfg: Dict[str, Any]) -> UserAuthDB:
 
 
 register_activation_routes(app, lambda: _get_api_auth_db(load_config()))
+register_telegram_login_route(app, lambda: _get_api_auth_db(load_config()))
 register_max_webhook(app, load_config, _get_api_auth_db)
 
 

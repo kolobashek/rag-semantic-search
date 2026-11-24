@@ -305,12 +305,43 @@ def test_login_io_does_not_block_nicegui_event_loop() -> None:
     assert 'login_button.props("loading")' in source
 
 
-def test_telegram_login_poll_awaits_session_completion() -> None:
-    source = inspect.getsource(nice_app._build_page)
+def test_telegram_login_returns_after_persisting_session_off_event_loop(monkeypatch) -> None:
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from threading import get_ident
 
-    assert "async def poll_tg_login()" in source
-    assert "await run.io_bound(auth_db.consume_confirmed_telegram_login, verifier=verifier)" in source
-    assert 'await _complete_login(user, event_type="telegram_web_login")' in source
+    import httpx
+    from fastapi import FastAPI
+
+    from rag_catalog.ui import telegram_login
+
+    storage = {}
+    monkeypatch.setattr(telegram_login, "app", SimpleNamespace(storage=SimpleNamespace(user=storage)))
+    expires = datetime.now(timezone.utc) + timedelta(minutes=5)
+    receipt = telegram_login.remember_telegram_login({
+        "verifier": "fixture-verifier", "expires_at": expires.isoformat(),
+    })
+    application = FastAPI()
+    loop_thread = get_ident()
+
+    def confirm(*, verifier, browser_session):
+        assert get_ident() != loop_thread
+        assert verifier == "fixture-verifier" and browser_session
+        return {"ok": True, "session_token": "fixture-session"}
+
+    db = SimpleNamespace(consume_confirmed_telegram_login=confirm)
+    telegram_login.register_telegram_login_route(application, lambda: db)
+
+    async def exercise():
+        transport = httpx.ASGITransport(application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://office.test") as client:
+            response = await client.post("/api/auth/telegram/check", headers={
+                "Origin": "http://office.test", "X-Rag-Login-Request": receipt,
+            })
+            assert response.status_code == 200
+            assert storage["auth_token"] == "fixture-session"
+
+    asyncio.run(exercise())
 
 
 def test_forced_password_change_does_not_block_or_reload_page() -> None:

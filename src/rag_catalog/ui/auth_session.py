@@ -12,6 +12,7 @@ from nicegui.storage import USER_PREFIX, Storage
 from rag_catalog.core.cloud_drive import CloudDriveService
 
 from .state import PageState, _get_auth_db, _username
+from .telegram_login import WAITS as TELEGRAM_LOGIN_WAITS
 
 
 class BrowserSessionStorage(Storage):
@@ -102,6 +103,7 @@ def apply_login_session(state: PageState, user: Dict[str, Any], token: str) -> N
     state.session_expired = False
     try:
         app.storage.user["auth_token"] = state.auth_token
+        app.storage.user.pop(TELEGRAM_LOGIN_WAITS, None)
     except Exception:
         pass
 
@@ -116,5 +118,6 @@ def logout_session(state: PageState) -> None:
     state.auth_token = ""
     try:
         app.storage.user.pop("auth_token", None)
+        app.storage.user.pop(TELEGRAM_LOGIN_WAITS, None)
     except Exception:
         pass

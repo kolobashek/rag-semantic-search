@@ -92,7 +92,6 @@ class PageState:
     telemetry: Optional[TelemetryDB] = None
     index_progress_timer: Optional[Any] = None
     stage_status_timer: Optional[Any] = None
-    tg_login_timer: Optional[Any] = None
     activity_timer: Optional[Any] = None
     scheduler_timer: Optional[Any] = None
     cloud_drive_timer: Optional[Any] = None

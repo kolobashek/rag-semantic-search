@@ -216,12 +216,13 @@ def test_inviting_a_dispatcher_requires_separate_confirmation(office, pages):
     assert set(pending["organization_roles"]["north"]) == {"driver", "dispatcher"}
 
 
-def test_telegram_driver_login_returns_to_initiating_shifts_page(office, pages, monkeypatch):
+@pytest.mark.parametrize("disconnect", [False, True], ids=["switch-tabs", "socket-disconnect"])
+def test_telegram_driver_login_returns_to_initiating_shifts_page(office, pages, monkeypatch, disconnect):
     from rag_catalog.integrations import telegram_bot
 
     _, url, auth, password = office
     anonymous, driver = pages
-    username, sender = "browser-telegram-driver", 4981
+    username, sender = ("disconnected-driver", 4982) if disconnect else ("browser-telegram-driver", 4981)
     assert auth.admin_create_user(
         username=username, password=password, roles=["driver"], telegram_chat_id=str(sender), must_change_password=False
     )
@@ -233,9 +234,16 @@ def test_telegram_driver_login_returns_to_initiating_shifts_page(office, pages, 
     driver.goto(url + "/shifts")
     driver.get_by_role("button", name="Войти через Telegram").click()
     link = driver.locator(f'a[href^="{BOT}?start=login_"]')
-    start = link.get_attribute("href").removeprefix(BOT + "?start=")
+    bot_url = link.get_attribute("href")
+    start = bot_url.removeprefix(BOT + "?start=")
     assert link.get_attribute("target") == "_blank"
     assert urlsplit(driver.url).hostname == "127.0.0.1"
+    driver.context.route(bot_url, lambda route: route.fulfill(status=200, content_type="text/html", body="Telegram"))
+    with driver.expect_popup() as popup:
+        link.click()
+    telegram = popup.value
+    telegram.bring_to_front()
+    telegram.get_by_text("Telegram", exact=True).wait_for()
 
     private = {"chat": {"id": sender, "type": "private"}, "from": {"id": sender}}
     telegram_bot.handle_update(
@@ -251,6 +259,11 @@ def test_telegram_driver_login_returns_to_initiating_shifts_page(office, pages, 
         b for row in replies[-1][1]["inline_keyboard"] for b in row if b["text"] == "Подтвердить вход в браузере"
     ]
     assert not driver.get_by_text("Смены и путевые листы", exact=True).is_visible()
+    if disconnect:
+        driver.evaluate("window.socket.disconnect()")
+        driver.wait_for_function("!window.socket.connected")
+        # Allow this test server's three-second NiceGUI reconnect grace period to expire.
+        telegram.wait_for_timeout(4000)
     telegram_bot.handle_update(
         "fixture",
         auth,
@@ -266,11 +279,44 @@ def test_telegram_driver_login_returns_to_initiating_shifts_page(office, pages, 
         },
     )
     assert "Вход подтверждён" in replies[-1][0]
-    driver.get_by_text("Смены и путевые листы", exact=True).wait_for()
-    driver.goto(url + "/shifts")
+    telegram.close()
+    driver.bring_to_front()
+    if disconnect:
+        driver.evaluate("window.socket?.connect()")
+    driver.get_by_text("Смены и путевые листы", exact=True).wait_for(timeout=15000)
     driver.get_by_role("button", name="Аккаунт Telegram").click()
     driver.get_by_text(f"Telegram привязан к сотруднику {username}.", exact=True).wait_for()
     assert not driver.get_by_role("button", name="Сотрудники").is_visible()
+    assert urlsplit(driver.url).path == "/shifts"
     anonymous.goto(url + "/shifts")
     anonymous.get_by_role("button", name="Войти через Telegram").wait_for()
     assert not anonymous.get_by_text("Смены и путевые листы", exact=True).is_visible()
+
+
+def test_telegram_confirmation_requires_initiating_browser_and_origin(office, pages):
+    _, url, auth, password = office
+    other, driver = pages
+    username, sender = "telegram-receipt-driver", "4983"
+    assert auth.admin_create_user(
+        username=username, password=password, roles=["driver"], telegram_chat_id=sender, must_change_password=False
+    )
+    for page in (other, driver):
+        page.goto(url + "/shifts")
+        page.get_by_role("button", name="Войти через Telegram").wait_for()
+
+    endpoint = url + "/api/auth/telegram/check"
+    with driver.expect_request(lambda request: request.url == endpoint and request.method == "POST") as poll:
+        driver.get_by_role("button", name="Войти через Telegram").click()
+    receipt = poll.value.all_headers()["x-rag-login-request"]
+    headers = {"Origin": url, "X-Rag-Login-Request": receipt}
+    assert driver.request.post(endpoint, headers=headers).status == 202
+    assert driver.request.post(endpoint, headers={**headers, "Origin": "https://other.example"}).status == 403
+    assert other.request.post(endpoint, headers=headers).status == 410
+
+    link = driver.get_by_role("link", name="Подтвердить в Telegram").get_attribute("href")
+    token = link.removeprefix(BOT + "?start=login_")
+    assert auth.confirm_telegram_login(token=token, telegram_chat_id=sender)["ok"]
+    assert other.request.post(endpoint, headers=headers).status == 410
+    driver.get_by_text("Смены и путевые листы", exact=True).wait_for()
+    other.reload()
+    other.get_by_role("button", name="Войти через Telegram").wait_for()
