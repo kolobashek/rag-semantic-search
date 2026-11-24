@@ -21,7 +21,17 @@ import requests
 from rag_catalog.core.index_state_db import IndexStateDB
 from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import RAGSearcher, load_config
+from rag_catalog.core.roles import (
+    ROLE_LABELS,
+    can_manage_shifts,
+    can_use_catalog,
+    can_use_shifts,
+    manages_employees,
+    user_roles,
+)
 from rag_catalog.core.user_auth_db import UserAuthDB
+from rag_catalog.integrations.employee_onboarding import OnboardingContact, OnboardingFlow
+from rag_catalog.integrations.employee_portal import dispatch_notice, employee_office_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 install_env_log_handler()
@@ -329,15 +339,6 @@ def _file_uri(path: str) -> str:
         return ""
 
 
-def _telegram_deeplink(bot_link: str, purpose: str, token: str) -> str:
-    base = str(bot_link or "").strip()
-    value = str(token or "").strip()
-    if not base or not value:
-        return ""
-    joiner = "&" if "?" in base else "?"
-    return f"{base}{joiner}start={purpose}_{quote(value, safe='')}"
-
-
 def format_fact_answer(result: Dict[str, Any]) -> str:
     answer = _clean_tg_text(result.get("answer", "Ответ не найден"), 800)
     lines = [answer]
@@ -378,9 +379,10 @@ def is_allowed_chat(chat_id: str, allowed_chat_id: str) -> bool:
 
 def get_authorized_telegram_user(auth_db: UserAuthDB, chat_id: str) -> Dict[str, Any] | None:
     try:
-        from rag_catalog.core.roles import can_use_catalog
-        user = auth_db.get_user_by_telegram_chat_id(str(chat_id or "").strip())
-        return user if can_use_catalog(user) else None
+        user = auth_db.get_user_by_telegram_chat_id(str(chat_id).strip())
+        if user and user.get("status", "active") == "active" and not user.get("must_change_password"):
+            return user
+        return None
     except Exception:
         return None
 
@@ -404,29 +406,6 @@ def _log_tg_auth_event(
         )
     except Exception:
         logger.debug("Не удалось записать событие авторизации Telegram", exc_info=True)
-
-
-def _log_tg_message_event(
-    auth_db: UserAuthDB,
-    *,
-    chat_id: str,
-    event_type: str,
-    ok: bool,
-    text: str = "",
-    username: str = "",
-    error: str = "",
-) -> None:
-    details = _clean_tg_text(text, max_len=120)
-    suffix = f"text={details}" if details else ""
-    merged_error = " | ".join([part for part in [error, suffix] if part])
-    _log_tg_auth_event(
-        auth_db,
-        username=username,
-        chat_id=chat_id,
-        event_type=event_type,
-        ok=ok,
-        error=merged_error,
-    )
 
 
 def _users_db_path(cfg: Dict[str, Any]) -> str:
@@ -512,6 +491,9 @@ def save_telegram_upload(
     msg: Dict[str, Any],
     user: Dict[str, Any],
 ) -> Dict[str, Any]:
+    current = get_authorized_telegram_user(auth_db, chat_id)
+    if not can_use_catalog(current) or current["username"] != user.get("username"):
+        return {"ok": False, "reason": "access_denied"}
     info = _message_file_info(msg)
     if not info or not info.get("file_id"):
         return {"ok": False, "reason": "no_file"}
@@ -519,14 +501,13 @@ def save_telegram_upload(
     destination = _unique_destination(_upload_root(cfg, username), str(info.get("file_name") or "telegram_file"))
     tg_file = get_file_info(token, str(info["file_id"]))
     bytes_written = download_file(token, str(tg_file["file_path"]), destination)
-    caption = _clean_tg_text(str(msg.get("caption") or ""), 500)
     _log_tg_auth_event(
         auth_db,
         username=username,
         chat_id=chat_id,
         event_type="telegram_file_uploaded",
         ok=True,
-        error=f"path={destination} | bytes={bytes_written} | caption={caption}",
+        error=f"bytes={bytes_written}",
     )
     return {
         "ok": True,
@@ -536,19 +517,21 @@ def save_telegram_upload(
     }
 
 
+def _employee_admin(user: Dict[str, Any] | None) -> bool:
+    return manages_employees(user) or "admin" in user_roles(user)
+
+
 def _main_menu(user: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    if user:
-        rows = [
-            [{"text": "Поиск"}, {"text": "Каталог"}, {"text": "Добавить файл"}],
-            [{"text": "Кто я"}, {"text": "Помощь"}],
-        ]
-    else:
-        rows = [
-            [{"text": "Заявка"}, {"text": "Помощь"}],
-            [{"text": "Кто я"}],
-        ]
-    if user and str(user.get("role") or "") == "admin":
+    rows = []
+    if not user:
+        rows.append([{"text": "Заявка"}, {"text": "/status"}])
+    if can_use_catalog(user):
+        rows.extend([[{"text": "Офис"}, {"text": "Каталог"}], [{"text": "Поиск"}, {"text": "Добавить файл"}]])
+    if can_use_shifts(user):
+        rows.append([{"text": "Смены"}, {"text": "Путевой лист"}])
+    if _employee_admin(user):
         rows.append([{"text": "Добавить пользователя"}, {"text": "Заявки"}])
+    rows.append([{"text": "Кто я"}, {"text": "Помощь"}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -568,7 +551,7 @@ def set_bot_commands(token: str) -> None:
             "commands": [
                 {"command": "start", "description": "Главное меню"},
                 {"command": "whoami", "description": "Текущий пользователь"},
-                {"command": "upload", "description": "Добавить файл"},
+                {"command": "status", "description": "Проверить статус заявки"},
                 {"command": "register", "description": "Подать заявку"},
                 {"command": "logout", "description": "Отвязать Telegram"},
             ],
@@ -576,163 +559,70 @@ def set_bot_commands(token: str) -> None:
     )
 
 
-def _admin_help_text() -> str:
-    return (
-        "Команды администратора:\n"
-        "/add_user @telegram username — создать активного пользователя и ссылку приглашения\n"
-        "/requests — показать заявки\n"
-        "/approve ID — одобрить заявку\n"
-        "/reject ID — отклонить заявку\n\n"
-        "Можно также отправить контакт Telegram-пользователя."
-    )
-
-
 def _user_help_text(user: Dict[str, Any] | None, chat_id: str) -> str:
-    if user:
-        role = str(user.get("role") or "user")
-        username = str(user.get("username") or "")
-        admin_block = f"\n\n{_admin_help_text()}" if role == "admin" else ""
+    if not user:
         return (
-            f"Привет, {username}! Вы в боте поиска по документам компании.\n"
-            "\n"
-            "Как искать:\n"
-            "Напишите что угодно — название файла, фрагмент текста, вопрос.\n"
-            "Примеры: «договор с Ромашкой», «акт за март», «сколько весит PC300»\n"
-            "\n"
-            "Что получите в ответ:\n"
-            "• Список файлов с названием и путём\n"
-            "• «Получить» — бот пришлёт сам файл\n"
-            "• Кнопки 👍 / 👎 — оценка улучшает следующие поиски\n"
-            "• «Ещё варианты» — больше результатов\n"
-            "• «Дополнить поиск» — уточнить запрос\n"
-            "• Фильтр по типу файла: PDF / Word / Excel / Фото\n"
-            "• Сортировка: новые или старые сначала\n"
-            "\n"
-            "Загрузка файлов:\n"
-            "Отправьте документ или фото прямо сюда — файл сохранится в каталог\n"
-            "и появится в поиске после следующей индексации.\n"
-            "\n"
-            "Команды:\n"
-            "/whoami — кто вы в системе\n"
-            "/upload — инструкция по загрузке файлов\n"
-            "/help — эта справка\n"
-            "/logout — отвязать Telegram от аккаунта"
-            f"{admin_block}"
+            "Откройте приглашение администратора или подайте заявку через /register. "
+            "Проверить решение можно через /status.\n"
+            f"Ваш Telegram ID: {chat_id}"
         )
-    return (
-        "Здравствуйте! Это бот поиска по документам компании.\n"
-        "\n"
-        "Чтобы пользоваться ботом, нужен доступ.\n"
-        "\n"
-        "Способ 1 — ссылка-приглашение:\n"
-        "Если администратор выдал вам ссылку — перейдите по ней.\n"
-        "Telegram привяжется к вашему аккаунту автоматически.\n"
-        "\n"
-        "Способ 2 — заявка:\n"
-        "Отправьте команду с вашим именем:\n"
-        "/register Иванов Иван Иванович\n"
-        "\n"
-        "Администратор рассмотрит заявку и откроет доступ.\n"
-        "Бот сообщит вам, когда это произойдёт.\n"
-        "\n"
-        f"Ваш Telegram ID: {chat_id}"
-    )
+    lines = [f"Вы вошли как {user['username']}."]
+    if can_use_catalog(user):
+        lines.append("Офис — /office. Для поиска напишите название или фрагмент документа. "
+                     "Чтобы сохранить документ, отправьте его сюда.")
+    if can_use_shifts(user):
+        lines.append("Смены и путевые листы — /shifts. Откройте смену для просмотра её вложений.")
+    if _employee_admin(user):
+        lines.append("Команды администратора\n/add_user — пригласить сотрудника\n/requests — рассмотреть заявки")
+    lines.append("/whoami — мои роли\n/logout — отвязать Telegram")
+    return "\n\n".join(lines)
 
 
-def process_contact_message(
-    *,
-    auth_db: UserAuthDB,
-    sender_chat_id: str,
-    contact: Dict[str, Any],
-    allowed_chat_id: str,
-    app_auth_link: str,
-) -> Dict[str, str]:
-    if not is_allowed_chat(sender_chat_id, allowed_chat_id):
-        _log_tg_auth_event(
-            auth_db,
-            chat_id=sender_chat_id,
-            event_type="telegram_contact_denied_allowed_chat",
-            ok=False,
-            error="chat_not_allowed",
-        )
-        return {"reply": "Доступ запрещён для этого chat_id."}
+def _private_sender(message: dict, sender: dict, allowed_chat_id: str) -> str:
+    chat = message.get("chat") or {}
+    actor = str(sender.get("id") or "")
+    if (chat.get("type") == "private" and actor.isascii() and actor.isdigit() and int(actor) > 0
+            and actor == str(chat.get("id")) and not sender.get("is_bot") and is_allowed_chat(actor, allowed_chat_id)):
+        return actor
+    return ""
 
-    admin_user = get_authorized_telegram_user(auth_db, sender_chat_id)
-    if not admin_user or str(admin_user.get("role") or "") != "admin":
-        _log_tg_auth_event(
-            auth_db,
-            chat_id=sender_chat_id,
-            username=str((admin_user or {}).get("username") or ""),
-            event_type="telegram_contact_denied_not_admin",
-            ok=False,
-            error="not_admin",
-        )
-        return {"reply": "Добавлять пользователей через контакты может только администратор."}
 
-    contact_chat_id = str(contact.get("user_id") or "").strip()
-    if not contact_chat_id:
-        _log_tg_auth_event(
-            auth_db,
-            username=str(admin_user.get("username") or ""),
-            chat_id=sender_chat_id,
-            event_type="telegram_contact_denied_no_user_id",
-            ok=False,
-            error="missing_user_id",
-        )
-        return {"reply": "В контакте нет Telegram user_id. Перешлите контакт Telegram-пользователя, а не телефонную карточку."}
+_PICK_EMPLOYEE_ID = 71
 
-    first_name = str(contact.get("first_name") or "").strip()
-    last_name = str(contact.get("last_name") or "").strip()
-    display_name = " ".join(part for part in [first_name, last_name] if part).strip()
-    username_hint = str(contact.get("username") or f"tg_{contact_chat_id}")
-    created = auth_db.upsert_user_from_telegram_contact(
-        telegram_chat_id=contact_chat_id,
-        username_hint=username_hint,
-        display_name=display_name,
-    )
-    target_username = str(created.get("username") or "")
-    invite_link = ""
-    try:
-        invite = auth_db.create_telegram_token(
-            purpose="invite",
-            username=target_username,
-            telegram_chat_id=contact_chat_id,
-            display_name=display_name,
-            created_by=str(admin_user.get("username") or ""),
-            ttl_minutes=7 * 24 * 60,
-        )
-        invite_link = _telegram_deeplink(app_auth_link, "invite", str(invite.get("token") or ""))
-    except Exception:
-        logger.debug("Не удалось создать invite-link для контакта", exc_info=True)
 
-    _log_tg_auth_event(
-        auth_db,
-        username=target_username,
-        chat_id=sender_chat_id,
-        event_type="telegram_contact_upsert",
-        ok=True,
-    )
+def _contact_hint(message: dict) -> OnboardingContact | None:
+    shared = message.get("users_shared") or {}
+    if shared and shared.get("request_id") == _PICK_EMPLOYEE_ID and len(shared.get("users") or []) == 1:
+        contact = shared["users"][0]
+    else:
+        contact = message.get("contact")
+    if not isinstance(contact, dict):
+        return None
+    name = " ".join(str(contact[k]) for k in ("first_name", "last_name") if contact.get(k))
+    return OnboardingContact(name=name, sender_id=str(contact.get("user_id") or ""),
+                             phone=str(contact.get("phone_number") or ""))
 
-    intro = (
-        f"Ваш Telegram привязан к пользователю '{target_username}'. "
-        "Теперь можно сразу пользоваться ботом для поиска."
-    )
-    link_line = f"\nСсылка для активации бота: {invite_link or app_auth_link}" if (invite_link or app_auth_link) else ""
-    temp_password = str(created.get("temp_password") or "")
-    credentials_line = (
-        f"\nЛогин: {target_username}\nВременный пароль: {temp_password}\n"
-        "После входа смените пароль в настройках."
-        if temp_password
-        else ""
-    )
-    notify_text = f"{intro}{link_line}{credentials_line}"
-    created_note = "создан" if created.get("created") else "обновлён"
-    return {
-        "reply": f"Пользователь '{target_username}' {created_note} и активирован для Telegram.",
-        "notify_chat_id": contact_chat_id,
-        "notify_text": notify_text,
-        "invite_link": invite_link,
-    }
+
+def _onboarding(auth_db, cfg, chat_id, user, text, sender, *, event_id, contact=None, is_callback=False):
+    flow = OnboardingFlow(auth_db, provider="telegram", bot_link=_app_auth_link(cfg), office_url=employee_office_url(cfg))
+    return flow.handle(sender_id=chat_id, text=text, display_name=" ".join(
+        str(sender[k]) for k in ("first_name", "last_name") if sender.get(k)
+    ), user=user, is_callback=is_callback, contact=contact, event_id=event_id)
+
+
+def _deliver_onboarding(token, cfg, chat_id, reply, user):
+    if reply.notice:
+        dispatch_notice(cfg, reply.notice)
+    if reply.pick_contact:
+        send_message(token, chat_id, "Можно выбрать сотрудника в Telegram.", {"keyboard": [[{
+            "text": "Выбрать сотрудника", "request_users": {
+                "request_id": _PICK_EMPLOYEE_ID, "user_is_bot": False, "max_quantity": 1,
+                "request_name": True, "request_username": True,
+            },
+        }]], "resize_keyboard": True, "one_time_keyboard": True})
+    rows = [[{"text": b["text"], **({"url": b["url"]} if "url" in b else {"callback_data": b["payload"]})}
+             for b in row] for row in reply.buttons]
+    send_message(token, chat_id, reply.text, {"inline_keyboard": rows} if rows else _main_menu(user))
 
 
 def process_query(
@@ -1121,7 +1011,11 @@ def open_catalog(
     cfg: Dict[str, Any],
     chat_id: str,
     user: Dict[str, Any] | None = None,
+    auth_db: UserAuthDB | None = None,
 ) -> None:
+    if not can_use_catalog(user):
+        send_message(token, chat_id, "Доступ к каталогу для этой роли закрыт.", _main_menu(user))
+        return
     root = str(cfg.get("catalog_path") or "").strip()
     if not root or not Path(root).exists():
         send_message(token, chat_id, "Каталог документов недоступен.")
@@ -1132,6 +1026,12 @@ def open_catalog(
         return
     # Дерево строится из state БД индексатора, где нет никаких прав: без этого
     # фильтра «Каталог» отдавал весь индекс любому привязанному пользователю.
+    if auth_db is not None:
+        current = get_authorized_telegram_user(auth_db, chat_id)
+        if not can_use_catalog(current) or current.get("username") != user.get("username"):
+            send_message(token, chat_id, "Доступ к каталогу изменился.")
+            return
+        user = current
     all_paths = acl_filter_paths(cfg, user, all_paths)
     if not all_paths:
         send_message(token, chat_id, "Нет доступных вам документов.")
@@ -1165,7 +1065,16 @@ def _handle_catalog_callback(
         return
     if str(session.get("chat_id") or "") != chat_id:
         return
+    if (session.get("user") or {}).get("username") != user.get("username"):
+        return
+    paths = session.get("all_paths") or []
+    if len(acl_filter_paths(dict(session.get("cfg") or {}), user, paths)) != len(paths):
+        CATALOG_SESSIONS.pop(sid, None)
+        send_message(token, chat_id, "Доступ к документам изменился. Откройте каталог снова.", _main_menu(user))
+        return
     subaction = parts[2] if len(parts) > 2 else ""
+    if subaction in {"d", "f", "pg"} and (len(parts) < 4 or not parts[3].isascii() or not parts[3].isdigit()):
+        return
     if subaction == "up":
         current = session["current"]
         root = session["root"]
@@ -1187,7 +1096,7 @@ def _handle_catalog_callback(
             elif subaction == "f" and kind == "f":
                 # Повторная проверка прав перед выдачей: список в сессии мог
                 # устареть после отзыва доступа.
-                if not acl_allows_path(dict(session.get("cfg") or {}), session.get("user"), path):
+                if not acl_allows_path(dict(session.get("cfg") or {}), user, path):
                     send_message(token, chat_id, "Файл недоступен: нет прав.", _main_menu(user))
                     return
                 try:
@@ -1208,14 +1117,19 @@ def send_search_results(
     query: str,
     username: str,
     previous_session_id: str = "",
+    auth_db: UserAuthDB | None = None,
     cfg: Dict[str, Any] | None = None,
     user: Dict[str, Any] | None = None,
 ) -> str:
     """Run search, send individual result messages + nav message. Returns session_id."""
+    if not can_use_catalog(user):
+        send_message(token, chat_id, "Доступ к поиску для этой роли закрыт.", _main_menu(user))
+        return ""
     q = (query or "").strip()
     if previous_session_id and previous_session_id in SEARCH_SESSIONS:
         old = SEARCH_SESSIONS[previous_session_id]
-        q = f"{old.get('query', '')} {q}".strip()
+        if old.get("username") == username and old.get("chat_id") == chat_id:
+            q = f"{old.get('query', '')} {q}".strip()
     try:
         results = searcher.search(
             q, limit=30, content_only=False,
@@ -1225,6 +1139,11 @@ def send_search_results(
     except (ConnectionError, RuntimeError) as exc:
         send_message(token, chat_id, f"Ошибка поиска: {exc}")
         return ""
+    if auth_db is not None:
+        user = get_authorized_telegram_user(auth_db, chat_id)
+        if not can_use_catalog(user) or user.get("username") != username:
+            send_message(token, chat_id, "Доступ к поиску изменился.", _main_menu(user))
+            return ""
     results = [item for item in (results or []) if isinstance(item, dict)]
     results = acl_filter_results(dict(cfg or {}), user, results)
 
@@ -1317,21 +1236,39 @@ def _record_visible_feedback(
 
 
 def handle_callback_query(
-    *,
-    token: str,
-    auth_db: UserAuthDB,
-    callback_query: Dict[str, Any],
+    *, token: str, auth_db: UserAuthDB, callback_query: Dict[str, Any],
+    cfg: Dict[str, Any] | None = None, event_id: str = "",
 ) -> None:
-    query_id = str(callback_query.get("id") or "")
+    cfg = cfg or {}
     data = str(callback_query.get("data") or "")
-    msg = callback_query.get("message") or {}
-    chat = msg.get("chat") or {}
-    chat_id = str(chat.get("id") or "")
+    sender = callback_query.get("from") or {}
+    chat_id = _private_sender(callback_query.get("message") or {}, sender, str(cfg.get("telegram_allowed_chat_id") or ""))
+    if not chat_id:
+        return
+    callback_id = str(callback_query.get("id") or "")
+    if callback_id:
+        try:
+            answer_callback_query(token, callback_id)
+        except TelegramAPIError:
+            # Telegram may expire the spinner before a queued private event is read.
+            pass
     user = get_authorized_telegram_user(auth_db, chat_id)
-    if query_id:
-        answer_callback_query(token, query_id)
-    if not user:
-        send_message(token, chat_id, "Telegram не привязан к активному пользователю.", _main_menu(None))
+    if data.startswith("ob:"):
+        reply = _onboarding(auth_db, cfg, chat_id, user, data, sender, is_callback=True, event_id=event_id or callback_id)
+        if reply:
+            _deliver_onboarding(token, cfg, chat_id, reply, user)
+        return
+    if data.startswith("tglogin:"):
+        challenge = data.removeprefix("tglogin:")
+        if not user or not re.fullmatch(r"[a-zA-Z0-9_-]{1,53}", challenge):
+            send_message(token, chat_id, "Для подтверждения нужен активный привязанный аккаунт.")
+            return
+        out = auth_db.confirm_telegram_login(token=challenge, telegram_chat_id=chat_id)
+        message = "Вход подтверждён. Вернитесь в браузер." if out.get("ok") else "Запрос недействителен. Начните вход заново."
+        send_message(token, chat_id, message, _main_menu(user))
+        return
+    if not can_use_catalog(user):
+        send_message(token, chat_id, "Доступ к каталогу для этой роли закрыт.", _main_menu(user))
         return
     _cleanup_search_sessions()
     parts = data.split(":")
@@ -1351,6 +1288,15 @@ def handle_callback_query(
         send_message(token, chat_id, "Эти результаты принадлежат другому чату.", _main_menu(user))
         return
 
+    if session.get("username") != user.get("username"):
+        return
+    saved = session.get("results") or []
+    if len(acl_filter_results(dict(session.get("cfg") or {}), user, saved)) != len(saved):
+        SEARCH_SESSIONS.pop(sid, None)
+        send_message(token, chat_id, "Доступ к документам изменился. Повторите поиск.", _main_menu(user))
+        return
+    if action in {"open", "fb"} and (len(parts) < 3 or not parts[2].isascii() or not parts[2].isdigit()):
+        return
     if action == "open" and len(parts) >= 3:
         index = int(parts[2])
         results = _filter_session_results(session)
@@ -1359,6 +1305,9 @@ def handle_callback_query(
             return
         result = results[index]
         path = _result_path(result)
+        if not acl_allows_path(dict(session.get("cfg") or {}), user, path):
+            send_message(token, chat_id, "Файл недоступен.", _main_menu(user))
+            return
         _record_result_feedback(
             auth_db=auth_db,
             session=session,
@@ -1369,9 +1318,6 @@ def handle_callback_query(
             rank=index + 1,
             reason="open_file",
         )
-        if not acl_allows_path(dict(session.get("cfg") or {}), session.get("user"), path):
-            send_message(token, chat_id, "Файл недоступен: нет прав.", _main_menu(user))
-            return
         try:
             with chat_action(token, chat_id, "upload_document"):
                 send_document(token, chat_id, path, caption=_result_title(result))
@@ -1464,124 +1410,58 @@ def handle_callback_query(
         return
 
 
-def _is_menu_or_command_text(text: str) -> bool:
-    low = (text or "").strip().lower()
-    if not low:
-        return True
-    if low.startswith("/"):
-        return True
-    return low in {
-        "поиск",
-        "добавить файл",
-        "кто я",
-        "помощь",
-        "заявка",
-        "заявки",
-        "добавить пользователя",
-    }
+def _portal_text(cfg: dict, user, action: str) -> str:
+    shifts = action in {"смены", "/shifts", "путевой лист", "/waybill"}
+    allowed = can_use_shifts(user) if shifts else can_use_catalog(user)
+    if not allowed:
+        return "Для вашей роли этот раздел недоступен."
+    origin = employee_office_url(cfg)
+    if not origin:
+        return "Адрес рабочего кабинета пока не настроен. Обратитесь к администратору."
+    if not shifts:
+        return f"Рабочий кабинет\n{origin}/"
+    if action in {"путевой лист", "/waybill"}:
+        return f"Откройте нужную смену, чтобы посмотреть путевые листы.\n{origin}/shifts"
+    title = "Журнал смен сотрудников" if can_manage_shifts(user) else "Мои смены"
+    return f"{title}\n{origin}/shifts"
 
 
 def process_message(
-    *,
-    searcher: RAGSearcher,
-    auth_db: UserAuthDB,
-    text: str,
-    chat_id: str,
-    allowed_chat_id: str,
-    bot_link: str = "",
-    telegram_username: str = "",
-    display_name: str = "",
-    cfg: Dict[str, Any] | None = None,
+    *, searcher: RAGSearcher | None, auth_db: UserAuthDB, text: str, chat_id: str,
+    allowed_chat_id: str, telegram_username: str = "", display_name: str = "", cfg: Dict[str, Any] | None = None,
 ) -> str:
     raw = (text or "").strip()
     low = raw.lower()
     parts = raw.split(maxsplit=1)
+    if not is_allowed_chat(chat_id, allowed_chat_id):
+        return "Доступ запрещён для этого chat_id."
+    user = get_authorized_telegram_user(auth_db, chat_id)
+    low = {"помощь": "/help", "кто я": "/whoami", "/menu": "/start"}.get(low, low)
+    if low in {"офис", "/office", "смены", "/shifts", "путевой лист", "/waybill"}:
+        return _portal_text(cfg or {}, user, low)
+    if low in {"поиск", "/search", "каталог", "/catalog", "добавить файл", "/upload"}:
+        if not can_use_catalog(user):
+            return "Доступ к каталогу для этой роли закрыт."
+        if low in {"добавить файл", "/upload"}:
+            return "Отправьте сюда документ или фото для добавления в каталог."
+        return "Напишите поисковый запрос или откройте каталог кнопкой «Каталог»."
 
-    if low == "помощь":
-        low = "/help"
-        raw = "/help"
-        parts = [raw]
-    elif low == "кто я":
-        low = "/whoami"
-        raw = "/whoami"
-        parts = [raw]
-    elif low == "заявки":
-        low = "/requests"
-        raw = "/requests"
-        parts = [raw]
-    elif low == "поиск":
-        return "Напишите поисковый запрос обычным сообщением. Я покажу варианты кнопками."
-    elif low == "каталог":
-        return "Для просмотра каталога необходима авторизация."
-    elif low in {"добавить файл", "/upload"}:
-        return "Отправьте сюда документ или фото. Я сохраню файл в каталог Telegram Uploads, после индексации он появится в поиске."
-    elif low == "заявка":
-        if get_authorized_telegram_user(auth_db, chat_id):
-            return "Вы уже авторизованы. Заявка не нужна."
-        return "Для заявки напишите: /register ФИО"
-    elif low == "добавить пользователя":
-        return "Для добавления пользователя напишите: /add_user @telegram username"
-
-    if low.startswith("/start ") and len(parts) > 1:
+    if low.startswith("/start "):
         payload = parts[1].strip()
-        if "_" in payload:
-            purpose, token = payload.split("_", 1)
-            purpose = purpose.strip().lower()
-            token = token.strip()
+        purpose, _, code = payload.partition("_")
+        if purpose == "login":
+            return "Подтверждайте вход, только если вы сами сейчас открыли кабинет в браузере."
+        if purpose not in {"verify", "link"} or not code:
+            return "Запросите новую ссылку."
+        if purpose == "verify":
+            out = auth_db.confirm_verification(telegram_chat_id=chat_id, code=code)
         else:
-            purpose, token = "", ""
-        if purpose in {"link", "invite", "login", "register", "verify"}:
-            if not token:
-                return "Код в ссылке пустой. Запросите новую ссылку."
-            try:
-                if purpose == "verify":
-                    out = auth_db.confirm_verification(telegram_chat_id=chat_id, code=token)
-                    out = {**out, "purpose": "link" if out.get("ok") else "verify"}
-                else:
-                    out = auth_db.consume_telegram_start_token(
-                        token=token,
-                        telegram_chat_id=chat_id,
-                        telegram_username=telegram_username,
-                        display_name=display_name,
-                    )
-            except Exception as exc:
-                _log_tg_auth_event(
-                    auth_db,
-                    chat_id=chat_id,
-                    event_type=f"telegram_{purpose}_failed",
-                    ok=False,
-                    error=str(exc),
-                )
-                return f"Ошибка обработки ссылки: {exc}"
-            if out.get("ok"):
-                username = str(out.get("username") or "")
-                _log_tg_auth_event(
-                    auth_db,
-                    username=username,
-                    chat_id=chat_id,
-                    event_type=f"telegram_{str(out.get('purpose') or purpose)}_success",
-                    ok=True,
-                )
-                user = get_authorized_telegram_user(auth_db, chat_id)
-                if str(out.get("purpose") or purpose) == "login":
-                    return "Вход подтверждён. Вернитесь в приложение."
-                if str(out.get("purpose") or purpose) == "register":
-                    return "Заявка отправлена администратору. После одобрения бот сообщит, что доступ открыт."
-                return f"Авторизация прошла успешно.\n\n{_user_help_text(user, chat_id)}"
-            _log_tg_auth_event(
-                auth_db,
-                chat_id=chat_id,
-                event_type=f"telegram_{purpose}_failed",
-                ok=False,
-                error=str(out.get("reason") or "not_found"),
-            )
-            if out.get("reason") == "expired":
-                return "Ссылка просрочена. Запросите новую."
-            if out.get("reason") == "telegram_not_linked":
-                return "Этот Telegram не привязан к активному пользователю. Сначала используйте ссылку привязки или приглашения."
-            if out.get("reason") == "telegram_username_mismatch":
-                return "Ссылка выписана на другой Telegram username. Попросите администратора создать новую ссылку."
-            return "Код из ссылки не найден. Запросите новую ссылку."
+            out = auth_db.consume_telegram_start_token(token=code, telegram_chat_id=chat_id, expected_purpose="link",
+                                                       telegram_username=telegram_username, display_name=display_name)
+        if out.get("ok"):
+            current = get_authorized_telegram_user(auth_db, chat_id)
+            return f"Авторизация прошла успешно.\n\n{_user_help_text(current, chat_id)}"
+        return "Ссылка недействительна. Запросите новую."
 
     if low.startswith("/verify"):
         if len(parts) < 2:
@@ -1595,9 +1475,9 @@ def process_message(
                 chat_id=chat_id,
                 event_type="telegram_verify_failed",
                 ok=False,
-                error=str(exc),
+                error=type(exc).__name__,
             )
-            return f"Ошибка подтверждения: {exc}"
+            return "Не удалось подтвердить код. Повторите позже."
         if out.get("ok"):
             username = str(out.get("username") or "")
             _log_tg_auth_event(
@@ -1631,9 +1511,9 @@ def process_message(
                 chat_id=chat_id,
                 event_type="telegram_recover_failed",
                 ok=False,
-                error=str(exc),
+                error=type(exc).__name__,
             )
-            return f"Ошибка восстановления: {exc}"
+            return "Не удалось проверить код восстановления. Повторите позже."
         if out.get("ok"):
             _log_tg_auth_event(
                 auth_db,
@@ -1654,25 +1534,14 @@ def process_message(
             return "Код восстановления просрочен. Запросите новый код в Web UI."
         return "Код восстановления не найден. Проверьте код и chat_id."
 
-    if not is_allowed_chat(chat_id, allowed_chat_id):
-        _log_tg_auth_event(
-            auth_db,
-            chat_id=chat_id,
-            event_type="telegram_denied_allowed_chat",
-            ok=False,
-            error="chat_not_allowed",
-        )
-        return "Доступ запрещён для этого chat_id."
-
     if low in ("/start", "/help"):
         user = get_authorized_telegram_user(auth_db, chat_id)
-        _log_tg_message_event(
+        _log_tg_auth_event(
             auth_db,
             chat_id=chat_id,
             username=str((user or {}).get("username") or ""),
             event_type="telegram_help",
             ok=True,
-            text=raw,
         )
         return _user_help_text(user, chat_id)
 
@@ -1695,7 +1564,10 @@ def process_message(
             event_type="telegram_whoami",
             ok=True,
         )
-        return f"Вы авторизованы как {username}. Роль: {user.get('role', 'user')}."
+        roles = [ROLE_LABELS[r] for r in sorted(user_roles(user))]
+        if _employee_admin(user) and "admin" not in user_roles(user):
+            roles.append("Администратор организации")
+        return f"Вы авторизованы как {username}. Роли: {', '.join(roles)}."
 
     if low == "/logout":
         try:
@@ -1706,9 +1578,9 @@ def process_message(
                 chat_id=chat_id,
                 event_type="telegram_logout",
                 ok=False,
-                error=str(exc),
+                error=type(exc).__name__,
             )
-            return f"Не удалось отвязать Telegram: {exc}"
+            return "Не удалось отвязать Telegram. Повторите позже."
         if not username:
             _log_tg_auth_event(
                 auth_db,
@@ -1727,102 +1599,13 @@ def process_message(
         )
         return f"Telegram отвязан от пользователя '{username}'."
 
-    if low.startswith("/register"):
-        if get_authorized_telegram_user(auth_db, chat_id):
-            return "Вы уже авторизованы. Новая заявка не нужна."
-        body = parts[1].strip() if len(parts) > 1 else ""
-        username_hint = ""
-        display = body or display_name
-        if body and " " not in body and re.match(r"^[a-zA-Z0-9_.-]{3,}$", body):
-            username_hint = body
-        req = auth_db.create_registration_request(
-            username=username_hint,
-            display_name=display,
-            telegram_chat_id=chat_id,
-            telegram_username=telegram_username,
-            source="telegram",
-            note=f"raw={raw}",
-        )
-        _log_tg_auth_event(
-            auth_db,
-            chat_id=chat_id,
-            event_type="telegram_registration_requested",
-            ok=bool(req.get("ok")),
-            error=f"id={req.get('id', '')}",
-        )
-        return f"Заявка #{req.get('id')} отправлена администратору."
-
-    if low.startswith("/requests"):
-        user = get_authorized_telegram_user(auth_db, chat_id)
-        if not user or str(user.get("role") or "") != "admin":
-            return "Команда доступна только администратору."
-        rows = auth_db.list_registration_requests(status="pending", limit=10)
-        if not rows:
-            return "Ожидающих заявок нет."
-        lines = ["Ожидающие заявки:"]
-        for row in rows:
-            tg = f"@{row.get('telegram_username')}" if row.get("telegram_username") else str(row.get("telegram_chat_id") or "")
-            lines.append(f"#{row.get('id')}: {row.get('username') or row.get('display_name') or 'без имени'} · {tg} · {row.get('source')}")
-        lines.append("\nОдобрить: /approve ID\nОтклонить: /reject ID")
-        return "\n".join(lines)
-
-    if low.startswith("/approve") or low.startswith("/reject"):
-        user = get_authorized_telegram_user(auth_db, chat_id)
-        if not user or str(user.get("role") or "") != "admin":
-            return "Команда доступна только администратору."
-        if len(parts) < 2 or not parts[1].strip().split()[0].isdigit():
-            return "Использование: /approve 12 или /reject 12"
-        req_id = int(parts[1].strip().split()[0])
-        decision = "approved" if low.startswith("/approve") else "rejected"
-        out = auth_db.review_registration_request(
-            request_id=req_id,
-            reviewed_by=str(user.get("username") or ""),
-            decision=decision,
-        )
-        if not out.get("ok"):
-            return f"Не удалось обработать заявку: {out.get('reason')}"
-        if decision == "rejected":
-            return f"Заявка #{req_id} отклонена."
-        return f"Заявка #{req_id} одобрена. Пользователь: {out.get('username')}."
-
-    if low.startswith("/add_user"):
-        admin = get_authorized_telegram_user(auth_db, chat_id)
-        if not admin or str(admin.get("role") or "") != "admin":
-            return "Команда доступна только администратору."
-        args = parts[1].split() if len(parts) > 1 else []
-        if not args:
-            return "Использование: /add_user @telegram username"
-        tg_name = args[0] if args[0].startswith("@") else ""
-        username = args[1] if len(args) > 1 else (tg_name.lstrip("@") if tg_name else args[0])
-        out = auth_db.create_admin_invite(
-            created_by=str(admin.get("username") or ""),
-            username=username,
-            display_name=username,
-            telegram_username=tg_name,
-        )
-        if not out.get("ok"):
-            return f"Не удалось создать пользователя: {out.get('reason')}"
-        link = _telegram_deeplink(bot_link, "invite", str(out.get("token") or ""))
-        return (
-            f"Пользователь '{out.get('username')}' создан и активирован.\n"
-            f"Временный пароль: {out.get('temp_password')}\n"
-            f"Ссылка для Telegram: {link}"
-        )
-
-    user = get_authorized_telegram_user(auth_db, chat_id)
-    if not user:
-        _log_tg_auth_event(
-            auth_db,
-            chat_id=chat_id,
-            event_type="telegram_search_denied",
-            ok=False,
-            error="not_authorized",
-        )
-        return (
-            "Доступ запрещён. Telegram chat_id не привязан к активному пользователю.\n"
-            "Откройте ссылку привязки/приглашения или отправьте /register ФИО для заявки."
-        )
-
+    if not can_use_catalog(user):
+        _log_tg_auth_event(auth_db, chat_id=chat_id, event_type="telegram_search_denied", ok=False, error="access_denied")
+        return "Доступ к каталогу для этой роли закрыт." if user else "Доступ запрещён. Откройте /start для входа."
+    if low.startswith("/"):
+        return _user_help_text(user, chat_id)
+    if searcher is None:
+        return "Поиск временно недоступен."
     username = str(user.get("username") or "")
     _log_tg_auth_event(
         auth_db,
@@ -1841,34 +1624,85 @@ def process_message(
     )
 
 
-def _wait_for_searcher(cfg: Dict[str, Any]) -> RAGSearcher | None:
-    attempts = 0
-    while True:
-        searcher = RAGSearcher(cfg)
-        if searcher.connected:
-            if attempts:
-                logger.info("Qdrant готов; запуск Telegram продолжается после %s повторов", attempts)
-            return searcher
-        # Failed attempts must not accumulate HTTP connection pools during recovery.
-        client = getattr(searcher, "qdrant", None)
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                logger.warning("Не удалось закрыть неактивное соединение Qdrant")
-        if not str(cfg.get("qdrant_url") or "").strip():
-            logger.error("Нет подключения к локальному Qdrant")
-            return None
-        attempts += 1
-        logger.warning("Qdrant пока недоступен; повтор запуска Telegram через 30 секунд")
-        time.sleep(30)
+def handle_update(token: str, auth_db: UserAuthDB, cfg: dict, update: dict) -> None:
+    event_id = str(update.get("update_id", ""))
+    if isinstance(update.get("callback_query"), dict):
+        handle_callback_query(token=token, auth_db=auth_db, cfg=cfg, callback_query=update["callback_query"], event_id=event_id)
+        return
+    msg = update.get("message") or {}
+    sender = msg.get("from") or {}
+    allowed = str(cfg.get("telegram_allowed_chat_id") or "").strip()
+    chat_id = _private_sender(msg, sender, allowed)
+    if not chat_id:
+        return
+    user = get_authorized_telegram_user(auth_db, chat_id)
+    _log_tg_auth_event(auth_db, chat_id=chat_id, event_type="telegram_message_received", ok=True)
+    text = str(msg.get("text") or "").strip()
+    cmd = text.lower()
+    if re.search(r"[?#&](?:token|start|verifier)=", cmd):
+        send_message(token, chat_id, "Откройте личную ссылку на своём устройстве.", _main_menu(user))
+        return
+    if cmd.startswith("ob:"):
+        send_message(token, chat_id, "Выберите действие кнопкой в боте.", _main_menu(user))
+        return
+    if cmd.startswith("/start login_"):
+        challenge = text[len("/start login_"):]
+        if not user or not re.fullmatch(r"[a-zA-Z0-9_-]{1,53}", challenge):
+            send_message(token, chat_id, "Для входа привяжите Telegram к своему активному аккаунту.", _main_menu(user))
+            return
+        rows = [[{"text": "Подтвердить вход в браузере", "callback_data": "tglogin:" + challenge}]]
+        send_message(token, chat_id, "Подтверждайте вход, только если вы сами сейчас открыли кабинет в браузере.",
+                     {"inline_keyboard": rows})
+        return
+    contact = _contact_hint(msg)
+    reserved = cmd.startswith(("/start link_", "/start verify_", "/verify", "/recover")) or cmd in {"/whoami", "кто я"}
+    if not reserved and (text or contact):
+        reply = _onboarding(auth_db, cfg, chat_id, user, text, sender, event_id=event_id, contact=contact)
+        if reply:
+            _deliver_onboarding(token, cfg, chat_id, reply, user)
+            return
+    if contact:
+        send_message(token, chat_id, "Контакт можно использовать для приглашения сотрудника через /add_user.", _main_menu(user))
+        return
+    if _message_file_info(msg):
+        if not can_use_catalog(user):
+            answer = (_portal_text(cfg, user, "/waybill") if can_use_shifts(user)
+                      else "Добавление документов доступно сотруднику офиса.")
+        else:
+            with chat_action(token, chat_id, "upload_document"):
+                out = save_telegram_upload(token=token, cfg=cfg, auth_db=auth_db, chat_id=chat_id, msg=msg, user=user)
+            answer = "Файл сохранён. Он появится в поиске после индексации." if out.get("ok") else "Не удалось сохранить файл."
+        send_message(token, chat_id, answer, _main_menu(user))
+        return
+    if not text:
+        return
+    if cmd in {"каталог", "/catalog"} and can_use_catalog(user):
+        with chat_action(token, chat_id):
+            open_catalog(token, cfg, chat_id, user=user, auth_db=auth_db)
+        return
+    menu_labels = {button["text"].lower() for row in _main_menu(user)["keyboard"] for button in row}
+    search_query = text[8:].strip() if cmd.startswith("/search ") else ""
+    if can_use_catalog(user) and (search_query or (not cmd.startswith("/") and cmd not in menu_labels)):
+        from rag_catalog.ui.helpers import _cached_searcher_if_ready
+
+        with chat_action(token, chat_id):
+            searcher = _cached_searcher_if_ready(cfg, connect_on_miss=True)
+            if searcher is None:
+                send_message(token, chat_id, "Поиск временно недоступен. Повторите запрос позже.", _main_menu(user))
+            else:
+                send_search_results(token, searcher, chat_id=chat_id, query=search_query or text, username=user["username"],
+                                    previous_session_id=PENDING_REFINEMENTS.pop(chat_id, ""), cfg=cfg, user=user, auth_db=auth_db)
+        return
+    answer = process_message(searcher=None, auth_db=auth_db, text=text, chat_id=chat_id, allowed_chat_id=allowed,
+                             telegram_username=str(sender.get("username") or ""), display_name=" ".join(
+                                 str(sender[k]) for k in ("first_name", "last_name") if sender.get(k)), cfg=cfg)
+    send_message(token, chat_id, answer, _main_menu(get_authorized_telegram_user(auth_db, chat_id)))
 
 
 def main() -> int:
     cfg = load_config()
     token = (cfg.get("telegram_bot_token") or "").strip()
-    allowed_chat_id = (cfg.get("telegram_allowed_chat_id") or "").strip()
-    app_auth_link = _app_auth_link(cfg)
+    allowed_chat_id = str(cfg.get("telegram_allowed_chat_id") or "").strip()
 
     if not token:
         logger.error("Не задан telegram_bot_token в config.json")
@@ -1878,9 +1712,6 @@ def main() -> int:
         logger.error("telegram_enabled=false. Включите бота в настройках.")
         return 1
 
-    searcher = _wait_for_searcher(cfg)
-    if searcher is None:
-        return 1
     auth_db = UserAuthDB(_users_db_path(cfg))
 
     try:
@@ -1906,211 +1737,10 @@ def main() -> int:
             polling_started = True
             for upd in updates:
                 offset = max(offset, int(upd.get("update_id", 0)) + 1)
-                callback_query = upd.get("callback_query") if isinstance(upd.get("callback_query"), dict) else None
-                if callback_query:
-                    try:
-                        handle_callback_query(
-                            token=token,
-                            auth_db=auth_db,
-                            callback_query=callback_query,
-                        )
-                    except Exception as exc:
-                        logger.exception("Ошибка callback_query: %s", exc)
-                    continue
-
-                msg = upd.get("message") or {}
-                chat = msg.get("chat") or {}
-                sender = msg.get("from") if isinstance(msg.get("from"), dict) else {}
-                chat_id = str(chat.get("id", ""))
-                telegram_username = str(sender.get("username") or "")
-                display_name = " ".join(
-                    part for part in [str(sender.get("first_name") or ""), str(sender.get("last_name") or "")] if part
-                ).strip()
-                contact = msg.get("contact") if isinstance(msg.get("contact"), dict) else None
-                text = (msg.get("text") or "").strip()
-
-                if contact:
-                    _log_tg_message_event(
-                        auth_db,
-                        chat_id=chat_id,
-                        event_type="telegram_contact_received",
-                        ok=True,
-                        text=f"contact_user_id={contact.get('user_id', '')}",
-                    )
-                    with chat_action(token, chat_id, "typing"):
-                        out = process_contact_message(
-                            auth_db=auth_db,
-                            sender_chat_id=chat_id,
-                            contact=contact,
-                            allowed_chat_id=allowed_chat_id,
-                            app_auth_link=app_auth_link,
-                        )
-                    admin_user = get_authorized_telegram_user(auth_db, chat_id)
-                    send_message(token, chat_id, str(out.get("reply") or "Операция завершена."), _main_menu(admin_user))
-                    _log_tg_message_event(
-                        auth_db,
-                        chat_id=chat_id,
-                        event_type="telegram_message_replied",
-                        ok=True,
-                        text=str(out.get("reply") or ""),
-                    )
-                    notify_chat = str(out.get("notify_chat_id") or "").strip()
-                    notify_text = str(out.get("notify_text") or "").strip()
-                    if notify_chat and notify_text:
-                        try:
-                            notify_user = get_authorized_telegram_user(auth_db, notify_chat)
-                            send_message(token, notify_chat, notify_text, _main_menu(notify_user))
-                            _log_tg_message_event(
-                                auth_db,
-                                chat_id=notify_chat,
-                                event_type="telegram_message_replied",
-                                ok=True,
-                                text=notify_text,
-                            )
-                        except Exception as exc:
-                            _log_tg_message_event(
-                                auth_db,
-                                chat_id=notify_chat,
-                                event_type="telegram_message_replied",
-                                ok=False,
-                                error=str(exc),
-                                text=notify_text,
-                            )
-                            logger.warning("Не удалось отправить приветствие пользователю %s: %s", notify_chat, exc)
-                    continue
-
-                if _message_file_info(msg):
-                    user = get_authorized_telegram_user(auth_db, chat_id)
-                    if not user:
-                        _log_tg_message_event(
-                            auth_db,
-                            chat_id=chat_id,
-                            event_type="telegram_file_upload_denied",
-                            ok=False,
-                            error="not_authorized",
-                        )
-                        send_message(
-                            token,
-                            chat_id,
-                            "Добавлять файлы может только авторизованный пользователь. Сначала привяжите Telegram.",
-                            _main_menu(None),
-                        )
-                        continue
-                    try:
-                        with chat_action(token, chat_id, "upload_document"):
-                            out = save_telegram_upload(
-                                token=token,
-                                cfg=cfg,
-                                auth_db=auth_db,
-                                chat_id=chat_id,
-                                msg=msg,
-                                user=user,
-                            )
-                        if out.get("ok"):
-                            answer = (
-                                "Файл сохранён.\n"
-                                f"Путь: {out.get('path')}\n\n"
-                                "В поиске он появится после очередной индексации."
-                            )
-                        else:
-                            answer = f"Не удалось сохранить файл: {out.get('reason')}"
-                        send_message(token, chat_id, answer, _main_menu(user))
-                    except Exception as exc:
-                        _log_tg_message_event(
-                            auth_db,
-                            chat_id=chat_id,
-                            username=str(user.get("username") or ""),
-                            event_type="telegram_file_uploaded",
-                            ok=False,
-                            error=str(exc),
-                        )
-                        send_message(token, chat_id, f"Не удалось сохранить файл: {exc}", _main_menu(user))
-                    continue
-
-                if not text:
-                    _log_tg_message_event(
-                        auth_db,
-                        chat_id=chat_id,
-                        event_type="telegram_message_ignored",
-                        ok=True,
-                        error="empty_text",
-                    )
-                    continue
-
-                _log_tg_message_event(
-                    auth_db,
-                    chat_id=chat_id,
-                    event_type="telegram_message_received",
-                    ok=True,
-                    text=text,
-                )
-                user = get_authorized_telegram_user(auth_db, chat_id)
-                if user and not _is_menu_or_command_text(text):
-                    if text.strip().lower() == "каталог":
-                        with chat_action(token, chat_id, "typing"):
-                            open_catalog(token, cfg, chat_id, user=user)
-                        _log_tg_message_event(
-                            auth_db,
-                            chat_id=chat_id,
-                            username=str(user.get("username") or ""),
-                            event_type="telegram_catalog_open",
-                            ok=True,
-                        )
-                        continue
-                    pending_sid = PENDING_REFINEMENTS.pop(chat_id, "")
-                    with chat_action(token, chat_id, "typing"):
-                        send_search_results(
-                            token,
-                            searcher,
-                            chat_id=chat_id,
-                            query=text,
-                            username=str(user.get("username") or ""),
-                            previous_session_id=pending_sid,
-                            cfg=cfg,
-                            user=user,
-                        )
-                    _log_tg_message_event(
-                        auth_db,
-                        chat_id=chat_id,
-                        username=str(user.get("username") or ""),
-                        event_type="telegram_search_interactive",
-                        ok=True,
-                        text=text,
-                    )
-                    continue
-
-                with chat_action(token, chat_id, "typing"):
-                    answer = process_message(
-                        searcher=searcher,
-                        auth_db=auth_db,
-                        text=text,
-                        chat_id=chat_id,
-                        allowed_chat_id=allowed_chat_id,
-                        bot_link=app_auth_link,
-                        telegram_username=telegram_username,
-                        display_name=display_name,
-                        cfg=cfg,
-                    )
                 try:
-                    user = get_authorized_telegram_user(auth_db, chat_id)
-                    send_message(token, chat_id, answer, _main_menu(user))
-                    _log_tg_message_event(
-                        auth_db,
-                        chat_id=chat_id,
-                        event_type="telegram_message_replied",
-                        ok=True,
-                        text=answer,
-                    )
+                    handle_update(token, auth_db, cfg, upd)
                 except Exception as exc:
-                    _log_tg_message_event(
-                        auth_db,
-                        chat_id=chat_id,
-                        event_type="telegram_message_replied",
-                        ok=False,
-                        error=str(exc),
-                        text=answer,
-                    )
-                    raise
+                    logger.warning("Не удалось обработать событие Telegram %s (%s)", upd.get("update_id"), type(exc).__name__)
         except KeyboardInterrupt:
             logger.info("Остановлено пользователем.")
             return 0

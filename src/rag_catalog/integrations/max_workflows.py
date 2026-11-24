@@ -19,6 +19,7 @@ from rag_catalog.core.shift_attachments import MAX_FILE_BYTES, ShiftAttachments,
 from rag_catalog.core.user_auth_db import UserAuthDB
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
 
+from .employee_onboarding import OnboardingFlow
 from .max_api import MaxAPIError
 from .max_waybill import MaxWaybillRequests
 
@@ -53,6 +54,12 @@ class _JournalAuth:
 
     def get_user(self, *, username: str):
         return self.auth.get_user(username=username)
+
+    def list_users(self):
+        return self.auth.list_users()
+
+    def list_employee_organizations(self):
+        return self.auth.list_employee_organizations()
 
 
 class MaxWorkflows:
@@ -111,11 +118,19 @@ class MaxWorkflows:
                 raise ValueError("Привязка не удалась. В кабинете нажмите «MAX» вверху → «Открыть бота MAX».")
             self.client.send_message(uid, "MAX привязан к учётной записи сотрудника.")
         user = self._active(uid)
+        reply = OnboardingFlow(self.auth, provider="max", bot_link=self.cfg.get("max_bot_link", ""),
+                               office_url=self.office_url).handle(
+            sender_id=uid, text=event.text, display_name=event.display_name, user=user,
+            is_callback=bool(event.callback_id), event_id=event.event_id, contact=event.contact)
+        if reply is not None:
+            if reply.notice:
+                from .employee_portal import dispatch_notice
+                dispatch_notice(self.cfg, reply.notice)
+            buttons = [[_link(b["text"], b["url"]) if "url" in b else _button(b["text"], b["payload"])
+                        for b in row] for row in reply.buttons]
+            self.client.send_message(uid, reply.text, buttons=buttons or None)
+            return
         if not user:
-            buttons = [[_link("Открыть кабинет", self.office_url)]] if self.office_url else None
-            self.client.send_message(uid, "Для доступа войдите в рабочий кабинет и привяжите MAX. "
-                                     "Нажмите «MAX» вверху → «Открыть бота MAX». "
-                                     "Если ещё нет учётной записи, обратитесь к администратору.", buttons=buttons)
             return
         if command == "/start" and args.startswith("login_"):
             token = args[6:]
@@ -160,8 +175,6 @@ class MaxWorkflows:
                                          "понадобится войти в кабинет.", buttons=[[
                                              _button("Отвязать MAX", "/logout confirm " + user["username"]),
                                              _button("Оставить", "/menu")]])
-        elif command in ("/add_user", "/reinvite"):
-            self._invite(uid, user, args, renew=command == "/reinvite")
         elif command in ("/shifts", "/new_shift", "/waybill", "/attachment", "/attach_next", "/cancel_waybill"):
             if not can_use_shifts(user):
                 raise PermissionError("Журнал смен недоступен для вашей роли")
@@ -211,43 +224,12 @@ class MaxWorkflows:
             rows.append([_button("Поиск по имени", "/files"), _button("Загрузить файл", "/upload")])
         if can_use_shifts(user):
             rows.append([_button("Ближайшие смены", "/shifts"), _button("Записать смену", "/new_shift")])
-        if "admin" in user_roles(user):
-            rows.append([_button("Добавить сотрудника", "/add_user")])
+        if self.auth.list_employee_organizations(admin_username=user["username"]):
+            rows.append([_button("Добавить сотрудника", "/add_user"), _button("Заявки", "/requests")])
         rows.append([_button("Мой профиль", "/whoami"), _button("Отвязать MAX", "/logout")])
         roles = ", ".join(ROLE_LABELS[r] for r in sorted(user_roles(user)))
         self.client.send_message(uid, f"{user.get('display_name') or user['username']} · {roles}",
                                  buttons=rows or None)
-
-    def _invite(self, uid, user, args, *, renew):
-        if "admin" not in user_roles(user):
-            raise PermissionError("Добавление сотрудников доступно администратору")
-        parts = args.split(maxsplit=2)
-        if renew and len(parts) != 1:
-            raise ValueError("Для новой ссылки ещё не активированного сотрудника введите /reinvite логин")
-        if not renew and len(parts) < 2:
-            raise ValueError("Введите /add_user логин роли Имя сотрудника. "
-                             "Роли: user (офис), driver, dispatcher, admin. Несколько ролей укажите через запятую.")
-        username = parts[0]
-        roles = [] if renew else parts[1].split(",")
-        if any(role not in ROLE_LABELS for role in roles):
-            raise ValueError("Допустимые роли: user, driver, dispatcher, admin")
-        if not re.fullmatch(r"[a-z][a-z0-9._-]{2,63}", username):
-            raise ValueError("Логин должен начинаться с латинской буквы и содержать от 3 до 64 символов")
-        if not self.office_url:
-            raise ValueError("Для приглашений администратору нужно указать HTTPS-адрес рабочего кабинета")
-        result = self.auth.create_account_activation(
-            username=username, roles=roles or None, renew_pending=renew, created_by=user["username"],
-            display_name=parts[2][:200] if len(parts) > 2 else username,
-        )
-        if not result["ok"]:
-            if result.get("reason") == "already_exists":
-                raise ValueError("Этот логин уже существует. Если сотрудник ещё не активировал учётную запись, "
-                                 "для новой ссылки введите /reinvite " + username)
-            raise ValueError("Создать приглашение не удалось. Проверьте права и наличие сотрудника с таким логином.")
-        url = self.office_url + "/auth/activate#token=" + result["token"]
-        self.client.send_message(uid, f"Приглашение для {username} готово. Передайте сотруднику лично ссылку "
-                                 f"для задания пароля. Для привязки в кабинете нажмите «MAX» вверху → "
-                                 f"«Открыть бота MAX».\n{url}")
 
     def _shifts(self, uid, key, args):
         today = date.today()

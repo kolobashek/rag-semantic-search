@@ -511,43 +511,24 @@ def render_auth_gate(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     if page == "Регистрация":
-        link = _bot_link(cfg)
-        if link:
-            st.markdown(f"Бот для подтверждения: [{link}]({link})")
-        else:
-            st.info("Администратор должен указать ссылку на бота в настройках Telegram.")
         username = st.text_input("Логин", key="reg_username")
-        display_name = st.text_input("Имя", key="reg_display_name")
-        password = st.text_input("Пароль", type="password", key="reg_password")
-        password2 = st.text_input("Повторите пароль", type="password", key="reg_password2")
-        tg_chat_id = st.text_input(
-            "Telegram chat_id",
-            key="reg_tg_chat",
-            help="Нужен для подтверждения через Telegram.",
-        )
-        if st.button("Зарегистрироваться", key="auth_request_code"):
-            if password != password2:
-                st.session_state.auth_status_level = "error"
-                st.session_state.auth_status_msg = "Пароли не совпадают."
-                _auth_status()
-                return None
-            try:
-                req = auth_db.request_verification(
-                    username=username,
-                    display_name=display_name,
-                    telegram_chat_id=tg_chat_id,
-                    password=password,
-                    ttl_minutes=30,
+        name = st.text_input("ФИО", key="reg_display_name")
+        organizations = {row["id"]: row["name"] for row in auth_db.list_employee_organizations()}
+        org = st.selectbox("Организация", options=list(organizations), format_func=organizations.get)
+        if st.button("Отправить заявку", key="auth_request_code"):
+            result = auth_db.create_registration_request(
+                username=username, display_name=name, organization_id=org, source="web"
+            )
+            if result["ok"]:
+                if result["created"]:
+                    from rag_catalog.integrations.employee_portal import dispatch_notice, reviewer_notice
+
+                    dispatch_notice(cfg, reviewer_notice(auth_db, org, result["id"]))
+                st.success(
+                    "Заявка отправлена. После одобрения администратор передаст ссылку для установки пароля."
                 )
-                st.session_state.auth_status_level = "success"
-                st.session_state.auth_status_msg = (
-                    "Регистрация создана. В Telegram боту отправьте: "
-                    f"`/verify {req['code']}` (действует 30 минут)."
-                )
-            except Exception as exc:
-                st.session_state.auth_status_level = "error"
-                st.session_state.auth_status_msg = f"Не удалось создать код: {exc}"
-        _auth_status()
+            else:
+                st.error("Не удалось подать заявку. Проверьте логин, ФИО и организацию.")
         return None
 
     username = st.text_input("Логин", key="reset_username")

@@ -1,6 +1,5 @@
 import time
 import traceback
-from types import SimpleNamespace
 
 import pytest
 import requests
@@ -15,7 +14,6 @@ from telegram_bot import (
     _safe_filename,
     chat_action,
     format_fact_answer,
-    process_contact_message,
     process_message,
     process_query,
     send_chat_action,
@@ -26,47 +24,6 @@ from telegram_bot import (
 
 def test_opening_file_is_neutral_feedback() -> None:
     assert OPEN_FILE_FEEDBACK == 0
-
-
-def test_startup_waits_for_remote_qdrant_and_closes_failed_clients(monkeypatch, caplog):
-    closed = []
-    sleeps = []
-    attempts = iter([
-        SimpleNamespace(connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(1))),
-        SimpleNamespace(connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(2))),
-        SimpleNamespace(connected=True),
-    ])
-    monkeypatch.setattr(telegram_bot, "RAGSearcher", lambda cfg: next(attempts))
-    monkeypatch.setattr(telegram_bot.time, "sleep", sleeps.append)
-    with caplog.at_level("INFO"):
-        searcher = telegram_bot._wait_for_searcher({"qdrant_url": "http://localhost:6333"})
-    assert searcher.connected
-    assert closed == [1, 2]
-    assert sleeps == [30, 30]
-    assert "после 2 повторов" in caplog.text
-
-
-def test_startup_does_not_retry_broken_local_qdrant(monkeypatch):
-    closed = []
-    monkeypatch.setattr(telegram_bot, "RAGSearcher", lambda cfg: SimpleNamespace(
-        connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(True))))
-    def unexpected_sleep(seconds):
-        pytest.fail("Local database errors must not loop forever")
-    monkeypatch.setattr(telegram_bot.time, "sleep", unexpected_sleep)
-    assert telegram_bot._wait_for_searcher({}) is None
-    assert closed == [True]
-
-
-def test_startup_wait_can_be_interrupted_without_a_client_leak(monkeypatch):
-    closed = []
-    monkeypatch.setattr(telegram_bot, "RAGSearcher", lambda cfg: SimpleNamespace(
-        connected=False, qdrant=SimpleNamespace(close=lambda: closed.append(True))))
-    def interrupt(seconds):
-        raise KeyboardInterrupt
-    monkeypatch.setattr(telegram_bot.time, "sleep", interrupt)
-    with pytest.raises(KeyboardInterrupt):
-        telegram_bot._wait_for_searcher({"qdrant_url": "http://localhost:6333"})
-    assert closed == [True]
 
 
 def test_tg_call_does_not_expose_token_in_transport_errors(monkeypatch) -> None:
@@ -174,35 +131,8 @@ class _FakeAuthDB:
     def log_auth_event(self, **kwargs):
         self.events.append(kwargs)
 
-    def upsert_user_from_telegram_contact(self, *, telegram_chat_id: str, username_hint: str = "", display_name: str = ""):
-        username = (username_hint or f"tg_{telegram_chat_id}").lower()
-        self.user = {"username": username, "telegram_chat_id": telegram_chat_id, "role": "user", "status": "active"}
-        return {"username": username, "created": True, "temp_password": "temp-pass"}
-
     def consume_telegram_start_token(self, **kwargs):
         return self.out(**kwargs) if callable(self.out) else self.out
-
-    def create_registration_request(self, **kwargs):
-        row = {"id": len(self.registration_requests) + 1, **kwargs}
-        self.registration_requests.append(row)
-        return {"ok": True, "id": row["id"], "status": "pending"}
-
-    def list_registration_requests(self, *, status: str = "pending", limit: int = 100):
-        return [
-            {"id": 1, "username": "ivan", "display_name": "Ivan", "telegram_username": "ivan_tg", "source": "telegram"}
-        ]
-
-    def review_registration_request(self, **kwargs):
-        decision = kwargs.get("decision")
-        if decision == "approved":
-            return {"ok": True, "status": "approved", "username": "ivan"}
-        return {"ok": True, "status": "rejected"}
-
-    def create_admin_invite(self, **kwargs):
-        return {"ok": True, "username": kwargs.get("username") or "ivan", "token": "invite-token", "temp_password": "temp-pass"}
-
-    def create_telegram_token(self, **kwargs):
-        return {"ok": True, "token": "invite-token"}
 
 
 def test_process_query_reports_infra_error_from_fact() -> None:
@@ -275,7 +205,7 @@ def test_interactive_search_sends_result_and_nav_buttons(monkeypatch) -> None:
 
     monkeypatch.setattr(telegram_bot, "send_message", fake_send_message)
 
-    sid = send_search_results("token", s, chat_id="777", query="паспорт", username="ivan")
+    sid = send_search_results("token", s, chat_id="777", query="паспорт", username="ivan", user={"username": "ivan", "role": "user"})
 
     assert sid
     assert len(sent) == 3
@@ -404,7 +334,7 @@ def test_process_message_verify_not_found() -> None:
         chat_id="777",
         allowed_chat_id="123",
     )
-    assert "Код не найден" in out
+    assert "Доступ запрещён" in out
 
 
 def test_process_message_recover_success() -> None:
@@ -453,33 +383,6 @@ def test_process_message_allows_search_for_verified_user() -> None:
     assert auth.events[-1]["event_type"] == "telegram_search"
 
 
-def test_process_message_request_button_is_ignored_for_active_user() -> None:
-    s = _FakeSearcher(fact_result={"ok": False}, search_result=[])
-    auth = _FakeAuthDB(user={"username": "ivan", "telegram_chat_id": "777", "status": "active"})
-    out = process_message(
-        searcher=s,
-        auth_db=auth,
-        text="Заявка",
-        chat_id="777",
-        allowed_chat_id="",
-    )
-    assert "уже авторизованы" in out
-
-
-def test_process_message_register_is_ignored_for_active_user() -> None:
-    s = _FakeSearcher(fact_result={"ok": False}, search_result=[])
-    auth = _FakeAuthDB(user={"username": "ivan", "telegram_chat_id": "777", "status": "active"})
-    out = process_message(
-        searcher=s,
-        auth_db=auth,
-        text="/register Иван",
-        chat_id="777",
-        allowed_chat_id="",
-    )
-    assert "Новая заявка не нужна" in out
-    assert auth.registration_requests == []
-
-
 def test_help_hides_admin_commands_for_regular_user() -> None:
     s = _FakeSearcher(fact_result={"ok": False}, search_result=[])
     auth = _FakeAuthDB(user={"username": "ivan", "telegram_chat_id": "777", "role": "user", "status": "active"})
@@ -521,7 +424,7 @@ def test_process_message_whoami_for_verified_user() -> None:
         allowed_chat_id="",
     )
     assert "ivan" in out
-    assert "admin" in out
+    assert "Администратор" in out
     assert auth.events[-1]["event_type"] == "telegram_whoami"
 
 
@@ -551,8 +454,7 @@ def test_process_message_help_is_logged() -> None:
         chat_id="777",
         allowed_chat_id="",
     )
-    assert "Как искать:" in out
-    assert "Напишите что угодно" in out
+    assert "Для поиска напишите" in out
     assert auth.events[-1]["event_type"] == "telegram_help"
 
 
@@ -580,7 +482,7 @@ def test_process_message_start_verify_payload_confirms_user() -> None:
         allowed_chat_id="",
     )
     assert "Авторизация прошла успешно" in out
-    assert "Как искать:" in out
+    assert "Для поиска напишите" in out
 
 
 def test_process_message_start_link_payload_uses_token_flow() -> None:
@@ -600,74 +502,155 @@ def test_process_message_start_link_payload_uses_token_flow() -> None:
     assert "Авторизация прошла успешно" in out
 
 
-def test_process_message_start_login_payload_confirms_login() -> None:
-    s = _FakeSearcher(fact_result={"ok": False}, search_result=[])
-    auth = _FakeAuthDB(out={"ok": True, "purpose": "login", "username": "ivan"})
-    out = process_message(
-        searcher=s,
-        auth_db=auth,
-        text="/start login_secret",
-        chat_id="777",
-        allowed_chat_id="",
-    )
-    assert "Вход подтверждён" in out
+@pytest.fixture
+def employee_chat(tmp_path, monkeypatch):
+    from rag_catalog.core.user_auth_db import UserAuthDB
+
+    db = UserAuthDB(str(tmp_path / "employees.db"))
+    responses, notices = [], []
+    cfg = {"employee_office_url": "https://office.example.com", "telegram_bot_link": "https://t.me/unit_test_bot"}
+    monkeypatch.setattr(telegram_bot, "send_message",
+                        lambda token, chat, text, reply_markup=None: responses.append((chat, text, reply_markup)))
+    monkeypatch.setattr(telegram_bot, "answer_callback_query", lambda *args: None)
+    monkeypatch.setattr(telegram_bot, "dispatch_notice", lambda cfg, notice: notices.append(notice) or True)
+
+    def update(actor, *, text="", callback="", chat=None, kind="private", **fields):
+        actor = int(actor)
+        message = {"chat": {"id": chat if chat is not None else actor, "type": kind}, **fields}
+        sender = {"id": actor, "first_name": "Сотрудник"}
+        payload = ({"callback_query": {"id": "test", "from": sender, "message": message, "data": callback}}
+                   if callback else {"message": {**message, "from": sender, "text": text}})
+        start = len(responses)
+        telegram_bot.handle_update("unit", db, cfg, {"update_id": start + 1, **payload})
+        return responses[-1] if len(responses) > start else None
+
+    return db, update, responses, notices
 
 
-def test_process_message_register_unknown_creates_pending_request() -> None:
-    s = _FakeSearcher(fact_result={"ok": False}, search_result=[])
-    auth = _FakeAuthDB(user=None)
-    out = process_message(
-        searcher=s,
-        auth_db=auth,
-        text="/register Иван Петров",
-        chat_id="777",
-        allowed_chat_id="",
-        telegram_username="ivan_tg",
-    )
-    assert "Заявка #1" in out
-    assert auth.registration_requests[0]["telegram_chat_id"] == "777"
+def _choose(reply, label):
+    return next(b["callback_data"] for row in reply[2]["inline_keyboard"] for b in row if b["text"] == label)
 
 
-def test_process_message_admin_add_user_returns_invite_link() -> None:
-    s = _FakeSearcher(fact_result={"ok": False}, search_result=[])
-    auth = _FakeAuthDB(user={"username": "admin", "telegram_chat_id": "777", "role": "admin", "status": "active"})
-    out = process_message(
-        searcher=s,
-        auth_db=auth,
-        text="/add_user @ivan ivan",
-        chat_id="777",
-        allowed_chat_id="",
-        bot_link="https://t.me/test_bot",
-    )
-    assert "Пользователь 'ivan' создан" in out
-    assert "https://t.me/test_bot?start=invite_" in out
+def _create_staff(db, username, sender, roles):
+    assert db.admin_create_user(username=username, password="local_fixture_password", telegram_chat_id=str(sender),
+                                roles=roles, must_change_password=False)
 
 
-def test_process_contact_message_requires_admin() -> None:
-    auth = _FakeAuthDB(user={"username": "user1", "telegram_chat_id": "777", "role": "user", "status": "active"})
-    out = process_contact_message(
-        auth_db=auth,
-        sender_chat_id="777",
-        contact={"user_id": 999, "first_name": "Ivan"},
-        allowed_chat_id="",
-        app_auth_link="https://example.local/login",
-    )
-    assert "только администратор" in out["reply"].lower()
+def test_driver_and_dispatcher_have_shift_features_without_catalog(employee_chat, monkeypatch):
+    import rag_catalog.ui.helpers as helpers
+
+    db, update, _, _ = employee_chat
+    _create_staff(db, "driver1", 71, ["driver"])
+    _create_staff(db, "dispatcher1", 72, ["dispatcher"])
+    monkeypatch.setattr(helpers, "_cached_searcher_if_ready", lambda *a, **kw: pytest.fail("search must stay closed"))
+    for actor, role, heading in [(71, "Водитель", "Мои смены"), (72, "Диспетчер", "Журнал смен сотрудников")]:
+        answer = update(actor, text="/whoami")
+        assert role in answer[1]
+        labels = [b["text"] for row in answer[2]["keyboard"] for b in row]
+        assert "Смены" in labels and "Каталог" not in labels and "Заявка" not in labels
+        journal = update(actor, text="Смены")[1]
+        assert heading in journal and "https://office.example.com/shifts" in journal
+        assert "https://office.example.com/shifts" in update(actor, text="Путевой лист")[1]
+        for command in ["Каталог", "/upload", "/search", "название документа"]:
+            assert "закрыт" in update(actor, text=command)[1]
+        assert "закрыт" in update(actor, callback="more:old")[1]
+        assert "https://office.example.com/shifts" in update(actor, document={"file_id": "bad"})[1]
 
 
-def test_process_contact_message_creates_user_and_prepare_notify() -> None:
-    auth = _FakeAuthDB(user={"username": "admin", "telegram_chat_id": "777", "role": "admin", "status": "active"})
-    out = process_contact_message(
-        auth_db=auth,
-        sender_chat_id="777",
-        contact={"user_id": 999, "first_name": "Ivan", "last_name": "Petrov", "username": "ivan.petrov"},
-        allowed_chat_id="",
-        app_auth_link="https://example.local/login",
-    )
-    assert "активирован" in out["reply"]
-    assert out["notify_chat_id"] == "999"
-    assert "https://example.local/login" in out["notify_text"]
-    assert "Временный пароль" in out["notify_text"]
+def test_private_login_requires_explicit_button_and_ignores_foreign_chat(employee_chat):
+    db, update, _, _ = employee_chat
+    _create_staff(db, "driver1", 71, ["driver"])
+    challenge = db.create_telegram_login_challenge()
+    private = challenge["token"]
+    verifier = challenge["verifier"]
+    assert update(71, text="/start login_" + private, kind="group") is None
+    assert update(71, text="/start login_" + private, chat=72) is None
+    reply = update(71, text="/start login_" + private)
+    button = _choose(reply, "Подтвердить вход в браузере")
+    assert verifier not in repr(reply)
+    assert db.consume_confirmed_telegram_login(verifier=verifier)["reason"] == "pending"
+    assert not update(72, chat=71, callback=button)
+    assert not update(71, kind="supergroup", callback=button)
+    assert db.consume_confirmed_telegram_login(verifier=verifier)["reason"] == "pending"
+    assert "подтверждён" in update(71, callback=button)[1]
+    assert not db.consume_confirmed_telegram_login(verifier=private)["ok"]
+    assert db.consume_confirmed_telegram_login(verifier=verifier)["username"] == "driver1"
+    assert not db.consume_confirmed_telegram_login(verifier=verifier)["ok"]
+    assert "Подтвердить" not in update(99, text="/start login_" + private)[1]
+    assert private not in repr(db.list_auth_events()) and verifier not in repr(db.list_auth_events())
+
+
+def test_telegram_user_picker_creates_pending_bound_invite_only_after_confirmation(employee_chat):
+    db, update, responses, notices = employee_chat
+    _create_staff(db, "admin1", 11, ["admin"])
+    _create_staff(db, "office1", 12, ["user"])
+    contact = {"user_id": 44, "first_name": "Иван", "last_name": "Петров"}
+    update(12, contact=contact)
+    assert not db.get_user_by_telegram_chat_id("44")
+    update(11, text="/add_user")
+    pick = responses[-2][2]["keyboard"][0][0]["request_users"]
+    assert pick["user_is_bot"] is False
+    reply = update(11, users_shared={"request_id": pick["request_id"], "users": [contact]})
+    assert "Иван Петров" in reply[1]
+    assert any("✓ Водитель" == b["text"] for row in reply[2]["inline_keyboard"] for b in row)
+    reply = update(11, callback=_choose(reply, "Далее"))
+    assert "Водитель" in reply[1]
+    reply = update(11, callback=_choose(reply, "Создать приглашение"))
+    link = reply[1].split("?start=")[1]
+    assert not any(r[0] == "44" for r in responses)
+    assert not notices and "Временный пароль" not in repr(responses)
+    assert "недоступно" in update(45, text="/start " + link)[1]
+    activation = update(44, text="/start " + link)
+    assert activation[2]["inline_keyboard"][0][0]["url"].startswith("https://office.example.com/auth/activate#token=")
+    assert not db.get_user_by_telegram_chat_id("44")
+    assert link not in repr(db.list_auth_events())
+
+
+@pytest.mark.parametrize("decision,confirm_label,notice", [
+    ("/approve", "Одобрить заявку", "одобрена"), ("/reject", "Да, отклонить", "отклонена"),
+])
+def test_telegram_approval_and_rejection_notify_requester(employee_chat, decision, confirm_label, notice):
+    db, update, _, notices = employee_chat
+    _create_staff(db, "admin1", 11, ["admin"])
+    update(44, text="/register")
+    reply = update(44, text="Иван Петров")
+    reply = update(44, callback=_choose(reply, "Отправить заявку"))
+    assert "ожидает" in reply[1]
+    pending = db.list_employee_requests(admin_username="admin1")
+    assert len(pending) == 1 and pending[0]["sender_id"] == "44"
+    request_id = pending[0]["id"]
+    assert "администратору" in update(45, text=f"{decision} {request_id}")[1]
+    reply = update(11, text=f"{decision} {request_id}")
+    if decision == "/approve":
+        reply = update(11, callback=_choose(reply, "Далее"))
+    reply = update(11, callback=_choose(reply, confirm_label))
+    assert notice in reply[1]
+    assert notices[0]["reviewers"] == [[("telegram", "11")]]
+    assert notices[1:] == [{"provider": "telegram", "sender_id": "44",
+                        "text": f"Ваша заявка {notice}. Откройте /status для подробностей."}]
+    reply = update(44, text="/status")
+    if decision == "/approve":
+        assert "#token=" in reply[2]["inline_keyboard"][0][0]["url"]
+    else:
+        assert "отклонил" in reply[1]
+
+
+@pytest.mark.parametrize("button", ["more:acl", "open:acl:0", "cat:acl:pg:0"])
+def test_telegram_callbacks_recheck_current_groups(employee_chat, monkeypatch, button):
+    db, update, _, _ = employee_chat
+    _create_staff(db, "office1", 12, ["user"])
+    user = {"username": "office1", "role": "user", "group_ids": ["revoked"]}
+
+    def restrict(cfg, current, results):
+        return results if "revoked" in current["group_ids"] else []
+
+    monkeypatch.setattr(telegram_bot, "acl_filter_results", restrict)
+    monkeypatch.setattr(telegram_bot, "send_document", lambda *a, **kw: pytest.fail("revoked file"))
+    sessions = telegram_bot.CATALOG_SESSIONS if button.startswith("cat:") else telegram_bot.SEARCH_SESSIONS
+    monkeypatch.setitem(sessions, "acl", {"user": user, "username": "office1", "chat_id": "12", "created_at": time.time(),
+                                         "cfg": {"cloud_drive_db_path": "dummy"}, "all_paths": ["closed.pdf"],
+                                         "results": [{"full_path": "closed.pdf"}]})
+    assert "изменился" in update(12, callback=button)[1]
 
 
 # ── sanitization helpers ──────────────────────────────────────────────────

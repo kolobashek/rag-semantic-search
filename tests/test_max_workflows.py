@@ -18,7 +18,7 @@ def bot(tmp_path):
     client = Mock()
     worker = MaxWorkflows(dict(work_shifts_db_path=str(tmp_path / "shifts.sqlite"),
                                users_db_path=str(tmp_path / "users.sqlite"),
-                               max_office_url="https://office.example"), auth, client)
+                               max_office_url="https://office.example", max_bot_link="https://max.ru/office_bot"), auth, client)
     for uid, name, roles in ((11, "alice", ["driver"]), (22, "bob", ["driver"]), (33, "dispatch", ["dispatcher"]),
                              (44, "office", ["user"]), (55, "chief", ["admin"])):
         auth.admin_create_user(username=name, roles=roles, password="test-password",
@@ -37,6 +37,12 @@ def response(bot, uid, text):
     bot.handle(MaxEvent(uid, "mid", text))
     return bot.client.send_message.call_args.args[1]
 
+def click(bot, uid, label):
+    buttons = bot.client.send_message.call_args.kwargs["buttons"]
+    button = next(b for row in buttons for b in row if b["text"] == label)
+    bot.handle(MaxEvent(uid, "callback-" + button["payload"], button["payload"], callback_id="button"))
+    return bot.client.send_message.call_args.args[1]
+
 
 def test_menus_login_and_employee_invites(bot):
     assert "привяжите MAX" in response(bot, 123, "/menu")
@@ -45,11 +51,15 @@ def test_menus_login_and_employee_invites(bot):
     assert "/add_user" not in repr(buttons) and "/files" not in repr(buttons)
     assert "администратору" in response(bot, 11, "/add_user jane admin Jane")
     assert bot.auth.get_user(username="jane") is None
-    invite = response(bot, 55, "/add_user jane user,driver Jane")
-    token = invite.split("#token=")[1]
-    replacement = response(bot, 55, "/reinvite jane").split("#token=")[1]
-    assert not bot.auth.activate_account(token=token, new_password="staff-secret")["ok"]
-    token = replacement
+    response(bot, 55, "/add_user jane user,driver Jane")
+    assert bot.auth.get_user(username="jane") is None
+    click(bot, 55, "Далее")
+    initial = click(bot, 55, "Создать приглашение").split("?start=invite_")[1]
+    response(bot, 55, "/reinvite jane")
+    replacement = click(bot, 55, "Обновить приглашение").split("?start=invite_")[1]
+    assert "недоступно" in response(bot, 77, "/start invite_" + initial)
+    response(bot, 77, "/start invite_" + replacement)
+    token = bot.client.send_message.call_args.kwargs["buttons"][0][0]["url"].split("#token=")[1]
     assert bot.auth.activate_account(token=token, new_password="staff-secret")["ok"]
     assert set(bot.auth.get_user(username="jane")["roles"]) == {"user", "driver"}
     assert "#token=" not in response(bot, 55, "/reinvite jane")

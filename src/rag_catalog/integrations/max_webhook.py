@@ -17,6 +17,7 @@ from filelock import FileLock, Timeout
 
 from rag_catalog.core.sqlite_runtime import ClosingConnection, cached_database
 
+from .employee_onboarding import OnboardingContact
 from .max_api import MaxAPIError, MaxClient, MaxEvent, MaxFile, normalize_update
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,8 @@ class MaxInbox:
             try:
                 fields = json.loads(payload)
                 fields["files"] = tuple(MaxFile(**item) for item in fields["files"])
+                if fields.get("contact"):
+                    fields["contact"] = OnboardingContact(**fields["contact"])
                 handle(MaxEvent(**fields))
             except Exception as exc:
                 attempts += 1
@@ -117,7 +120,8 @@ def _handle(cfg, settings, get_auth_db, event):
         except MaxAPIError:
             # The notification is transient and can expire on a replay.
             pass
-    workflows = MaxWorkflows({**cfg, "max_office_url": settings.office_url}, get_auth_db(cfg), client)
+    workflows = MaxWorkflows({**cfg, "max_office_url": settings.office_url, "max_bot_link": settings.bot_link},
+                             get_auth_db(cfg), client)
     workflows.handle(event)
 
 

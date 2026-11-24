@@ -17,6 +17,8 @@ from uuid import uuid4
 import requests
 from urllib3.fields import RequestField
 
+from .employee_onboarding import OnboardingContact
+
 API_BASE = "https://platform-api2.max.ru"
 UPDATE_TYPES = ("bot_started", "message_created", "message_callback")
 _TEXT_LIMIT = 4000
@@ -48,6 +50,7 @@ class MaxEvent:
     files: tuple[MaxFile, ...] = ()
     callback_id: str | None = None
     display_name: str = ""
+    contact: OnboardingContact | None = field(default=None, repr=False)
 
 
 def _object(value: Any) -> dict:
@@ -76,12 +79,38 @@ def _message_files(body: dict) -> tuple[MaxFile, ...]:
     return tuple(result)
 
 
+def _message_contact(body: dict) -> OnboardingContact | None:
+    attachments = body.get("attachments")
+    if not isinstance(attachments, list):
+        return None
+    for item in attachments:
+        if _object(item).get("type") != "contact":
+            continue
+        payload = _object(item.get("payload"))
+        info = _object(payload.get("max_info"))
+        uid = info.get("user_id")
+        name = " ".join(filter(None, (_string(info.get("first_name")), _string(info.get("last_name")))))
+        phone = ""
+        vcard = re.sub(r"\r?\n[ \t]", "", _string(payload.get("vcf_info"))[:8192])
+        for line in vcard.splitlines():
+            label, _, value = line.partition(":")
+            prop = label.split(";")[0].rsplit(".", 1)[-1].upper()
+            if prop == "FN" and not name:
+                name = value.replace(r"\,", ",").replace(r"\;", ";")
+            elif prop == "TEL" and not phone:
+                phone = value.removeprefix("tel:")[:64]
+        return OnboardingContact(name=name[:150], sender_id=str(uid) if type(uid) is int and 0 < uid < 2**63 else "",
+                                 phone=phone)
+    return None
+
+
 def normalize_update(update: dict) -> MaxEvent | None:
     """Only direct contact with a human may reach the employee workflows."""
     kind = _object(update).get("update_type")
     if kind not in UPDATE_TYPES:
         return None
     files = ()
+    contact = None
     callback_id = None
     if kind == "bot_started":
         user = _object(update.get("user"))
@@ -105,11 +134,20 @@ def normalize_update(update: dict) -> MaxEvent | None:
             identifier = _string(body.get("mid"))
             text = _string(body.get("text"))
             files = _message_files(body)
+            contact = _message_contact(body)
+            link = _object(message.get("link"))
+            if contact is None and link.get("type") == "forward":
+                forwarded = _object(link.get("message"))
+                contact = _message_contact(forwarded)
+                # MAX can omit the wrapper body when the message is only a forward.
+                # Keep the actor from message.sender; the forwarded sender is unrelated.
+                if not identifier and contact and type(message.get("timestamp")) is int and forwarded.get("mid"):
+                    identifier = f"forward:{message['timestamp']}:{_string(forwarded['mid'])}"
     uid = user.get("user_id")
     if not identifier or type(uid) is not int or not 0 < uid < 2**63 or user.get("is_bot"):
         return None
     name = " ".join(filter(None, (_string(user.get("first_name")), _string(user.get("last_name")))))
-    return MaxEvent(uid, f"{kind}:{uid}:{identifier}", text, files, callback_id, name)
+    return MaxEvent(uid, f"{kind}:{uid}:{identifier}", text, files, callback_id, name, contact)
 
 
 def _media_url(url: str) -> str:
