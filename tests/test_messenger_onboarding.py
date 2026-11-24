@@ -56,6 +56,7 @@ def test_self_request_organization_scope_confirmation_and_status(staff, provider
     assert "недоступна" in outsider.send("/approve 1").text
     reviewer.send("/requests")
     reviewer.click("#1")
+    reviewer.click("Создать новый кабинет")
     choices = [b["text"] for row in reviewer.reply.buttons for b in row if b["text"].startswith("✓")]
     assert choices == ["✓ Водитель"]
     reviewer.click("Далее")
@@ -99,6 +100,71 @@ def test_contact_is_hint_manual_invite_uses_the_recipient_and_rejects_stale_role
     token = employee.send("/status").buttons[0][0]["url"].split("#token=")[1]
     assert staff.activate_account(token=token, new_password="staff-pass")["ok"]
     assert set(staff.get_user_by_max_user_id(91)["roles"]) == {"driver", "dispatcher"}
+
+
+@pytest.mark.parametrize("provider", ["telegram", "max"])
+def test_refer_to_existing_professional_account_requires_employee_proof(staff, provider):
+    target = "west.dispatch"
+    assert staff.admin_create_user(username=target, display_name="Елена Водитель", roles=["dispatcher"],
+                                   organization_id="west", password="working-password", must_change_password=False)
+    for i in range(8):
+        assert staff.admin_create_user(username=f"other{i}", display_name=f"Запад {i}", roles=["driver"],
+                                       organization_id="west", password="working-password", must_change_password=False)
+    reviewer = Conversation(staff, "telegram", 21, "west_admin")
+    employee = Conversation(staff, provider, 987)
+    request_id = staff.submit_employee_request(provider=provider, sender_id="987", organization_id="west",
+                                               display_name="Елена")["id"]
+    reviewer.send(f"/approve {request_id}")
+    profiles = reviewer.click("Привязать к кабинету")
+    assert "Следующие профили" in repr(profiles) and "office_admin" not in repr(profiles)
+    reviewer.click("Следующие профили")
+    reviewer.click("Предыдущие профили")
+    profiles = reviewer.send("ВОДИТ")
+    assert "Елена Водитель" in repr(profiles) and "other0" not in repr(profiles)
+    # Callback in the applicant's chat cannot enter the administrator's draft.
+    guest = employee.send(profiles.buttons[0][0]["payload"], callback=True)
+    assert target not in repr(guest) and "Елена Водитель" not in repr(guest)
+    confirmation = reviewer.click(target)
+    assert target in confirmation.text and "права" in confirmation.text
+    assert staff.employee_request_status(provider=provider, sender_id="987")["status"] == "pending"
+    sent = reviewer.click("Подтвердить привязку к кабинету")
+    assert sent.notice["provider"] == provider and sent.notice["sender_id"] == "987"
+    assert sent.notice["open_office"] and target not in sent.notice["text"]
+    result = employee.send("/status")
+    assert result.text == sent.notice["text"]
+    assert result.buttons == [[{"text": "Открыть кабинет", "url": "https://office.example"}]]
+    assert employee.send("/request").text == result.text
+    assert staff.get_user(username=target)["organization_roles"] == {"west": ["dispatcher"]}
+    assert staff.get_user_by_telegram_chat_id("987") is None and staff.get_user_by_max_user_id(987) is None
+    session = staff.create_session(username=target)
+    if provider == "telegram":
+        token = staff.create_telegram_link_token(session_token=session)["token"]
+        assert staff.consume_telegram_start_token(token=token, telegram_chat_id="987")["ok"]
+    else:
+        token = staff.create_max_link_token(session_token=session)["token"]
+        assert staff.consume_max_link_token(token=token, max_user_id=987)["ok"]
+    assert staff.employee_request_status(provider=provider, sender_id="987")["status"] == "linked"
+    assert staff.get_user(username=target)["organization_roles"] == {"west": ["dispatcher"]}
+
+
+def test_refer_after_mistaken_approval_of_unactivated_profile(staff):
+    request_id = staff.submit_employee_request(provider="telegram", sender_id="833", display_name="Елена",
+                                               organization_id="west")["id"]
+    original = staff.review_employee_request(admin_username="west_admin", request_id=request_id, approve=True)
+    activation = original["activation_token"]
+    reviewer = Conversation(staff, "telegram", 21, "west_admin")
+    reviewer.send("/requests")
+    reviewer.click("Исправить одобрение")
+    prompt = reviewer.click(f"#{request_id}")
+    assert "перестанет работать" in prompt.text
+    assert staff.get_user(username=original["username"])["telegram_chat_id"] == "833"
+    reviewer.click("Да, вернуть заявку")
+    assert not staff.activate_account(token=activation, new_password="new-password")["ok"]
+    assert not staff.get_user(username=original["username"])["telegram_chat_id"]
+    reviewer.click("Привязать к кабинету")
+    reviewer.click("west_admin")
+    assert "Кабинет: west_admin" in reviewer.click("Подтвердить привязку к кабинету").text
+    assert staff.employee_request_status(provider="telegram", sender_id="833")["status"] == "use_existing"
 
 
 def test_plain_phone_cannot_claim_an_existing_employee_and_guest_can_resubmit_after_denial(staff):

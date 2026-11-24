@@ -14,6 +14,13 @@ def employee_office_url(cfg: dict) -> str:
         return ""
 
 
+def existing_account_instructions(provider):
+    name = "MAX" if provider == "max" else "Telegram"
+    return (f"Администратор одобрил привязку к существующему кабинету. Войдите в него привычным способом. "
+            f"В верхней панели нажмите «{name}», затем «Открыть бота {name}». "
+            "Откройте бота из аккаунта, с которого подали заявку.")
+
+
 def reviewer_notice(auth, org_id, request_id, *, preferred_channel="telegram"):
     targets = []
     for user in auth.list_users():
@@ -44,11 +51,16 @@ def dispatch_notice(cfg: dict, notice: dict) -> bool:
     message = notice.get("text") or ""
     if not sender.isascii() or not sender.isdecimal() or int(sender) <= 0 or not message:
         return False
+    office = employee_office_url(cfg) if notice.get("open_office") else ""
     try:
         if provider == "telegram" and cfg.get("telegram_enabled") and cfg.get("telegram_bot_token"):
             from .telegram_bot import send_message
 
-            send_message(cfg["telegram_bot_token"], sender, message)
+            if office:
+                send_message(cfg["telegram_bot_token"], sender, message,
+                             {"inline_keyboard": [[{"text": "Открыть кабинет", "url": office}]]})
+            else:
+                send_message(cfg["telegram_bot_token"], sender, message)
             return True
         if provider == "max":
             from .max_api import MaxClient
@@ -56,7 +68,8 @@ def dispatch_notice(cfg: dict, notice: dict) -> bool:
 
             settings = read_settings(cfg)
             if settings and settings.subscribed:
-                MaxClient(settings.token).send_message(int(sender), message)
+                buttons = [[{"type": "link", "text": "Открыть кабинет", "url": office}]] if office else None
+                MaxClient(settings.token).send_message(int(sender), message, buttons=buttons)
                 return True
     except (OSError, ValueError, RuntimeError, requests.RequestException, KeyError):
         # An approved employee can obtain the decision again in the verified chat.

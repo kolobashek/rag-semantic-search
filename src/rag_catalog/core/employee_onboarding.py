@@ -108,6 +108,63 @@ def _attach(conn, provider, sender, user):
         )
 
 
+def finish_employee_referral(conn, provider, sender, username):
+    """Record a referral only after the normal cabinet-to-messenger link has succeeded."""
+    rows = conn.execute("""SELECT r.id FROM registration_requests r
+        JOIN employee_request_referrals f ON f.request_id=r.id
+        JOIN users u ON u.id=f.target_id
+        JOIN employee_memberships m ON m.username=u.username AND m.organization_id=r.organization_id
+        WHERE r.provider=? AND r.sender_id=? AND r.status='use_existing' AND u.username=?""",
+        (provider, sender, username)).fetchall()
+    for row in rows:
+        conn.execute("UPDATE registration_requests SET status='linked',username=? WHERE id=?", (username, row["id"]))
+        _audit(conn, username, "employee_request_linked", request_id=row["id"], provider=provider)
+
+
+def _referral_candidates(conn, actor, request, username=None):
+    sender = request["sender_id"]
+    provider = request["provider"]
+    owner = _binding(conn, provider, sender) if provider in PROVIDERS else None
+    platform = conn.execute("SELECT 1 FROM employee_platform_admins WHERE username=?", (actor,)).fetchone()
+    scope = json.dumps(sorted(_scope(conn, actor)))
+    rows = conn.execute("""SELECT u.id,u.username,u.display_name,u.telegram_chat_id,b.max_user_id
+        FROM employee_memberships m JOIN users u ON u.username=m.username
+        LEFT JOIN max_bindings b ON b.user_id=u.id WHERE m.organization_id=? AND u.status='active'
+        AND (? OR NOT EXISTS (SELECT 1 FROM employee_platform_admins p WHERE p.username=u.username))
+        AND NOT EXISTS (SELECT 1 FROM employee_memberships other WHERE other.username=u.username
+                        AND other.organization_id NOT IN (SELECT value FROM json_each(?)))
+        AND (? IS NULL OR u.username=?) ORDER BY u.display_name COLLATE NOCASE,u.username""",
+        (request["organization_id"], bool(platform), scope, username, username))
+    for row in rows:
+        bound = row["telegram_chat_id"] if provider == "telegram" else row["max_user_id"]
+        if provider in PROVIDERS and ((owner and owner["id"] != row["id"]) or (bound and bound != sender)):
+            continue
+        yield row
+
+
+def _can_reopen_approval(conn, actor, request):
+    if request["provider"] not in PROVIDERS or request["status"] != "approved":
+        return False
+    username = request["username"]
+    user = _binding(conn, request["provider"], request["sender_id"])
+    if not user or user["username"] != username or not _all_in_scope(conn, actor, username):
+        return False
+    return bool(conn.execute("""SELECT 1 FROM users u
+        JOIN account_activations a ON u.username=a.username AND a.used_at IS NULL
+        LEFT JOIN max_bindings b ON b.user_id=u.id
+        WHERE u.id=? AND u.status='pending' AND u.password_hash='' AND u.must_change_password=1
+        AND a.bound_provider=? AND a.bound_sender_id=?
+        AND (u.telegram_chat_id='' OR b.max_user_id IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM user_sessions s WHERE s.username=u.username)
+        AND NOT EXISTS (SELECT 1 FROM employee_invites i WHERE i.username=u.username)
+        AND NOT EXISTS (SELECT 1 FROM employee_platform_admins p WHERE p.username=u.username)
+        AND NOT EXISTS (SELECT 1 FROM employee_memberships m WHERE m.username=u.username AND m.organization_id<>?)
+        AND EXISTS (SELECT 1 FROM auth_events e WHERE e.event_type='employee_request_approved'
+            AND json_valid(e.error) AND json_extract(e.error,'$.request_id')=?
+            AND json_extract(e.error,'$.username')=u.username)""",
+        (user["id"], request["provider"], request["sender_id"], request["organization_id"], request["id"])).fetchone())
+
+
 def issue_activation(conn, username, actor, *, ttl_hours=72, provider="", sender=""):
     now = datetime.now(timezone.utc)
     expires = (now + timedelta(hours=ttl_hours)).isoformat()
@@ -240,6 +297,15 @@ def migrate_employee_onboarding(conn):
     conn.execute(
         """CREATE INDEX IF NOT EXISTS employee_request_sender ON registration_requests(provider,sender_id,id)"""
     )
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='employee_request_referrals'").fetchone():
+        conn.execute("""CREATE TABLE employee_request_referrals(
+                     request_id INTEGER PRIMARY KEY REFERENCES registration_requests(id) ON DELETE CASCADE,
+                     target_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE)""")
+        # Legacy referrals had no target ID. Keep the latest for re-selection if nobody superseded it.
+        conn.execute("""UPDATE registration_requests AS old SET status='superseded'
+                     WHERE old.status='use_existing' AND old.provider IN ('max','telegram') AND old.sender_id<>''
+                     AND EXISTS (SELECT 1 FROM registration_requests newer
+                                 WHERE newer.provider=old.provider AND newer.sender_id=old.sender_id AND newer.id>old.id)""")
     conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS telegram_login_verifier ON telegram_tokens(verifier_hash)
                     WHERE verifier_hash<>''""")
     conn.execute("""CREATE TABLE IF NOT EXISTS employee_invites(
@@ -377,7 +443,7 @@ class EmployeeOnboarding:
                 return {"ok": False, "reason": "already_linked"}
             previous = conn.execute(
                 """SELECT id,status,organization_id FROM registration_requests WHERE
-                provider=? AND sender_id=? AND status='pending' ORDER BY id DESC LIMIT 1""",
+                provider=? AND sender_id=? AND status IN ('pending','use_existing') ORDER BY id DESC LIMIT 1""",
                 (provider, sender),
             ).fetchone()
         else:
@@ -410,15 +476,18 @@ class EmployeeOnboarding:
 
     def list_employee_requests(self, *, admin_username, status="pending"):
         with self._connect() as conn:
+            conn.execute("BEGIN")
             scope = _scope(conn, admin_username)
+            lookup = "approved" if status == "correctable" else status
             return [
                 dict(r)
                 for r in conn.execute(
                     """SELECT r.*,o.name AS organization_name FROM registration_requests r
                 JOIN employee_organizations o ON r.organization_id=o.id WHERE (?='all' OR r.status=?) ORDER BY r.id DESC""",
-                    (status, status),
+                    (lookup, lookup),
                 )
                 if r["organization_id"] in scope
+                and (status != "correctable" or _can_reopen_approval(conn, admin_username, r))
             ]
 
     def employee_request_status(self, *, provider, sender_id):
@@ -434,7 +503,12 @@ class EmployeeOnboarding:
             ).fetchone()
             user = _binding(conn, provider, sender)
             if not user:
+                if row and row["status"] == "linked":
+                    return {"ok": True, "status": "none"}
                 return {"ok": True, **(dict(row) if row else {"status": "none"})}
+            if row and row["status"] == "use_existing":
+                return {"ok": True, "id": row["id"], "organization_id": row["organization_id"],
+                        "status": "use_existing", "reason": "referral_unconfirmed"}
             if user["status"] != "pending":
                 return {
                     "ok": True,
@@ -459,35 +533,77 @@ class EmployeeOnboarding:
                 "activation_token": activation["token"],
             }
 
+    def list_employee_request_candidates(self, *, admin_username, request_id, query="", offset=0, limit=7):
+        offset, limit = max(0, int(offset)), max(1, min(30, int(limit)))
+        query = str(query or "").strip().casefold()
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            row = conn.execute("SELECT * FROM registration_requests WHERE id=?", (request_id,)).fetchone()
+            if not row or row["organization_id"] not in _scope(conn, admin_username):
+                return {"ok": False, "reason": "not_admin"}
+            if row["status"] not in ("pending", "use_existing"):
+                return {"ok": False, "reason": "already_reviewed"}
+            items = []
+            for person in _referral_candidates(conn, admin_username, row):
+                if query not in (person["display_name"] or "").casefold() and query not in person["username"].casefold():
+                    continue
+                if offset:
+                    offset -= 1
+                else:
+                    items.append({"username": person["username"], "display_name": person["display_name"]})
+                    if len(items) > limit:
+                        break
+            return {"ok": True, "items": items[:limit], "has_more": len(items) > limit}
+
     def refer_employee_request(self, *, admin_username, request_id, username):
-        """Close the request and direct the requester to prove ownership in the existing cabinet."""
+        """Suggest an existing cabinet. Only its authenticated owner can establish a new binding."""
         target = str(username or "").strip().lower()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM registration_requests WHERE id=?", (request_id,)).fetchone()
             if not row or row["organization_id"] not in _scope(conn, admin_username):
                 return {"ok": False, "reason": "not_admin"}
-            if row["status"] != "pending":
+            if row["status"] not in ("pending", "use_existing", "linked"):
                 return {"ok": False, "reason": "already_reviewed"}
-            member = conn.execute(
-                """SELECT 1 FROM users u JOIN employee_memberships m ON m.username=u.username
-                   WHERE u.username=? AND u.status='active' AND m.organization_id=?""",
-                (target, row["organization_id"]),
-            ).fetchone()
+            member = next(_referral_candidates(conn, admin_username, row, target), None)
             if not member:
                 return {"ok": False, "reason": "not_found"}
-            conn.execute(
-                """UPDATE registration_requests SET status='use_existing',reviewed_at=?,reviewed_by=?
-                   WHERE id=?""",
-                (_now(), admin_username, request_id),
-            )
-            _audit(conn, admin_username, "employee_request_referred", request_id=request_id, target=target)
-            return {
-                "ok": True,
-                "status": "use_existing",
-                "provider": row["provider"],
-                "sender_id": row["sender_id"],
-            }
+            previous = conn.execute("SELECT target_id FROM employee_request_referrals WHERE request_id=?",
+                                    (request_id,)).fetchone()
+            same_target = bool(previous and previous["target_id"] == member["id"])
+            binding = _binding(conn, row["provider"], row["sender_id"]) if row["provider"] in PROVIDERS else None
+            status = "linked" if binding and binding["id"] == member["id"] else "use_existing"
+            if row["status"] == "linked" and not (same_target and status == "linked"):
+                return {"ok": False, "reason": "already_reviewed"}
+            if not same_target or row["status"] != status:
+                conn.execute("""INSERT INTO employee_request_referrals(request_id,target_id) VALUES(?,?)
+                    ON CONFLICT(request_id) DO UPDATE SET target_id=excluded.target_id""", (request_id, member["id"]))
+                conn.execute("""UPDATE registration_requests SET status=?,reviewed_at=?,reviewed_by=?,
+                             username=CASE WHEN ?='linked' THEN ? ELSE username END WHERE id=?""",
+                             (status, _now(), admin_username, status, target, request_id))
+                _audit(conn, admin_username, "employee_request_referred", request_id=request_id, target=target)
+            return {"ok": True, "status": status, "provider": row["provider"], "sender_id": row["sender_id"]}
+
+    def reopen_employee_request(self, *, admin_username, request_id):
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM registration_requests WHERE id=?", (request_id,)).fetchone()
+            if not row or row["organization_id"] not in _scope(conn, admin_username):
+                return {"ok": False, "reason": "not_admin"}
+            if row["status"] == "approved":
+                if not _can_reopen_approval(conn, admin_username, row):
+                    return {"ok": False, "reason": "already_reviewed"}
+                self._revoke_employee_channel(conn, row["username"], row["provider"])
+                conn.execute("UPDATE users SET status='blocked' WHERE username=?", (row["username"],))
+                conn.execute("UPDATE registration_requests SET username='' WHERE id=?", (request_id,))
+            elif row["status"] != "use_existing":
+                return {"ok": False, "reason": "already_reviewed"}
+            conn.execute("DELETE FROM employee_request_referrals WHERE request_id=?", (request_id,))
+            conn.execute("""UPDATE registration_requests SET status='pending',reviewed_at=NULL,reviewed_by=NULL
+                WHERE id=?""", (request_id,))
+            _audit(conn, admin_username, "employee_request_reopened", request_id=request_id, previous=row["status"],
+                   previous_username=row["username"])
+            return {"ok": True, "status": "pending", "provider": row["provider"], "sender_id": row["sender_id"]}
 
     def review_employee_request(self, *, admin_username, request_id, approve, roles=None):
         values = normalize_roles(["driver"] if roles is None else roles) if approve else []

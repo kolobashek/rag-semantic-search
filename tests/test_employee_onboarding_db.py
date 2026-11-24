@@ -177,13 +177,121 @@ def test_existing_employee_referral_checks_organization_and_preserves_identity(d
     assert not db.refer_employee_request(**review, username="former")["ok"]
     result = db.refer_employee_request(**review, username="local")
     assert result == {"ok": True, "status": "use_existing", "provider": "max", "sender_id": "788"}
-    assert not db.refer_employee_request(**review, username="local")["ok"]
+    assert db.refer_employee_request(**review, username="local") == result
     assert not db.review_employee_request(**review, approve=True)["ok"]
     status = db.employee_request_status(provider="max", sender_id="788")
     assert status["status"] == "use_existing" and not status.get("activation_token")
     assert db.get_user_by_max_user_id("788") is None
     assert db.login(username="local", password="original")["roles"] == ["driver"]
-    assert db.submit_employee_request(**args)["created"]
+    assert db.submit_employee_request(**args)["created"] is False
+
+
+def prove_channel(db, provider, username, sender):
+    session = db.create_session(username=username)
+    if provider == "max":
+        token = db.create_max_link_token(session_token=session)["token"]
+        return db.consume_max_link_token(token=token, max_user_id=sender)
+    token = db.create_telegram_link_token(session_token=session)["token"]
+    return db.consume_telegram_start_token(token=token, telegram_chat_id=sender)
+
+
+@pytest.mark.parametrize("provider", ["telegram", "max"])
+def test_referral_requires_the_exact_verified_cabinet_and_sender(db, provider):
+    for login, name in [("colleague", "Иванов Иван"), ("other", "Пётр"), ("ivan", "Иван Петров")]:
+        assert db.admin_create_user(username=login, display_name=name, organization_id="north", roles=["user"],
+                                    password="original", must_change_password=False)
+    req = db.submit_employee_request(provider=provider, sender_id="771", display_name="Иван",
+                                     organization_id="north")
+    review = dict(admin_username="manager", request_id=req["id"])
+    first = db.list_employee_request_candidates(**review, query="ИВАН", limit=1)
+    second = db.list_employee_request_candidates(**review, query="иван", limit=1, offset=1)
+    assert first["has_more"] and not second["has_more"]
+    assert {first["items"][0]["username"], second["items"][0]["username"]} == {"colleague", "ivan"}
+    assert not db.refer_employee_request(**review, username="owner")["ok"]
+    assert not db.list_employee_request_candidates(admin_username="other", request_id=req["id"])["ok"]
+    assert db.refer_employee_request(**review, username="colleague")["status"] == "use_existing"
+    assert db.employee_request_status(provider=provider, sender_id="772")["status"] == "none"
+    assert prove_channel(db, provider, "colleague", "772")["ok"]  # Owner proved a different chat.
+    assert db.employee_request_status(provider=provider, sender_id="771")["status"] == "use_existing"
+    assert all(p["username"] != "colleague" for p in db.list_employee_request_candidates(**review)["items"])
+    assert not db.refer_employee_request(**review, username="colleague")["ok"]
+    assert db.refer_employee_request(**review, username="ivan")["status"] == "use_existing"
+    assert prove_channel(db, provider, "other", "771")["ok"]  # User proved their own, different cabinet.
+    status = db.employee_request_status(provider=provider, sender_id="771")
+    assert status["status"] == "use_existing" and status["reason"] == "referral_unconfirmed"
+    assert not db.list_employee_requests(admin_username="manager", status="linked")
+    assert db.refer_employee_request(**review, username="other")["status"] == "linked"
+    assert db.refer_employee_request(**review, username="other")["status"] == "linked"
+    assert db.employee_request_status(provider=provider, sender_id="771")["username"] == "other"
+    assert db.login(username="other", password="original")["organization_roles"]["north"] == ["user"]
+    assert not db.reopen_employee_request(**review)["ok"]
+
+
+@pytest.mark.parametrize("provider", ["telegram", "max"])
+def test_reopen_only_provisional_approval_then_link_existing(db, provider):
+    assert db.admin_create_user(username="existing", organization_id="north", password="original",
+                                roles=["dispatcher"], must_change_password=False)
+    request = db.submit_employee_request(provider=provider, sender_id="773", display_name="Applicant",
+                                         organization_id="north")
+    review = dict(admin_username="manager", request_id=request["id"])
+    wrong = db.review_employee_request(**review, approve=True)
+    assert wrong["status"] == "approved"
+    assert [r["id"] for r in db.list_employee_requests(admin_username="manager", status="correctable")] == [request["id"]]
+    assert not db.reopen_employee_request(admin_username="existing", request_id=request["id"])["ok"]
+    assert db.reopen_employee_request(**review)["status"] == "pending"
+    assert not db.activate_account(token=wrong["activation_token"], new_password="new-password")["ok"]
+    assert db.get_user(username=wrong["username"])["status"] == "blocked"
+    assert db.employee_request_status(provider=provider, sender_id="773")["status"] == "pending"
+    assert not db.reopen_employee_request(**review)["ok"]
+    assert db.refer_employee_request(**review, username="existing")["ok"]
+    assert db.reopen_employee_request(**review)["ok"]
+    assert db.refer_employee_request(**review, username="existing")["ok"]
+    assert prove_channel(db, provider, "existing", "773")["ok"]
+    linked = db.list_employee_requests(admin_username="manager", status="linked")
+    assert [(r["id"], r["username"]) for r in linked] == [(request["id"], "existing")]
+    assert db.login(username="existing", password="original")["organization_roles"]["north"] == ["dispatcher"]
+
+
+def test_activated_and_historical_referrals_are_preserved(db):
+    req = db.submit_employee_request(provider="max", sender_id="55", display_name="Applicant", organization_id="north")
+    review = dict(admin_username="manager", request_id=req["id"])
+    new = db.review_employee_request(**review, approve=True)
+    assert db.activate_account(token=new["activation_token"], new_password="new-password")["ok"]
+    assert not db.reopen_employee_request(**review)["ok"]
+    assert db.list_employee_requests(admin_username="manager", status="correctable") == []
+    assert db.get_user_by_max_user_id("55")["username"] == new["username"]
+    legacy = db.submit_employee_request(provider="max", sender_id="56", display_name="Other", organization_id="north")
+    single = db.submit_employee_request(provider="max", sender_id="57", display_name="Single", organization_id="north")
+    with db._connect() as conn:
+        conn.execute("UPDATE registration_requests SET status='use_existing' WHERE id IN (?,?)",
+                     (legacy["id"], single["id"]))
+        conn.execute("""INSERT INTO registration_requests(provider,sender_id,organization_id,display_name,requested_at)
+                     SELECT provider,sender_id,organization_id,display_name,requested_at FROM registration_requests
+                     WHERE id=?""", (legacy["id"],))
+        conn.execute("DROP TABLE employee_request_referrals")
+    store = UserAuthDB(str(db.db_path))
+    assert store.employee_request_status(provider="max", sender_id="57")["status"] == "use_existing"
+    assert store.reopen_employee_request(admin_username="manager", request_id=single["id"])["ok"]
+    assert store.employee_request_status(provider="max", sender_id="56")["status"] == "pending"
+    assert not store.reopen_employee_request(admin_username="manager", request_id=legacy["id"])["ok"]
+    assert store.list_employee_requests(admin_username="manager", status="superseded")[0]["id"] == legacy["id"]
+
+
+def test_reopen_racing_activation_keeps_both_request_and_binding_consistent(db):
+    req = db.submit_employee_request(provider="max", sender_id="888", display_name="Applicant", organization_id="north")
+    review = dict(admin_username="manager", request_id=req["id"])
+    approved = db.review_employee_request(**review, approve=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        activate = pool.submit(db.activate_account, token=approved["activation_token"], new_password="changed-password")
+        reopen = pool.submit(db.reopen_employee_request, **review)
+    assert activate.result()["ok"] != reopen.result()["ok"]
+    if activate.result()["ok"]:
+        assert db.get_user_by_max_user_id("888")["status"] == "active"
+        assert db.list_employee_requests(admin_username="manager", status="approved")[0]["id"] == req["id"]
+    else:
+        assert db.get_user_by_max_user_id("888") is None
+        assert db.get_user(username=approved["username"])["status"] == "blocked"
+        assert db.list_employee_requests(admin_username="manager")[0]["id"] == req["id"]
 
 
 @pytest.mark.parametrize("reset", ["platform", "dispatcher"])

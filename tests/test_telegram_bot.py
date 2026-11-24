@@ -649,6 +649,25 @@ def test_telegram_approval_and_rejection_notify_requester(employee_chat, decisio
         assert "отклонил" in reply[1]
 
 
+def test_telegram_administrator_can_choose_an_existing_profile_from_the_request(employee_chat):
+    db, update, _, notices = employee_chat
+    _create_staff(db, "admin1", 11, ["admin"])
+    assert db.admin_create_user(username="dispatch1", display_name="Виктор", roles=["dispatcher"],
+                                password="working-password", must_change_password=False)
+    request = db.submit_employee_request(provider="telegram", sender_id="44", display_name="Виктор")
+    decision = update(11, text=f"/approve {request['id']}")
+    profiles = update(11, callback=_choose(decision, "Привязать к кабинету"))
+    assert "выберите" in profiles[1].lower()
+    matching = update(11, text="Виктор")
+    selected = update(11, callback=_choose(matching, "dispatch1 · Виктор"))
+    assert "Логин кабинета: dispatch1" in selected[1] and not notices
+    update(11, callback=_choose(selected, "Подтвердить привязку к кабинету"))
+    assert len(notices) == 1 and notices[0]["sender_id"] == "44" and notices[0]["open_office"]
+    result = update(44, text="/status")
+    assert result[1] == notices[0]["text"] and "Открыть бота Telegram" in result[1]
+    assert result[2]["inline_keyboard"][0][0]["url"] == "https://office.example.com"
+
+
 @pytest.mark.parametrize("button", ["more:acl", "open:acl:0", "cat:acl:pg:0"])
 def test_telegram_callbacks_recheck_current_groups(employee_chat, monkeypatch, button):
     db, update, _, _ = employee_chat

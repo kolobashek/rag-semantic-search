@@ -14,7 +14,9 @@ from urllib.parse import quote, urlsplit
 from rag_catalog.core.roles import ROLE_LABELS
 from rag_catalog.core.sqlite_runtime import ClosingConnection, cached_database
 
-from .employee_portal import reviewer_notice
+from .employee_portal import existing_account_instructions, reviewer_notice
+
+_PAGE_SIZE = 7
 
 
 @dataclass(frozen=True)
@@ -139,23 +141,41 @@ class OnboardingFlow:
             if verb in ("/status", "ob:status"):
                 return self._status(sender)
             if verb == "ob:existing":
-                return OnboardingReply("Войдите в свой рабочий кабинет привычным способом и откройте привязку "
-                                       + ("MAX в верхней панели." if self.provider == "max" else "Telegram в настройках."),
+                messenger = "MAX" if self.provider == "max" else "Telegram"
+                return OnboardingReply(f"Войдите в свой рабочий кабинет привычным способом. В верхней панели "
+                                       f"нажмите «{messenger}», затем «Открыть бота {messenger}».",
                                        self._existing_buttons())
-            if verb in ("/requests", "ob:queue") or verb.startswith("ob:page:"):
+            if verb in ("/requests", "ob:queue") or verb.startswith(("ob:page:", "ob:queue:")):
                 if not actor:
                     return self._welcome()
-                offset = int(verb.split(":")[2]) if verb.startswith("ob:page:") else 0
-                return self._queue(actor, offset)
+                if verb.startswith("ob:queue:"):
+                    match = re.fullmatch(r"ob:queue:(pending|use_existing|correctable):([0-9]{1,9})", verb)
+                    if not match:
+                        raise ValueError("Откройте список заявок заново.")
+                    status, offset = match.groups()
+                    return self._queue(actor, int(offset), status)
+                return self._queue(actor, int(verb[8:]) if verb.startswith("ob:page:") else 0)
             if verb in ("/approve", "/reject") or verb.startswith("ob:view:"):
                 request_id = verb[8:] if verb.startswith("ob:view:") else args.strip()
                 if not actor or not request_id.isascii() or not request_id.isdigit():
                     raise ValueError("Выберите заявку в списке /requests.")
-                rows = self.auth.list_employee_requests(admin_username=actor, status="pending")
-                row = next((r for r in rows if str(r["id"]) == request_id), None)
-                if not row:
+                row = None
+                for status in ("pending", "use_existing", "correctable"):
+                    rows = self.auth.list_employee_requests(admin_username=actor, status=status)
+                    row = next((r for r in rows if str(r["id"]) == request_id), None)
+                    if row:
+                        break
+                if not row or (verb == "/reject" and status != "pending"):
                     raise ValueError("Заявка уже рассмотрена или недоступна.")
-                draft = {"flow": "review", "stage": "reject" if verb == "/reject" else "roles",
+                if status == "correctable":
+                    stage = "reopen"
+                elif status == "use_existing":
+                    stage = "referred"
+                elif verb == "/reject":
+                    stage = "reject"
+                else:
+                    stage = "decision" if row["provider"] in ("telegram", "max") else "roles"
+                draft = {"flow": "review", "stage": stage, "review_status": status,
                          "id": row["id"], "name": row["display_name"], "org": row["organization_id"],
                          "roles": ["driver"]}
             elif verb in ("/add_user", "ob:admin") or (contact and admin and not verb.startswith("ob:")):
@@ -187,7 +207,7 @@ class OnboardingFlow:
                 if user:
                     return OnboardingReply(f"Ваш аккаунт уже привязан. Чтобы посмотреть права, {self.menu_action}.")
                 known = self.auth.employee_request_status(provider=self.provider, sender_id=sender)
-                if known.get("status") in ("pending", "approved", "blocked", "linked"):
+                if known.get("status") in ("pending", "approved", "blocked", "linked", "use_existing"):
                     return self._status(sender, known)
                 draft = {"flow": "request", "stage": "org", "roles": ["driver"]}
                 if args:
@@ -208,7 +228,23 @@ class OnboardingFlow:
                     if self.provider == "max":
                         return OnboardingReply("Действие отменено. Нажмите «Главное меню».")
                     return OnboardingReply("Действие отменено. Главное меню можно открыть командой /menu.")
-                if stage == "org" and action == "page" and choice.isdecimal() and int(choice) < len(draft["org_ids"]):
+                if stage in ("decision", "referred", "confirm_profile") and action == "profiles":
+                    self._load_profiles(draft, actor, "", 0)
+                elif stage == "decision" and action == "new":
+                    draft["stage"] = "roles"
+                elif stage == "referred" and action == "reopen":
+                    draft["stage"] = "reopen"
+                elif stage == "reopen" and action == "reopen_yes":
+                    result = self.auth.reopen_employee_request(admin_username=actor, request_id=draft["id"])
+                    if not result.get("ok"):
+                        raise ValueError("Вернуть заявку не удалось. Откройте список заявок и проверьте её статус.")
+                    draft.update(stage="decision", review_status="pending")
+                elif stage == "profiles" and action in ("prev", "more"):
+                    offset = max(0, draft["offset"] + (_PAGE_SIZE if action == "more" else -_PAGE_SIZE))
+                    self._load_profiles(draft, actor, draft["query"], offset)
+                elif stage == "profiles" and action == "pick" and choice.isdecimal() and int(choice) < len(draft["profiles"]):
+                    draft.update(stage="confirm_profile", selected=draft["profiles"][int(choice)]["username"])
+                elif stage == "org" and action == "page" and choice.isdecimal() and int(choice) < len(draft["org_ids"]):
                     draft["offset"] = int(choice)
                 elif action == "editname" and draft["flow"] == "invite" and not draft.get("renew"):
                     draft["stage"] = "name"
@@ -228,9 +264,9 @@ class OnboardingFlow:
                     if not draft["roles"]:
                         raise ValueError("Выберите хотя бы одну роль.")
                     draft["stage"] = "confirm"
-                elif stage == "roles" and action == "reject" and draft["flow"] == "review":
+                elif stage in ("decision", "roles") and action == "reject" and draft["flow"] == "review":
                     draft["stage"] = "reject"
-                elif stage in ("confirm", "reject") and action == "yes":
+                elif stage in ("confirm", "reject", "confirm_profile") and action == "yes":
                     used = draft.get("applied_event")
                     if used and (not event_id or used != event_id):
                         raise ValueError(f"Решение уже принято. Для следующего действия {self.menu_action}.")
@@ -240,6 +276,8 @@ class OnboardingFlow:
                     return reply
                 else:
                     raise ValueError("Эта кнопка устарела. Откройте /menu.")
+            elif draft.get("stage") == "profiles" and admin and text and not text.startswith("/") and not has_files:
+                self._load_profiles(draft, actor, text[:150], 0)
             elif draft.get("stage") == "name" and text and not text.startswith("/") and not contact and not has_files:
                 draft.update(name=_name(text), stage="confirm" if draft["flow"] == "request" else "org")
             elif (self.provider == "max" and draft and not draft.get("applied_event")
@@ -305,8 +343,11 @@ class OnboardingFlow:
         if status == "pending":
             return OnboardingReply("Заявка ожидает решения администратора.", [[_button("Обновить статус", "ob:status")]])
         if status == "use_existing":
-            return OnboardingReply("У вас уже есть кабинет. Войдите привычным способом и подключите мессенджер из кабинета.",
-                                   self._existing_buttons())
+            if result.get("reason") == "referral_unconfirmed":
+                return OnboardingReply("Привязка к выбранному администратором кабинету ещё не подтверждена. "
+                                       "Если вы уже вошли в свой кабинет, попросите администратора проверить выбор.",
+                                       self._existing_buttons())
+            return OnboardingReply(existing_account_instructions(self.provider), self._existing_buttons())
         if status == "rejected":
             return OnboardingReply("Администратор отклонил заявку. Уточните данные и при необходимости подайте новую.",
                                    [[_button("Подать заявку", "ob:request")]])
@@ -316,15 +357,31 @@ class OnboardingFlow:
             return OnboardingReply("Доступ к учётной записи приостановлен. Обратитесь к администратору.")
         return OnboardingReply("Заявки от вашего аккаунта пока нет.", [[_button("Подать заявку", "ob:request")]])
 
-    def _queue(self, actor, offset):
-        rows = self.auth.list_employee_requests(admin_username=actor, status="pending")
+    def _queue(self, actor, offset, status="pending"):
+        if status not in ("pending", "use_existing", "correctable"):
+            raise ValueError("Откройте список заявок заново.")
+        rows = self.auth.list_employee_requests(admin_username=actor, status=status)
         offset = max(0, offset)
-        org_names = {str(org["id"]): org["name"] for org in self._organizations(actor, "review")}
-        buttons = [[_button(f"#{r['id']} · {r['display_name']} · {org_names.get(str(r['organization_id']), '')}"[:75],
-                            f"ob:view:{r['id']}")] for r in rows[offset:offset + 7]]
-        if offset + 7 < len(rows):
-            buttons.append([_button("Следующие заявки", f"ob:page:{offset + 7}")])
-        return OnboardingReply("Выберите заявку сотрудника." if buttons else "Заявок на рассмотрении нет.", buttons)
+        buttons = [[_button(f"#{r['id']} · {r['display_name']} · {r['organization_name']}"[:75], f"ob:view:{r['id']}")]
+                   for r in rows[offset:offset + _PAGE_SIZE]]
+        if offset:
+            buttons.append([_button("Предыдущие заявки", f"ob:queue:{status}:{max(0, offset - _PAGE_SIZE)}")])
+        if offset + _PAGE_SIZE < len(rows):
+            buttons.append([_button("Следующие заявки", f"ob:queue:{status}:{offset + _PAGE_SIZE}")])
+        if status == "pending":
+            for other, label in [("use_existing", "Ожидают привязки"), ("correctable", "Исправить одобрение")]:
+                if self.auth.list_employee_requests(admin_username=actor, status=other):
+                    buttons.append([_button(label, f"ob:queue:{other}:0")])
+        else:
+            buttons.append([_button("К новым заявкам", "ob:queue")])
+        return OnboardingReply("Выберите заявку сотрудника." if rows else "Заявок на рассмотрении нет.", buttons)
+
+    def _load_profiles(self, draft, actor, query, offset):
+        page = self.auth.list_employee_request_candidates(admin_username=actor, request_id=draft["id"],
+                                                          query=query, offset=offset, limit=_PAGE_SIZE)
+        if not page.get("ok"):
+            raise ValueError("Заявка изменилась или больше недоступна. Откройте её заново.")
+        draft.update(stage="profiles", profiles=page["items"], query=query, offset=offset, has_more=page["has_more"])
 
     def _render(self, draft, actor):
         def button(label, action):
@@ -358,6 +415,38 @@ class OnboardingFlow:
         if not org_name:
             raise PermissionError("Организация больше недоступна.")
         details = f"Сотрудник: {draft['name']}\nОрганизация: {org_name}"
+        if stage == "decision":
+            return OnboardingReply(details + "\nЕсли сотрудник уже работает в кабинете, выберите его профиль.",
+                                   [[button("Привязать к кабинету", "profiles")], [button("Создать новый кабинет", "new")],
+                                    [button("Отклонить заявку", "reject")], cancel])
+        if stage == "referred":
+            return OnboardingReply(details + "\nСотруднику предложено войти в существующий кабинет.",
+                                   [[button("Выбрать другой кабинет", "profiles")],
+                                    [button("Вернуть на рассмотрение", "reopen")], cancel])
+        if stage == "reopen":
+            text = "Вернуть заявку на рассмотрение?"
+            if draft["review_status"] == "correctable":
+                text += " Прежняя ссылка задания пароля перестанет работать."
+            return OnboardingReply(details + "\n" + text, [[button("Да, вернуть заявку", "reopen_yes")], cancel])
+        if stage == "profiles":
+            choices = []
+            for i, profile in enumerate(draft["profiles"]):
+                username = profile["username"]
+                name = profile.get("display_name") or username
+                choices.append([button(f"{username} · {name}"[:75], f"pick:{i}")])
+            if draft["offset"]:
+                choices.append([button("Предыдущие профили", "prev")])
+            if draft["has_more"]:
+                choices.append([button("Следующие профили", "more")])
+            instruction = ("Выберите кабинет из списка или напишите логин или имя для поиска." if draft["profiles"]
+                           else "Подходящих кабинетов нет. Для поиска введите другой логин или имя.")
+            return OnboardingReply(details + "\n" + instruction, choices + [cancel])
+        if stage == "confirm_profile":
+            return OnboardingReply(details + f"\nЛогин кабинета: {draft['selected']}\n"
+                                   "Сотрудник получит приглашение войти в этот кабинет и подтвердить привязку. "
+                                   "Действующие права сотрудника сохранятся.",
+                                   [[button("Подтвердить привязку к кабинету", "yes")],
+                                    [button("Выбрать другой кабинет", "profiles")], cancel])
         if stage == "roles":
             buttons = [[button(("✓ " if r in draft["roles"] else "○ ") + label, "role:" + r)]
                        for r, label in ROLE_LABELS.items()]
@@ -389,6 +478,19 @@ class OnboardingFlow:
                     reply.notice = reviewer_notice(self.auth, org, result["id"], preferred_channel=self.provider)
                 return reply
         elif draft["flow"] == "review":
+            if draft["stage"] == "confirm_profile":
+                result = self.auth.refer_employee_request(admin_username=actor, request_id=draft["id"],
+                                                          username=draft["selected"])
+                if not result.get("ok"):
+                    return OnboardingReply("Выбранный кабинет или заявка больше недоступны. Откройте список заново.",
+                                           [[_button("Заявки", "ob:queue")]])
+                linked = result["status"] == "linked"
+                message = ("Ваш мессенджер уже привязан к рабочему кабинету. Откройте главное меню бота."
+                           if linked else existing_account_instructions(result["provider"]))
+                notice = {"provider": result["provider"], "sender_id": result["sender_id"],
+                          "text": message, "open_office": not linked}
+                outcome = "Привязка уже подтверждена." if linked else "Сотрудник сможет подтвердить привязку из кабинета."
+                return OnboardingReply(f"Заявка #{draft['id']}. Кабинет: {draft['selected']}. {outcome}", notice=notice)
             approve = draft["stage"] != "reject"
             result = self.auth.review_employee_request(admin_username=actor, request_id=draft["id"], approve=approve,
                                                        roles=draft["roles"])

@@ -23,3 +23,21 @@ def test_employee_links_only_use_configured_https_origin(tmp_path):
     assert employee_office_url(cfg) == ""
     assert employee_office_url({**cfg, "employee_office_url": "https://office.test/"}) == "https://office.test"
     assert employee_office_url({**cfg, "employee_office_url": "http://office.test"}) == ""
+
+
+def test_existing_account_notice_links_to_the_office_in_the_requested_channel(monkeypatch):
+    from unittest.mock import Mock
+
+    from rag_catalog.integrations import max_api, max_settings, telegram_bot
+
+    tg_sender, max_sender = Mock(), Mock()
+    monkeypatch.setattr(telegram_bot, "send_message", tg_sender)
+    monkeypatch.setattr(max_settings, "read_settings", lambda cfg: SimpleNamespace(subscribed=True, token="fixture"))
+    monkeypatch.setattr(max_api, "MaxClient", lambda token: SimpleNamespace(send_message=max_sender))
+    cfg = {"telegram_enabled": True, "telegram_bot_token": "fixture", "employee_office_url": "https://office.test"}
+    notice = {"text": "Войдите в кабинет.", "sender_id": "42", "open_office": True}
+    assert dispatch_notice(cfg, {**notice, "provider": "telegram"})
+    assert dispatch_notice(cfg, {**notice, "provider": "max"})
+    link = {"text": "Открыть кабинет", "url": "https://office.test"}
+    tg_sender.assert_called_once_with("fixture", "42", notice["text"], {"inline_keyboard": [[link]]})
+    max_sender.assert_called_once_with(42, notice["text"], buttons=[[{"type": "link", **link}]])

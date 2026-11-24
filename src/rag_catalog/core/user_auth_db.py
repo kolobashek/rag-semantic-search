@@ -28,6 +28,7 @@ from .employee_onboarding import (
     _scope,
     assign_new_membership,
     create_pending,
+    finish_employee_referral,
     issue_activation,
     migrate_employee_onboarding,
     normalize_sender_id,
@@ -43,7 +44,7 @@ MIN_SESSION_TTL_DAYS = 1
 MAX_SESSION_TTL_DAYS = 7
 SESSION_TTL_SETTING_KEY = "session_ttl_days"
 SHOW_SYSTEM_FILES_SETTING_KEY = "show_system_files_for_admin"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 LOGIN_MAX_FAILURES = 5
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 LOGIN_LOCKOUT_SECONDS = 15 * 60
@@ -585,6 +586,7 @@ class UserAuthDB(EmployeeOnboarding):
                 (chat, self._normalize_telegram_username(telegram_username), now, row["username"]),
             )
             conn.execute("UPDATE telegram_tokens SET status='used',used_at=? WHERE id=?", (now, row["id"]))
+            finish_employee_referral(conn, "telegram", chat, row["username"])
             return {"ok": True, "username": row["username"], "purpose": "link"}
 
     def create_registration_request(
@@ -1237,6 +1239,7 @@ class UserAuthDB(EmployeeOnboarding):
             conn.execute("DELETE FROM max_link_tokens WHERE user_id=?", (row["id"],))
             conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES (?,?,'max_link')",
                          (now, row["username"]))
+            finish_employee_referral(conn, "max", sender, row["username"])
         return {"ok": True, "username": row["username"]}
 
     @staticmethod

@@ -8,7 +8,7 @@ from io import BytesIO
 from nicegui import run, ui
 
 from rag_catalog.core.roles import DEFAULT_EMPLOYEE_ROLE, ROLE_LABELS, manages_employees
-from rag_catalog.integrations.employee_portal import dispatch_notice, employee_office_url
+from rag_catalog.integrations.employee_portal import dispatch_notice, employee_office_url, existing_account_instructions
 from rag_catalog.integrations.max_settings import public_bot_link
 
 from .helpers import _telegram_deeplink
@@ -236,10 +236,9 @@ def render_employee_desk(state):
                             if not out.get("ok"):
                                 ui.notify("Проверьте организацию сотрудника и состояние заявки.", type="warning")
                                 return
-                            message = "У вас уже есть рабочий кабинет. Войдите привычным способом и подключите мессенджер вверху страницы."
-                            if portal:
-                                message += "\n" + portal
-                            sent = await run.io_bound(dispatch_notice, state.cfg, {**out, "text": message})
+                            sent = await run.io_bound(dispatch_notice, state.cfg, {
+                                **out, "text": existing_account_instructions(out["provider"]), "open_office": True,
+                            })
                             desk.refresh()
                             ui.notify("Инструкция отправлена." if sent else "Заявка обработана. Передайте сотруднику инструкцию по входу лично.")
                         ui.button("Предложить привязку", on_click=refer).props("outline")
