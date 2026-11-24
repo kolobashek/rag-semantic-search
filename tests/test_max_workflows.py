@@ -54,10 +54,10 @@ def test_first_start_and_navigation_from_normalized_max_updates(bot):
         assert call.args[0] == event.user_id
         return call.args[1], {b["text"]: b for row in call.kwargs["buttons"] for b in row}
 
-    def start(uid):
+    def start(uid, payload=None):
         return deliver({"update_type": "bot_started", "timestamp": 1573226679188, "chat_id": 500 + uid,
                         "user": {"user_id": uid, "first_name": "Иван", "is_bot": False},
-                        "payload": None, "user_locale": "ru"})
+                        "payload": payload, "user_locale": "ru"})
 
     def message(uid, text):
         return deliver({"update_type": "message_created", "message": {
@@ -70,23 +70,30 @@ def test_first_start_and_navigation_from_normalized_max_updates(bot):
                                      "payload": buttons[label]["payload"]}})
 
     welcome, guest = start(90)
-    assert "Здравствуйте" in welcome and set(guest) == {"Подать заявку", "Статус заявки", "У меня уже есть кабинет"}
+    assert "Здравствуйте" in welcome and "Нажмите кнопку под сообщением" in welcome
+    assert list(guest) == ["Подать заявку", "У меня уже есть кабинет", "Статус заявки"]
+    assert message(90, "Привет") == (welcome, guest)
     _, existing = press(90, guest, "У меня уже есть кабинет")
     assert existing["Открыть кабинет"]["url"] == bot.office_url
     assert press(90, existing, "Главное меню") == (welcome, guest)
     prompt, _ = press(90, guest, "Подать заявку")
     assert "фамилию" in prompt.lower()
+    assert start(90, "menu") == (welcome, guest)
+    assert message(90, "Иван Тестов") == (welcome, guest)  # Menu link closed the unfinished request.
     assert message(90, "/start") == (welcome, guest)
     assert bot.auth.submit_employee_request(provider="max", sender_id="90", display_name="Иван Тестов")["ok"]
     pending, actions = start(90)
     assert "ожидает" in pending
+    assert start(90, "menu") == (welcome, guest)
     assert press(90, actions, "Главное меню") == (welcome, guest)
     assert "ожидает" in press(90, guest, "Статус заявки")[0]
 
     for uid, role, action in [(11, "Водитель", "Ближайшие смены"), (33, "Диспетчер", "Ближайшие смены"),
                               (44, "Пользователь облака", "Офис"), (55, "Администратор", "Заявки")]:
         title, menu = start(uid)
-        assert role in title and action in menu
+        assert role in title and action in menu and "Нажмите кнопку под сообщением" in title
+        assert message(uid, "Привет!") == (title, menu)
+        assert message(uid, "Начать") == (title, menu)
         if uid != 44:
             assert menu["Открыть кабинет"] == {"type": "link", "text": "Открыть кабинет",
                                               "url": "https://office.example/shifts"}
@@ -102,6 +109,15 @@ def test_first_start_and_navigation_from_normalized_max_updates(bot):
         _, details = press(uid, menu, action)
         assert press(uid, details, "Главное меню") == (title, menu)
         assert press(uid, buttons, "Главное меню") == (title, menu)
+
+
+def test_greeting_preserves_name_prompts_and_file_handling(bot):
+    assert "фамилию" in response(bot, 55, "/add_user").lower()
+    review = response(bot, 55, "Добрый День")
+    assert "Добрый День" in review and "Рабочий кабинет" not in review
+
+    event = MaxEvent(11, "file-with-caption", "Привет!", (MaxFile("scan.pdf", "https://cdn.max.ru/signed", 3),))
+    assert "отправьте файл" in response_with_media(bot, event)
 
 
 def test_menus_login_and_employee_invites(bot):

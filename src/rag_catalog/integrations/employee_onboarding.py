@@ -269,9 +269,15 @@ class OnboardingFlow:
         return [[{"text": "Открыть кабинет", "url": self.office}]] if _https(self.office) else []
 
     def _welcome(self):
-        provider = "MAX" if self.provider == "max" else "Telegram"
-        return OnboardingReply(f"Здравствуйте! Это рабочий бот для сотрудников. Если у вас уже есть кабинет, "
-                               f"войдите в него и привяжите {provider}. Если вы новый сотрудник, подайте заявку.",
+        if self.provider == "max":
+            return OnboardingReply("Здравствуйте! Нажмите кнопку под сообщением. Если вы новый сотрудник, "
+                                   "выберите «Подать заявку». Если уже пользуетесь кабинетом, "
+                                   "выберите «У меня уже есть кабинет» и привяжите MAX.",
+                                   [[_button("Подать заявку", "ob:request")],
+                                    [_button("У меня уже есть кабинет", "ob:existing")],
+                                    [_button("Статус заявки", "ob:status")]], is_main_menu=True)
+        return OnboardingReply("Здравствуйте! Это рабочий бот для сотрудников. Если у вас уже есть кабинет, "
+                               "войдите в него и привяжите Telegram. Если вы новый сотрудник, подайте заявку.",
                                [[_button("У меня уже есть кабинет", "ob:existing")],
                                 [_button("Подать заявку", "ob:request"), _button("Статус заявки", "ob:status")]],
                                is_main_menu=True)

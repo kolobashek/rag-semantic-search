@@ -123,7 +123,7 @@ class MaxWorkflows:
 
     def _handle(self, event: MaxEvent) -> None:
         text = event.text.strip()
-        if text.casefold() in {"/menu", "/help", "меню", "главное меню"}:
+        if text.casefold() in {"/menu", "/help", "/start menu", "меню", "главное меню"}:
             text = "/menu"
         elif text.casefold() == "/start":
             text = "/start"
@@ -187,7 +187,9 @@ class MaxWorkflows:
             if can_use_catalog(user):
                 hints.append("В личную папку: отправьте файл с подписью /upload.")
             raise ValueError("\n".join(hints) or "Загрузка файлов недоступна для вашей роли")
-        if command in ("", "/start", "/menu", "/help"):
+        greeting = text.casefold().rstrip(".!") in {"привет", "здравствуйте", "доброе утро", "добрый день",
+                                                    "добрый вечер", "начать"}
+        if command in ("", "/start", "/menu", "/help") or greeting:
             self._menu(uid, user)
         elif command == "/whoami":
             self._reply(uid, f"Логин: {user['username']}\nИмя: {user.get('display_name') or '—'}"
@@ -256,7 +258,8 @@ class MaxWorkflows:
             rows.append([_button("Добавить сотрудника", "/add_user"), _button("Заявки", "/requests")])
         rows.append([_button("Мой профиль", "/whoami"), _button("Отвязать MAX", "/logout")])
         name = user.get("display_name") or user["username"]
-        self.client.send_message(uid, f"Рабочий кабинет\n{name} · {_role_labels(user)}", buttons=rows)
+        self.client.send_message(uid, f"Рабочий кабинет\n{name} · {_role_labels(user)}\n\n"
+                                 "Нажмите кнопку под сообщением.", buttons=rows)
 
     def _shifts(self, uid, key, args):
         today = date.today()
