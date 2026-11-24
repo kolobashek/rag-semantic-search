@@ -536,6 +536,19 @@ def _create_staff(db, username, sender, roles):
                                 roles=roles, must_change_password=False)
 
 
+def test_public_menu_deeplink_reopens_guest_and_driver_menus(employee_chat):
+    db, update, _, _ = employee_chat
+    update(73, text="/request")
+    guest = update(73, text="/start menu")
+    assert _choose(guest, "Подать заявку") == "ob:request"
+    assert guest[1:] == update(73, text="/menu")[1:]
+    assert update(73, text="/start menu", kind="group") is None
+    _create_staff(db, "public-driver", 74, ["driver"])
+    driver = update(74, text="/start menu")
+    assert driver[1:] == update(74, text="/menu")[1:]
+    assert "Смены" in [button["text"] for row in driver[2]["keyboard"] for button in row]
+
+
 def test_driver_and_dispatcher_have_shift_features_without_catalog(employee_chat, monkeypatch):
     import rag_catalog.ui.helpers as helpers
 
@@ -622,6 +635,7 @@ def test_telegram_approval_and_rejection_notify_requester(employee_chat, decisio
     assert "администратору" in update(45, text=f"{decision} {request_id}")[1]
     reply = update(11, text=f"{decision} {request_id}")
     if decision == "/approve":
+        reply = update(11, callback=_choose(reply, "Создать новый кабинет"))
         reply = update(11, callback=_choose(reply, "Далее"))
     reply = update(11, callback=_choose(reply, confirm_label))
     assert notice in reply[1]

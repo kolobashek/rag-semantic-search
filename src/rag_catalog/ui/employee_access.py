@@ -1,5 +1,6 @@
 """Account linking and the organization administrator's employee desk."""
 
+import json
 import re
 from inspect import isawaitable
 from io import BytesIO
@@ -76,6 +77,22 @@ def _personal_link(url):
     dialog.open()
 
 
+def _public_menu_link(channel, base):
+    url = base + "?start=menu"
+    with ui.row().classes("items-center gap-1"):
+        ui.link(f"Меню в {channel}", url, new_tab=True).props("rel='noopener noreferrer'")
+        label = f"Скопировать ссылку на меню в {channel}"
+        ui.button(icon="content_copy").props(f'flat dense round aria-label="{label}"').tooltip(label).on(
+            "click", js_handler=f"""async () => {{
+                try {{
+                    await navigator.clipboard.writeText({json.dumps(url)});
+                    Quasar.Notify.create('Ссылка скопирована.');
+                }} catch {{
+                    Quasar.Notify.create('Скопируйте адрес через меню ссылки.');
+                }}
+            }}""")
+
+
 def open_employee_desk(state):
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
         ui.label("Сотрудники").classes("text-xl font-semibold")
@@ -106,8 +123,19 @@ def render_employee_desk(state):
         channels = {"web": "Ссылка в кабинет"}
         if state.cfg.get("telegram_bot_link"):
             channels["telegram"] = "Telegram"
-        if public_bot_link(state.cfg):
+        max_base = public_bot_link(state.cfg)
+        if max_base:
             channels["max"] = "MAX"
+        telegram_base = str(state.cfg.get("telegram_bot_link") or "").strip().rstrip("/")
+        if not re.fullmatch(r"https://(?:t\.me|telegram\.me)/[a-zA-Z][a-zA-Z0-9_]*", telegram_base):
+            telegram_base = ""
+        if telegram_base or max_base:
+            ui.label("Общие ссылки для сотрудников").classes("font-semibold")
+            with ui.row().classes("gap-4"):
+                if telegram_base:
+                    _public_menu_link("Telegram", telegram_base)
+                if max_base:
+                    _public_menu_link("MAX", max_base)
         if portal:
             def download_qr():
                 import qrcode

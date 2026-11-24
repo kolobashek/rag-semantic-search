@@ -30,6 +30,12 @@ def office(tmp_path_factory):
     root = tmp_path_factory.mktemp("employee_web")
     contour = _prepare_contour(root, qdrant_url="")
     config = dict(contour["config"], telegram_bot_link=BOT, employee_office_url=PORTAL, max_state_dir=str(root / "max"))
+    max_dir = Path(config["max_state_dir"])
+    max_dir.mkdir()
+    (max_dir / "bot.json").write_text(json.dumps({
+        "token": "fixture-only", "secret": "x" * 32, "subscribed": True, "office_url": PORTAL,
+        "bot_link": "https://max.ru/employee_fixture_bot",
+    }), encoding="utf-8")
     Path(contour["config_path"]).write_text(json.dumps(config), encoding="utf-8")
     auth = UserAuthDB(config["users_db_path"])
     password = contour["password"]
@@ -56,6 +62,8 @@ def office(tmp_path_factory):
         "NICEGUI_SCREEN_TEST_PORT": str(port),
     }
     server = (
+        "from unittest.mock import patch; "
+        "patch('rag_catalog.integrations.max_api._request', side_effect=AssertionError('External MAX disabled')).start(); "
         "from rag_catalog.ui.nice_app import ui; import sys; "
         "ui.run(host='127.0.0.1',port=int(sys.argv[1]),reload=False,show=False,storage_secret='fixture')"
     )
@@ -117,6 +125,13 @@ def test_invited_driver_only_sees_personal_telegram_and_public_qr(office, pages,
     sign_in(admin, url, ADMIN, password)
     admin.get_by_role("button", name="Сотрудники").click()
     desk = admin.get_by_role("dialog")
+    admin.evaluate("Object.defineProperty(navigator, 'clipboard', {value: "
+                   "{writeText: async text => { window.copiedMenuUrl = text; }}})")
+    for channel, base in (("Telegram", BOT), ("MAX", "https://max.ru/employee_fixture_bot")):
+        url_to_share = base + "?start=menu"
+        assert desk.get_by_role("link", name=f"Меню в {channel}").get_attribute("href") == url_to_share
+        desk.get_by_role("button", name=f"Скопировать ссылку на меню в {channel}").click()
+        admin.wait_for_function("url => window.copiedMenuUrl === url", arg=url_to_share)
     desk.get_by_text("Пригласить сотрудника", exact=True).click()
     invite = desk.locator(".q-expansion-item").filter(has_text="Создать приглашение")
     assert invite.locator(".q-select").filter(has_text="Роли сотрудника").locator(

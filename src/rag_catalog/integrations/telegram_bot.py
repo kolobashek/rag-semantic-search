@@ -1638,6 +1638,8 @@ def handle_update(token: str, auth_db: UserAuthDB, cfg: dict, update: dict) -> N
     user = get_authorized_telegram_user(auth_db, chat_id)
     _log_tg_auth_event(auth_db, chat_id=chat_id, event_type="telegram_message_received", ok=True)
     text = str(msg.get("text") or "").strip()
+    if text.casefold() == "/start menu":
+        text = "/menu"
     cmd = text.lower()
     if re.search(r"[?#&](?:token|start|verifier)=", cmd):
         send_message(token, chat_id, "Откройте личную ссылку на своём устройстве.", _main_menu(user))
