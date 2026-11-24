@@ -113,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     setup = sub.add_parser("configure", help="Проверить токен и подключить webhook")
     setup.add_argument("--office-url", required=True)
     setup.add_argument("--bot-link", required=True)
+    setup.add_argument("--local-form", action="store_true", help="Ввести токен в браузере на этом компьютере")
     sub.add_parser("status", help="Проверить настройки и подписку в MAX")
     args = parser.parse_args(argv)
     from rag_catalog.core.rag_core import load_config
@@ -120,6 +121,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config()
         if args.action == "configure":
+            if args.local_form:
+                from .max_local_setup import serve
+                return 0 if serve(cfg, args.office_url, args.bot_link) else 1
             token = os.environ.get("RAG_MAX_SETUP_TOKEN") or getpass("Токен нового бота MAX: ")
             settings = configure(cfg, args.office_url, args.bot_link, token.strip())
             print(f"Подключён {settings.bot_link}")
