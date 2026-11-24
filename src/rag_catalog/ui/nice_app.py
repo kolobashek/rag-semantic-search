@@ -25,7 +25,8 @@ from nicegui import app, background_tasks, events, run, ui
 from rag_catalog.core.document_facts import answer_from_facts, facts_for_result, matches_query, parse_fact_query
 from rag_catalog.core.log_history import install_env_log_handler
 from rag_catalog.core.rag_core import load_config, save_config
-from rag_catalog.core.roles import can_open_screen, can_use_catalog, user_roles
+from rag_catalog.core.roles import can_open_screen, can_use_catalog, manages_employees, user_roles
+from rag_catalog.integrations.employee_portal import dispatch_notice, reviewer_notice
 from rag_catalog.integrations.max_settings import public_bot_link
 
 from . import api as _api_routes  # noqa: F401 — import triggers route registration
@@ -45,7 +46,7 @@ from .auth_session import (
     touch_session,
 )
 from .css import INTERACTION_JS_PATH, USAGE_JS_PATH, _install_css, _install_interaction_javascript
-from .max_auth import open_max_account, render_max_login_button
+from .employee_access import open_employee_desk, open_telegram_account
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
@@ -94,6 +95,7 @@ from .helpers import (
     _viewer_file_url,
     _warm_searcher_cache,
 )
+from .max_auth import open_max_account, render_max_login_button
 from .state import (
     PageState,
     _get_auth_db,
@@ -546,6 +548,14 @@ def _build_page(
                 ).props("flat dense no-caps aria-label='Аккаунт MAX'").classes("rag-header-button")
                 max_account_button.tooltip("Привязка аккаунта MAX")
                 max_account_button.set_visibility(False)
+                telegram_account_button = ui.button("Telegram", icon="send",
+                    on_click=lambda: open_telegram_account(state), color=None).props(
+                    "flat dense no-caps aria-label='Аккаунт Telegram'").classes("rag-header-button")
+                telegram_account_button.set_visibility(False)
+                employee_desk_button = ui.button("Сотрудники", icon="groups",
+                    on_click=lambda: open_employee_desk(state), color=None).props(
+                    "flat dense no-caps").classes("rag-header-button")
+                employee_desk_button.set_visibility(False)
                 theme_button = ui.button(
                     icon="light_mode" if state.theme == "dark" else "dark_mode",
                     on_click=lambda: toggle_theme(),
@@ -748,6 +758,9 @@ def _build_page(
         user = state.current_user
         max_account_button.set_visibility(bool(user and not user.get("must_change_password")
                                                and (public_bot_link(state.cfg) or user.get("max_user_id"))))
+        telegram_account_button.set_visibility(bool(user and not user.get("must_change_password")
+                                                    and (state.cfg.get("telegram_bot_link") or user.get("telegram_chat_id"))))
+        employee_desk_button.set_visibility(bool(manages_employees(user) and not user.get("must_change_password")))
         shift_logout_button.set_visibility(bool(state.current_user) and not can_use_catalog(state.current_user))
         nav_items = [
             spec for spec in APP_SCREEN_SPECS
@@ -2868,7 +2881,8 @@ def _build_page(
 
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
-        tg_login_token = {"value": ""}
+        tg_login_verifier = {"value": ""}
+        tg_login_dialog = None
         try:
             login_stats = _read_login_screen_stats(state.cfg)
         except Exception:
@@ -2962,6 +2976,7 @@ def _build_page(
                     login_button.enable()
 
         def request_tg_login() -> None:
+            nonlocal tg_login_dialog
             bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
             if not bot_link:
                 ui.notify("Telegram-вход не настроен: задайте telegram_bot_link в config.json.", type="warning")
@@ -2972,33 +2987,44 @@ def _build_page(
             if not token or not link:
                 ui.notify("Не удалось создать Telegram-ссылку входа.", type="negative")
                 return
-            tg_login_token["value"] = token
-            ui.run_javascript(
-                "(() => {"
-                f"const url = {json.dumps(link)};"
-                "const w = window.open(url, '_blank', 'noopener,noreferrer');"
-                "if (!w) { window.location.href = url; }"
-                "})();"
-            )
-            ui.notify("Подтвердите вход в Telegram, затем вернитесь в браузер.", type="positive")
+            tg_login_verifier["value"] = out["verifier"]
+            with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm"):
+                ui.label("Вход через Telegram").classes("text-lg font-semibold")
+                ui.label("Откройте личный чат с ботом и подтвердите вход в этот браузер. Ссылка действует 5 минут.")
+                ui.link("Подтвердить в Telegram", link, new_tab=True).props("rel='noopener noreferrer'")
+                ui.button("Отмена", on_click=dialog.close).props("flat")
+
+            def stop_waiting():
+                if tg_login_verifier["value"] == out["verifier"]:
+                    tg_login_verifier["value"] = ""
+                dialog.delete()
+
+            tg_login_dialog = dialog
+            dialog.on("hide", stop_waiting)
+            dialog.open()
 
         async def poll_tg_login() -> None:
-            token = tg_login_token["value"]
-            if not token or state.current_user is not None:
+            verifier = tg_login_verifier["value"]
+            if not verifier or state.current_user is not None:
                 return
-            out = await run.io_bound(auth_db.consume_confirmed_telegram_login, token=token)
+            out = await run.io_bound(auth_db.consume_confirmed_telegram_login, verifier=verifier)
+            if verifier != tg_login_verifier["value"] or state.current_user or out.get("reason") == "pending":
+                return
+            tg_login_verifier["value"] = ""
+            if tg_login_dialog and not tg_login_dialog.is_deleted:
+                tg_login_dialog.close()
             if not out.get("ok"):
+                ui.notify("Запрос входа истёк. Начните вход заново.", type="warning")
                 return
-            tg_login_token["value"] = ""
             user = out.get("user") or auth_db.get_user(username=str(out.get("username") or ""))
             if not user:
                 return
             await _complete_login(user, event_type="telegram_web_login")
 
-        def register_request() -> None:
+        async def register_request() -> None:
             username = str(reg_username_input.value or "").strip().lower()
             display_name = str(reg_display_input.value or "").strip()
-            tg_username = str(reg_tg_user_input.value or "").strip().lstrip("@")
+            phone = str(reg_phone_input.value or "").strip()
             if len(username) < 3:
                 ui.notify("Укажите логин (минимум 3 символа).", type="warning")
                 return
@@ -3007,16 +3033,20 @@ def _build_page(
                 return
             out = auth_db.create_registration_request(
                 username=username,
+                organization_id=reg_org_input.value or "",
                 display_name=display_name or username,
-                telegram_username=tg_username,
+                phone=phone,
                 source="web",
                 note="requested from web login form",
             )
             if not out.get("ok"):
                 ui.notify("Не удалось отправить заявку. Попробуйте позже.", type="negative")
                 return
+            if out.get("created"):
+                notice = reviewer_notice(auth_db, reg_org_input.value, out["id"])
+                await run.io_bound(dispatch_notice, state.cfg, notice)
             ui.notify("Заявка отправлена администратору.", type="positive")
-            for inp in (reg_username_input, reg_display_input, reg_tg_user_input):
+            for inp in (reg_username_input, reg_display_input, reg_phone_input):
                 inp.value = ""
                 inp.update()
 
@@ -3162,9 +3192,12 @@ def _build_page(
 
                         with ui.tab_panel(tab_register).classes("w-full gap-3"):
                             reg_username_input = ui.input("Логин").props("dense outlined").classes("w-full")
+                            orgs = {o["id"]: o["name"] for o in auth_db.list_employee_organizations()}
+                            reg_org_input = ui.select(orgs, label="Организация",
+                                value=next(iter(orgs)) if len(orgs) == 1 else None).props("dense outlined").classes("w-full")
                             reg_display_input = ui.input("Имя").props("dense outlined").classes("w-full")
-                            reg_tg_user_input = ui.input("Telegram username (необязательно)").props("dense outlined").classes("w-full")
-                            reg_tg_user_input.on("keyup.enter", lambda _: register_request())
+                            reg_phone_input = ui.input("Телефон для связи (необязательно)").props("dense outlined type=tel maxlength=64").classes("w-full")
+                            reg_phone_input.on("keyup.enter", register_request)
                             ui.button("Отправить заявку", icon="how_to_reg", on_click=register_request).props("unelevated").classes("w-full")
                             ui.label("После одобрения администратором вы получите доступ.").classes("rag-meta")
 

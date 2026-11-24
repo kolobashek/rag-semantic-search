@@ -55,6 +55,7 @@
   "telegram_bot_token": "",
   "telegram_allowed_chat_id": "",
   "telegram_bot_link": "",
+  "employee_office_url": "",
   "users_db_path": "",
   "telemetry_db_path": "",
   "cloud_drive_enabled": false,

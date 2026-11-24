@@ -25,6 +25,9 @@ async def show_shift_administration(state, journal):
     async def call(method, *args, **kwargs):
         return await run.io_bound(method, state.auth_token, *args, **kwargs)
 
+    organizations = await call(journal.organizations, manage=True)
+    default_org = next(iter(organizations)) if len(organizations) == 1 else None
+
     def report(exc):
         ui.notify(str(exc) if isinstance(exc, (ValueError, PermissionError)) else "Не удалось выполнить операцию", type="negative")
 
@@ -32,6 +35,9 @@ async def show_shift_administration(state, journal):
         row = row or {}
         with ui.dialog() as editor, ui.card().classes("w-full max-w-lg").style("background: var(--rag-surface-strong)"):
             ui.label("Запись справочника").classes("text-lg")
+            org = ui.select(organizations, label="Организация доступа",
+                            value=row.get("organization_id", default_org)).classes("w-full")
+            org.set_enabled(not row)
             kind = ui.select(REFERENCE_LABELS, label="Справочник", value=row.get("kind", "organization")).classes("w-full")
             kind.set_enabled(not row)
             name = ui.input("Название", value=row.get("name", "")).props("maxlength=200").classes("w-full")
@@ -42,7 +48,7 @@ async def show_shift_administration(state, journal):
                 button.disable()
                 try:
                     await call(journal.save_reference, kind.value, name.value, record_id=row.get("id"),
-                               revision=row.get("revision"), archived=archived.value)
+                               revision=row.get("revision"), archived=archived.value, organization_id=org.value)
                     editor.close()
                     await refresh_references()
                 except Exception as exc:
@@ -62,6 +68,9 @@ async def show_shift_administration(state, journal):
             return
         with ui.dialog() as editor, ui.card().classes("w-full max-w-lg").style("background: var(--rag-surface-strong)"):
             ui.label("Водитель").classes("text-lg")
+            org = ui.select(organizations, label="Организация",
+                            value=row["organization_ids"][0] if row else default_org).classes("w-full")
+            org.set_visibility(not row)
             username = ui.input("Логин", value=row.get("username", "")).classes("w-full")
             username.set_enabled(not row)
             name = ui.input("ФИО", value=row.get("display_name", "")).classes("w-full")
@@ -73,7 +82,8 @@ async def show_shift_administration(state, journal):
                 button.disable()
                 try:
                     await call(journal.save_employee, username=username.value or "", display_name=name.value or "",
-                               password=password.value or "", create=not row, archived=archived.value)
+                               password=password.value or "", create=not row, archived=archived.value,
+                               organization_id=org.value)
                     editor.close()
                     await refresh_employees()
                 except Exception as exc:
@@ -88,7 +98,7 @@ async def show_shift_administration(state, journal):
 
     async def refresh_references():
         try:
-            refs.rows = [dict(r, kind_label=REFERENCE_LABELS[r["kind"]],
+            refs.rows = [dict(r, kind_label=REFERENCE_LABELS[r["kind"]], org_name=organizations.get(r["organization_id"], ""),
                              state="Архив" if r["archived"] else "Активна")
                          for r in await call(journal.references, archived=True)]
             refs.selected = []
@@ -139,7 +149,7 @@ async def show_shift_administration(state, journal):
                     ui.button("Добавить запись", icon="add", on_click=lambda: reference_editor())
                     ui.button(icon="edit", on_click=lambda: reference_editor(refs.selected[0]) if refs.selected else None).props("flat").tooltip("Изменить или архивировать запись")
                     ui.button(icon="refresh", on_click=refresh_references).props("flat").tooltip("Обновить справочники")
-                refs = ui.table(columns=columns((("kind_label", "Справочник"), ("name", "Название"), ("state", "Статус"))),
+                refs = ui.table(columns=columns((("org_name", "Организация"), ("kind_label", "Справочник"), ("name", "Название"), ("state", "Статус"))),
                                 rows=[], row_key="id", selection="single", pagination=15).classes("w-full").props("flat wrap-cells")
             with ui.tab_panel(employees_tab):
                 with ui.row():

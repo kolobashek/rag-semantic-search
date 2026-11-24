@@ -200,3 +200,130 @@ def test_real_session_revocation(tmp_path, monkeypatch, payload):
     auth.revoke_session(token)
     with pytest.raises(PermissionError):
         listing(journal, token)
+
+
+@pytest.fixture
+def company_journal(tmp_path, monkeypatch):
+    from rag_catalog.core.user_auth_db import UserAuthDB
+
+    monkeypatch.setenv("RAG_DISABLE_DEFAULT_ADMIN", "1")
+    auth = UserAuthDB(str(tmp_path / "staff.db"))
+
+    def staff(name, role, org="default", platform=False):
+        assert auth.admin_create_user(username=name, password="test-only-password", role=role,
+                                      organization_id=org, platform_admin=platform, must_change_password=False)
+        return auth.create_session(username=name)
+
+    tokens = {"root": staff("root", "admin", platform=True)}
+    assert auth.create_employee_organization(admin_username="root", name="Север", organization_id="north")["ok"]
+    assert auth.create_employee_organization(admin_username="root", name="Юг", organization_id="south")["ok"]
+    for name, role, org in [("mixed", "dispatcher", "north"), ("northie", "driver", "north"),
+                            ("southie", "driver", "south"), ("southadmin", "admin", "south")]:
+        tokens[name] = staff(name, role, org)
+    assert auth.set_employee_org_roles(admin_username="root", username="mixed", organization_id="south", roles=["driver"])["ok"]
+    return WorkShiftJournal(tmp_path / "shifts.db", auth), tokens
+
+
+def test_mixed_org_shift_acl_for_all_operations(company_journal, payload):
+    from rag_catalog.core.shift_attachments import ShiftAttachments
+
+    journal, tokens = company_journal
+    mixed, south = tokens["mixed"], tokens["southadmin"]
+    north_shift = journal.save(mixed, dict(payload, organization="Север", employee="northie", equipment="North truck"))
+    own_shift = journal.save(mixed, dict(payload, organization="Юг", equipment="Own truck"))
+    other = journal.save(south, dict(payload, organization="Юг", employee="southie", equipment="South truck"))
+    other_id = other["id"]
+    assert north_shift["status"] == "draft" and own_shift["status"] == "submitted"
+    assert journal.get(mixed, own_shift["id"])["organization_id"] == "south"
+    assert journal.organizations(mixed) == {"north": "Север", "south": "Юг"}
+    assert journal.organizations(mixed, manage=True) == {"north": "Север"}
+    assert set(journal.users(mixed, organization_id="south")) == {"mixed"}
+    assert "southie" not in journal.users(mixed)
+    assert "northie" in journal.users(mixed, organization_id="north")
+    assert {r["id"] for r in listing(journal, mixed)["rows"]} == {north_shift["id"], own_shift["id"]}
+    assert not listing(journal, mixed, employee="southie")["count"]
+    exported = journal.export_csv(mixed, date_from="2026-10-01", date_to="2026-10-31").decode("utf-8-sig")
+    assert "North truck" in exported and "Own truck" in exported and "South truck" not in exported
+    assert {r["shift_id"] for r in journal.audit(mixed)["rows"]} == {north_shift["id"]}
+    store = ShiftAttachments(journal)
+    attachment = store.add(south, other_id, "delivery", "private.pdf", b"private")
+    for action in (
+        lambda: journal.get(mixed, other_id), lambda: journal.history(mixed, other_id),
+        lambda: journal.save(mixed, dict(payload, organization="Юг"), shift_id=other_id, revision=1),
+        lambda: journal.save(mixed, dict(payload, organization="Юг", employee="southie")),
+        lambda: journal.transition(mixed, own_shift["id"], 1, "approved"),
+        lambda: journal.transition(mixed, other_id, 1, "approved"), lambda: journal.delete(mixed, other_id, 1),
+        lambda: store.list(mixed, other_id), lambda: store.read(mixed, other_id, attachment),
+        lambda: store.read(mixed, own_shift["id"], attachment),
+        lambda: store.add(mixed, other_id, "wrong", "wrong.pdf", b"wrong"),
+        lambda: journal.save(mixed, dict(payload, organization="Юг", organization_id="north")),
+        lambda: journal.save(mixed, dict(payload, organization="unknown")),
+    ):
+        with pytest.raises(PermissionError):
+            action()
+    with pytest.raises(ValueError):
+        journal.save(mixed, dict(payload, organization="Север", employee="southie"))
+    journal.delete(south, other_id, 1)
+    with pytest.raises(PermissionError):
+        journal.history(mixed, other_id)
+    assert journal.history(south, other_id)[-1]["action"] == "delete"
+
+
+def test_company_references_directory_and_driver_management(company_journal):
+    journal, tokens = company_journal
+    mixed = tokens["mixed"]
+    for token, org in [(mixed, "north"), (tokens["southadmin"], "south")]:
+        journal.save_reference(token, "equipment", "Машина", organization_id=org)
+    south_ref = next(r for r in journal.references(mixed) if r["organization_id"] == "south")
+    journal.save_reference(tokens["southadmin"], "equipment", "Архив юга", record_id=south_ref["id"],
+                           organization_id="south", revision=1, archived=True)
+    assert {r["name"] for r in journal.references(mixed, archived=True)} == {"Машина"}
+    for org, error in [("north", ValueError), ("south", PermissionError)]:
+        with pytest.raises(error):
+            journal.save_reference(mixed, "equipment", "rename", organization_id=org, record_id=south_ref["id"], revision=2)
+    with pytest.raises(PermissionError):
+        journal.save_reference(tokens["root"], "equipment", "Ghost", organization_id="not_a_company")
+    journal.save_employee(mixed, username="hired", display_name="Новый", organization_id="north",
+                          create=True, password="only-for-test-12345")
+    assert journal.auth.get_user(username="hired")["organization_ids"] == ["north"]
+    staff = {p["username"]: p for p in journal.employees(mixed)}
+    assert "southie" not in staff and staff["hired"]["editable"] and not staff["mixed"]["editable"]
+    journal.save_employee(mixed, username="hired", display_name="Изменён", organization_id=staff["hired"]["organization_ids"][0])
+    with pytest.raises(PermissionError):
+        journal.save_employee(mixed, username="southie", display_name="Forbidden", organization_id="south")
+
+
+def test_legacy_shift_name_colliding_with_new_org_keeps_original_scope(company_journal, payload):
+    journal, tokens = company_journal
+    original = journal.save(tokens["root"], dict(payload, organization="Старая компания"))
+    assert original["organization_id"] == "default"
+    assert journal.auth.create_employee_organization(admin_username="root", name="Старая компания", organization_id="later")["ok"]
+    edited = journal.save(tokens["root"], dict(payload, organization="Старая компания", comment="Исправление"),
+                          shift_id=original["id"], revision=1)
+    assert edited["organization_id"] == "default"
+    with pytest.raises(PermissionError):
+        journal.save(tokens["root"], dict(payload, organization="Старая компания", organization_id="later"),
+                     shift_id=original["id"], revision=2)
+    newer = journal.save(tokens["root"], dict(payload, organization="Старая компания", shift_number=2))
+    assert newer["organization_id"] == "later"
+
+
+def test_upgrade_assigns_existing_shifts_and_archived_reference_to_default(company_journal, payload):
+    journal, tokens = company_journal
+    old = journal.save(tokens["root"], payload)
+    with journal._connection() as conn:
+        conn.execute("ALTER TABLE shifts DROP COLUMN organization_id")
+        conn.execute("DROP TABLE shift_references")
+        conn.execute("""CREATE TABLE shift_references(id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+                     name TEXT NOT NULL, name_key TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
+                     revision INTEGER NOT NULL DEFAULT 1, UNIQUE(kind,name_key))""")
+        conn.execute("INSERT INTO shift_references VALUES(31,'equipment','История','история',1,4)")
+    reopened = WorkShiftJournal(journal.path, journal.auth)
+    assert reopened.get(tokens["root"], old["id"])["organization_id"] == "default"
+    assert reopened.references(tokens["root"], archived=True) == [{
+        "id": 31, "kind": "equipment", "name": "История", "name_key": "история",
+        "organization_id": "default", "archived": 1, "revision": 4,
+    }]
+    assert not reopened.references(tokens["mixed"], archived=True)
+    with pytest.raises(PermissionError):
+        reopened.get(tokens["mixed"], old["id"])

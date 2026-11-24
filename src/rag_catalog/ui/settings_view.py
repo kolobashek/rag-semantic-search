@@ -24,6 +24,7 @@ from rag_catalog.core.roles import ROLE_LABELS, primary_role, user_roles
 from rag_catalog.core.user_auth_db import UserAuthDB
 
 from .client_diagnostics_view import show_client_diagnostics
+from .employee_access import confirm_role_grant, employee_roles_select, open_employee_desk, render_employee_desk
 from .helpers import (
     _alias_key_from_text,
     _cd_get_service,
@@ -66,15 +67,16 @@ def render_settings_screen(
             with ui.expansion("Создать пользователя", icon="person_add").classes("w-full"):
                 new_username = ui.input("Логин").props("dense outlined").classes("w-full")
                 new_display = ui.input("Имя").props("dense outlined").classes("w-full")
-                new_telegram = ui.input("Telegram chat id").props("dense outlined").classes("w-full")
-                new_telegram_username = ui.input("Telegram username").props("dense outlined prefix=@").classes("w-full")
                 new_password = ui.input("Временный пароль", password=True, password_toggle_button=True).props("dense outlined").classes("w-full")
-                new_role = ui.select(ROLE_LABELS, value=["user"], multiple=True, label="Роли").props("dense outlined use-chips").classes("w-full")
+                new_role = employee_roles_select()
+                organizations = {o["id"]: o["name"] for o in auth_db.list_employee_organizations(admin_username=_username(state))}
+                new_org = ui.select(organizations, value=next(iter(organizations)) if len(organizations) == 1 else None,
+                                    label="Организация").classes("w-full")
                 new_status = ui.select(["active", "pending", "blocked"], value="active", label="Статус").props("dense outlined").classes("w-full")
                 new_must_change = ui.checkbox("Потребовать смену пароля", value=True)
 
                 def create_user() -> None:
-                    if not new_role.value:
+                    if not new_role.value or not new_org.value:
                         ui.notify("Выберите хотя бы одну роль", type="warning")
                         return
                     if "admin" not in user_roles(auth_db.get_user_by_session(state.auth_token)):
@@ -83,10 +85,11 @@ def render_settings_screen(
                     ok = auth_db.admin_create_user(
                         username=str(new_username.value or ""),
                         display_name=str(new_display.value or ""),
-                        telegram_chat_id=str(new_telegram.value or ""),
-                        telegram_username=str(new_telegram_username.value or ""),
+                        telegram_chat_id="",
+                        telegram_username="",
                         password=str(new_password.value or ""),
                         roles=list(new_role.value),
+                        organization_id=new_org.value, platform_admin=False,
                         status=str(new_status.value or "active"),
                         must_change_password=bool(new_must_change.value),
                     )
@@ -99,7 +102,8 @@ def render_settings_screen(
                     ui.notify("Пользователь создан." if ok else "Не удалось создать пользователя.", type="positive" if ok else "negative")
                     render_fn()
 
-                ui.button("Создать", icon="person_add", on_click=create_user).props("unelevated")
+                ui.button("Создать", icon="person_add",
+                          on_click=lambda: confirm_role_grant(new_role.value, create_user)).props("unelevated")
 
             users = auth_db.list_users()
             ui.separator()
@@ -266,8 +270,8 @@ def render_settings_screen(
                         "must_change_password": bool(int(user.get("must_change_password") or 0)),
                     }
                     display_input = ui.input("Имя", value=str(user.get("display_name") or "")).props("dense outlined").classes("w-full")
-                    telegram_input = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined").classes("w-full")
-                    telegram_username_input = ui.input("Telegram username", value=str(user.get("telegram_username") or "")).props("dense outlined prefix=@").classes("w-full")
+                    telegram_input = ui.input("Telegram chat id", value=str(user.get("telegram_chat_id") or "")).props("dense outlined readonly").classes("w-full")
+                    telegram_username_input = ui.input("Telegram username", value=str(user.get("telegram_username") or "")).props("dense outlined readonly prefix=@").classes("w-full")
                     role_input = ui.select(ROLE_LABELS, value=sorted(user_roles(user)), multiple=True, label="Роли").props("dense outlined use-chips").classes("w-full")
                     status_input = ui.select(["active", "pending", "blocked"], value=status or "active", label="Статус").props("dense outlined").classes("w-full")
                     must_input = ui.checkbox("Потребовать смену пароля", value=bool(int(user.get("must_change_password") or 0)))
@@ -362,27 +366,8 @@ def render_settings_screen(
 
                     with ui.row().classes("gap-2"):
                         ui.button("Сбросить пароль", icon="key", on_click=set_password).props("outline")
-                        def make_invite(
-                            username: str = username,
-                            display_input: Any = display_input,
-                            telegram_username_input: Any = telegram_username_input,
-                        ) -> None:
-                            bot_link = str(state.cfg.get("telegram_bot_link") or "").strip()
-                            if not bot_link:
-                                ui.notify("В config.json не задан telegram_bot_link.", type="warning")
-                                return
-                            out = auth_db.create_telegram_token(
-                                purpose="invite",
-                                username=username,
-                                display_name=str(display_input.value or ""),
-                                telegram_username=str(telegram_username_input.value or ""),
-                                created_by=_username(state),
-                                ttl_minutes=7 * 24 * 60,
-                            )
-                            link = _telegram_deeplink(bot_link, "invite", str(out.get("token") or ""))
-                            ui.notify(f"Invite-link: {link}", type="positive", timeout=12000)
-
-                        ui.button("Invite Telegram", icon="link", on_click=make_invite).props("outline")
+                        ui.button("Организации и приглашения", icon="groups",
+                                  on_click=lambda: open_employee_desk(state)).props("outline")
                     with user_actions:
                         with ui.row().classes("rag-dirty-actions-inner"):
                             ui.button("Отменить", icon="close", on_click=reset_user_fields).props("flat dense")
@@ -410,48 +395,7 @@ def render_settings_screen(
             ).classes("w-full")
 
     def render_admin_registration_requests(auth_db: UserAuthDB) -> None:
-        rows = auth_db.list_registration_requests(status="pending", limit=50)
-        with ui.column().classes("rag-card w-full p-4 gap-3"):
-            ui.label("Заявки на регистрацию").classes("text-xl font-semibold")
-            if not rows:
-                ui.label("Ожидающих заявок нет.").classes("rag-meta")
-                return
-            for row in rows:
-                req_id = int(row.get("id") or 0)
-                title = str(row.get("username") or row.get("display_name") or f"заявка {req_id}")
-                tg = str(row.get("telegram_username") or row.get("telegram_chat_id") or "")
-                with ui.row().classes("w-full items-center gap-2"):
-                    ui.label(f"#{req_id}").classes("rag-chip")
-                    ui.label(title).classes("font-medium")
-                    ui.label(f"Telegram: {tg or '-'}").classes("rag-meta flex-1")
-                    ui.label(str(row.get("source") or "")).classes("rag-meta")
-
-                    def approve(req_id: int = req_id) -> None:
-                        out = auth_db.review_registration_request(
-                            request_id=req_id,
-                            reviewed_by=_username(state),
-                            decision="approved",
-                        )
-                        ui.notify(
-                            f"Заявка одобрена: {out.get('username')}" if out.get("ok") else f"Не удалось одобрить: {out.get('reason')}",
-                            type="positive" if out.get("ok") else "negative",
-                        )
-                        render_fn()
-
-                    def reject(req_id: int = req_id) -> None:
-                        out = auth_db.review_registration_request(
-                            request_id=req_id,
-                            reviewed_by=_username(state),
-                            decision="rejected",
-                        )
-                        ui.notify(
-                            "Заявка отклонена." if out.get("ok") else f"Не удалось отклонить: {out.get('reason')}",
-                            type="positive" if out.get("ok") else "negative",
-                        )
-                        render_fn()
-
-                    ui.button("Одобрить", icon="check", on_click=approve).props("outline dense")
-                    ui.button("Отклонить", icon="close", on_click=reject).props("flat dense")
+        render_employee_desk(state)
 
     def render_admin_security_settings(auth_db: UserAuthDB) -> None:
         current_ttl = auth_db.get_session_ttl_days()
@@ -2525,7 +2469,7 @@ def render_settings_screen(
                         if not bot_link:
                             ui.notify("В config.json не задан telegram_bot_link.", type="warning")
                             return
-                        out = auth_db.create_telegram_link_token(username=str(user.get("username") or ""))
+                        out = auth_db.create_telegram_link_token(session_token=state.auth_token)
                         if not out.get("ok"):
                             ui.notify(f"Ошибка: {out.get('reason')}", type="negative")
                             return

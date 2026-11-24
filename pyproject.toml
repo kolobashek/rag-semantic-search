@@ -27,6 +27,7 @@ classifiers = [
 dependencies = [
     "streamlit>=1.28.0",
     "nicegui>=3.10.0",
+    "qrcode[pil]>=8.2,<9",
     "qdrant-client>=1.17.1,<1.18",
     "sentence-transformers>=2.3.0",
     "python-docx>=1.1.0",

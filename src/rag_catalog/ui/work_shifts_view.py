@@ -27,14 +27,17 @@ def render_work_shifts(state: PageState) -> None:
     busy = False
     action_buttons = {}
     admin = can_manage_shifts(state.current_user)
+    managed_orgs = {}
 
     def update_actions():
-        status = table.selected[0]["status"] if table.selected else None
+        row = table.selected[0] if table.selected else {}
+        status = row.get("status")
+        manager = row.get("organization_id") in managed_orgs
         allowed = {
-            "edit": status is not None, "submitted": admin and status == "draft", "delete": admin and status is not None,
-            "approved": admin and status in {"draft", "submitted"}, "history": status is not None,
+            "edit": status is not None, "submitted": manager and status == "draft", "delete": manager and status is not None,
+            "approved": manager and status in {"draft", "submitted"}, "history": status is not None,
             "attachments": status is not None,
-            "draft": admin and status in {"submitted", "approved"},
+            "draft": manager and status in {"submitted", "approved"},
         }
         for key, button in action_buttons.items():
             button.set_enabled(allowed[key])
@@ -110,9 +113,10 @@ def render_work_shifts(state: PageState) -> None:
         if row is None:
             return
         try:
-            available_users = await call(journal.users)
-            if row.get("employee") and row["employee"] not in available_users:
-                available_users[row["employee"]] = row["employee_name"] + " (архив)"
+            if not new:
+                row = await call(journal.get, row["id"])
+            organizations = await call(journal.organizations)
+            initial_org = row.get("organization_id") or (next(iter(organizations)) if len(organizations) == 1 else None)
             references = await call(journal.references)
         except Exception as exc:
             error(exc)
@@ -121,18 +125,16 @@ def render_work_shifts(state: PageState) -> None:
             ui.label("Новая смена" if new else f"Смена №{row['id']}").classes("text-lg font-semibold")
             with ui.element("div").classes("grid grid-cols-1 sm:grid-cols-2 gap-3 w-full").style("max-height: 45vh; overflow-y: auto"):
                 inputs = {}
-                inputs["employee"] = ui.select(available_users, label="Сотрудник",
-                    value=row.get("employee") or (state.current_user or {}).get("username")).classes("w-full")
-                inputs["employee"].set_enabled(admin)
+                org = ui.select(organizations, label="Организация доступа", value=initial_org).classes("w-full")
+                org.set_enabled(new and len(organizations) > 1)
+                inputs["employee"] = ui.select({}, label="Сотрудник").classes("w-full")
                 inputs["work_date"] = ui.input("Дата", value=row.get("work_date", date.today().isoformat())).props("type=date")
                 inputs["shift_number"] = ui.select({1: "1", 2: "2", 3: "3"}, label="Номер смены", value=row.get("shift_number", 1))
                 for key, label in (("organization", "Организация"), ("equipment", "Техника / госномер"),
                                    ("workplace", "Объект"), ("partner", "Контрагент"),
                                    ("waybill_number", "Номер путевого листа")):
-                    options = sorted({ref["name"] for ref in references if ref["kind"] == key} | ({row[key]} if row.get(key) else set()))
                     if key != "waybill_number":
-                        inputs[key] = ui.select(options, label=label, value=row.get(key) or None,
-                                                with_input=True, new_value_mode="add-unique" if admin else None).classes("w-full")
+                        inputs[key] = ui.select([], label=label, with_input=True).classes("w-full")
                     else:
                         inputs[key] = ui.input(label, value=row.get(key, "")).props("maxlength=200")
                 inputs["hours"] = ui.number("Отработано без перерывов, ч", value=row.get("work_minutes", 0) / 60,
@@ -144,7 +146,10 @@ def render_work_shifts(state: PageState) -> None:
             async def save():
                 save_button.disable()
                 try:
-                    await call(journal.save, {key: field.value for key, field in inputs.items()},
+                    if not org.value:
+                        raise ValueError("Выберите организацию")
+                    values = {key: field.value for key, field in inputs.items()}
+                    await call(journal.save, dict(values, organization_id=org.value),
                                shift_id=row.get("id"), revision=row.get("revision"))
                     dialog.close()
                     await refresh()
@@ -157,6 +162,39 @@ def render_work_shifts(state: PageState) -> None:
             with ui.row().classes("w-full justify-end"):
                 ui.button("Отмена", on_click=dialog.close).props("flat")
                 save_button = ui.button("Сохранить" if admin else "Сохранить и отправить", icon="save", on_click=save)
+            async def choose_organization():
+                selected_org = org.value
+                manager = selected_org in managed_orgs
+                people = await call(journal.users, organization_id=selected_org) if selected_org else {}
+                if org.value != selected_org:
+                    return
+                if row.get("employee") and row["employee"] not in people:
+                    people[row["employee"]] = row["employee_name"] + " (архив)"
+                current = row.get("employee") or (state.current_user or {}).get("username")
+                inputs["employee"].set_options(people, value=current if current in people else None)
+                inputs["employee"].set_enabled(manager)
+                for key in ("organization", "equipment", "workplace", "partner"):
+                    field = inputs[key]
+                    options = {r["name"] for r in references if r["organization_id"] == selected_org and r["kind"] == key}
+                    value = row.get(key) or None
+                    if key == "organization" and selected_org:
+                        value = value or organizations[selected_org]
+                        options.add(organizations[selected_org])
+                    if value:
+                        options.add(value)
+                    field.set_options(sorted(options), value=value)
+                    field.set_enabled(bool(selected_org))
+                    if manager:
+                        field.props('new-value-mode="add-unique"')
+                    else:
+                        field.props(remove="new-value-mode")
+                    if key == "organization":
+                        field.set_visibility(selected_org == "default")
+                save_button.set_text("Сохранить" if manager else "Сохранить и отправить")
+                save_button.set_enabled(bool(selected_org))
+
+            org.on_value_change(choose_organization)
+            await choose_organization()
         dialog.open()
 
     async def change(action):
@@ -298,7 +336,7 @@ def render_work_shifts(state: PageState) -> None:
             following.tooltip("Следующая страница").disable()
 
     async def initialize():
-        nonlocal journal, users
+        nonlocal journal, users, managed_orgs
         try:
             root = Path(__file__).resolve().parents[3]
             path = Path(state.cfg.get("work_shifts_db_path") or root / "data" / "work_shifts.db")
@@ -307,6 +345,7 @@ def render_work_shifts(state: PageState) -> None:
             auth = await run.io_bound(_get_auth_db, state)
             journal = await run.io_bound(WorkShiftJournal, path, auth)
             users = await call(journal.users)
+            managed_orgs = await call(journal.organizations, manage=True)
             employee_filter.set_options({"": "Все сотрудники", **users})
             new_button.enable()
             await refresh()
