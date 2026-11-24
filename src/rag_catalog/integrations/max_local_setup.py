@@ -1,13 +1,14 @@
 """Accept a MAX credential once from a browser on the same workstation."""
 
 import hmac
+import html
 import secrets
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
 
 from .max_api import MaxAPIError
-from .max_settings import configure
+from .max_settings import MenuSetupPending, configure
 
 
 def serve(cfg, office_url, bot_link, *, ready=print, lifetime=1800):
@@ -22,6 +23,7 @@ def serve(cfg, office_url, bot_link, *, ready=print, lifetime=1800):
 <label>Токен бота <input type="password" name="token" required autocomplete="off"></label>
 <button>Подключить бота</button></form></main></html>"""
     connected = False
+    menu_pending = None
 
     class Form(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -32,7 +34,7 @@ def serve(cfg, office_url, bot_link, *, ready=print, lifetime=1800):
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", "same-origin")
             self.send_header("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -45,7 +47,7 @@ def serve(cfg, office_url, bot_link, *, ready=print, lifetime=1800):
             self.reply(200, page) if self.expected() else self.reply(404, "")
 
         def do_POST(self):
-            nonlocal connected
+            nonlocal connected, menu_pending
             if not self.expected() or self.headers.get("Origin") != "http://" + host:
                 return self.reply(403, "")
             length = self.headers.get("Content-Length", "")
@@ -57,10 +59,14 @@ def serve(cfg, office_url, bot_link, *, ready=print, lifetime=1800):
                 return self.reply(403, "")
             try:
                 configure(cfg, office_url, bot_link, form.get("token", [""])[0].strip())
+            except MenuSetupPending as exc:
+                connected = True
+                menu_pending = exc
+                return self.reply(200, "<meta charset=utf-8><p>" + html.escape(str(exc)) + "</p>")
             except (OSError, ValueError, MaxAPIError):
                 return self.reply(400, page.replace("<form ", "<p>Проверьте токен выбранного бота и подключение к MAX.</p><form "))
             connected = True
-            self.reply(200, "Бот подключён. Вернитесь в чат.")
+            self.reply(200, "<meta charset=utf-8><p>Бот подключён. Команды /menu, /request, /status и /start готовы. Вернитесь в чат.</p>")
 
     with HTTPServer(("127.0.0.1", 0), Form) as server:
         host = "127.0.0.1:" + str(server.server_port)
@@ -69,4 +75,6 @@ def serve(cfg, office_url, bot_link, *, ready=print, lifetime=1800):
         server.timeout = 1
         while not connected and time.monotonic() < deadline:
             server.handle_request()
+    if menu_pending:
+        raise menu_pending
     return connected

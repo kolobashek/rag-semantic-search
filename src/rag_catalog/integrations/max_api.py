@@ -256,6 +256,9 @@ class MaxClient:
     def get_me(self) -> dict:
         return self._api("GET", "/me")
 
+    def set_commands(self, commands: list[dict]) -> None:
+        self._api("PATCH", "/me/commands", json={"commands": commands})
+
     def subscriptions(self) -> list[dict]:
         entries = self._api("GET", "/subscriptions").get("subscriptions")
         if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):

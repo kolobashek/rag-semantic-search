@@ -122,6 +122,17 @@ def test_subscription_polling_and_get_me(monkeypatch):
     assert len(calls) == 4
 
 
+def test_command_hints_send_raw_auth_only_to_command_endpoint(monkeypatch):
+    hints = [{"name": "menu", "description": "Открыть меню"}]
+    calls = scripted(monkeypatch, response({"commands": hints}))
+    api.MaxClient("test-token").set_commands(hints)
+    method, url, options = calls[0]
+    assert (method, url) == ("PATCH", "https://platform-api2.max.ru/me/commands")
+    assert options["json"] == {"commands": hints}
+    assert options["headers"]["Authorization"] == "test-token"
+    assert not options["allow_redirects"]
+
+
 def test_send_file_upload_once_without_api_credentials_and_retry_processing(monkeypatch, tmp_path):
     doc = tmp_path / "лист.pdf"
     doc.write_bytes(b"a" * 830000)
