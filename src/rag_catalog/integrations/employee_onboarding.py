@@ -30,6 +30,7 @@ class OnboardingReply:
     buttons: list[list[dict]] = field(default_factory=list)
     pick_contact: bool = False
     notice: dict | None = None
+    is_main_menu: bool = False
 
 
 class _Drafts:
@@ -121,6 +122,8 @@ class OnboardingFlow:
                     drafts.clear(self.provider, sender)
                 if user:
                     return None
+                if text != "/start":
+                    return self._welcome()
                 status = self.auth.employee_request_status(provider=self.provider, sender_id=sender)
                 return self._status(sender, status) if status.get("status") not in (None, "none") else self._welcome()
             if stamp and draft.get("last_event") == stamp:
@@ -267,10 +270,11 @@ class OnboardingFlow:
 
     def _welcome(self):
         provider = "MAX" if self.provider == "max" else "Telegram"
-        return OnboardingReply(f"Для доступа к работе выберите, как подключиться. Если кабинет уже есть, "
-                               f"войдите в него и привяжите {provider}.",
+        return OnboardingReply(f"Здравствуйте! Это рабочий бот для сотрудников. Если у вас уже есть кабинет, "
+                               f"войдите в него и привяжите {provider}. Если вы новый сотрудник, подайте заявку.",
                                [[_button("У меня уже есть кабинет", "ob:existing")],
-                                [_button("Подать заявку", "ob:request"), _button("Статус заявки", "ob:status")]])
+                                [_button("Подать заявку", "ob:request"), _button("Статус заявки", "ob:status")]],
+                               is_main_menu=True)
 
     def _activation(self, result):
         token = result.get("activation_token")

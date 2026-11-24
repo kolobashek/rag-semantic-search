@@ -14,7 +14,14 @@ from uuid import NAMESPACE_URL, uuid5
 
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.cloud_drive.registry import CloudFilenameConflict
-from rag_catalog.core.roles import ROLE_LABELS, can_manage_shifts, can_use_catalog, can_use_shifts, user_roles
+from rag_catalog.core.roles import (
+    ROLE_LABELS,
+    can_manage_shifts,
+    can_use_catalog,
+    can_use_shifts,
+    manages_employees,
+    user_roles,
+)
 from rag_catalog.core.shift_attachments import MAX_FILE_BYTES, ShiftAttachments, safe_filename
 from rag_catalog.core.user_auth_db import UserAuthDB
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
@@ -33,6 +40,14 @@ def _button(text: str, payload: str) -> dict:
 
 def _link(text: str, url: str) -> dict:
     return {"type": "link", "text": text, "url": url}
+
+
+def _role_labels(user: dict) -> str:
+    scoped = user.get("organization_roles") or {}
+    roles = {role for organization_roles in scoped.values() for role in organization_roles} or user_roles(user)
+    if user.get("is_platform_admin"):
+        roles.add("admin")
+    return ", ".join(label for role, label in ROLE_LABELS.items() if role in roles)
 
 
 def _integer(value: str, *, minimum: int = 1) -> int:
@@ -95,15 +110,24 @@ class MaxWorkflows:
             return user
         return None
 
+    def _reply(self, uid: int, text: str, *, buttons: list[list[dict]] | None = None) -> None:
+        rows = (buttons or []) + [[_button("Главное меню", "/menu")]]
+        self.client.send_message(uid, text, buttons=rows)
+
     def handle(self, event: MaxEvent) -> None:
         """The runner authenticates the Bot API, normalizes private events and acknowledges callbacks."""
         try:
             self._handle(event)
         except (ValueError, PermissionError) as exc:
-            self.client.send_message(event.user_id, str(exc))
+            self._reply(event.user_id, str(exc))
 
     def _handle(self, event: MaxEvent) -> None:
-        parts = event.text.strip().split(maxsplit=1)
+        text = event.text.strip()
+        if text.casefold() in {"/menu", "/help", "меню", "главное меню"}:
+            text = "/menu"
+        elif text.casefold() == "/start":
+            text = "/start"
+        parts = text.split(maxsplit=1)
         command = parts[0].lower() if parts else ""
         args = parts[1].strip() if len(parts) > 1 else ""
         uid = event.user_id
@@ -120,7 +144,7 @@ class MaxWorkflows:
         user = self._active(uid)
         reply = OnboardingFlow(self.auth, provider="max", bot_link=self.cfg.get("max_bot_link", ""),
                                office_url=self.office_url).handle(
-            sender_id=uid, text=event.text, display_name=event.display_name, user=user,
+            sender_id=uid, text=text, display_name=event.display_name, user=user,
             is_callback=bool(event.callback_id), event_id=event.event_id, contact=event.contact)
         if reply is not None:
             if reply.notice:
@@ -128,7 +152,10 @@ class MaxWorkflows:
                 dispatch_notice(self.cfg, reply.notice)
             buttons = [[_link(b["text"], b["url"]) if "url" in b else _button(b["text"], b["payload"])
                         for b in row] for row in reply.buttons]
-            self.client.send_message(uid, reply.text, buttons=buttons or None)
+            if reply.is_main_menu:
+                self.client.send_message(uid, reply.text, buttons=buttons)
+            else:
+                self._reply(uid, reply.text, buttons=buttons)
             return
         if not user:
             return
@@ -136,16 +163,16 @@ class MaxWorkflows:
             token = args[6:]
             if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", token):
                 raise ValueError("Некорректная ссылка для входа")
-            self.client.send_message(uid, "На другом экране запрошен вход в кабинет под вашей учётной записью. "
-                                     "Нажмите кнопку, только если вы сами начали этот вход.",
-                                     buttons=[[_button("Подтвердить мой вход", "/confirm_login " + token)]])
+            self._reply(uid, "На другом экране запрошен вход в кабинет под вашей учётной записью. "
+                        "Нажмите кнопку, только если вы сами начали этот вход.",
+                        buttons=[[_button("Подтвердить мой вход", "/confirm_login " + token)]])
             return
         if command == "/confirm_login":
             if not event.callback_id:
                 raise ValueError("Подтвердите свой запрос кнопкой в сообщении бота")
             result = self.auth.confirm_max_login(token=args, max_user_id=uid)
-            self.client.send_message(uid, "Вход подтверждён. Вернитесь в кабинет." if result["ok"]
-                                     else "Запрос уже использован или истёк. Начните вход заново.")
+            self._reply(uid, "Вход подтверждён. Вернитесь в кабинет." if result["ok"]
+                        else "Запрос уже использован или истёк. Начните вход заново.")
             return
         binding = json.dumps([uid, user["username"], user["max_linked_at"]], separators=(",", ":"))
         if event.files and not command and can_use_shifts(user):
@@ -163,13 +190,12 @@ class MaxWorkflows:
         if command in ("", "/start", "/menu", "/help"):
             self._menu(uid, user)
         elif command == "/whoami":
-            roles = ", ".join(ROLE_LABELS[r] for r in sorted(user_roles(user)))
-            self.client.send_message(uid, f"Логин: {user['username']}\nИмя: {user.get('display_name') or '—'}"
-                                     f"\nПрава: {roles}")
+            self._reply(uid, f"Логин: {user['username']}\nИмя: {user.get('display_name') or '—'}"
+                        f"\nПрава: {_role_labels(user)}")
         elif command == "/logout":
             if args == "confirm " + user["username"] and event.callback_id:
                 self.auth.unlink_max_user(uid)
-                self.client.send_message(uid, "MAX отвязан от рабочего кабинета.")
+                self._reply(uid, "MAX отвязан от рабочего кабинета.")
             else:
                 self.client.send_message(uid, "Отвязать MAX от вашей учётной записи? Для повторной привязки "
                                          "понадобится войти в кабинет.", buttons=[[
@@ -192,10 +218,10 @@ class MaxWorkflows:
                                              f"10 минут. Он будет приложен к смене #{shift_id}.",
                                              buttons=[[_button("Отменить выбор", "/cancel_waybill " + prompt)]])
                 else:
-                    self.client.send_message(uid, "Этот выбор уже завершён. Чтобы приложить ещё файл, выберите смену снова.")
+                    self._reply(uid, "Этот выбор уже завершён. Чтобы приложить ещё файл, выберите смену снова.")
             elif command == "/cancel_waybill":
                 self.waybill_requests.cancel(binding, args)
-                self.client.send_message(uid, "Ожидание этого путевого листа завершено.")
+                self._reply(uid, "Ожидание этого путевого листа завершено.")
             else:
                 self._attachment(uid, binding, args)
         elif command in ("/office", "/files", "/search", "/upload", "/download") or not command.startswith("/"):
@@ -204,8 +230,8 @@ class MaxWorkflows:
             if command == "/office":
                 if not self.office_url:
                     raise ValueError("Администратор ещё не указал адрес рабочего кабинета")
-                self.client.send_message(uid, "Откройте рабочий кабинет и выберите вход через MAX.",
-                                         buttons=[[_link("Открыть офис", self.office_url)]])
+                self._reply(uid, "Откройте рабочий кабинет и выберите вход через MAX.",
+                            buttons=[[_link("Открыть офис", self.office_url)]])
             elif command == "/download":
                 self._download(uid, user, args)
             elif command == "/files":
@@ -215,21 +241,22 @@ class MaxWorkflows:
             else:
                 self._search(uid, user, args if command == "/search" else event.text.strip())
         else:
-            self.client.send_message(uid, "Неизвестная команда. Нажмите /menu, чтобы открыть меню.")
+            self._reply(uid, "Неизвестная команда. Выберите действие в главном меню.")
 
     def _menu(self, uid, user):
         rows = []
         if can_use_catalog(user):
             rows.append([_button("Офис", "/office"), _button("Поиск по содержимому", "/search")])
             rows.append([_button("Поиск по имени", "/files"), _button("Загрузить файл", "/upload")])
+        elif can_use_shifts(user) and self.office_url:
+            rows.append([_link("Открыть кабинет", self.office_url + "/shifts")])
         if can_use_shifts(user):
             rows.append([_button("Ближайшие смены", "/shifts"), _button("Записать смену", "/new_shift")])
-        if self.auth.list_employee_organizations(admin_username=user["username"]):
+        if manages_employees(user):
             rows.append([_button("Добавить сотрудника", "/add_user"), _button("Заявки", "/requests")])
         rows.append([_button("Мой профиль", "/whoami"), _button("Отвязать MAX", "/logout")])
-        roles = ", ".join(ROLE_LABELS[r] for r in sorted(user_roles(user)))
-        self.client.send_message(uid, f"{user.get('display_name') or user['username']} · {roles}",
-                                 buttons=rows or None)
+        name = user.get("display_name") or user["username"]
+        self.client.send_message(uid, f"Рабочий кабинет\n{name} · {_role_labels(user)}", buttons=rows)
 
     def _shifts(self, uid, key, args):
         today = date.today()
@@ -253,7 +280,7 @@ class MaxWorkflows:
         if not page["rows"]:
             lines.append("Записей за этот период нет.")
         lines.append("Другой период: /shifts ГГГГ-ММ-ДД ГГГГ-ММ-ДД")
-        self.client.send_message(uid, "\n".join(lines), buttons=rows or None)
+        self._reply(uid, "\n".join(lines), buttons=rows)
 
     def _new_shift(self, event, key, user, args):
         fields = [v.strip() for v in args.split("|")]
@@ -268,8 +295,8 @@ class MaxWorkflows:
                     organization=organization, equipment=equipment, workplace=workplace,
                     hours=hours.replace(",", "."), waybill_number=waybill,
                     employee=employee[0] if employee else user["username"]), source_event_id="max:" + event.event_id)
-        self.client.send_message(event.user_id, f"Смена #{row['id']} записана. Можно приложить путевой лист.",
-                                 buttons=[[_button("Путевой лист", f"/waybill {row['id']}")]])
+        self._reply(event.user_id, f"Смена #{row['id']} записана. Можно приложить путевой лист.",
+                    buttons=[[_button("Путевой лист", f"/waybill {row['id']}")]])
 
     def _waybill(self, event, key, args):
         parts = args.split()
@@ -289,7 +316,7 @@ class MaxWorkflows:
                     dest = Path(directory) / "incoming"
                     self._receive_file(attachment, dest, MAX_FILE_BYTES)
                     self.attachments.add(key, shift_id, f"{event.event_id}:{index}", attachment.name, dest.read_bytes())
-            self.client.send_message(uid, f"Путевые листы приложены к смене #{shift_id}. Файлов: {len(event.files)}.")
+            self._reply(uid, f"Путевые листы приложены к смене #{shift_id}. Файлов: {len(event.files)}.")
             return
         lines = [f"Смена #{shift_id}. Приложено файлов: {len(attachments)}."]
         lines.append(f"Нажмите «Приложить путевой лист» или отправьте файл с подписью /waybill {shift_id}. "
@@ -299,7 +326,7 @@ class MaxWorkflows:
                     for item in attachments[offset:offset + 8])
         if len(attachments) > offset + 8:
             rows.append([_button("Следующие вложения", f"/waybill {shift_id} {offset + 8}")])
-        self.client.send_message(uid, "\n".join(lines), buttons=rows or None)
+        self._reply(uid, "\n".join(lines), buttons=rows)
 
     def _attachment(self, uid, key, args):
         ids = args.split()
@@ -337,7 +364,7 @@ class MaxWorkflows:
         rows = [[_button(item["path"][-80:], "/download " + item["id"])] for item in files[:8]]
         text = ("Выберите файл для скачивания. Для более точного поиска добавьте часть пути или имени."
                 if rows else "Доступных файлов по этому запросу не найдено.")
-        self.client.send_message(uid, text, buttons=rows or None)
+        self._reply(uid, text, buttons=rows)
 
     def _search(self, uid, user, query):
         if not query:
@@ -376,8 +403,7 @@ class MaxWorkflows:
             snippet = str(item.get("text") or item.get("chunk_text") or "")
             lines.append(f"{len(lines) + 1}. {label[:180]}\n{' '.join(snippet.split())[:460]}".rstrip())
             rows.append([_button(f"Скачать {len(lines)} · {label[:50]}", "/download " + node.id)])
-        self.client.send_message(uid, "\n\n".join(lines) or "Доступных документов по запросу не найдено.",
-                                 buttons=rows or None)
+        self._reply(uid, "\n\n".join(lines) or "Доступных документов по запросу не найдено.", buttons=rows)
 
     def _receive_file(self, attachment, path, limit):
         try:
@@ -423,7 +449,7 @@ class MaxWorkflows:
                         self.drive.upload_file(filename=alternative, **kwargs)
                     except CloudFilenameConflict:
                         raise ValueError("Файл с таким именем уже существует. Переименуйте его и пришлите заново.") from None
-        self.client.send_message(event.user_id, f"Файлы приняты в личную папку облака: {len(event.files)}.")
+        self._reply(event.user_id, f"Файлы приняты в личную папку облака: {len(event.files)}.")
 
     def _download(self, uid, user, file_id):
         from rag_catalog.ui.helpers import _cd_registry_acl_allows

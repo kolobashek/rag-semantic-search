@@ -8,7 +8,7 @@ import pytest
 
 from rag_catalog.core.shift_attachments import MAX_FILE_BYTES
 from rag_catalog.core.user_auth_db import UserAuthDB
-from rag_catalog.integrations.max_api import MaxEvent, MaxFile
+from rag_catalog.integrations.max_api import MaxEvent, MaxFile, normalize_update
 from rag_catalog.integrations.max_workflows import MaxWorkflows
 
 
@@ -42,6 +42,66 @@ def click(bot, uid, label):
     button = next(b for row in buttons for b in row if b["text"] == label)
     bot.handle(MaxEvent(uid, "callback-" + button["payload"], button["payload"], callback_id="button"))
     return bot.client.send_message.call_args.args[1]
+
+
+def test_first_start_and_navigation_from_normalized_max_updates(bot):
+    def deliver(update):
+        event = normalize_update(update)
+        assert event is not None
+        bot.client.reset_mock()
+        bot.handle(event)
+        call = bot.client.send_message.call_args
+        assert call.args[0] == event.user_id
+        return call.args[1], {b["text"]: b for row in call.kwargs["buttons"] for b in row}
+
+    def start(uid):
+        return deliver({"update_type": "bot_started", "timestamp": 1573226679188, "chat_id": 500 + uid,
+                        "user": {"user_id": uid, "first_name": "Иван", "is_bot": False},
+                        "payload": None, "user_locale": "ru"})
+
+    def message(uid, text):
+        return deliver({"update_type": "message_created", "message": {
+            "recipient": {"chat_type": "dialog"}, "sender": {"user_id": uid},
+            "body": {"mid": "mid." + text, "text": text}}})
+
+    def press(uid, buttons, label):
+        return deliver({"update_type": "message_callback", "message": {"recipient": {"chat_type": "dialog"}},
+                        "callback": {"callback_id": "cb." + label, "user": {"user_id": uid},
+                                     "payload": buttons[label]["payload"]}})
+
+    welcome, guest = start(90)
+    assert "Здравствуйте" in welcome and set(guest) == {"Подать заявку", "Статус заявки", "У меня уже есть кабинет"}
+    _, existing = press(90, guest, "У меня уже есть кабинет")
+    assert existing["Открыть кабинет"]["url"] == bot.office_url
+    assert press(90, existing, "Главное меню") == (welcome, guest)
+    prompt, _ = press(90, guest, "Подать заявку")
+    assert "фамилию" in prompt.lower()
+    assert message(90, "/start") == (welcome, guest)
+    assert bot.auth.submit_employee_request(provider="max", sender_id="90", display_name="Иван Тестов")["ok"]
+    pending, actions = start(90)
+    assert "ожидает" in pending
+    assert press(90, actions, "Главное меню") == (welcome, guest)
+    assert "ожидает" in press(90, guest, "Статус заявки")[0]
+
+    for uid, role, action in [(11, "Водитель", "Ближайшие смены"), (33, "Диспетчер", "Ближайшие смены"),
+                              (44, "Пользователь облака", "Офис"), (55, "Администратор", "Заявки")]:
+        title, menu = start(uid)
+        assert role in title and action in menu
+        if uid != 44:
+            assert menu["Открыть кабинет"] == {"type": "link", "text": "Открыть кабинет",
+                                              "url": "https://office.example/shifts"}
+            assert "Офис" not in menu and "Поиск по имени" not in menu
+        if uid == 11:
+            assert "нужна роль" in message(uid, "/office")[0]
+        assert message(uid, "/start") == (title, menu)
+        assert message(uid, "Главное меню") == (title, menu)
+        profile, buttons = press(uid, menu, "Мой профиль")
+        assert role in profile
+        if uid == 55:
+            assert "Водитель" not in title and "Водитель" not in profile
+        _, details = press(uid, menu, action)
+        assert press(uid, details, "Главное меню") == (title, menu)
+        assert press(uid, buttons, "Главное меню") == (title, menu)
 
 
 def test_menus_login_and_employee_invites(bot):
@@ -120,7 +180,7 @@ def test_cloud_search_and_download_recheck_access(bot):
     bot.drive.registry.get_file_by_id.return_value = doc
     assert "Выберите файл" in response(bot, 44, "/files report")
     buttons = bot.client.send_message.call_args.kwargs["buttons"]
-    assert [btn["payload"] for row in buttons for btn in row] == ["/download file1"]
+    assert [btn["payload"] for row in buttons for btn in row] == ["/download file1", "/menu"]
     assert "офисному каталогу" in response(bot, 11, "/download file1")
     bot.drive.registry.get_file_by_id.return_value = doc
     bot.drive.user_can_access.return_value = False

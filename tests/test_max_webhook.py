@@ -145,7 +145,10 @@ def test_http_delivery_to_employee_roles_with_real_databases(monkeypatch, tmp_pa
         events.append({"update_type": "bot_started", "timestamp": 145000, "chat_id": 500 + uid,
                        "user": {"user_id": uid, "first_name": username, "is_bot": False}, "payload": "link_" + token})
     events.append(update(11, "mid.restricted", "/add_user evan admin"))
-    events.append(update(99, "mid.unlinked", "/menu"))
+    events.append({"update_type": "bot_started", "timestamp": 1573226679188, "chat_id": 599,
+                   "user": {"user_id": 99, "first_name": "Гость", "is_bot": False},
+                   "user_locale": "ru", "payload": None})
+    events.append(update(99, "mid.repeat", "/start"))
     challenge = auth.create_max_login_challenge()
     events.append({"update_type": "bot_started", "timestamp": 145001, "chat_id": 522,
                    "user": {"user_id": 22, "is_bot": False}, "payload": "login_" + challenge["token"]})
@@ -215,6 +218,8 @@ def test_http_delivery_to_employee_roles_with_real_databases(monkeypatch, tmp_pa
     assert "/shifts" in menus[11] and "/office" not in menus[11] and "/add_user" not in menus[11]
     assert "/office" in menus[22] and "/add_user" not in menus[22]
     assert "/add_user" in menus[33] and auth.get_user(username="evan") is None
-    assert any(uid == 99 and "привяжите MAX" in body["text"] for uid, body in sent)
+    welcome, repeated = [body for uid, body in sent if uid == 99]
+    assert repeated == welcome and "Здравствуйте" in welcome["text"]
+    assert menus[99] == {"ob:existing", "ob:request", "ob:status"}
     assert answers == ["cb-login"]
     assert auth.consume_confirmed_max_login(verifier=challenge["verifier"])["username"] == "worker"
