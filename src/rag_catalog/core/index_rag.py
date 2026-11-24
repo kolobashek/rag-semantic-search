@@ -58,6 +58,7 @@ from .extractors import (
 )
 from .index_state_db import IndexStateDB
 from .indexer_control import read_indexer_control
+from . import nightly_index
 from .indexing import delete_file_vectors, ensure_collection, upsert_points
 from .indexing.ocr_deferral import EMBEDDED_MEDIA_EXTENSIONS as _EMBEDDED_MEDIA_EXTENSIONS
 from .indexing.ocr_deferral import IMAGE_EXTENSIONS as _IMAGE_EXTENSIONS
@@ -1684,6 +1685,8 @@ class RAGIndexer:
             "points_added": 0,
         }
         for stage in stages:
+            if getattr(self, "nightly", False):
+                nightly_index.check_resources(self.catalog_path)
             # point_count — счётчик на сессию, сбрасываем между этапами чтобы
             # логи «итого» были понятнее.
             self.point_count = 0
@@ -2227,7 +2230,7 @@ def main() -> None:
     parser.add_argument(
         "--stage",
         default=default_stage,
-        choices=("all", "full", *STAGES),
+        choices=("all", "full", nightly_index.STAGE, *STAGES),
         help="Этап индексирования. По умолчанию 'all'/'full' — прогон всех этапов "
         "(metadata → small → large). Можно запустить отдельный этап для "
         "дробного прогресса или для тонкой настройки фоновых задач.",
@@ -2317,6 +2320,13 @@ def main() -> None:
         help="Не выполнять валидацию config.json при старте (только для отладки).",
     )
     args = parser.parse_args()
+    nightly = args.stage == nightly_index.STAGE
+    if nightly:
+        if any((args.recreate, args.force_ocr, args.cleanup, args.watch, args.metadata_only,
+                args.metadata_only_for, args.mark_stage_metadata_for, args.force_replace_for)):
+            parser.error("Ночной профиль несовместим с принудительным OCR, очисткой и ручными режимами")
+        nightly_index.check_resources(args.catalog)
+        args.no_ocr, args.workers, args.max_chunks = True, 1, nightly_index.MAX_CHUNKS
     args.no_ocr, ocr_reason = resolve_ocr_mode(cfg, no_ocr=args.no_ocr, force_ocr=args.force_ocr)
     logger.info("OCR %s (%s)", "ВЫКЛЮЧЕН" if args.no_ocr else "включён", ocr_reason)
     args.collection = resolve_embedding_collection_name(
@@ -2426,6 +2436,7 @@ def main() -> None:
         index_embedded_media=bool(cfg.get("index_embedded_media", True)),
         cleanup_skip_failed_ratio=_resolve_cleanup_skip_failed_ratio(cfg),
     )
+    indexer.nightly = nightly
     logger.info("Потоков чтения: %d (index_read_workers=%s)", indexer.read_workers, cfg.get("index_read_workers"))
     if args.quality_report:
         print(json.dumps(indexer.quality_report(), ensure_ascii=False, indent=2))
@@ -2496,7 +2507,9 @@ def main() -> None:
         else:
             if args.dry_run:
                 indexer.dry_run = True
-            if stage in {"all", "full"}:
+            if nightly:
+                totals = indexer.index_all_stages(stages=list(nightly_index.PHASES))
+            elif stage in {"all", "full"}:
                 totals = indexer.index_all_stages()
             else:
                 totals = indexer.index_directory(stage=stage)
@@ -2559,7 +2572,7 @@ def main() -> None:
             deleted_files=indexer._run_deleted_files,
             error_files=run_totals["error_files"] + 1,
             points_added=run_totals["points_added"],
-            note=str(exc),
+            note=f"stage={stage} | {exc}" if nightly else str(exc),
         )
         raise
 

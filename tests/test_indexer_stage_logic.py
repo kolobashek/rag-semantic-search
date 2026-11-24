@@ -1241,6 +1241,15 @@ def test_metadata_stage_cleans_phantoms_with_full_inventory(tmp_path: Path) -> N
     assert set(calls[0]) == {str(kept), str(other)}
 
 
+def test_nightly_metadata_does_not_prune_missing_paths(tmp_path: Path) -> None:
+    (tmp_path / "available.txt").write_text("test", encoding="utf-8")
+    calls: list = []
+    idx = _cleanup_recording_indexer(tmp_path, calls)
+    idx.nightly = True
+    idx.index_directory(stage="metadata")
+    assert not calls
+
+
 # ── Qdrant: обрыв соединения не роняет прогон ─────────────────────────────────
 
 

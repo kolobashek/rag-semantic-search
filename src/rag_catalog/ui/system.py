@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
+from rag_catalog.core import nightly_index
 from rag_catalog.core.cloud_drive import CloudDriveService
 from rag_catalog.core.log_history import open_run_log
 from rag_catalog.core.process_status import process_is_alive
@@ -22,6 +23,7 @@ from rag_catalog.core.telemetry_db import TelemetryDB
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _STAGE_LABELS: Dict[str, str] = {
+    nightly_index.STAGE: "Ночной: метаданные и быстрый проход",
     "all": "Все этапы",
     "full": "full",
     "metadata": "metadata",
@@ -682,6 +684,11 @@ def _schedules_due(schedules: List[Dict[str, Any]], *, now: datetime | None = No
             if current < scheduled_at:
                 continue
 
+        if sched.get("stage") == nightly_index.STAGE and (
+            cadence == "hourly" or (current - scheduled_at).total_seconds() >= nightly_index.START_WINDOW_SECONDS
+        ):
+            continue  # Never catch up an unattended overnight job during the day.
+
         last_run = str(sched.get("last_run_at") or "")
         if last_run:
             try:
@@ -697,6 +704,7 @@ def _schedules_due(schedules: List[Dict[str, Any]], *, now: datetime | None = No
 def _schedule_stage_priority(stage: str) -> int:
     """Lower priority value means this stage should claim a shared schedule slot first."""
     order = {
+        nightly_index.STAGE: 15,
         "all": 0,
         "full": 0,
         "large": 10,
@@ -717,6 +725,8 @@ def _schedule_stage_covers(launched_stage: str, candidate_stage: str) -> bool:
         return True
     if launched in {"all", "full"} and candidate != "ocr":
         return True
+    if launched == nightly_index.STAGE:
+        return candidate in nightly_index.PHASES
     return launched == "large" and candidate == "small"
 
 
@@ -788,7 +798,13 @@ def _run_scheduler_tick(cfg: Dict[str, Any]) -> None:
                 )
             continue
         try:
-            if stage == "ocr":
+            if stage == nightly_index.STAGE:
+                nightly_index.check_resources(live_cfg.get("catalog_path") or "")
+                pid = _launch_indexer(
+                    live_cfg, stage=stage, workers=1, max_chunks=nightly_index.MAX_CHUNKS,
+                    recreate=False, skip_inline_ocr=True, force_ocr=False,
+                )
+            elif stage == "ocr":
                 if launched_index_stage:
                     _log_scheduler_event(
                         tdb,
@@ -969,8 +985,9 @@ def _recover_background_tasks(
     elif active_index and (not live_index or (active_index_pid_dead and live_index.get("_process_scan_only"))):
         recovery_stage = _resolve_index_recovery_stage(telemetry, active_index)
         telemetry.finalize_running_index_runs(status="cancelled", note=recovery_note)
-        _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr, ocr_engine=ocr_engine_setting)
-        recovered_index_now = True
+        if not nightly_index.is_nightly_run(active_index):
+            _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr, ocr_engine=ocr_engine_setting)
+            recovered_index_now = True
     elif allow_failed_restart and not live_index:
         failed_rows = telemetry.fetch_dicts(
             """SELECT * FROM index_runs
@@ -981,7 +998,7 @@ def _recover_background_tasks(
         if failed_rows:
             failed_run = failed_rows[0]
             failed_run_id = str(failed_run.get("run_id") or "")
-            if _is_recent_failure(failed_run, now=now) and _can_attempt_failed_restart("index", failed_run_id, now_ts):
+            if not nightly_index.is_nightly_run(failed_run) and _is_recent_failure(failed_run, now=now) and _can_attempt_failed_restart("index", failed_run_id, now_ts):
                 recovery_stage = _resolve_index_recovery_stage(telemetry, failed_run)
                 _launch_indexer(cfg, stage=recovery_stage, workers=workers, max_chunks=max_chunks, skip_inline_ocr=skip_inline_ocr, ocr_engine=ocr_engine_setting)
                 _register_failed_restart("index", failed_run_id, now_ts)

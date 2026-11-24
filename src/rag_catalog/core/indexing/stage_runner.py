@@ -664,7 +664,8 @@ class IndexStageRunner:
                 if task is not None:
                     all_tasks.append(task)
 
-        if hasattr(indexer, "state_db") and not only_paths and not getattr(indexer, "dry_run", False):
+        prune_missing = not getattr(indexer, "nightly", False)
+        if prune_missing and hasattr(indexer, "state_db") and not only_paths and not getattr(indexer, "dry_run", False):
             for archive_path, current_keys in archive_member_keys.items():
                 prefix = f"{archive_path}::"
                 stale_keys = sorted(set(indexer.state_db.list_entries_by_prefix(prefix)) - set(current_keys))
@@ -1721,7 +1722,7 @@ class IndexStageRunner:
         # --only-paths-file усекает all_tasks до явно перечисленных путей, поэтому
         # такой inventory тоже неполон: передать его в cleanup означало бы объявить
         # «удалёнными» все остальные записи state и стереть индекс целиком.
-        if stage in ("metadata", "content"):
+        if prune_missing and stage in ("metadata", "content"):
             if only_paths:
                 self._logger.info(
                     "Cleanup «фантомов» пропущен на этапе '%s': список файлов ограничен "
