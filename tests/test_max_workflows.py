@@ -18,6 +18,7 @@ def bot(tmp_path):
     client = Mock()
     worker = MaxWorkflows(dict(work_shifts_db_path=str(tmp_path / "shifts.sqlite"),
                                users_db_path=str(tmp_path / "users.sqlite"),
+                               max_state_dir=str(tmp_path / "max"),
                                max_office_url="https://office.example", max_bot_link="https://max.ru/office_bot"), auth, client)
     for uid, name, roles in ((11, "alice", ["driver"]), (22, "bob", ["driver"]), (33, "dispatch", ["dispatcher"]),
                              (44, "office", ["user"]), (55, "chief", ["admin"])):
@@ -113,11 +114,53 @@ def test_first_start_and_navigation_from_normalized_max_updates(bot):
 
 def test_greeting_preserves_name_prompts_and_file_handling(bot):
     assert "фамилию" in response(bot, 55, "/add_user").lower()
+    shift = response(bot, 55, f"/new_shift {date.today()} | 1 | ООО | Кран | Объект | 8 | 123")
+    assert "Смена #1 записана" in shift
+    assert "10 минут" in response(bot, 55, "/attach_next 1")
+    photo = normalize_update({"update_type": "message_created", "message": {
+        "recipient": {"chat_type": "dialog"}, "sender": {"user_id": 55}, "body": {
+            "mid": "photo", "attachments": [{"type": "image", "payload": {"url": "https://cdn.max.ru/photo"}}]}}})
+    bot.client.download_file.side_effect = lambda _, dest, max_bytes: dest.write_bytes(b"photo")
+    assert "Путевые листы приложены" in response_with_media(bot, photo)
     review = response(bot, 55, "Добрый День")
     assert "Добрый День" in review and "Рабочий кабинет" not in review
 
     event = MaxEvent(11, "file-with-caption", "Привет!", (MaxFile("scan.pdf", "https://cdn.max.ru/signed", 3),))
     assert "отправьте файл" in response_with_media(bot, event)
+
+
+def test_unexpected_private_input_shows_buttons_for_the_sender(bot):
+    def send(uid, body):
+        event = normalize_update({"update_type": "message_created", "message": {
+            "recipient": {"chat_type": "dialog"}, "sender": {"user_id": uid}, "body": body}})
+        assert event is not None
+        bot.handle(event)
+        return bot.client.send_message.call_args
+
+    for uid, action in [(90, "Подать заявку"), (11, "Ближайшие смены"), (44, "Офис"), (55, "Заявки")]:
+        menu = send(uid, {"mid": "menu", "text": "/menu"})
+        assert action in {b["text"] for row in menu.kwargs["buttons"] for b in row}
+        assert send(uid, {"mid": "unsupported", "text": "/хочу_домой сейчас"}) == menu
+        assert send(uid, {"mid": "empty"}) == menu
+        assert send(uid, {"mid": "sticker", "attachments": [{"type": "sticker", "payload": {"code": "1"}}]}) == menu
+        if uid != 44:
+            assert send(uid, {"mid": "arbitrary", "text": "Куда мне дальше?"}) == menu
+        else:
+            offline = send(uid, {"mid": "search", "text": "инструкция"})
+            assert "каталог ещё не настроен" in offline.args[1] and offline.kwargs == menu.kwargs
+
+
+def test_free_text_and_stickers_repeat_active_button_step(bot):
+    assert "фамилию" in response(bot, 91, "/request")
+    review = response(bot, 91, "Елена Тестова")
+    buttons = bot.client.send_message.call_args.kwargs["buttons"]
+    assert "Отправить заявку" in {b["text"] for row in buttons for b in row}
+    for msg in ["Как подтвердить?", ""]:
+        assert response(bot, 91, msg) == review
+        assert bot.client.send_message.call_args.kwargs["buttons"] == buttons
+    assert bot.auth.employee_request_status(provider="max", sender_id="91")["status"] == "none"
+    assert "ожидает решения" in click(bot, 91, "Отправить заявку")
+    assert "Здравствуйте" in response(bot, 91, "Как дела?")
 
 
 def test_menus_login_and_employee_invites(bot):
@@ -243,6 +286,11 @@ def test_office_upload_rag_search_and_unlink(bot, tmp_path, monkeypatch):
     assert "Visible text" in answer and "hidden text" not in answer
     assert fake.search.call_args.kwargs["result_filter"]([visible, hidden])[0]["filename"] == "doc.pdf"
     assert "/download " + original.id in repr(bot.client.send_message.call_args.kwargs["buttons"])
+    fake.search.return_value = [hidden]
+    assert "Доступных документов по запросу не найдено" in response(bot, 44, "другой запрос")
+    labels = {b["text"] for row in bot.client.send_message.call_args.kwargs["buttons"] for b in row}
+    assert {"Офис", "Поиск по имени", "Мой профиль"} <= labels
+    assert not any(label.startswith("Скачать") for label in labels)
     assert "Логин: office" in response(bot, 44, "/whoami")
     response(bot, 44, "/logout confirm office")
     assert bot.auth.get_user_by_max_user_id(44) is not None

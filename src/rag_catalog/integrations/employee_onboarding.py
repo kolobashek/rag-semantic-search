@@ -86,9 +86,10 @@ class OnboardingFlow:
         self.provider = provider
         self.bot_link = str(bot_link or "").strip().rstrip("/")
         self.office = str(office_url or "").strip().rstrip("/")
+        self.menu_action = "нажмите «Главное меню»" if provider == "max" else "откройте /menu"
 
     def handle(self, *, sender_id, text, display_name="", user=None, is_callback=False,
-               contact: OnboardingContact | None = None, event_id="") -> OnboardingReply | None:
+               contact: OnboardingContact | None = None, event_id="", has_files=False) -> OnboardingReply | None:
         sender = str(sender_id)
         text = str(text or "").strip()
         verb, _, args = text.partition(" ")
@@ -184,7 +185,7 @@ class OnboardingFlow:
                          "roles": ["driver"], "renew": True}
             elif verb in ("/request", "ob:request"):
                 if user:
-                    return OnboardingReply("Ваш аккаунт уже привязан. Чтобы посмотреть права, откройте /menu.")
+                    return OnboardingReply(f"Ваш аккаунт уже привязан. Чтобы посмотреть права, {self.menu_action}.")
                 known = self.auth.employee_request_status(provider=self.provider, sender_id=sender)
                 if known.get("status") in ("pending", "approved", "blocked", "linked"):
                     return self._status(sender, known)
@@ -204,6 +205,8 @@ class OnboardingFlow:
                 stage = draft["stage"]
                 if action == "cancel":
                     drafts.clear(self.provider, sender)
+                    if self.provider == "max":
+                        return OnboardingReply("Действие отменено. Нажмите «Главное меню».")
                     return OnboardingReply("Действие отменено. Главное меню можно открыть командой /menu.")
                 if stage == "org" and action == "page" and choice.isdecimal() and int(choice) < len(draft["org_ids"]):
                     draft["offset"] = int(choice)
@@ -230,15 +233,19 @@ class OnboardingFlow:
                 elif stage in ("confirm", "reject") and action == "yes":
                     used = draft.get("applied_event")
                     if used and (not event_id or used != event_id):
-                        raise ValueError("Решение уже принято. Для следующего действия откройте /menu.")
+                        raise ValueError(f"Решение уже принято. Для следующего действия {self.menu_action}.")
                     reply = self._apply(draft, actor, sender)
                     draft["applied_event"] = event_id or "applied"
                     drafts.write(self.provider, sender, binding, draft)
                     return reply
                 else:
                     raise ValueError("Эта кнопка устарела. Откройте /menu.")
-            elif draft.get("stage") == "name" and text and not text.startswith("/") and not contact:
+            elif draft.get("stage") == "name" and text and not text.startswith("/") and not contact and not has_files:
                 draft.update(name=_name(text), stage="confirm" if draft["flow"] == "request" else "org")
+            elif (self.provider == "max" and draft and not draft.get("applied_event")
+                  and not text.startswith("/") and (not has_files or not user)
+                  and (draft["flow"] == "request" or admin)):
+                return self._render(draft, actor)
             elif not user:
                 return self._welcome()
             else:
@@ -286,7 +293,7 @@ class OnboardingFlow:
         token = result.get("activation_token")
         if token and _https(self.office):
             return OnboardingReply(f"Учётная запись: {result['username']}. Откройте личную ссылку и задайте пароль. "
-                                   "После активации откройте /menu.",
+                                   f"После активации {self.menu_action}.",
                                    [[{"text": "Задать пароль", "url": self.office + "/auth/activate#token=" + quote(token)}]])
         return OnboardingReply("Проверьте состояние подключения через /status.", self._existing_buttons())
 
@@ -304,7 +311,7 @@ class OnboardingFlow:
             return OnboardingReply("Администратор отклонил заявку. Уточните данные и при необходимости подайте новую.",
                                    [[_button("Подать заявку", "ob:request")]])
         if status in ("approved", "active", "linked"):
-            return OnboardingReply("Заявка одобрена. Для доступа откройте /menu.", self._existing_buttons())
+            return OnboardingReply(f"Заявка одобрена. Для доступа {self.menu_action}.", self._existing_buttons())
         if status == "blocked":
             return OnboardingReply("Доступ к учётной записи приостановлен. Обратитесь к администратору.")
         return OnboardingReply("Заявки от вашего аккаунта пока нет.", [[_button("Подать заявку", "ob:request")]])

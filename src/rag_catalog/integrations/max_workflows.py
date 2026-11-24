@@ -145,7 +145,8 @@ class MaxWorkflows:
         reply = OnboardingFlow(self.auth, provider="max", bot_link=self.cfg.get("max_bot_link", ""),
                                office_url=self.office_url).handle(
             sender_id=uid, text=text, display_name=event.display_name, user=user,
-            is_callback=bool(event.callback_id), event_id=event.event_id, contact=event.contact)
+            is_callback=bool(event.callback_id), event_id=event.event_id, contact=event.contact,
+            has_files=bool(event.files))
         if reply is not None:
             if reply.notice:
                 from .employee_portal import dispatch_notice
@@ -226,7 +227,7 @@ class MaxWorkflows:
                 self._reply(uid, "Ожидание этого путевого листа завершено.")
             else:
                 self._attachment(uid, binding, args)
-        elif command in ("/office", "/files", "/search", "/upload", "/download") or not command.startswith("/"):
+        elif command in ("/office", "/files", "/search", "/upload", "/download"):
             if not can_use_catalog(user):
                 raise PermissionError("Для доступа к офисному каталогу нужна роль пользователя облака")
             if command == "/office":
@@ -241,11 +242,13 @@ class MaxWorkflows:
             elif command == "/upload":
                 self._upload(event, user)
             else:
-                self._search(uid, user, args if command == "/search" else event.text.strip())
+                self._search(uid, user, args)
+        elif not command.startswith("/") and can_use_catalog(user):
+            self._search(uid, user, text)
         else:
-            self._reply(uid, "Неизвестная команда. Выберите действие в главном меню.")
+            self._menu(uid, user)
 
-    def _menu(self, uid, user):
+    def _menu(self, uid, user, *, notice=""):
         rows = []
         if can_use_catalog(user):
             rows.append([_button("Офис", "/office"), _button("Поиск по содержимому", "/search")])
@@ -258,8 +261,9 @@ class MaxWorkflows:
             rows.append([_button("Добавить сотрудника", "/add_user"), _button("Заявки", "/requests")])
         rows.append([_button("Мой профиль", "/whoami"), _button("Отвязать MAX", "/logout")])
         name = user.get("display_name") or user["username"]
-        self.client.send_message(uid, f"Рабочий кабинет\n{name} · {_role_labels(user)}\n\n"
-                                 "Нажмите кнопку под сообщением.", buttons=rows)
+        header = f"Рабочий кабинет\n{name} · {_role_labels(user)}"
+        paragraphs = [header, notice, "Нажмите кнопку под сообщением."]
+        self.client.send_message(uid, "\n\n".join(filter(None, paragraphs)), buttons=rows)
 
     def _shifts(self, uid, key, args):
         today = date.today()
@@ -373,7 +377,8 @@ class MaxWorkflows:
         if not query:
             raise ValueError("Опишите искомый документ или введите /search и текст запроса.")
         if not self.cfg.get("cloud_drive_db_path"):
-            raise ValueError("Облачный каталог ещё не настроен")
+            self._menu(uid, user, notice="Облачный каталог ещё не настроен.")
+            return
         from rag_catalog.ui.helpers import (
             _cached_searcher_if_ready,
             _cd_registry_acl_allows,
@@ -381,7 +386,8 @@ class MaxWorkflows:
         )
         searcher = _cached_searcher_if_ready(self.cfg, connect_on_miss=True)
         if searcher is None:
-            raise ValueError("Поиск по содержимому временно недоступен. Поиск по имени: /files запрос")
+            self._menu(uid, user, notice="Поиск по содержимому временно недоступен. Попробуйте «Поиск по имени».")
+            return
 
         def allowed(results):
             current = self._active(uid)
@@ -406,7 +412,10 @@ class MaxWorkflows:
             snippet = str(item.get("text") or item.get("chunk_text") or "")
             lines.append(f"{len(lines) + 1}. {label[:180]}\n{' '.join(snippet.split())[:460]}".rstrip())
             rows.append([_button(f"Скачать {len(lines)} · {label[:50]}", "/download " + node.id)])
-        self._reply(uid, "\n\n".join(lines) or "Доступных документов по запросу не найдено.", buttons=rows)
+        if rows:
+            self._reply(uid, "\n\n".join(lines), buttons=rows)
+        else:
+            self._menu(uid, fresh, notice="Доступных документов по запросу не найдено.")
 
     def _receive_file(self, attachment, path, limit):
         try:
