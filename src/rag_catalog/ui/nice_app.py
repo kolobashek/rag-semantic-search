@@ -3403,7 +3403,7 @@ def _build_page(
                     "requestAnimationFrame(() => {"
                     f"const v = Number(sessionStorage.getItem('rag-scroll-{current_screen}') || 0);"
                     "if (Number.isFinite(v) && v > 0) window.scrollTo({top:v, behavior:'instant'});"
-                    "setTimeout(() => { window.ragHideBusy && window.ragHideBusy(); }, 80);"
+                    f"window.ragHideBusy && window.ragHideBusy({json.dumps(current_screen)});"
                     "});"
                 )
             except Exception:

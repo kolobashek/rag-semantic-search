@@ -1,10 +1,13 @@
 (() => {
   let busyTimer = null;
+  let navigationTarget = null;
   const busy = () => document.getElementById('rag-global-busy');
 
   window.ragShowBusy = (label = 'Выполняется...', options = {}) => {
     const el = busy();
     if (!el) return;
+    if (navigationTarget && !options.navigation) return;
+    if (options.navigation) navigationTarget = options.navigation;
     const text = el.querySelector('.rag-busy-label');
     if (text) text.textContent = String(label || 'Выполняется...');
     el.classList.add('show');
@@ -15,7 +18,9 @@
     }
   };
 
-  window.ragHideBusy = () => {
+  window.ragHideBusy = (screen) => {
+    if (screen && navigationTarget && navigationTarget !== screen) return;
+    navigationTarget = null;
     const el = busy();
     if (!el) return;
     if (busyTimer) window.clearTimeout(busyTimer);
@@ -30,7 +35,12 @@
     if (target.disabled || target.getAttribute('aria-disabled') === 'true') return;
     const raw = target.innerText || target.getAttribute('aria-label') || target.getAttribute('title') || '';
     const label = raw.trim().replace(/\s+/g, ' ').slice(0, 64) || 'Выполняется...';
-    window.ragShowBusy(label, { timeout: 1200 });
+    const usage = target.getAttribute('data-rag-usage') || '';
+    if (usage.startsWith('navigation.')) {
+      window.ragShowBusy('Открываю: ' + label, { navigation: usage.slice(11), timeout: 90000 });
+    } else {
+      window.ragShowBusy(label, { timeout: 1200 });
+    }
   };
 
   if (!window.__ragBusyInstalled) {

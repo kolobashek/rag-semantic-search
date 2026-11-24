@@ -1713,8 +1713,7 @@ def _read_index_stats(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not state_file.exists():
         return out
     try:
-        db = IndexStateDB(str(state_file))
-        stats = db.stats()
+        stats = IndexStateDB(str(state_file), read_only=True).dashboard_stats()
     except Exception as exc:
         out["error"] = str(exc)
         return out
@@ -1757,7 +1756,7 @@ def _read_coverage_summary(cfg: Dict[str, Any], *, top_folders: int = 5) -> Dict
     if not state_file.exists():
         return out
     try:
-        summary = IndexStateDB(str(state_file)).coverage_summary(top_folders=top_folders)
+        summary = IndexStateDB(str(state_file), read_only=True).coverage_summary(top_folders=top_folders)
     except Exception as exc:
         out["error"] = str(exc)
         return out
@@ -2438,7 +2437,7 @@ def _read_index_activity(cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _read_index_telemetry(cfg: Dict[str, Any], *, include_inventory: bool = True) -> Dict[str, Any]:
     db_path = _telemetry_db_path(cfg)
     activity = _read_index_activity(cfg)
     last_run = _db_query_dicts(
@@ -2472,7 +2471,7 @@ def _read_index_telemetry(cfg: Dict[str, Any]) -> Dict[str, Any]:
         WHERE ts_finished IS NOT NULL
         """,
     )
-    ocr_inventory = _read_ocr_inventory(cfg)
+    ocr_inventory = _read_ocr_inventory(cfg) if include_inventory else {}
     return {
         "last_run": last_run[0] if last_run else None,
         "active_runs": activity["active_runs"],

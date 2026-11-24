@@ -607,7 +607,7 @@ def test_render_does_not_attach_busy_timers_to_rebuilt_content() -> None:
     source = inspect.getsource(nice_app._build_page)
 
     assert "window.ragHideBusy" in source
-    assert "setTimeout(() => { window.ragHideBusy" in source
+    assert "window.ragHideBusy({json.dumps(current_screen)})" in source
     assert "ui.timer(\n                    0.08" not in source
 
 

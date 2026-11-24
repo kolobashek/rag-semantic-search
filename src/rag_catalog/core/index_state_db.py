@@ -24,14 +24,17 @@ def _utc_now() -> str:
 class IndexStateDB:
     """Потокобезопасное хранилище state_entries для индексатора."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, read_only: bool = False) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
         self._lock = threading.Lock()
-        self._init_schema()
+        if not read_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn = (sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
+                if self._read_only else sqlite3.connect(str(self.db_path), timeout=30.0))
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -907,6 +910,20 @@ class IndexStateDB:
             "uncovered_by_status": {str(r["k"]): int(r["cnt"]) for r in uncovered_status_rows},
             "uncovered_by_extension": {str(r["k"]): int(r["cnt"]) for r in uncovered_ext_rows},
             "uncovered_top_folders": [{"folder": folder, "files": count} for folder, count in top],
+        }
+
+    def dashboard_stats(self) -> Dict[str, Any]:
+        """Only the aggregates shown in the web dashboard; no duplicate or queue scan."""
+        with self._connect() as conn:
+            exts = conn.execute("SELECT extension, COUNT(*), SUM(size_bytes) FROM state_entries GROUP BY extension").fetchall()
+            stages = conn.execute("SELECT COALESCE(NULLIF(stage, ''), 'metadata') AS s, COUNT(*) FROM state_entries GROUP BY s").fetchall()
+        exts.sort(key=lambda row: (-row[1], row[0]))
+        return {
+            "total": sum(row[1] for row in exts),
+            "total_size_bytes": sum(row[2] or 0 for row in exts),
+            "by_ext": {row[0] or "(без расширения)": row[1] for row in exts},
+            "by_ext_size": {row[0] or "(без расширения)": row[2] or 0 for row in exts},
+            "by_stage": {row[0] or "metadata": row[1] for row in stages},
         }
 
     def stats(self) -> Dict[str, Any]:

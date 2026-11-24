@@ -7,10 +7,10 @@ Imported by: nice_app.py.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from time import monotonic
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -36,6 +36,7 @@ from .helpers import (
     _read_heartbeat_status,
     _read_index_stats,
     _read_index_telemetry,
+    _read_ocr_inventory,
     _read_log_entries,
     _schedule_display_label,
 )
@@ -46,7 +47,6 @@ from .state import (
 )
 from .system import (
     _STAGE_LABELS,
-    _find_live_running_index_run,
     _launch_indexer,
     _launch_ocr,
     _recreate_applies,
@@ -55,6 +55,19 @@ from .system import (
     stop_active_indexer,
     stop_active_ocr,
 )
+
+
+def _load_dashboard(state: PageState) -> Dict[str, Any]:
+    db = _get_telemetry(state)
+    return {
+        "stats": _read_index_stats(state.cfg),
+        "telemetry": _read_index_telemetry(state.cfg, include_inventory=False),
+        "settings": db.get_index_settings(),
+        "schedules": db.list_index_schedules(),
+        "daily": db.get_daily_index_stats(days=90),
+        "gpu": _gpu_ocr_available(),
+        "db": db,
+    }
 
 
 def render_index_screen(
@@ -67,10 +80,48 @@ def render_index_screen(
     if not _is_admin(state):
         access_denied(hint="Управление индексом и расписание индексации доступны только администраторам.")
         return
-    stats = _read_index_stats(state.cfg)
-    telemetry = _read_index_telemetry(state.cfg)
-    settings_db = _get_telemetry(state)
-    settings = settings_db.get_index_settings() if hasattr(settings_db, "get_index_settings") else {}
+    started_at = monotonic()
+    panel = ui.column().classes("w-full gap-3")
+
+    def current() -> bool:
+        return not panel.is_deleted and state.screen == "index" and _is_admin(state)
+
+    async def load() -> None:
+        if not current():
+            return
+        try:
+            snapshot = await run.io_bound(_load_dashboard, state)
+            if snapshot is None or not current():
+                return
+            panel.clear()
+            with panel:
+                _render_dashboard(state, snapshot, render_fn, current)
+            _log.info("index_dashboard_ready duration_ms=%d", (monotonic() - started_at) * 1000)
+        except Exception:
+            _log.exception("Failed to load index dashboard")
+            if current():
+                panel.clear()
+                with panel:
+                    ui.label("Не удалось загрузить статистику индекса.")
+                    ui.button("Повторить", icon="refresh", on_click=render_fn)
+        finally:
+            if current():
+                panel.props('aria-busy=false')
+
+    with panel:
+        panel.props('aria-busy=true')
+        ui.label("Индексация").classes("text-2xl font-semibold")
+        ui.label("Загружаю статистику индекса…").props('role=status').classes("rag-meta")
+        for _ in range(3):
+            ui.skeleton(type="rect").classes("w-full h-12")
+    ui.timer(0.05, load, once=True)
+
+
+def _render_dashboard(state: PageState, snapshot: Dict[str, Any], render_fn: Callable, current: Callable[[], bool]) -> None:
+    stats = snapshot["stats"]
+    telemetry = snapshot["telemetry"]
+    settings_db = snapshot["db"]
+    settings = snapshot["settings"]
 
     with ui.row().classes("w-full items-center gap-2"):
         ui.label("Индексация").classes("text-2xl font-semibold")
@@ -82,6 +133,7 @@ def render_index_screen(
             active_stage_names.append("OCR")
         active_label = "Запущено: " + ", ".join(active_stage_names) if active_stage_names else "Нет активных задач"
         header_active_chip = ui.label(active_label).classes("rag-chip")
+        schedule_chip = ui.label().classes("rag-chip")
         ui.space()
     ui.label("Этапы, OCR, расписание и параметры индексирования.").classes("rag-meta")
 
@@ -580,10 +632,8 @@ def render_index_screen(
                 row = dict(summary_by_stage.get(stage_key) or {})
                 row.update(latest_by_stage.get(stage_key) or {})
                 row.update(active_by_stage.get(stage_key) or {})
-                if not row and stage_key == "metadata":
-                    live_index = _find_live_running_index_run(_get_telemetry(state))
-                    if live_index:
-                        row = {"stage": stage_key, "status": "running", "processed_files": 0, "total_files": 0, "duration_sec": 0}
+                if not row and stage_key == "metadata" and fresh.get("active_runs"):
+                    row = {"stage": stage_key, "status": "running", "_progress_unknown": True}
                 result[stage_key] = row
             ocr_row = dict(fresh.get("last_ocr") or {})
             ocr_row["_ocr_inventory"] = dict(fresh.get("ocr_inventory") or {})
@@ -598,16 +648,7 @@ def render_index_screen(
             result["ocr"] = ocr_row
             return result
 
-        async def _refresh_progress() -> None:
-            try:
-                fresh, stats = await asyncio.gather(
-                    run.io_bound(_read_index_telemetry, state.cfg),
-                    run.io_bound(_read_index_stats, state.cfg),
-                )
-            except Exception as exc:
-                _log.exception("_refresh_progress: data fetch failed")
-                ui.notify(f"Ошибка загрузки данных индекса: {exc}", type="negative")
-                return
+        def apply_progress(fresh, stats) -> bool:
             active_names = [
                 _STAGE_LABELS.get(str(row.get("stage") or ""), str(row.get("stage") or ""))
                 for row in (fresh.get("active_stages") or [])
@@ -653,19 +694,65 @@ def render_index_screen(
                 for stage_key in ["metadata", "small", "large"]:
                     update_phase_row(key=stage_key, label=_STAGE_LABELS.get(stage_key, stage_key), row=stage_rows[stage_key])
                 update_phase_row(key="ocr", label="OCR", row=stage_rows["ocr"], is_ocr=True)
+            return bool(active_names or fresh.get("active_runs"))
 
-        # ui.timer fires immediately after client connection (immediate=True default)
-        # and then every 5 s. Running inside the timer's slot context ensures
-        # ui.notify / element creation all have a valid slot stack.
+        active = apply_progress(telemetry, stats)
+        last_poll = last_stats = monotonic()
+        refreshing = False
+        inventory = {}
+
+        async def _refresh_progress(*, automatic=False, detailed=False) -> None:
+            nonlocal active, last_poll, last_stats, refreshing, stats, inventory
+            if refreshing or not current() or (automatic and not active and monotonic() - last_poll < 60):
+                return
+            refreshing = True
+            try:
+                fresh = await run.io_bound(_read_index_telemetry, state.cfg, include_inventory=False)
+                if not current():
+                    return
+                if not automatic or ((active or fresh.get("active_runs")) and monotonic() - last_stats >= 60):
+                    stats = await run.io_bound(_read_index_stats, state.cfg)
+                    last_stats = monotonic()
+                if detailed and current():
+                    inventory = await run.io_bound(_read_ocr_inventory, state.cfg)
+                if current():
+                    fresh["ocr_inventory"] = inventory
+                    active = apply_progress(fresh, stats)
+            except Exception:
+                _log.exception("Index progress refresh failed")
+                if current():
+                    ui.notify("Не удалось обновить статистику индекса.", type="negative")
+            finally:
+                last_poll = monotonic()
+                refreshing = False
+
+        async def poll_progress() -> None:
+            await _refresh_progress(automatic=True)
+
+        ui.button("Подробная статистика OCR", icon="analytics", on_click=lambda: _refresh_progress(detailed=True)).props("flat dense")
         _stop_managed_timer(state.index_progress_timer)
-        state.index_progress_timer = ui.timer(5.0, _refresh_progress)
+        state.index_progress_timer = ui.timer(5.0, poll_progress, immediate=False)
 
     # ── Слепые зоны + heartbeat ──────────────────────────────────────
-    try:
-        render_blind_spots_card(state)
-    except Exception as exc:
-        _log.exception("render_blind_spots_card failed")
-        ui.label(f"Слепые зоны недоступны: {exc}").classes("rag-meta")
+    blind_area = ui.column().classes("w-full")
+
+    async def load_blind_spots() -> None:
+        blind_button.disable()
+        try:
+            coverage = await run.io_bound(_read_coverage_summary, state.cfg, top_folders=5)
+            heartbeat = await run.io_bound(_read_heartbeat_status, state.cfg)
+            if current():
+                blind_area.clear()
+                with blind_area:
+                    render_blind_spots_card(coverage, heartbeat)
+        except Exception:
+            _log.exception("Cannot load coverage details")
+            if current() and not blind_button.is_deleted:
+                blind_button.enable()
+                ui.notify("Не удалось получить статистику покрытия.", type="negative")
+
+    with blind_area:
+        blind_button = ui.button("Показать слепые зоны", icon="visibility_off", on_click=load_blind_spots).props("flat")
 
     # ── Расписание и параметры ───────────────────────────────────────
     with ui.column().classes("rag-card w-full p-4 gap-3"):
@@ -688,9 +775,11 @@ def render_index_screen(
 
                 sched_area = ui.column().classes("w-full gap-2")
 
-                def render_schedules() -> None:
+                def render_schedules(rows=None) -> None:
                     sched_area.clear()
-                    current = settings_db.list_index_schedules() if hasattr(settings_db, "list_index_schedules") else []
+                    current = settings_db.list_index_schedules() if rows is None else rows
+                    enabled_count = sum(bool(int(row.get("enabled") or 0)) for row in current)
+                    schedule_chip.set_text(f"Активных расписаний: {enabled_count}" if enabled_count else "Автозапуск по расписанию выключен")
                     with sched_area:
                         if not current:
                             ui.label("Расписаний пока нет. Нажмите «Добавить расписание» чтобы создать.").classes("rag-meta")
@@ -770,7 +859,7 @@ def render_index_screen(
                             ui.button("Сохранить", icon="save", on_click=save_sched).props("unelevated")
                     dlg.open()
 
-                render_schedules()
+                render_schedules(snapshot["schedules"])
                 ui.button("Добавить расписание", icon="add", on_click=lambda: open_sched_dialog()).props("outline")
 
             with ui.column().classes("gap-3 min-w-0"):
@@ -800,7 +889,7 @@ def render_index_screen(
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.icon("document_scanner").classes("text-xl text-orange-500")
                     ui.label("OCR настройки").classes("font-semibold")
-                _has_gpu_ocr = _gpu_ocr_available()
+                _has_gpu_ocr = snapshot["gpu"]
 
                 with ui.row().classes("w-full gap-3 items-end flex-wrap"):
                     ocr_enabled_input = ui.checkbox("OCR внутри индексации (--force-ocr)", value=initial_index_settings["ocr_enabled"])
@@ -927,7 +1016,8 @@ def render_index_screen(
             chart_area.clear()
             period_days = int(chart_period.value or 30)
             metric_key = str(chart_metric.value or "files")
-            daily = settings_db.get_daily_index_stats(days=period_days) if hasattr(settings_db, "get_daily_index_stats") else []
+            cutoff = (datetime.now(timezone.utc).date() - timedelta(days=period_days)).isoformat()
+            daily = [r for r in snapshot["daily"] if str(r.get("day") or "") >= cutoff]
             if not daily:
                 with chart_area:
                     ui.label("Нет данных за выбранный период.").classes("rag-meta")
@@ -974,10 +1064,8 @@ _HEARTBEAT_KIND_STYLE: Dict[str, tuple[str, str]] = {
 }
 
 
-def render_blind_spots_card(state: PageState) -> None:
+def render_blind_spots_card(coverage: Dict[str, Any], heartbeat: Dict[str, Any]) -> None:
     """Карточка «Слепые зоны» (coverage-report) + статус heartbeat индексатора."""
-    coverage = _read_coverage_summary(state.cfg, top_folders=5)
-    heartbeat = _read_heartbeat_status(state.cfg)
     with ui.column().classes("rag-card w-full p-4 gap-3"):
         with ui.row().classes("w-full items-center gap-2"):
             ui.icon("visibility_off").classes("text-2xl text-orange-500")
