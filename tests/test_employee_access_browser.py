@@ -119,6 +119,54 @@ def pages(office):
         yield admin.new_page(), employee.new_page()
 
 
+@pytest.mark.parametrize("username", [ADMIN, "pilot-smoke-admin"])
+def test_header_action_contents_fit_at_common_widths(office, pages, tmp_path, username):
+    _, url, _, password = office
+    admin, _ = pages
+    sign_in(admin, url, username, password)
+    header = admin.locator(".rag-hdr-actions")
+    for width in (1440, 1024, 390, 320):
+        admin.set_viewport_size({"width": width, "height": 840})
+        for label in ("Аккаунт MAX", "Аккаунт Telegram", "Сотрудники"):
+            header.get_by_role("button", name=label, exact=True).wait_for(state="visible")
+        admin.locator("header").screenshot(path=tmp_path / f"header-{width}.png")
+        overflow = header.locator("button:visible").evaluate_all("""buttons => buttons.flatMap(button => {
+            const box = button.getBoundingClientRect();
+            const range = document.createRange();
+            range.selectNodeContents(button.querySelector('.q-btn__content'));
+            const outside = Array.from(range.getClientRects()).some(r =>
+                r.width > 0 && (r.left < box.left - 1 || r.right > box.right + 1));
+            return outside || box.left < 0 || box.right > innerWidth ? [button.outerText] : [];
+        })""")
+        assert not overflow, (width, overflow)
+
+
+def test_screen_back_forward_keeps_url_and_active_screen_together(office, pages):
+    _, url, _, password = office
+    admin, _ = pages
+    sign_in(admin, url, "pilot-smoke-admin", password)
+    tabs = admin.locator(".rag-hdr-nav")
+    shifts = tabs.locator("[data-rag-usage='navigation.shifts']")
+    search = tabs.locator("[data-rag-usage='navigation.search']")
+    search.click()
+    admin.wait_for_url(url + "/search")
+    tabs.locator(".active[data-rag-usage='navigation.search']").wait_for()
+    admin.evaluate("window.historyTestMarker = true")
+    depth = admin.evaluate("history.length")
+    search.click()
+    admin.wait_for_function("!document.querySelector('#rag-global-busy.show')")
+    shifts.click()
+    admin.wait_for_url(url + "/shifts")
+    assert admin.evaluate("history.length") == depth + 1
+    admin.go_back()
+    admin.wait_for_url(url + "/search")
+    tabs.locator(".active[data-rag-usage='navigation.search']").wait_for(timeout=10000)
+    admin.go_forward()
+    admin.wait_for_url(url + "/shifts")
+    tabs.locator(".active[data-rag-usage='navigation.shifts']").wait_for(timeout=10000)
+    assert admin.evaluate("window.historyTestMarker") is True
+
+
 def test_invited_driver_only_sees_personal_telegram_and_public_qr(office, pages, tmp_path):
     _, url, auth, password = office
     admin, employee = pages

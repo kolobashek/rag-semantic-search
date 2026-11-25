@@ -547,17 +547,19 @@ def _build_page(
                 ).props("flat round dense aria-label='Открыть настройки'").classes("rag-header-button")
                 settings_button.tooltip("Настройки")
                 max_account_button = ui.button(
-                    "MAX", icon="chat", on_click=lambda: open_max_account(state), color=None,
-                ).props("flat dense no-caps aria-label='Аккаунт MAX'").classes("rag-header-button")
+                    icon="chat", on_click=lambda: open_max_account(state), color=None,
+                ).props("flat round dense aria-label='Аккаунт MAX'").classes("rag-header-button")
                 max_account_button.tooltip("Привязка аккаунта MAX")
                 max_account_button.set_visibility(False)
-                telegram_account_button = ui.button("Telegram", icon="send",
+                telegram_account_button = ui.button(icon="send",
                     on_click=lambda: open_telegram_account(state), color=None).props(
-                    "flat dense no-caps aria-label='Аккаунт Telegram'").classes("rag-header-button")
+                    "flat round dense aria-label='Аккаунт Telegram'").classes("rag-header-button")
+                telegram_account_button.tooltip("Привязка аккаунта Telegram")
                 telegram_account_button.set_visibility(False)
-                employee_desk_button = ui.button("Сотрудники", icon="groups",
+                employee_desk_button = ui.button(icon="groups",
                     on_click=lambda: open_employee_desk(state), color=None).props(
-                    "flat dense no-caps").classes("rag-header-button")
+                    "flat round dense aria-label='Сотрудники'").classes("rag-header-button")
+                employee_desk_button.tooltip("Сотрудники")
                 employee_desk_button.set_visibility(False)
                 theme_button = ui.button(
                     icon="light_mode" if state.theme == "dark" else "dark_mode",
@@ -647,7 +649,8 @@ def _build_page(
         _save_ui_settings(state)
         _log_app_event(state, "ui", "theme_toggle", details={"theme": state.theme})
 
-    def set_screen(screen: str, *, close_drawer: bool = False, restore: bool = True) -> None:
+    def set_screen(screen: str, *, close_drawer: bool = False, restore: bool = True,
+                   push_history: bool = True) -> None:
         if screen == "cloud":
             screen = "explorer"
         ui.run_javascript(
@@ -670,7 +673,8 @@ def _build_page(
         state.screen = screen
         if restore:
             restore_screen_state(state, screen)
-        ui.run_javascript(f"history.pushState(null, '', '/{screen}')")
+        if push_history:
+            ui.run_javascript(f"window.ragPushScreen({json.dumps(APP_SCREEN_ROUTES[screen])})")
         _log_app_event(state, "navigation", "open_screen", details={"screen": screen})
         render()
 
@@ -706,7 +710,7 @@ def _build_page(
             mark_screen_dirty("explorer")
         set_screen("explorer", restore=False)
 
-    def go_cloud_explorer_path(cloud_item_path: str, *, is_folder: bool = False) -> None:
+    def go_cloud_explorer_path(cloud_item_path: str, *, is_folder: bool = False, push_history: bool = True) -> None:
         item_path = str(cloud_item_path or "").strip().strip("/")
         if not item_path:
             state.explorer_cd_path = ""
@@ -719,7 +723,21 @@ def _build_page(
         mark_screen_dirty("explorer")
         state.explorer_selected_paths = []
         state.explorer_filter = ""
-        set_screen("explorer", restore=False)
+        set_screen("explorer", restore=False, push_history=push_history)
+
+    def restore_browser_route(event: Any) -> None:
+        args = event.args if isinstance(event.args, dict) else {}
+        screen = next((key for key, route in APP_SCREEN_ROUTES.items() if route == args.get("route")), None)
+        if not screen:
+            return
+        if screen == "explorer" and args.get("path") and can_open_screen(state.current_user, screen):
+            path = str(args["path"]).strip().replace("\\", "/").strip("/")
+            state.explorer_share_path = path if args.get("share") is True else ""
+            go_cloud_explorer_path(path, is_folder=args.get("kind") == "folder", push_history=False)
+        else:
+            set_screen(screen, push_history=False)
+
+    ui.on("rag_history_screen", restore_browser_route)
 
     def apply_header_index_status(telemetry: Optional[Dict[str, Any]] = None) -> None:
         header_status_chip.set_visibility(False)

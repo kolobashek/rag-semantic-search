@@ -1,4 +1,25 @@
 (() => {
+  if (!window.ragPushScreen) {
+    const route = () => location.pathname + location.search;
+    let renderedRoute = route();
+    window.ragPushScreen = (path) => {
+      if (route() !== path) {
+        history.replaceState({ ...history.state, ragScreen: true }, '');
+        history.pushState({ ragScreen: true }, '', path);
+      }
+      renderedRoute = route();
+    };
+    // Restore the screen without rebuilding the NiceGUI client or adding a history entry.
+    window.addEventListener('popstate', (event) => {
+      if (!event.state?.ragScreen || route() === renderedRoute) return;
+      renderedRoute = route();
+      const params = new URLSearchParams(location.search);
+      emitEvent('rag_history_screen', {
+        route: location.pathname, path: params.get('path') || '',
+        kind: params.get('kind') || '', share: params.get('share') === '1',
+      });
+    });
+  }
   let busyTimer = null;
   let navigationTarget = null;
   const busy = () => document.getElementById('rag-global-busy');
