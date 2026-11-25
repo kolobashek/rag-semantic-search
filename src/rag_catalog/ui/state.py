@@ -16,6 +16,7 @@ from typing import Any, Collection, Dict, List, Optional
 from nicegui import ui
 
 from rag_catalog.core.rag_core import RAGSearcher, load_config, save_config
+from rag_catalog.core.sqlite_runtime import cached_database
 from rag_catalog.core.telemetry_db import TelemetryDB
 from rag_catalog.core.user_auth_db import UserAuthDB
 
@@ -252,7 +253,7 @@ def _users_db_path(cfg: Dict[str, Any]) -> Path:
 def _get_auth_db(state: PageState) -> UserAuthDB:
     path = _users_db_path(state.cfg)
     if state.auth_db is None or Path(getattr(state.auth_db, "db_path", "")) != path:
-        state.auth_db = UserAuthDB(str(path))
+        state.auth_db = cached_database(UserAuthDB, str(path))
     return state.auth_db
 
 
@@ -273,7 +274,7 @@ def _username(state: PageState) -> str:
 def _get_telemetry(state: PageState) -> TelemetryDB:
     path = _telemetry_db_path(state.cfg)
     if state.telemetry is None or Path(getattr(state.telemetry, "db_path", "")) != path:
-        state.telemetry = TelemetryDB(str(path))
+        state.telemetry = cached_database(TelemetryDB, str(path))
     return state.telemetry
 
 

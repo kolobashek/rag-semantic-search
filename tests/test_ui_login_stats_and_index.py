@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import threading
 import time
 from pathlib import Path
 
@@ -31,6 +33,40 @@ def test_login_stats_empty_when_nothing_exists(tmp_path: Path) -> None:
     assert out["avg_seconds"] is None
     assert out["recent_searches"] == []
     assert out["index_status"]["dot"] == "info"
+
+
+def test_concurrent_login_counters_share_worker_and_survive_navigation(tmp_path, monkeypatch):
+    from rag_catalog.ui import login_stats
+
+    cache = login_stats.LoginStats()
+    cfg = _cfg(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def read(_):
+        calls.append(threading.get_ident())
+        entered.set()
+        assert release.wait(5)
+        return {"documents": 12}
+
+    monkeypatch.setattr(login_stats, "_read_login_screen_stats", read)
+
+    async def exercise():
+        abandoned = asyncio.create_task(cache.get(cfg))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            assert calls != [threading.get_ident()]
+            current = asyncio.create_task(cache.get(cfg))
+            await asyncio.sleep(0)
+            abandoned.cancel()
+            await asyncio.gather(abandoned, return_exceptions=True)
+            assert not current.done()
+        finally:
+            release.set()
+        assert await current == await cache.get(cfg) == {"documents": 12}
+        assert len(calls) == 1
+
+    asyncio.run(exercise())
 
 
 def test_login_stats_reads_real_values(tmp_path: Path) -> None:

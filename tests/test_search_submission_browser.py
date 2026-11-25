@@ -45,7 +45,16 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import numpy as np
-from rag_catalog.ui import helpers, nice_app
+from rag_catalog.ui import helpers, login_stats, nice_app
+import time
+read_stats = login_stats._read_login_screen_stats
+def gated_login_stats(cfg):
+    Path('stats-started').touch()
+    until = time.monotonic() + 10
+    while not Path('stats-release').exists() and time.monotonic() < until:
+        time.sleep(.03)
+    return read_stats(cfg)
+login_stats._read_login_screen_stats = gated_login_stats
 helpers.RAGSearcher.embedder = property(lambda self: SimpleNamespace(encode=lambda *a, **kw: np.eye(1, 384)[0]))
 helpers._qdrant_http_ready = nice_app._qdrant_http_ready = lambda cfg: Path('index-ready').exists()
 helpers._warm_searcher_cache(nice_app.load_config())
@@ -80,6 +89,14 @@ nice_app.ui.run(host='127.0.0.1', port=int(sys.argv[1]), reload=False, show=Fals
                     page.set_default_timeout(30_000)
                     page.goto(url + '/search')
                     page.get_by_label('Логин или email', exact=True).fill(contour['username'])
+                    import time
+                    deadline = time.monotonic() + 5
+                    while not (tmp_path / 'stats-started').exists() and time.monotonic() < deadline:
+                        time.sleep(.03)
+                    assert (tmp_path / 'stats-started').exists()
+                    assert page.request.get(url + '/api/ping', timeout=1500).ok
+                    assert all(value == '—' for value in page.locator('.rag-login-stat-num').all_text_contents())
+                    (tmp_path / 'stats-release').touch()
                     page.get_by_label('Пароль', exact=True).fill(contour['password'])
                     page.get_by_role('button', name='Войти', exact=True).click()
                     page.get_by_role('button', name='Файлы', exact=True).click()

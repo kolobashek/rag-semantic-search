@@ -833,6 +833,10 @@ class IndexStateDB:
     # Условие «файл покрыт содержимым»: полный/частичный контент и статус ok.
     _COVERED_SQL = "(stage IN ('content', 'partial') AND (status = '' OR status = 'ok'))"
 
+    def covered_file_count(self) -> int:
+        with self._lock, self._connect() as conn:
+            return int(conn.execute(f"SELECT COUNT(*) FROM state_entries WHERE {self._COVERED_SQL}").fetchone()[0])
+
     def iter_uncovered_entries(self) -> List[Dict[str, Any]]:
         """Записи без проиндексированного содержимого с причиной (status/last_error)."""
         with self._lock:

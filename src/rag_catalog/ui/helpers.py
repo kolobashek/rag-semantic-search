@@ -1842,9 +1842,12 @@ def _read_login_screen_stats(cfg: Dict[str, Any], *, now: Optional[datetime] = N
         "recent_searches": [],
         "index_status": {"dot": "info", "label": "статус индекса неизвестен", "sub": "—"},
     }
-    coverage = _read_coverage_summary(cfg, top_folders=0)
-    if coverage.get("found"):
-        out["documents"] = int(coverage.get("covered") or 0)
+    state_file = _index_state_db_file(cfg)
+    if state_file.is_file():
+        try:
+            out["documents"] = IndexStateDB(str(state_file), read_only=True).covered_file_count()
+        except (OSError, sqlite3.Error):
+            pass
 
     local_now = (now or datetime.now()).astimezone()
     day_start_utc = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()

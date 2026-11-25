@@ -48,6 +48,7 @@ from .auth_session import (
 from .css import INTERACTION_JS_PATH, USAGE_JS_PATH, _install_css, _install_interaction_javascript
 from .employee_access import open_employee_desk, open_telegram_account
 from .file_job_badges import FileJobBadges
+from .login_stats import login_stats as public_login_stats
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
@@ -82,7 +83,6 @@ from .helpers import (
     _preview_office_file,
     _qdrant_http_ready,
     _read_index_activity,
-    _read_login_screen_stats,
     _remember_query,
     _resolve_catalog_file,
     _result_group,
@@ -2861,11 +2861,6 @@ def _build_page(
 
     def render_login_screen() -> None:
         auth_db = _get_auth_db(state)
-        try:
-            login_stats = _read_login_screen_stats(state.cfg)
-        except Exception:
-            logger.exception("login screen stats failed")
-            login_stats = {}
 
         async def _complete_login(user: Dict[str, Any], *, event_type: str) -> None:
             started = _time.perf_counter()
@@ -3050,39 +3045,17 @@ def _build_page(
                     )
 
                     # Live stats — реальные данные из index_state.db / telemetry, «—» при отсутствии
-                    documents = login_stats.get("documents")
-                    searches_today = login_stats.get("searches_today")
-                    avg_seconds = login_stats.get("avg_seconds")
+                    counters = []
                     with ui.element("div").style("display:flex;gap:0;margin-top:44px;max-width:480px"):
-                        for i, (num, lbl) in enumerate([
-                            (f"{int(documents):,}".replace(",", " ") if documents is not None else "—", "документов в индексе"),
-                            (str(int(searches_today)) if searches_today is not None else "—", "поисков сегодня"),
-                            (f"{float(avg_seconds):.2f}с" if avg_seconds is not None else "—", "среднее время"),
-                        ]):
+                        for i, lbl in enumerate(("документов в индексе", "поисков сегодня", "среднее время")):
                             style = "display:flex;flex-direction:column;gap:6px;" + (
                                 "padding-right:24px;" if i < 2 else ""
                             ) + ("padding-left:24px;border-left:1px solid rgba(255,255,255,.1);" if i > 0 else "")
                             with ui.element("div").style(style):
-                                ui.label(num).classes("rag-login-stat-num")
+                                counters.append(ui.label("—").classes("rag-login-stat-num"))
                                 ui.label(lbl).style(
                                     "font-family:var(--rag-font-mono);font-size:10px;font-weight:500;"
                                     "text-transform:uppercase;letter-spacing:0.1em;color:rgba(255,255,255,.4)"
-                                )
-
-                # Activity feed — последние реальные запросы без имён пользователей
-                recent_searches = list(login_stats.get("recent_searches") or [])
-                if recent_searches:
-                    with ui.element("div").style("margin-bottom:24px"):
-                        ui.label("↗ последние запросы").style(
-                            "font-family:var(--rag-font-mono);font-size:10px;letter-spacing:0.08em;"
-                            "color:rgba(255,255,255,.35);text-transform:uppercase;margin-bottom:10px;display:block"
-                        )
-                        for item in recent_searches:
-                            with ui.element("div").classes("rag-login-activity-row"):
-                                ui.label(str(item.get("time") or ""))
-                                ui.label("")
-                                ui.label(str(item.get("query") or "")).style(
-                                    "color:#8aabff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                                 )
 
                 # Bottom
@@ -3168,22 +3141,33 @@ def _build_page(
                     "display:grid;grid-template-columns:1fr 1fr;gap:0;"
                     "border-top:1px solid var(--rag-border);margin:0 -32px;padding:0 32px;margin-top:auto"
                 ):
-                    index_status = dict(login_stats.get("index_status") or {})
-                    status_rows = [(
-                        str(index_status.get("dot") or "info"),
-                        str(index_status.get("label") or "статус индекса неизвестен"),
-                        str(index_status.get("sub") or "—"),
-                    )]
-                    if documents is not None:
-                        status_rows.append(("ok", "файлов с содержимым", f"{int(documents):,}".replace(",", " ")))
-                    for dot_cls, lbl, sub in status_rows:
-                        with ui.element("div").style(
-                            "display:flex;align-items:center;gap:10px;padding:14px 0;"
-                            "font-size:12px;color:var(--rag-text)"
-                        ):
-                            ui.element("span").classes(f"rag-dot {dot_cls}")
-                            ui.label(lbl)
-                            ui.label(sub).style("margin-left:auto;font-family:var(--rag-font-mono);font-size:11px;color:var(--rag-muted)")
+                    strip = ui.element("div").classes("contents")
+
+                    async def fill_login_stats():
+                        try:
+                            stats = await public_login_stats.get(state.cfg)
+                        except Exception:
+                            logger.exception("login screen stats failed")
+                            return
+                        if not stats or strip.is_deleted:
+                            return
+                        docs, searches, avg = (stats.get(k) for k in ("documents","searches_today","avg_seconds"))
+                        count = f"{docs:,}".replace(",", " ") if docs is not None else "—"
+                        for counter, text in zip(counters, (count, str(searches) if searches is not None else "—",
+                                                           f"{avg:.2f}с" if avg is not None else "—")):
+                            counter.set_text(text)
+                        status = stats["index_status"]
+                        rows = [(status["dot"],status["label"],status["sub"])]
+                        if docs is not None:
+                            rows.append(("ok","файлов с содержимым",count))
+                        with strip:
+                            for dot, label, sub in rows:
+                                with ui.element("div").style("display:flex;align-items:center;gap:10px;padding:14px 0;font-size:12px;color:var(--rag-text)"):
+                                    ui.element("span").classes(f"rag-dot {dot}")
+                                    ui.label(label)
+                                    ui.label(sub).style("margin-left:auto;font-family:var(--rag-font-mono);font-size:11px;color:var(--rag-muted)")
+
+                    ui.timer(0, fill_login_stats, once=True)
 
 
     # ── Admin / settings screens ──────────────────────────────────────────────
