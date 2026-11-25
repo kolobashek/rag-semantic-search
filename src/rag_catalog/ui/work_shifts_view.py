@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import date
@@ -11,10 +12,12 @@ from nicegui import run, ui
 
 from rag_catalog.core.roles import can_manage_shifts
 from rag_catalog.core.shift_attachments import ShiftAttachments
+from rag_catalog.core.shift_operations import CATEGORIES, printable_shift
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
 
 from .state import PageState, _get_auth_db, _log_app_event
-from .work_shifts_admin import show_shift_administration, show_shift_history
+from .work_shifts_admin import open_directory_editor, show_month_sheet, show_shift_administration, show_shift_history
+from .work_shifts_pay import shift_work_editor
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ def render_work_shifts(state: PageState) -> None:
             "edit": status is not None, "submitted": manager and status == "draft", "delete": manager and status is not None,
             "approved": manager and status in {"draft", "submitted"}, "history": status is not None,
             "attachments": status is not None,
+            "print": status is not None,
             "draft": manager and status in {"submitted", "approved"},
         }
         for key, button in action_buttons.items():
@@ -121,26 +125,101 @@ def render_work_shifts(state: PageState) -> None:
         except Exception as exc:
             error(exc)
             return
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl").style("background: var(--rag-surface-strong)"):
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl").style("background: var(--rag-surface-strong)") as editor_card:
             ui.label("Новая смена" if new else f"Смена №{row['id']}").classes("text-lg font-semibold")
             with ui.element("div").classes("grid grid-cols-1 sm:grid-cols-2 gap-3 w-full").style("max-height: 45vh; overflow-y: auto"):
                 inputs = {}
-                org = ui.select(organizations, label="Организация доступа", value=initial_org).classes("w-full")
+                inputs["entry_type"] = ui.select({"vehicle": "Смена с техникой", "attendance": "Явка без техники"},
+                    label="Вид записи", value=row.get("entry_type","vehicle")).classes("w-full")
+                org = ui.select(organizations, label="Организация журнала", value=initial_org).classes("w-full")
                 org.set_enabled(new and len(organizations) > 1)
-                inputs["employee"] = ui.select({}, label="Сотрудник").classes("w-full")
+                org.set_visibility(len(organizations) > 1)
+                add_actions = {}
+
+                def picker(key, label, action):
+                    field = ui.select({}, label=label, with_input=True).classes("w-full min-w-0")
+                    inputs[key] = field
+
+                    def create():
+                        scope = org.value
+                        if scope not in managed_orgs:
+                            return
+                        field.run_method("hidePopup")
+
+                        async def added(saved_org, value):
+                            if org.value != saved_org:
+                                return
+                            if key == "employee":
+                                people = await call(journal.users, organization_id=saved_org)
+                                if org.value == saved_org:
+                                    field.set_options(people, value=value)
+                                    users.update(people)
+                                    employee_filter.set_options({"": "Все сотрудники", **users})
+                            else:
+                                refs = await call(journal.references)
+                                if org.value == saved_org:
+                                    references[:] = refs
+                                    set_reference(key, value)
+
+                        with editor_card:
+                            open_directory_editor(journal, call, {scope: organizations[scope]}, key, added, error)
+
+                    buttons = []
+                    with field.add_slot("append"):
+                        buttons.append(ui.button(icon="add", on_click=create).props(
+                            f'flat dense round aria-label="{action}"').on("click.stop", js_handler="() => {}").tooltip(action))
+                    for slot in ("after-options", "no-option"):
+                        with field.add_slot(slot):
+                            buttons.append(ui.button(action, icon="add", on_click=create).props("flat no-caps").classes("w-full"))
+                    add_actions[key] = buttons
+                    return field
+
+                category = ui.select(CATEGORIES, label="Категория сотрудника", clearable=True).classes("w-full")
+                picker("employee", "Сотрудник", "Добавить сотрудника")
                 inputs["work_date"] = ui.input("Дата", value=row.get("work_date", date.today().isoformat())).props("type=date")
                 inputs["shift_number"] = ui.select({1: "1", 2: "2", 3: "3"}, label="Номер смены", value=row.get("shift_number", 1))
-                for key, label in (("organization", "Организация"), ("equipment", "Техника / госномер"),
-                                   ("workplace", "Объект"), ("partner", "Контрагент"),
-                                   ("waybill_number", "Номер путевого листа")):
-                    if key != "waybill_number":
-                        inputs[key] = ui.select([], label=label, with_input=True).classes("w-full")
-                    else:
-                        inputs[key] = ui.input(label, value=row.get(key, "")).props("maxlength=200")
+                for key, label, action in (("organization", "Организация в путевом листе", "Добавить организацию"),
+                                           ("equipment", "Техника / госномер", "Добавить технику"),
+                                           ("workplace", "Объект", "Добавить объект"), ("partner", "Контрагент", "Добавить контрагента")):
+                    picker(key, label, action)
+                inputs["waybill_number"] = ui.input("Номер путевого листа", value=row.get("waybill_number", "")).props("maxlength=200")
                 inputs["hours"] = ui.number("Отработано без перерывов, ч", value=row.get("work_minutes", 0) / 60,
                                             min=0, max=24, step=0.25)
                 inputs["breaks"] = ui.number("Перерывы, ч", value=row.get("break_minutes", 0) / 60,
                                              min=0, max=24, step=0.25)
+                for k,label in (("time_from","Начало смены"),("time_to","Окончание смены")):
+                    inputs[k] = ui.input(label, value=row.get(k,"")).props("type=time")
+            with ui.expansion("Замена по назначению", icon="swap_horiz",
+                              value=bool(row.get("assigned_equipment") or row.get("assigned_employee"))).classes("w-full") as substitution:
+                inputs["assigned_employee"] = ui.select({}, label="Первоначально назначен",with_input=True,clearable=True).classes("w-full")
+                inputs["assigned_equipment"] = ui.select([], label="Первоначально назначенная техника",with_input=True,clearable=True).classes("w-full")
+            refresh_rates, work_lines = shift_work_editor(journal, call, org, inputs, row, managed_orgs, error)
+            warning = ui.label().classes("text-negative font-medium").props("role=status")
+            warning.set_visibility(False)
+            checks = 0
+
+            async def check_overlap():
+                nonlocal checks
+                checks += 1
+                version = checks
+                warning.set_visibility(False)
+                await asyncio.sleep(.2)
+                if version != checks or not dialog.value or org.value not in managed_orgs:
+                    return
+                keys = ("employee","assigned_employee","equipment","assigned_equipment","work_date","shift_number","time_from","time_to")
+                values = {key:inputs[key].value for key in keys}
+                if not values["work_date"] or bool(values["time_from"]) != bool(values["time_to"]):
+                    return
+                try:
+                    clashes = await call(journal.conflict_preview,organization_id=org.value,shift_id=row.get("id"),**values)
+                    if version == checks and dialog.value:
+                        warning.set_text("Пересечение смен: " + clashes)
+                        warning.set_visibility(bool(clashes))
+                except ValueError:
+                    pass  # The save action validates incomplete dates and times.
+
+            for key in ("employee","assigned_employee","equipment","assigned_equipment","work_date","shift_number","time_from","time_to"):
+                inputs[key].on_value_change(check_overlap)
             inputs["comment"] = ui.textarea("Комментарий", value=row.get("comment", "")).classes("w-full").props("maxlength=2000 rows=2")
 
             async def save():
@@ -148,8 +227,10 @@ def render_work_shifts(state: PageState) -> None:
                 try:
                     if not org.value:
                         raise ValueError("Выберите организацию")
+                    if not inputs["employee"].value:
+                        raise ValueError("Выберите фактического исполнителя")
                     values = {key: field.value for key, field in inputs.items()}
-                    await call(journal.save, dict(values, organization_id=org.value),
+                    await call(journal.save, dict(values, organization_id=org.value, work_lines=work_lines()),
                                shift_id=row.get("id"), revision=row.get("revision"))
                     dialog.close()
                     await refresh()
@@ -162,9 +243,49 @@ def render_work_shifts(state: PageState) -> None:
             with ui.row().classes("w-full justify-end"):
                 ui.button("Отмена", on_click=dialog.close).props("flat")
                 save_button = ui.button("Сохранить" if admin else "Сохранить и отправить", icon="save", on_click=save)
+            def set_reference(key, value):
+                field = inputs[key]
+                options = {r["name"] for r in references if r["organization_id"] == org.value and r["kind"] == key}
+                if key == "organization" and org.value:
+                    options.add(organizations[org.value])
+                    value = value or organizations[org.value]
+                if value:
+                    options.add(value)
+                field.set_options(sorted(options), value=value)
+                field.set_enabled(bool(org.value))
+                if key == "organization":
+                    field.set_visibility(org.value == "default")
+                if key == "equipment":
+                    assigned = inputs["assigned_equipment"]
+                    current = assigned.value or row.get("assigned_equipment") or None
+                    assigned.set_options(sorted(options | ({current} if current else set())), value=current)
+
+            def set_entry_type():
+                vehicle = inputs["entry_type"].value == "vehicle"
+                for key in ("equipment","assigned_equipment","waybill_number"):
+                    inputs[key].set_visibility(vehicle)
+                    if not vehicle:
+                        inputs[key].set_value("" if key=="waybill_number" else None)
+
+            async def filter_people():
+                scope, group = org.value, category.value
+                if not scope or scope not in managed_orgs:
+                    return
+                options = await call(journal.users, organization_id=scope, category=group or "")
+                if (org.value,category.value) == (scope,group):
+                    current = inputs["employee"].value
+                    inputs["employee"].set_options(options, value=current if current in options else None)
+
+            category.on_value_change(filter_people)
+            inputs["entry_type"].on_value_change(set_entry_type)
+
             async def choose_organization():
                 selected_org = org.value
                 manager = selected_org in managed_orgs
+                save_button.disable()
+                for buttons in add_actions.values():
+                    for button in buttons:
+                        button.set_visibility(manager)
                 people = await call(journal.users, organization_id=selected_org) if selected_org else {}
                 if org.value != selected_org:
                     return
@@ -173,23 +294,21 @@ def render_work_shifts(state: PageState) -> None:
                 current = row.get("employee") or (state.current_user or {}).get("username")
                 inputs["employee"].set_options(people, value=current if current in people else None)
                 inputs["employee"].set_enabled(manager)
+                category.set_visibility(manager)
+                category.value = None
+                substitution.set_visibility(manager or bool(row.get("assigned_employee") or row.get("assigned_equipment")))
+                assigned = row.get("assigned_employee") or None
+                assigned_people = dict(people)
+                if assigned:
+                    assigned_people.setdefault(assigned,row["assigned_employee_name"]+" (архив)")
+                inputs["assigned_employee"].set_options(assigned_people,value=assigned)
+                inputs["assigned_equipment"].value = None
+                for key in ("assigned_employee","assigned_equipment"):
+                    inputs[key].set_enabled(manager)
                 for key in ("organization", "equipment", "workplace", "partner"):
-                    field = inputs[key]
-                    options = {r["name"] for r in references if r["organization_id"] == selected_org and r["kind"] == key}
-                    value = row.get(key) or None
-                    if key == "organization" and selected_org:
-                        value = value or organizations[selected_org]
-                        options.add(organizations[selected_org])
-                    if value:
-                        options.add(value)
-                    field.set_options(sorted(options), value=value)
-                    field.set_enabled(bool(selected_org))
-                    if manager:
-                        field.props('new-value-mode="add-unique"')
-                    else:
-                        field.props(remove="new-value-mode")
-                    if key == "organization":
-                        field.set_visibility(selected_org == "default")
+                    set_reference(key, row.get(key) or None)
+                set_entry_type()
+                await refresh_rates()
                 save_button.set_text("Сохранить" if manager else "Сохранить и отправить")
                 save_button.set_enabled(bool(selected_org))
 
@@ -275,6 +394,16 @@ def render_work_shifts(state: PageState) -> None:
         except Exception as exc:
             error(exc)
 
+    async def print_card():
+        row = selected()
+        if not row:
+            return
+        try:
+            item = await call(journal.get, row["id"])
+            ui.download(printable_shift(item,STATUS_LABELS[item["status"]]), f'shift-{item["id"]}.html', media_type="text/html")
+        except Exception as exc:
+            error(exc)
+
     async def export():
         if journal is None:
             return
@@ -300,6 +429,7 @@ def render_work_shifts(state: PageState) -> None:
                 ui.button(icon="download", on_click=export).props('flat aria-label="Выгрузить CSV"').tooltip("Выгрузить CSV")
                 if admin:
                     ui.button("Управление", icon="manage_accounts", on_click=lambda: show_shift_administration(state, journal))
+                    ui.button("Табель",icon="calendar_month", on_click=lambda: show_month_sheet(journal,call,error))
         with ui.row().classes("w-full items-end gap-3"):
             start = ui.input("С", value=date.today().replace(day=1).isoformat()).props("type=date")
             end = ui.input("По", value=date.today().isoformat()).props("type=date")
@@ -312,11 +442,13 @@ def render_work_shifts(state: PageState) -> None:
         columns = [dict(name=key, field=key, label=label, align="left") for key, label in (
             ("work_date", "Дата"), ("status_label", "Статус"), ("shift_number", "Смена"), ("employee_name", "Сотрудник"),
             ("organization", "Организация"), ("equipment", "Техника"), ("workplace", "Объект"),
-            ("waybill_number", "Путевой лист"), ("hours", "Часы"), ("breaks", "Перерывы"))]
+            ("waybill_number", "Путевой лист"), ("hours", "Часы"), ("breaks", "Перерывы"),("conflict","Пересечения"))]
         table = ui.table(columns=columns, rows=[], row_key="id", selection="single", on_select=update_actions).classes("w-full max-w-full").props("flat bordered wrap-cells")
         table.add_slot('body-cell-status_label', '''
             <q-td :props="props"><q-badge :color="props.row.status === 'approved' ? 'positive' : 'negative'"
             :label="props.row.status_label" /></q-td>''')
+        table.add_slot("body-cell-conflict", """<q-td :props="props"><q-badge v-if="props.row.conflict"
+            color="negative" :label="props.row.conflict" /></q-td>""")
         with ui.row().classes("w-full flex-wrap items-center"):
             action_buttons["edit"] = ui.button(icon="edit", on_click=lambda: edit()).props('flat aria-label="Изменить смену"').tooltip("Изменить смену")
             if admin:
@@ -325,6 +457,7 @@ def render_work_shifts(state: PageState) -> None:
                 action_buttons["draft"] = ui.button("В черновик", icon="undo", on_click=lambda: change("draft")).props("flat")
             action_buttons["history"] = ui.button(icon="history", on_click=history).props('flat aria-label="История изменений"').tooltip("История изменений")
             action_buttons["attachments"] = ui.button("Путевые листы", icon="attach_file", on_click=attachments).props("flat")
+            action_buttons["print"] = ui.button(icon="print",on_click=print_card).props('flat aria-label="Версия для печати"').tooltip("Скачать карточку для печати")
             if admin:
                 action_buttons["delete"] = ui.button(icon="delete", on_click=lambda: change("delete")).props('flat color=negative aria-label="Удалить смену"').tooltip("Удалить смену")
             update_actions()

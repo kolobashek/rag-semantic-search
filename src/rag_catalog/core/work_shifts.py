@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import calendar
 import io
 import json
 import sqlite3
@@ -11,7 +12,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from . import shift_operations as ops
 from .roles import can_manage_shifts, can_use_shifts, user_roles
 from .sqlite_runtime import prepare_sqlite_connection
 
@@ -19,7 +22,7 @@ STATUS_LABELS = {"draft": "Черновик", "submitted": "На проверк�
 TEXT_FIELDS = ("organization", "equipment", "workplace", "partner", "waybill_number", "comment")
 REFERENCE_LABELS = {"organization": "Организации", "equipment": "Техника", "workplace": "Объекты", "partner": "Контрагенты"}
 AUDIT_FIELDS = ("employee", "employee_name", "work_date", "shift_number", *TEXT_FIELDS,
-                "work_minutes", "break_minutes", "status", "deleted")
+                "work_minutes", "break_minutes", "status", "deleted", *ops.NEW_FIELDS)
 
 
 def _org_roles(user):
@@ -74,7 +77,15 @@ def _payload(data: dict) -> dict:
     for key, value in result.items():
         if len(value) > (2000 if key == "comment" else 200):
             raise ValueError("Слишком длинное значение поля")
-    if not all(result[key] for key in ("organization", "equipment", "workplace")):
+    result["entry_type"] = data.get("entry_type", "vehicle")
+    if result["entry_type"] not in ("vehicle","attendance"):
+        raise ValueError("Укажите вид записи")
+    if result["entry_type"] == "attendance":
+        if not result["organization"] or not result["workplace"]:
+            raise ValueError("Заполните организацию и объект")
+        if result["equipment"] or result["waybill_number"]:
+            raise ValueError("Явку строителей оформляют без техники и путевого листа")
+    elif not all(result[key] for key in ("organization", "equipment", "workplace")):
         raise ValueError("Заполните организацию, технику и объект")
     result["work_date"] = _day(data.get("work_date", ""))
     shift = data.get("shift_number")
@@ -82,6 +93,8 @@ def _payload(data: dict) -> dict:
         raise ValueError("Номер смены должен быть 1, 2 или 3")
     result["shift_number"] = int(shift)
     result["work_minutes"] = _minutes(data.get("hours", 0))
+    if result["entry_type"] == "attendance" and not result["work_minutes"]:
+        raise ValueError("Укажите фактически отработанные часы")
     result["break_minutes"] = _minutes(data.get("breaks", 0))
     if result["work_minutes"] + result["break_minutes"] > 1440:
         raise ValueError("Работа и перерывы вместе не могут превышать 24 часа")
@@ -156,6 +169,14 @@ class WorkShiftJournal:
                 conn.execute("""INSERT INTO shift_references(id,kind,name,name_key,archived,revision)
                     SELECT id,kind,name,name_key,archived,revision FROM legacy_shift_references""")
                 conn.execute("DROP TABLE legacy_shift_references")
+            ref_columns = {r["name"] for r in conn.execute("PRAGMA table_info(shift_references)")}
+            for column in ("equipment_name", "registration_number", "fleet_number"):
+                if column not in ref_columns:
+                    conn.execute(f"ALTER TABLE shift_references ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            conn.execute("""CREATE TABLE IF NOT EXISTS shift_staff (
+                id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0)""")
+            ops.migrate(conn)
             for kind in (REFERENCE_LABELS if seed_references else ()):
                 for org, value in conn.execute(f"SELECT DISTINCT organization_id,{kind} FROM shifts WHERE {kind}<>''"):
                     conn.execute("INSERT OR IGNORE INTO shift_references(organization_id,kind,name,name_key) VALUES(?,?,?,?)",
@@ -181,7 +202,7 @@ class WorkShiftJournal:
             raise PermissionError("Нужна роль Водитель или Диспетчер")
         return user
 
-    def users(self, token: str, *, organization_id: str = "") -> dict[str, str]:
+    def users(self, token: str, *, organization_id: str = "", category: str = "") -> dict[str, str]:
         user = self._user(token)
         if organization_id and (
             not _shift_access(user, organization_id) or organization_id not in {row["id"] for row in self._directory(user)}
@@ -200,7 +221,34 @@ class WorkShiftJournal:
             choices = [organization_id] if organization_id else memberships
             if employee["username"] == user["username"] or any(_manager(user, key) for key in choices):
                 result[employee["username"]] = employee.get("display_name") or employee["username"]
+        if can_manage_shifts(user):
+            with self._connection() as conn:
+                for person in conn.execute("SELECT * FROM shift_staff WHERE archived=0 AND (?='' OR organization_id=?)",
+                                           (organization_id, organization_id)):
+                    if _manager(user, person["organization_id"]):
+                        result[person["id"]] = person["name"] + " (без входа)"
+        if category:
+            with self._connection() as conn:
+                members = {r[0] for r in conn.execute("SELECT employee FROM shift_staff_categories WHERE organization_id=? AND category=?",
+                                                      (organization_id,category))}
+            result = {k:v for k,v in result.items() if k in members}
         return result
+
+    def _employee_name(self, conn, user, org, employee, *, previous=""):
+        manager = _manager(user, org)
+        if employee.startswith("staff:"):
+            person = conn.execute("SELECT name,archived FROM shift_staff WHERE id=? AND organization_id=?",
+                                  (employee, org)).fetchone()
+            if manager and person and (not person["archived"] or previous == employee):
+                return person["name"]
+            raise ValueError("Сотрудник недоступен в организации")
+        target = self.auth.get_user(username=employee)
+        platform_self = employee == user["username"] and user.get("is_platform_admin")
+        if not target or (org not in _org_roles(target) and not platform_self):
+            raise ValueError("Сотрудник недоступен в организации")
+        if target.get("status") != "active" and not (manager and previous == employee):
+            raise ValueError("Нельзя назначить смену отключённому сотруднику")
+        return target.get("display_name") or employee
 
     def _directory(self, user):
         if hasattr(self.auth, "list_employee_organizations"):
@@ -282,14 +330,33 @@ class WorkShiftJournal:
                 manager = _manager(user, org)
                 if not manager and employee != user["username"]:
                     raise PermissionError("Нельзя создавать смены другого сотрудника")
-                target = self.auth.get_user(username=employee)
-                platform_self = employee == user["username"] and user.get("is_platform_admin")
-                if not target or (org not in _org_roles(target) and not platform_self):
-                    raise ValueError("Сотрудник недоступен в организации")
-                if target.get("status") != "active" and not (manager and old.get("employee") == employee):
-                    raise ValueError("Нельзя назначить смену отключённому сотруднику")
-                values.update(organization_id=org, employee=employee, employee_name=target.get("display_name") or employee,
+                values.update(organization_id=org, employee=employee, employee_name=self._employee_name(
+                    conn, user, org, employee, previous=old.get("employee")),
                               updated_at=datetime.now(timezone.utc).isoformat(), status="draft" if manager else "submitted")
+                for key in ("assigned_employee", "assigned_equipment"):
+                    value = str(data.get(key, old.get(key)) or "").strip()
+                    if not manager and value != old.get(key, ""):
+                        raise PermissionError("Назначение изменяет диспетчер")
+                    values[key] = value
+                assigned = values["assigned_employee"]
+                if assigned == old.get("assigned_employee"):
+                    values["assigned_employee_name"] = old["assigned_employee_name"]
+                else:
+                    values["assigned_employee_name"] = self._employee_name(conn, user, org, assigned) if assigned else ""
+                if values["entry_type"] == "attendance" and values["assigned_equipment"]:
+                    raise ValueError("В табеле явки не указывают технику")
+                for key, plate in (("equipment","registration_number"),("assigned_equipment","assigned_registration_number")):
+                    if old and old[key] == values[key]:
+                        values[plate] = old[plate]
+                        continue
+                    ref = conn.execute("""SELECT registration_number FROM shift_references WHERE kind='equipment'
+                        AND organization_id=? AND name_key=? AND archived=0""", (org, values[key].casefold())).fetchone()
+                    if key == "assigned_equipment" and values[key] and not ref:
+                        raise ValueError("Назначенная техника отсутствует в справочнике")
+                    values[plate] = ref[0] if ref else ""
+                values["time_from"], values["time_to"] = ops.shift_times(
+                    data.get("time_from",old.get("time_from")), data.get("time_to",old.get("time_to")))
+                values["work_lines"] = ops.price_lines(conn, values, old, data.get("work_lines", json.loads(old.get("work_lines","[]"))))
                 if manager:
                     for kind in REFERENCE_LABELS:
                         if values[kind] and values[kind] != old.get(kind):
@@ -423,33 +490,115 @@ class WorkShiftJournal:
                         and all(set(roles) == {"driver"} for roles in memberships.values()))
             result.append({"username": employee["username"], "display_name": employee.get("display_name") or employee["username"],
                            "status": employee["status"], "editable": editable, "organization_ids": managed})
+        with self._connection() as conn:
+            for person in conn.execute("SELECT * FROM shift_staff ORDER BY name"):
+                if _manager(user, person["organization_id"]):
+                    result.append(dict(username=person["id"], display_name=person["name"], offline=True,
+                                       status="blocked" if person["archived"] else "active", editable=True,
+                                       organization_ids=[person["organization_id"]]))
+            cats = {}
+            for item in conn.execute("SELECT * FROM shift_staff_categories"):
+                cats.setdefault((item["organization_id"],item["employee"]), []).append(item["category"])
+            for person in result:
+                person["categories"] = cats.get((person["organization_ids"][0],person["username"]), [])
         return result
 
-    def save_employee(self, token: str, **data) -> None:
+    def save_employee(self, token: str, *, offline=False, categories=None, **data) -> str:
         self._user(token)
+        org = data.get("organization_id", "default")
+        if categories is not None and (not isinstance(categories,list) or any(c not in ops.CATEGORIES for c in categories)):
+            raise ValueError("Неизвестная категория сотрудника")
+
+        def set_categories(conn, key):
+            if categories is not None:
+                conn.execute("DELETE FROM shift_staff_categories WHERE organization_id=? AND employee=?", (org,key))
+                conn.executemany("INSERT INTO shift_staff_categories VALUES(?,?,?)", [(org,key,c) for c in set(categories)])
+
+        if offline:
+            if org not in self.organizations(token, manage=True):
+                raise PermissionError("Сотрудниками управляет диспетчер организации")
+            name = str(data.get("display_name") or "").strip()
+            if not name or len(name) > 200:
+                raise ValueError("Укажите ФИО сотрудника (до 200 символов)")
+            with self._connection() as conn:
+                if data.get("create"):
+                    key = "staff:" + uuid4().hex
+                    conn.execute("INSERT INTO shift_staff(id,organization_id,name) VALUES(?,?,?)",(key,org,name))
+                else:
+                    key = data.get("username")
+                    if not conn.execute("UPDATE shift_staff SET name=?,archived=? WHERE id=? AND organization_id=?",
+                                        (name, int(bool(data.get("archived"))), key, org)).rowcount:
+                        raise ValueError("Сотрудник не найден")
+                set_categories(conn,key)
+            return key
         self.auth.save_driver(token, **data)
+        key = data["username"].strip().lower()
+        with self._connection() as conn:
+            set_categories(conn,key)
+        return key
+
+    def rates(self, token, *, organization_id, work_date, equipment="", workplace=""):
+        if organization_id not in self.organizations(token):
+            raise PermissionError("Организация недоступна")
+        with self._connection() as conn:
+            return ops.applicable_rates(conn, organization_id, _day(work_date), equipment or "", workplace or "")
+
+    def add_rate(self, token, *, organization_id, work, unit, price, since, equipment="", workplace=""):
+        user = self._user(token)
+        if organization_id not in self.organizations(token, manage=True):
+            raise PermissionError("Тарифы изменяет диспетчер организации")
+        work = (work or "").strip()
+        if not work or len(work)>200 or unit not in ops.UNITS:
+            raise ValueError("Укажите вид работы и единицу расчёта")
+        cents = int(100 * ops.number(price, 2, 9999999, "Укажите положительную ставку с точностью до копейки"))
+        with self._connection() as conn:
+            for kind, value in (("equipment",equipment),("workplace",workplace)):
+                if value and not conn.execute("""SELECT 1 FROM shift_references WHERE organization_id=? AND kind=?
+                    AND name=? AND archived=0""",(organization_id,kind,value)).fetchone():
+                    raise ValueError("Техника или объект отсутствуют в справочнике организации")
+            try:
+                return conn.execute("""INSERT INTO shift_rates(organization_id,work,work_key,unit,equipment,workplace,
+                    since,kopecks,created_by) VALUES(?,?,?,?,?,?,?,?,?)""",(organization_id,work,work.casefold(),unit,
+                        equipment or "",workplace or "",_day(since),cents,user["username"])).lastrowid
+            except sqlite3.IntegrityError:
+                raise ValueError("Такой тариф уже задан на эту дату") from None
 
     def save_reference(self, token: str, kind: str, name: str, *, record_id: int | None = None,
-                       revision: int | None = None, archived: bool = False, organization_id: str = "default") -> None:
+                       revision: int | None = None, archived: bool = False, organization_id: str = "default",
+                       registration_number: str = "", fleet_number: str = "") -> str:
         if organization_id not in self.organizations(token, manage=True):
             raise PermissionError("Справочники изменяет диспетчер")
         name = str(name).strip()
         if kind not in REFERENCE_LABELS or not name or len(name) > 200:
             raise ValueError("Укажите тип и название (до 200 символов)")
+        equipment_name = name if kind == "equipment" else ""
+        registration_number, fleet_number = registration_number.strip(), fleet_number.strip()
+        if registration_number or fleet_number:
+            if kind != "equipment" or max(len(registration_number), len(fleet_number)) > 32:
+                raise ValueError("Номера техники должны содержать не более 32 символов")
+            # Shifts and waybills keep a readable snapshot, including for identical models.
+            name = " · ".join(filter(None, (name, f"гос. {registration_number}" if registration_number else "",
+                                            f"борт {fleet_number}" if fleet_number else "")))
+            if len(name) > 200:
+                raise ValueError("Название техники вместе с номерами должно укладываться в 200 символов")
         try:
             with self._connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if record_id is None:
-                    conn.execute("INSERT INTO shift_references(organization_id,kind,name,name_key) VALUES(?,?,?,?)",
-                                 (organization_id, kind, name, name.casefold()))
+                    conn.execute("""INSERT INTO shift_references(organization_id,kind,name,name_key,
+                        equipment_name,registration_number,fleet_number) VALUES(?,?,?,?,?,?,?)""",
+                                 (organization_id, kind, name, name.casefold(), equipment_name, registration_number, fleet_number))
                 else:
-                    result = conn.execute("""UPDATE shift_references SET name=?,name_key=?,archived=?,revision=revision+1
+                    result = conn.execute("""UPDATE shift_references SET name=?,name_key=?,archived=?,revision=revision+1,
+                        equipment_name=?,registration_number=?,fleet_number=?
                         WHERE id=? AND organization_id=? AND kind=? AND revision=?""",
-                        (name, name.casefold(), int(archived), record_id, organization_id, kind, revision))
+                        (name, name.casefold(), int(archived), equipment_name, registration_number, fleet_number,
+                         record_id, organization_id, kind, revision))
                     if not result.rowcount:
                         raise ValueError("Справочник изменён. Обновите список.")
         except sqlite3.IntegrityError:
             raise ValueError("Такое название уже есть, в том числе в архиве") from None
+        return name
 
     def list(self, token: str, *, date_from: str, date_to: str, employee: str = "", status: str = "",
              offset: int = 0, limit: int = 50) -> dict:
@@ -482,7 +631,50 @@ class WorkShiftJournal:
                 f"SELECT * FROM shifts WHERE {where} ORDER BY work_date DESC,shift_number,id DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             )]
+            ops.conflicts(conn, summary["rows"], scope, scope_params)
             return summary
+
+    def month_sheet(self, token, month, *, attendance_only=False):
+        user = self._user(token)
+        if not can_manage_shifts(user):
+            raise PermissionError("Табель доступен диспетчеру")
+        first = date.fromisoformat(_day(f"{month}-01"))
+        end = first.replace(day=calendar.monthrange(first.year, first.month)[1])
+        scope, params = _scope_sql(user, management=True)
+        with self._connection() as conn:
+            rows = conn.execute(f"""SELECT employee,employee_name,work_date,status,work_minutes,work_lines
+                FROM shifts WHERE deleted=0 AND work_date BETWEEN ? AND ? AND {scope}
+                AND (NOT ? OR entry_type='attendance') ORDER BY work_date,employee_name,id""",
+                (str(first),str(end),*params,int(attendance_only)))
+            people = {}
+            for r in rows:
+                p = people.setdefault(r["employee"], dict(name=r["employee_name"],days={},minutes=0,approved=0,kopecks=0))
+                day = int(r["work_date"][-2:])
+                p["days"][day] = p["days"].get(day,0) + r["work_minutes"]
+                p["minutes"] += r["work_minutes"]
+                if r["status"] == "approved":
+                    p["approved"] += r["work_minutes"]
+                    p["kopecks"] += sum(line["amount"] for line in json.loads(r["work_lines"]))
+            return people
+
+    def conflict_preview(self, token, *, organization_id, work_date, shift_number, shift_id=None,
+                         employee="", equipment="", assigned_employee="", assigned_equipment="", time_from="", time_to=""):
+        user = self._user(token)
+        if organization_id not in self.organizations(token, manage=True):
+            raise PermissionError("Проверка назначений доступна диспетчеру организации")
+        start,end = ops.shift_times(time_from,time_to)
+        item = dict(id=shift_id, work_date=_day(work_date), shift_number=shift_number, employee=employee,
+                    equipment=equipment, assigned_employee=assigned_employee, assigned_equipment=assigned_equipment,
+                    time_from=start,time_to=end)
+        with self._connection() as conn:
+            for key, plate in (("equipment","registration_number"),("assigned_equipment","assigned_registration_number")):
+                ref = conn.execute("""SELECT registration_number FROM shift_references
+                    WHERE organization_id=? AND kind='equipment' AND name_key=?""",
+                    (organization_id,(item[key] or "").casefold())).fetchone()
+                item[plate] = ref[0] if ref else ""
+            scope,params = _scope_sql(user, management=True)
+            ops.conflicts(conn,[item],scope,params)
+        return item["conflict"]
 
     def export_csv(self, token: str, **filters) -> bytes:
         data = self.list(token, **filters, limit=10001)
@@ -491,12 +683,16 @@ class WorkShiftJournal:
         stream = io.StringIO(newline="")
         writer = csv.writer(stream, delimiter=";")
         fields = ("id", "work_date", "shift_number", "employee_name", "organization", "equipment", "workplace",
-                  "partner", "waybill_number", "hours", "breaks", "status", "comment")
-        writer.writerow(("ID", "Дата", "Смена", "Сотрудник", "Организация", "Техника", "Объект", "Контрагент",
-                         "Путевой лист", "Отработано, ч", "Перерывы, ч", "Статус", "Комментарий"))
+                  "partner", "waybill_number", "hours", "breaks", "status", "comment",
+                  "assigned_employee_name","assigned_equipment","registration_number","assigned_registration_number","time_from","time_to","amount")
+        writer.writerow(("ID", "Дата", "Смена", "Фактический исполнитель", "Организация", "Фактическая техника", "Объект", "Контрагент",
+                         "Путевой лист", "Отработано, ч", "Перерывы, ч", "Статус", "Комментарий",
+                         "Сотрудник по назначению","Техника по назначению","Госномер фактической техники","Госномер по назначению",
+                         "Начало","Окончание","Расчёт по работам, руб."))
         for row in data["rows"]:
             row.update(hours=row["work_minutes"] / 60, breaks=row["break_minutes"] / 60,
-                       status=STATUS_LABELS[row["status"]])
+                       status=STATUS_LABELS[row["status"]],
+                       amount=f'{sum(line["amount"] for line in json.loads(row["work_lines"]))/100:.2f}')
             # Quoting does not stop spreadsheet formula evaluation.
             values = [row[key] for key in fields]
             writer.writerow([

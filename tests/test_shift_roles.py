@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -168,3 +169,69 @@ def test_manager_can_correct_archived_employee_without_resurrecting_renamed_refe
     assert [r["name"] for r in journal.references(token) if r["kind"] == "equipment"] == ["New name"]
     with pytest.raises(ValueError):
         journal.save(token, data(employee="driver"))
+
+
+def test_offline_builder_attendance_and_approved_month_sheet(accounts,tmp_path):
+    auth,tokens=accounts
+    j=WorkShiftJournal(tmp_path/"shifts.db",auth)
+    t=tokens["dispatch"]
+    args=dict(create=True,offline=True,display_name="Builder",categories=["builder","car"])
+    with pytest.raises(PermissionError):
+        j.save_employee(tokens["driver"],**args)
+    key=j.save_employee(t,**args)
+    assert auth.get_user(username=key) is None
+    assert key in j.users(t,organization_id="default",category="builder")
+    assert key not in j.users(tokens["driver"],organization_id="default")
+    work={**data(),"equipment":"","entry_type":"attendance","employee":key}
+    r=j.save(t,work)
+    assert j.month_sheet(t,"2026-10",attendance_only=True)[key]["days"]=={7:480}
+    assert j.month_sheet(t,"2026-10")[key]["approved"]==0
+    j.transition(t,r["id"],1,"approved")
+    assert j.month_sheet(t,"2026-10")[key]["approved"]==480
+    with pytest.raises(PermissionError):
+        j.month_sheet(tokens["driver"],"2026-10")
+    j.save_employee(t,offline=True,username=key,display_name="Builder",archived=True)
+    assert key not in j.users(t) and key in j.month_sheet(t,"2026-10")
+
+
+def test_rate_snapshots_units_substitution_and_overlap(accounts,tmp_path):
+    auth,tokens=accounts
+    j=WorkShiftJournal(tmp_path/"shifts.db",auth)
+    t=tokens["dispatch"]
+    loader=j.save_reference(t,"equipment","Loader",registration_number="X 10",fleet_number="7")
+    truck=j.save_reference(t,"equipment","Truck",registration_number="X10",fleet_number="8")
+    j.save_reference(t,"workplace","Site")
+    rate_args=dict(organization_id="default",since="2026-01-01",work="Repair",unit="hour",price="100.25")
+    generic=j.add_rate(t,**rate_args)
+    exact=j.add_rate(t,**rate_args,equipment=loader,workplace="Site")
+    trip=j.add_rate(t,**{**rate_args,"work":"Transport","unit":"trip","price":"500"})
+    km=j.add_rate(t,**{**rate_args,"work":"Distance","unit":"km","price":"2.30"})
+    ton=j.add_rate(t,**{**rate_args,"work":"Load","unit":"ton","price":"10"})
+    values={**data(),"equipment":loader,"employee":"driver","assigned_employee":"both","assigned_equipment":truck,
+            "time_from":"22:00","time_to":"06:00","work_lines":[{"rate_id":exact,"quantity":"1.5","amount":1},
+            {"rate_id":trip,"quantity":2},{"rate_id":km,"quantity":10},{"rate_id":ton,"quantity":"1.225"}]}
+    with pytest.raises(ValueError):
+        j.save(t,{**values,"work_lines":[dict(rate_id=trip,quantity=1.25)]})
+    with pytest.raises(ValueError):
+        j.save(t,{**values,"work_lines":[dict(rate_id=generic,quantity=1)]})
+    with pytest.raises(PermissionError):
+        j.save(tokens["driver"],values)
+    r=j.save(t,values)
+    assert r["registration_number"]=="X 10" and r["assigned_registration_number"]=="X10"
+    assert [v["amount"] for v in json.loads(r["work_lines"])]==[15038,100000,2300,1225]
+    j.add_rate(t,**{**rate_args,"since":"2026-10-01","price":"300"},equipment=loader,workplace="Site")
+    edited=j.save(t,{**values,"comment":"check"},shift_id=r["id"],revision=1)
+    assert edited["work_lines"]==r["work_lines"]
+    next_day={**data(),"work_date":"2026-10-08","employee":"both","equipment":truck,"time_from":"05:00","time_to":"07:00"}
+    with pytest.raises(PermissionError):
+        j.add_rate(tokens["driver"],**rate_args)
+    warning=j.conflict_preview(t,organization_id="default",**{k:next_day[k] for k in ("work_date","shift_number","employee","equipment","time_from","time_to")})
+    assert set(warning.split(", "))=={"госномер","сотрудник","техника"}
+    j.save(t,next_day)
+    assert all(v["conflict"] for v in j.list(t,date_from="2026-10-07",date_to="2026-10-08")["rows"])
+    assert not j.list(tokens["driver"],date_from="2026-10-07",date_to="2026-10-08")["rows"][0]["conflict"]
+    assert not j.conflict_preview(t,organization_id="default",work_date="2026-10-08",shift_number=1,
+                                  employee="driver",time_from="07:00",time_to="08:00")
+    j.transition(t,r["id"],2,"approved")
+    people=j.month_sheet(t,"2026-10")
+    assert people["driver"]["kopecks"]==118563 and people["both"]["kopecks"]==0
