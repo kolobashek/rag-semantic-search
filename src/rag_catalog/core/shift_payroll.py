@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 
+from .roles import can_use_payroll
 from .shift_operations import number
 
 GROUPS = {"credit": "Начисление", "debit": "Удержание", "voluntary": "Добровольный взнос", "memo": "Справочно"}
@@ -63,17 +64,17 @@ class MonthlyPayroll:
     def __init__(self, journal):
         self.journal = journal
 
-    def _owner(self, token):
+    def _payroll_user(self, token):
         user = self.journal.auth.get_user_by_session(token)
-        if not user or user.get("status") != "active" or user.get("must_change_password") or not user.get("is_payroll_owner"):
+        if not can_use_payroll(user):
             raise PermissionError("Нет доступа к расчёту зарплаты")
         return user
 
     def organizations(self, token):
-        return {r["id"]: r["name"] for r in self.journal._directory(self._owner(token))}
+        return {r["id"]: r["name"] for r in self.journal._directory(self._payroll_user(token))}
 
     def _manager(self, token, org):
-        user = self._owner(token)
+        user = self._payroll_user(token)
         if org not in {r["id"] for r in self.journal._directory(user)}:
             raise PermissionError("Организация недоступна")
         return user

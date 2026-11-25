@@ -93,12 +93,14 @@ class UserAuthDB(EmployeeOnboarding):
     def _with_roles(conn, user):
         row = conn.execute(
             """SELECT u.roles_json, u.telegram_linked_at, m.max_user_id,
-                      EXISTS(SELECT 1 FROM payroll_owner p WHERE p.user_id=u.id) AS payroll
+                      EXISTS(SELECT 1 FROM payroll_owner p WHERE p.user_id=u.id) AS payroll,
+                      EXISTS(SELECT 1 FROM payroll_admin p WHERE p.user_id=u.id) AS payroll_admin
                FROM users u LEFT JOIN max_bindings m ON m.user_id=u.id WHERE u.username=?""",
             (user["username"],),
         ).fetchone()
         user["roles_json"] = row["roles_json"] if row else ""
         user["is_payroll_owner"] = bool(row and row["payroll"])
+        user["is_payroll_admin"] = bool(row and row["payroll_admin"])
         user["max_user_id"] = (row["max_user_id"] or "") if row else ""
         user["telegram_linked_at"] = row["telegram_linked_at"] if row else ""
         user["roles"] = sorted(user_roles(user))
@@ -129,6 +131,11 @@ class UserAuthDB(EmployeeOnboarding):
                     );
 
                     CREATE TABLE IF NOT EXISTS payroll_owner (
+                        slot INTEGER PRIMARY KEY CHECK(slot=1),
+                        user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS payroll_admin (
                         slot INTEGER PRIMARY KEY CHECK(slot=1),
                         user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE
                     );
@@ -328,23 +335,33 @@ class UserAuthDB(EmployeeOnboarding):
 
     def set_payroll_owner(self, username: str, *, expected_previous: str | None = None) -> None:
         """Local operator action. No web role can grant or inherit payroll access."""
+        self._set_payroll_principal(username, expected_previous, admin=False)
+
+    def set_payroll_admin(self, username: str, *, expected_previous: str | None = None) -> None:
+        """Name one platform administrator without replacing the payroll owner."""
+        self._set_payroll_principal(username, expected_previous, admin=True)
+
+    def _set_payroll_principal(self, username: str, expected_previous: str | None, *, admin: bool) -> None:
+        table = "payroll_admin" if admin else "payroll_owner"
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             target = conn.execute("SELECT id FROM users WHERE username=? AND status='active'", (username,)).fetchone()
             if not target:
                 raise ValueError("Нужна действующая учётная запись")
-            old = conn.execute("SELECT p.user_id,u.username FROM payroll_owner p LEFT JOIN users u ON u.id=p.user_id").fetchone()
+            if admin and not conn.execute("SELECT 1 FROM employee_platform_admins WHERE username=?", (username,)).fetchone():
+                raise ValueError("Нужен действующий администратор платформы")
+            old = conn.execute(f"SELECT p.user_id,u.username FROM {table} p LEFT JOIN users u ON u.id=p.user_id").fetchone()
             if old and old["user_id"] == target["id"]:
                 return
             if old and (not expected_previous or old["username"] != expected_previous):
                 raise ValueError("Ответственный уже назначен")
-            conn.execute("""INSERT INTO payroll_owner(slot,user_id) VALUES(1,?)
+            conn.execute(f"""INSERT INTO {table}(slot,user_id) VALUES(1,?)
                 ON CONFLICT(slot) DO UPDATE SET user_id=excluded.user_id""", (target["id"],))
             if old and old["username"]:
                 conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES(?,?,?)",
-                             (_utc_now(), old["username"], "local_payroll_owner_revoked"))
+                             (_utc_now(), old["username"], f"local_{table}_revoked"))
             conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES(?,?,?)",
-                         (_utc_now(), username, "local_payroll_owner_granted"))
+                         (_utc_now(), username, f"local_{table}_granted"))
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}

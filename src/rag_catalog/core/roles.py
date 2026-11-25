@@ -53,9 +53,14 @@ def can_use_catalog(user):
     return bool(user_roles(user) & {"admin", "user"})
 
 
+def can_use_payroll(user):
+    return bool(user and user.get("status") == "active" and not user.get("must_change_password")
+                and (user.get("is_payroll_owner") or (user.get("is_payroll_admin") and user.get("is_platform_admin"))))
+
+
 def can_open_screen(user, screen):
     if screen == "shifts":
-        return can_use_shifts(user) or bool(user and user.get("is_payroll_owner"))
+        return can_use_shifts(user) or can_use_payroll(user)
     if screen in {"jobs", "index", "stats"}:
         return "admin" in user_roles(user)
     return can_use_catalog(user)

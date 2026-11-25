@@ -70,6 +70,39 @@ def test_owner_is_unique_and_checked_again_for_existing_sessions(accounts,tmp_pa
         p.sheet(t["cloud"],"default","2026-10")
 
 
+def test_only_named_platform_admin_and_owner_share_payroll(payroll):
+    journal, service, tokens = payroll
+    auth = journal.auth
+    assert auth.admin_create_user(username="second-admin", password="test-admin-password", roles=["admin"],
+                                  platform_admin=True, must_change_password=False)
+    other = auth.create_session(username="second-admin")
+    for name in ("driver", "dispatch", "missing"):
+        with pytest.raises(ValueError):
+            auth.set_payroll_admin(name)
+    auth.set_payroll_admin("admin")
+    auth.set_payroll_admin("admin")
+    session = auth.get_user_by_session(tokens["admin"])
+    assert session["is_payroll_admin"] and not session["is_payroll_owner"]
+    assert auth.get_user_by_session(tokens["cloud"])["is_payroll_owner"]
+    with pytest.raises(ValueError):
+        auth.set_payroll_admin("second-admin")
+    service.add_item(tokens["admin"], "default", "2026-10", "driver", "bonus", 100, "Test")
+    for token in (tokens["admin"], tokens["cloud"]):
+        assert service.sheet(token, "default", "2026-10")["people"]["driver"]["credit"] == 10000
+    for token in (other, tokens["driver"], tokens["dispatch"]):
+        with pytest.raises(PermissionError):
+            service.sheet(token, "default", "2026-10")
+    auth.set_payroll_admin("second-admin", expected_previous="admin")
+    with pytest.raises(PermissionError):
+        service.sheet(tokens["admin"], "default", "2026-10")
+    assert service.organizations(other)
+    auth.admin_update_user(username="second-admin", display_name="Second", telegram_chat_id="",
+                           role="user", roles=["user"], status="active", must_change_password=False)
+    with pytest.raises(PermissionError):
+        service.organizations(other)
+    assert service.organizations(tokens["cloud"])
+
+
 def test_journal_surfaces_never_return_pay_and_drivers_only_see_their_hours(payroll):
     j,p,t = payroll
     rate = j.add_rate(t["cloud"],organization_id="default",work="Work",unit="hour",price="8765.43",since="2026-01-01")

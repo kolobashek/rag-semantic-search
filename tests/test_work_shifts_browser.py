@@ -181,6 +181,19 @@ def test_monthly_payroll_ui_bonus_and_cancellation(office,pages):
     item.get_by_text("Отменена",exact=True).wait_for()
 
 
+def test_payroll_button_for_designated_admin_but_not_other_admin(office, pages):
+    _, url, auth, password = office
+    allowed_page, denied_page = pages
+    admin = next(u["username"] for u in auth.list_users() if u["is_platform_admin"])
+    auth.set_payroll_admin(admin)
+    sign_in(allowed_page, url, admin, password)
+    allowed_page.get_by_role("button", name="Расчёт за месяц", exact=True).click()
+    allowed_page.get_by_role("dialog").get_by_role("tab", name="Тарифы", exact=True).wait_for()
+    sign_in(denied_page, url, ADMIN, password)
+    denied_page.get_by_role("button", name="Табель", exact=True).wait_for()
+    assert not denied_page.get_by_role("button", name="Расчёт за месяц", exact=True).count()
+
+
 def test_driver_and_machine_filter_each_other(office,pages):
     _,url,auth,password=office
     page,_=pages

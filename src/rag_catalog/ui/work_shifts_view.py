@@ -10,7 +10,7 @@ from pathlib import Path
 
 from nicegui import run, ui
 
-from rag_catalog.core.roles import can_manage_shifts, can_use_shifts
+from rag_catalog.core.roles import can_manage_shifts, can_use_payroll, can_use_shifts
 from rag_catalog.core.shift_attachments import ShiftAttachments
 from rag_catalog.core.shift_operations import CATEGORIES, printable_shift
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
@@ -496,7 +496,7 @@ def render_work_shifts(state: PageState) -> None:
         auth = await run.io_bound(_get_auth_db, state)
         return await run.io_bound(WorkShiftJournal, path, auth)
 
-    financial = bool(state.current_user and state.current_user.get("is_payroll_owner"))
+    financial = can_use_payroll(state.current_user)
     if not can_use_shifts(state.current_user):
         if financial:
             async def payroll_only():
@@ -523,7 +523,9 @@ def render_work_shifts(state: PageState) -> None:
                     ui.button("Управление", icon="manage_accounts", on_click=lambda: show_shift_administration(state, journal))
                     ui.button("Табель",icon="calendar_month", on_click=lambda: show_month_sheet(journal,call,error))
                 if financial:
-                    ui.button("Расчёт за месяц",icon="payments",on_click=lambda:open_payroll(journal,call,error))
+                    payroll_button = ui.button("Расчёт за месяц", icon="payments",
+                                               on_click=lambda: open_payroll(journal, call, error))
+                    payroll_button.disable()
         with ui.row().classes("w-full items-end gap-3"):
             start = ui.input("С", value=date.today().replace(day=1).isoformat()).props("type=date")
             end = ui.input("По", value=date.today().isoformat()).props("type=date")
@@ -566,6 +568,8 @@ def render_work_shifts(state: PageState) -> None:
         nonlocal journal, users, managed_orgs
         try:
             journal = await load_journal()
+            if financial:
+                payroll_button.enable()
             users = await call(journal.users)
             managed_orgs = await call(journal.organizations, manage=True)
             employee_filter.set_options({"": "Все сотрудники", **users})
