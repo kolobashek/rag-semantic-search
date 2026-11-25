@@ -369,18 +369,41 @@ async def api_ping() -> Dict[str, Any]:
     return {"ok": True, "service": "rag-catalog"}
 
 
-def _compact_ui_event_value(value: Any, *, depth: int = 0) -> Any:
-    if depth > 3:
-        return str(value)[:250]
-    if isinstance(value, dict):
-        return {str(key)[:80]: _compact_ui_event_value(val, depth=depth + 1) for key, val in list(value.items())[:40]}
-    if isinstance(value, list):
-        return [_compact_ui_event_value(item, depth=depth + 1) for item in value[:40]]
-    if isinstance(value, str):
-        return value[:1000]
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return str(value)[:500]
+_BROWSER_ACTIONS = frozenset("""
+    page_open client_diag_ready browser_online browser_offline visibility_change
+    pagehide pageshow beforeunload javascript_error unhandled_rejection_error
+    socket_disconnect socket_connect_error socket_reconnect_attempt socket_reconnected
+    socket_diagnostics_ready route_change connection_lost_visible connection_lost_hidden
+    search_loading_visible search_loading_hidden preparing_error_visible preparing_error_hidden
+    search_run_start search_render_final search_run_done search_schedule search_loading_render
+""".split())
+_BROWSER_ROUTES = frozenset(("/", "/search", "/explorer", "/cloud", "/shifts", "/settings",
+                            "/index", "/stats", "/jobs", "/auth/device"))
+
+
+def _browser_event_fields(payload: dict) -> tuple[str, str, dict]:
+    """Accept old and new clients, but never persist arbitrary strings or nested objects."""
+    action = payload.get("action")
+    if not isinstance(action, str) or action not in _BROWSER_ACTIONS:
+        action = "client_event"
+    path = payload.get("path")
+    path = path.partition("?")[0].partition("#")[0] if isinstance(path, str) else ""
+    details = {}
+    extra = payload.get("details")
+    if not isinstance(extra, dict):
+        extra = {}
+    for key, source in (("elapsed_ms", payload), ("duration_ms", extra), ("downtime_ms", extra),
+                        ("attempt", extra), ("request_id", extra), ("results", extra)):
+        value = source.get(key)
+        if type(value) is int and 0 <= value <= 2**53 - 1:
+            details[key] = value
+    for key, source in (("online", payload), ("connected", extra), ("persisted", extra)):
+        if type(source.get(key)) is bool:
+            details[key] = source[key]
+    method = extra.get("method")
+    if method in ("pushState", "replaceState", "popstate"):
+        details["method"] = method
+    return action, path if path in _BROWSER_ROUTES else "browser", details
 
 
 @app.post("/api/ui-events")
@@ -390,25 +413,11 @@ async def api_ui_events(request: Request) -> Dict[str, Any]:
         payload = await request.json()
     except Exception:
         payload = {}
-    if not isinstance(payload, dict):
-        payload = {"payload": payload}
-    return await run_in_threadpool(
-        _store_ui_event, payload,
-        client_host=request.client.host if request.client else "",
-        user_agent=str(request.headers.get("user-agent") or "")[:500],
-        referer=str(request.headers.get("referer") or "")[:1000],
-    )
+    return await run_in_threadpool(_store_ui_event, *_browser_event_fields(payload if isinstance(payload, dict) else {}))
 
 
-def _store_ui_event(payload: dict, *, client_host: str, user_agent: str, referer: str) -> Dict[str, Any]:
+def _store_ui_event(action: str, screen: str, details: dict) -> Dict[str, Any]:
     cfg = load_config()
-    action = str(payload.get("action") or "client_event").strip()[:80] or "client_event"
-    details = _compact_ui_event_value(payload)
-    if not isinstance(details, dict):
-        details = {"payload": details}
-    details["client_host"] = client_host
-    details["user_agent"] = user_agent
-    details["referer"] = referer
     username = ""
     try:
         token = str(app.storage.user.get("auth_token") or "").strip()
@@ -420,7 +429,7 @@ def _store_ui_event(payload: dict, *, client_host: str, user_agent: str, referer
     try:
         TelemetryDB(str(_telemetry_db_path(cfg))).log_app_event(
             username=username,
-            screen=str(payload.get("path") or payload.get("url") or "browser")[:120],
+            screen=screen,
             feature="browser",
             action=action,
             ok=not action.endswith("_error") and "error" not in action,

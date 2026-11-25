@@ -301,7 +301,11 @@ def _log_app_event(
     except Exception:
         pass
     try:
-        details_json = json.dumps(event_details, ensure_ascii=False, sort_keys=True, default=str)
+        # The search history and result-use metrics have their own consumers.
+        # Do not duplicate their queries and document paths in the technical log.
+        log_details = ({k: v for k, v in event_details.items() if type(v) in (bool, int, float)}
+                       if feature in {"search", "diagnostics"} else event_details)
+        details_json = json.dumps(log_details, ensure_ascii=False, sort_keys=True, default=str)
         if len(details_json) > 4000:
             details_json = f"{details_json[:4000]}…"
         _APP_EVENT_LOGGER.info(

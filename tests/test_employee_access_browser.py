@@ -141,6 +141,23 @@ def test_header_action_contents_fit_at_common_widths(office, pages, tmp_path, us
         assert not overflow, (width, overflow)
 
 
+def test_browser_diagnostics_omit_text_before_sending(office, pages):
+    _, url, _, _ = office
+    page, _ = pages
+    page.goto(url + "/search?path=private-document-fixture")
+    page.wait_for_function("typeof window.ragDiagLog === 'function'")
+    with page.expect_request(lambda r: r.url.endswith("/api/ui-events") and
+                             r.post_data_json.get("action") == "search_schedule") as sent:
+        page.evaluate("""window.ragDiagLog('search_schedule', {
+            query: 'private-document-fixture', excerpt: 'private-document-fixture', results: 5
+        })""")
+    payload = sent.value.post_data_json
+    assert set(payload) == {"action", "path", "online", "elapsed_ms", "details"}
+    assert payload["path"] == "/search" and payload["details"] == {"results": 5}
+    assert "private-document-fixture" not in sent.value.post_data
+    assert "referer" not in sent.value.all_headers()
+
+
 def test_screen_back_forward_keeps_url_and_active_screen_together(office, pages):
     _, url, _, password = office
     admin, _ = pages

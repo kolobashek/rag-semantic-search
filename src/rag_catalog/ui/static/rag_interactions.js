@@ -72,71 +72,40 @@
   const installDiagnostics = () => {
     if (window._ragDiagInit) return;
     window._ragDiagInit = true;
-    const now = () => Math.round(performance.now());
-    const sid = sessionStorage.getItem('rag-diag-session') ||
-      (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
-    sessionStorage.setItem('rag-diag-session', sid);
-    const basePayload = () => {
-      const text = document.body ? document.body.innerText : '';
-      const input = document.querySelector('.rag-search-box input, input[placeholder^="Введите название"]');
-      return {
-        session_id: sid,
-        url: location.href,
-        path: location.pathname,
-        ready_state: document.readyState,
-        online: navigator.onLine,
-        visibility: document.visibilityState,
-        elapsed_ms: now(),
-        viewport: {
-          width: window.innerWidth,
-          height: window.innerHeight,
-          dpr: window.devicePixelRatio || 1,
-          scroll_y: Math.round(window.scrollY || 0),
-        },
-        search: {
-          query: input ? String(input.value || '').slice(0, 250) : '',
-          has_results_header: text.includes('Результаты по запросу'),
-          has_loading_label: text.includes('Ищу совпадения'),
-          has_connection_lost: text.includes('Соединение потеряно'),
-          has_preparing_error: text.includes('Файловый индекс еще подготавливается'),
-          has_semantic_timeout: text.includes('Семантический поиск не ответил быстро'),
-        },
-      };
-    };
-    const send = (action, details = {}) => {
-      const body = JSON.stringify({ action, ...basePayload(), details });
-      try {
-        if (navigator.sendBeacon) {
-          const blob = new Blob([body], { type: 'application/json' });
-          if (navigator.sendBeacon('/api/ui-events', blob)) return;
-        }
-      } catch (_) {}
+    const routes = new Set(['/', '/search', '/explorer', '/cloud', '/shifts', '/settings',
+      '/index', '/stats', '/jobs', '/auth/device']);
+    const send = (action, extra = {}) => {
+      const details = {};
+      for (const key of ['duration_ms', 'downtime_ms', 'attempt', 'request_id', 'results']) {
+        if (Number.isSafeInteger(extra[key]) && extra[key] >= 0) details[key] = extra[key];
+      }
+      for (const key of ['connected', 'persisted']) {
+        if (typeof extra[key] === 'boolean') details[key] = extra[key];
+      }
+      if (['pushState', 'replaceState', 'popstate'].includes(extra.method)) details.method = extra.method;
+      const body = JSON.stringify({ action, path: routes.has(location.pathname) ? location.pathname : '',
+        online: navigator.onLine, elapsed_ms: Math.round(performance.now()), details });
       fetch('/api/ui-events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
         keepalive: true,
+        referrerPolicy: 'no-referrer',
       }).catch(() => {});
     };
-    window.ragDiagLog = send;
+    const searchActions = new Set(['search_run_start', 'search_render_final', 'search_run_done',
+      'search_schedule', 'search_loading_render']);
+    window.ragDiagLog = (action, details) => { if (searchActions.has(action)) send(action, details); };
 
-    const navEntry = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
-    send('client_diag_ready', { navigation_type: navEntry ? navEntry.type : '' });
+    send('client_diag_ready');
     window.addEventListener('online', () => send('browser_online'));
     window.addEventListener('offline', () => send('browser_offline'));
     window.addEventListener('visibilitychange', () => send('visibility_change'));
     window.addEventListener('pagehide', (event) => send('pagehide', { persisted: !!event.persisted }));
     window.addEventListener('pageshow', (event) => send('pageshow', { persisted: !!event.persisted }));
     window.addEventListener('beforeunload', () => send('beforeunload'));
-    window.addEventListener('error', (event) => send('javascript_error', {
-      message: String(event.message || '').slice(0, 1000),
-      source: String(event.filename || '').slice(0, 500),
-      line: event.lineno || 0,
-      col: event.colno || 0,
-    }));
-    window.addEventListener('unhandledrejection', (event) => send('unhandled_rejection_error', {
-      reason: String(event.reason && (event.reason.stack || event.reason.message || event.reason) || '').slice(0, 1500),
-    }));
+    window.addEventListener('error', () => send('javascript_error'));
+    window.addEventListener('unhandledrejection', () => send('unhandled_rejection_error'));
 
     let socketAttached = false;
     let disconnectedAt = 0;
@@ -144,16 +113,11 @@
       const socket = window.socket;
       if (socketAttached || !socket || typeof socket.on !== 'function') return false;
       socketAttached = true;
-      socket.on('disconnect', (reason, details) => {
+      socket.on('disconnect', () => {
         disconnectedAt = Date.now();
-        send('socket_disconnect', {
-          reason: String(reason || '').slice(0, 300),
-          details: String(details && (details.message || details.description || details) || '').slice(0, 600),
-        });
+        send('socket_disconnect');
       });
-      socket.on('connect_error', (error) => send('socket_connect_error', {
-        message: String(error && (error.message || error) || '').slice(0, 600),
-      }));
+      socket.on('connect_error', () => send('socket_connect_error'));
       socket.io?.on('reconnect_attempt', (attempt) => send('socket_reconnect_attempt', { attempt: Number(attempt || 0) }));
       socket.io?.on('reconnect', (attempt) => {
         send('socket_reconnected', {
@@ -200,7 +164,7 @@
       const preparing = text.includes('Файловый индекс еще подготавливается');
       if (lost !== lastLost) {
         lastLost = lost;
-        send(lost ? 'connection_lost_visible' : 'connection_lost_hidden', { excerpt: text.slice(0, 1200) });
+        send(lost ? 'connection_lost_visible' : 'connection_lost_hidden');
       }
       if (loading !== lastLoading) {
         lastLoading = loading;
@@ -208,7 +172,7 @@
       }
       if (preparing !== lastPreparing) {
         lastPreparing = preparing;
-        send(preparing ? 'preparing_error_visible' : 'preparing_error_hidden', { excerpt: text.slice(0, 1200) });
+        send(preparing ? 'preparing_error_visible' : 'preparing_error_hidden');
       }
     };
     let pending = false;

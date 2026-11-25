@@ -13,6 +13,46 @@ from fastapi import FastAPI
 from rag_catalog.ui import api
 
 
+def test_search_usage_record_does_not_copy_query_to_technical_log(monkeypatch, caplog):
+    from rag_catalog.ui import state
+
+    events = []
+    monkeypatch.setattr(state, "_get_telemetry", lambda _: SimpleNamespace(log_app_event=lambda **kw: events.append(kw)))
+    page = state.PageState(cfg={"usage_analytics_enabled": False})
+    with caplog.at_level("INFO", logger=state._APP_EVENT_LOGGER.name):
+        state._log_app_event(page, "search", "run_full", details={"query": "private-query", "duration_ms": 17})
+    assert events[0]["details"]["query"] == "private-query"  # Used by the user's search suggestions.
+    assert '"duration_ms": 17' in caplog.text and "private-query" not in caplog.text
+
+
+def test_browser_diagnostics_allowlist_precedes_both_storage_and_logging(monkeypatch, caplog):
+    marker = "private-document-fixture"
+    events = []
+    monkeypatch.setattr(api, "load_config", lambda: {})
+    monkeypatch.setattr(api, "_telemetry_db_path", lambda _: "mock")
+    monkeypatch.setattr(api, "TelemetryDB", lambda _: SimpleNamespace(log_app_event=lambda **kw: events.append(kw)))
+    app = FastAPI()
+    app.post("/api/ui-events")(api.api_ui_events)
+
+    async def post():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            for path, action in (("/search?q=" + marker, "javascript_error"), ("/" + marker, marker)):
+                response = await client.post("/api/ui-events", json={
+                    "action": action, "path": path, "url": "https://example/#" + marker,
+                    "search": {"query": marker}, "session_id": marker, "elapsed_ms": 23,
+                    "details": {"excerpt": marker, "message": marker, "duration_ms": 14,
+                                "attempt": marker, "method": [marker]},
+                }, headers={"Referer": "https://example/?q=" + marker, "User-Agent": marker})
+                assert response.json() == {"ok": True}
+    with caplog.at_level("INFO", logger=api.logger.name):
+        asyncio.run(post())
+    assert [(e["screen"], e["action"]) for e in events] == [
+        ("/search", "javascript_error"), ("browser", "client_event")]
+    assert all(e["details"] == {"elapsed_ms": 23, "duration_ms": 14} for e in events)
+    assert "browser_event action=javascript_error" in caplog.text
+    assert marker not in str(events) and marker not in caplog.text
+
+
 @pytest.mark.parametrize('stage', [
     'heartbeat_auth', 'heartbeat_store', 'diagnostics_auth', 'diagnostics_store',
     'ui_store', 'logs_auth', 'logs_store', 'upload_auth', 'upload_copy', 'upload_commit',
