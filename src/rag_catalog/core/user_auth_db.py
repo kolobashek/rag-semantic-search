@@ -92,11 +92,13 @@ class UserAuthDB(EmployeeOnboarding):
     @staticmethod
     def _with_roles(conn, user):
         row = conn.execute(
-            """SELECT u.roles_json, u.telegram_linked_at, m.max_user_id
+            """SELECT u.roles_json, u.telegram_linked_at, m.max_user_id,
+                      EXISTS(SELECT 1 FROM payroll_owner p WHERE p.user_id=u.id) AS payroll
                FROM users u LEFT JOIN max_bindings m ON m.user_id=u.id WHERE u.username=?""",
             (user["username"],),
         ).fetchone()
         user["roles_json"] = row["roles_json"] if row else ""
+        user["is_payroll_owner"] = bool(row and row["payroll"])
         user["max_user_id"] = (row["max_user_id"] or "") if row else ""
         user["telegram_linked_at"] = row["telegram_linked_at"] if row else ""
         user["roles"] = sorted(user_roles(user))
@@ -124,6 +126,11 @@ class UserAuthDB(EmployeeOnboarding):
                         created_at TEXT NOT NULL,
                         verified_at TEXT,
                         last_login_at TEXT
+                    );
+
+                    CREATE TABLE IF NOT EXISTS payroll_owner (
+                        slot INTEGER PRIMARY KEY CHECK(slot=1),
+                        user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE
                     );
 
                     CREATE TABLE IF NOT EXISTS user_groups (
@@ -318,6 +325,26 @@ class UserAuthDB(EmployeeOnboarding):
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
                 self._ensure_default_admin(conn)
+
+    def set_payroll_owner(self, username: str, *, expected_previous: str | None = None) -> None:
+        """Local operator action. No web role can grant or inherit payroll access."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            target = conn.execute("SELECT id FROM users WHERE username=? AND status='active'", (username,)).fetchone()
+            if not target:
+                raise ValueError("Нужна действующая учётная запись")
+            old = conn.execute("SELECT p.user_id,u.username FROM payroll_owner p LEFT JOIN users u ON u.id=p.user_id").fetchone()
+            if old and old["user_id"] == target["id"]:
+                return
+            if old and (not expected_previous or old["username"] != expected_previous):
+                raise ValueError("Ответственный уже назначен")
+            conn.execute("""INSERT INTO payroll_owner(slot,user_id) VALUES(1,?)
+                ON CONFLICT(slot) DO UPDATE SET user_id=excluded.user_id""", (target["id"],))
+            if old and old["username"]:
+                conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES(?,?,?)",
+                             (_utc_now(), old["username"], "local_payroll_owner_revoked"))
+            conn.execute("INSERT INTO auth_events(ts,username,event_type) VALUES(?,?,?)",
+                         (_utc_now(), username, "local_payroll_owner_granted"))
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}

@@ -194,6 +194,29 @@ def test_offline_builder_attendance_and_approved_month_sheet(accounts,tmp_path):
     assert key not in j.users(t) and key in j.month_sheet(t,"2026-10")
 
 
+def test_machine_requires_specialty_correct_document_category_and_shift_date(accounts,tmp_path):
+    auth,tokens=accounts
+    j=WorkShiftJournal(tmp_path/"shifts.db",auth)
+    manager=tokens["dispatch"]
+    eq=j.save_reference(manager,"equipment","Grader",equipment_category="grader",licence_kind="tractor",licence_mark="C")
+    doc=dict(marks=["C"],since="2026-10-01",until="2026-10-07")
+    j.set_categories(manager,"default","driver",["grader"],licences={"road":doc})
+    with pytest.raises(ValueError,match="удостоверения"):
+        j.save(tokens["driver"],{**data(),"equipment":eq})
+    j.set_categories(manager,"default","driver",["truck"],licences={"tractor":doc})
+    with pytest.raises(ValueError,match="допуска"):
+        j.save(tokens["driver"],{**data(),"equipment":eq})
+    j.set_categories(manager,"default","driver",["grader"],licences={"tractor":doc})
+    r=j.save(tokens["driver"],{**data(),"equipment":eq})
+    for day in ("2026-09-30","2026-10-08"):
+        with pytest.raises(ValueError,match="удостоверения"):
+            j.save(manager,{**data(),"equipment":eq,"employee":"driver","work_date":day},shift_id=r["id"],revision=1)
+    assert "tractor:C" in j.qualifications(tokens["driver"],"default",work_date="2026-10-07")["driver"]
+    assert "tractor:C" not in j.qualifications(tokens["driver"],"default",work_date="2026-10-08")["driver"]
+    with pytest.raises(PermissionError):
+        j.set_categories(tokens["driver"],"default","driver",["grader"],licences={"tractor":doc})
+
+
 def test_rate_snapshots_units_substitution_and_overlap(accounts,tmp_path):
     auth,tokens=accounts
     j=WorkShiftJournal(tmp_path/"shifts.db",auth)
@@ -202,11 +225,13 @@ def test_rate_snapshots_units_substitution_and_overlap(accounts,tmp_path):
     truck=j.save_reference(t,"equipment","Truck",registration_number="X10",fleet_number="8")
     j.save_reference(t,"workplace","Site")
     rate_args=dict(organization_id="default",since="2026-01-01",work="Repair",unit="hour",price="100.25")
-    generic=j.add_rate(t,**rate_args)
-    exact=j.add_rate(t,**rate_args,equipment=loader,workplace="Site")
-    trip=j.add_rate(t,**{**rate_args,"work":"Transport","unit":"trip","price":"500"})
-    km=j.add_rate(t,**{**rate_args,"work":"Distance","unit":"km","price":"2.30"})
-    ton=j.add_rate(t,**{**rate_args,"work":"Load","unit":"ton","price":"10"})
+    auth.set_payroll_owner("cloud")
+    pay = tokens["cloud"]
+    generic=j.add_rate(pay,**rate_args)
+    exact=j.add_rate(pay,**rate_args,equipment=loader,workplace="Site")
+    trip=j.add_rate(pay,**{**rate_args,"work":"Transport","unit":"trip","price":"500"})
+    km=j.add_rate(pay,**{**rate_args,"work":"Distance","unit":"km","price":"2.30"})
+    ton=j.add_rate(pay,**{**rate_args,"work":"Load","unit":"ton","price":"10"})
     values={**data(),"equipment":loader,"employee":"driver","assigned_employee":"both","assigned_equipment":truck,
             "time_from":"22:00","time_to":"06:00","work_lines":[{"rate_id":exact,"quantity":"1.5","amount":1},
             {"rate_id":trip,"quantity":2},{"rate_id":km,"quantity":10},{"rate_id":ton,"quantity":"1.225"}]}
@@ -218,8 +243,8 @@ def test_rate_snapshots_units_substitution_and_overlap(accounts,tmp_path):
         j.save(tokens["driver"],values)
     r=j.save(t,values)
     assert r["registration_number"]=="X 10" and r["assigned_registration_number"]=="X10"
-    assert [v["amount"] for v in json.loads(r["work_lines"])]==[15038,100000,2300,1225]
-    j.add_rate(t,**{**rate_args,"since":"2026-10-01","price":"300"},equipment=loader,workplace="Site")
+    assert all(set(v)=={"rate_id","work","unit","quantity"} for v in json.loads(r["work_lines"]))
+    j.add_rate(pay,**{**rate_args,"since":"2026-10-01","price":"300"},equipment=loader,workplace="Site")
     edited=j.save(t,{**values,"comment":"check"},shift_id=r["id"],revision=1)
     assert edited["work_lines"]==r["work_lines"]
     next_day={**data(),"work_date":"2026-10-08","employee":"both","equipment":truck,"time_from":"05:00","time_to":"07:00"}
@@ -234,4 +259,6 @@ def test_rate_snapshots_units_substitution_and_overlap(accounts,tmp_path):
                                   employee="driver",time_from="07:00",time_to="08:00")
     j.transition(t,r["id"],2,"approved")
     people=j.month_sheet(t,"2026-10")
-    assert people["driver"]["kopecks"]==118563 and people["both"]["kopecks"]==0
+    assert "kopecks" not in people["driver"] and "kopecks" not in people["both"]
+    from rag_catalog.core.shift_payroll import MonthlyPayroll
+    assert MonthlyPayroll(j).sheet(pay,"default","2026-10")["people"]["driver"]["piece"]==118563

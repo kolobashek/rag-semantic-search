@@ -8,6 +8,7 @@ import pytest
 
 from rag_catalog.core.shift_attachments import MAX_FILE_BYTES
 from rag_catalog.core.user_auth_db import UserAuthDB
+from rag_catalog.core.work_shifts import WorkShiftJournal
 from rag_catalog.integrations.max_api import MaxEvent, MaxFile, normalize_update
 from rag_catalog.integrations.max_workflows import MaxWorkflows
 
@@ -29,6 +30,13 @@ def bot(tmp_path):
         event = MaxEvent(uid, f"start-{uid}", f"/start link_{token}")
         worker.handle(event)
         assert auth.get_user_by_max_user_id(uid)["username"] == name
+    setup_journal = WorkShiftJournal(tmp_path/"shifts.sqlite",auth)
+    dispatcher = auth.create_session(username="dispatch")
+    for equipment in ("Кран","Грузовик"):
+        setup_journal.save_reference(dispatcher,"equipment",equipment,equipment_category="truck",licence_kind="road",licence_mark="C")
+    for employee in ("alice","bob","dispatch","chief"):
+        setup_journal.set_categories(dispatcher,"default",employee,["truck"],
+            licences={"road":dict(marks=["C"],since="2020-01-01",until="2090-01-01")})
     client.reset_mock()
     return worker
 

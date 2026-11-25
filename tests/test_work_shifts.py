@@ -323,7 +323,8 @@ def test_upgrade_assigns_existing_shifts_and_archived_reference_to_default(compa
     assert reopened.references(tokens["root"], archived=True) == [{
         "id": 31, "kind": "equipment", "name": "История", "name_key": "история",
         "organization_id": "default", "archived": 1, "revision": 4,
-        "equipment_name": "", "registration_number": "", "fleet_number": "",
+        "equipment_name": "", "registration_number": "", "fleet_number": "", "equipment_category":"",
+        "licence_kind":"", "licence_mark":"",
     }]
     assert not reopened.references(tokens["mixed"], archived=True)
     with pytest.raises(PermissionError):

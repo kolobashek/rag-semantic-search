@@ -55,7 +55,7 @@ def can_use_catalog(user):
 
 def can_open_screen(user, screen):
     if screen == "shifts":
-        return can_use_shifts(user)
+        return can_use_shifts(user) or bool(user and user.get("is_payroll_owner"))
     if screen in {"jobs", "index", "stats"}:
         return "admin" in user_roles(user)
     return can_use_catalog(user)

@@ -301,7 +301,8 @@ class MaxWorkflows:
         row = self.journal.save(key, dict(work_date=day, shift_number=_integer(number),
                     organization=organization, equipment=equipment, workplace=workplace,
                     hours=hours.replace(",", "."), waybill_number=waybill,
-                    employee=employee[0] if employee else user["username"]), source_event_id="max:" + event.event_id)
+                    employee=employee[0] if employee else user["username"]), source_event_id="max:" + event.event_id,
+                    require_equipment_category=True)
         self._reply(event.user_id, f"Смена #{row['id']} записана. Можно приложить путевой лист.",
                     buttons=[[_button("Путевой лист", f"/waybill {row['id']}")]])
 

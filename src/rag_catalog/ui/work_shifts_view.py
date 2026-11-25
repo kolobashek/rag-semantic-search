@@ -10,7 +10,7 @@ from pathlib import Path
 
 from nicegui import run, ui
 
-from rag_catalog.core.roles import can_manage_shifts
+from rag_catalog.core.roles import can_manage_shifts, can_use_shifts
 from rag_catalog.core.shift_attachments import ShiftAttachments
 from rag_catalog.core.shift_operations import CATEGORIES, printable_shift
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
@@ -18,6 +18,7 @@ from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
 from .state import PageState, _get_auth_db, _log_app_event
 from .work_shifts_admin import open_directory_editor, show_month_sheet, show_shift_administration, show_shift_history
 from .work_shifts_pay import shift_work_editor
+from .shift_payroll_view import open_payroll
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +136,11 @@ def render_work_shifts(state: PageState) -> None:
                 org.set_enabled(new and len(organizations) > 1)
                 org.set_visibility(len(organizations) > 1)
                 add_actions = {}
+                people_options, permits = {}, {}
+                pairing = False
 
                 def picker(key, label, action):
-                    field = ui.select({}, label=label, with_input=True).classes("w-full min-w-0")
+                    field = ui.select({}, label=label, with_input=True,clearable=True).classes("w-full min-w-0")
                     inputs[key] = field
 
                     def create():
@@ -151,15 +154,23 @@ def render_work_shifts(state: PageState) -> None:
                                 return
                             if key == "employee":
                                 people = await call(journal.users, organization_id=saved_org)
+                                day = inputs["work_date"].value
+                                marks = await call(journal.qualifications,saved_org,work_date=day)
                                 if org.value == saved_org:
+                                    people_options.update(people)
+                                    permits.update(marks)
+                                    category.value = None
                                     field.set_options(people, value=value)
                                     users.update(people)
                                     employee_filter.set_options({"": "Все сотрудники", **users})
+                                    inputs["assigned_employee"].set_options(people,value=inputs["assigned_employee"].value)
+                                    pair("employee")
                             else:
                                 refs = await call(journal.references)
                                 if org.value == saved_org:
                                     references[:] = refs
                                     set_reference(key, value)
+                                    pair(key)
 
                         with editor_card:
                             open_directory_editor(journal, call, {scope: organizations[scope]}, key, added, error)
@@ -193,9 +204,11 @@ def render_work_shifts(state: PageState) -> None:
                               value=bool(row.get("assigned_equipment") or row.get("assigned_employee"))).classes("w-full") as substitution:
                 inputs["assigned_employee"] = ui.select({}, label="Первоначально назначен",with_input=True,clearable=True).classes("w-full")
                 inputs["assigned_equipment"] = ui.select([], label="Первоначально назначенная техника",with_input=True,clearable=True).classes("w-full")
-            refresh_rates, work_lines = shift_work_editor(journal, call, org, inputs, row, managed_orgs, error)
+            refresh_rates, work_lines = shift_work_editor(journal, call, org, inputs, row, error)
             warning = ui.label().classes("text-negative font-medium").props("role=status")
             warning.set_visibility(False)
+            no_match = ui.label().classes("text-warning text-sm").props("role=status")
+            no_match.set_visibility(False)
             checks = 0
 
             async def check_overlap():
@@ -231,7 +244,7 @@ def render_work_shifts(state: PageState) -> None:
                         raise ValueError("Выберите фактического исполнителя")
                     values = {key: field.value for key, field in inputs.items()}
                     await call(journal.save, dict(values, organization_id=org.value, work_lines=work_lines()),
-                               shift_id=row.get("id"), revision=row.get("revision"))
+                               shift_id=row.get("id"), revision=row.get("revision"),require_equipment_category=True)
                     dialog.close()
                     await refresh()
                     ui.notify("Смена сохранена", type="positive")
@@ -267,19 +280,68 @@ def render_work_shifts(state: PageState) -> None:
                     if not vehicle:
                         inputs[key].set_value("" if key=="waybill_number" else None)
 
-            async def filter_people():
-                scope, group = org.value, category.value
-                if not scope or scope not in managed_orgs:
+            def pair(prefer="employee"):
+                nonlocal pairing
+                if pairing:
                     return
-                options = await call(journal.users, organization_id=scope, category=group or "")
-                if (org.value,category.value) == (scope,group):
-                    current = inputs["employee"].value
-                    inputs["employee"].set_options(options, value=current if current in options else None)
+                pairing = True
+                try:
+                    driver, machine = inputs["employee"],inputs["equipment"]
+                    who,which = driver.value,machine.value
+                    opts = {k:v for k,v in people_options.items() if not category.value or category.value in permits.get(k,())}
+                    vehicle = inputs["entry_type"].value=="vehicle"
+                    eqs = {r["name"]:r for r in references if r["kind"]=="equipment" and r["organization_id"]==org.value
+                           and r["equipment_category"] and r["licence_kind"] and r["licence_mark"]}
+                    historic = not new and inputs["work_date"].value==row["work_date"]
+                    if historic and row["equipment"]:
+                        eqs.setdefault(row["equipment"],{})
+                    def allowed(person,name):
+                        if historic and (person,name)==(row["employee"],row["equipment"]):
+                            return True
+                        r = eqs.get(name)
+                        rights = permits.get(person,())
+                        return bool(r and r["equipment_category"] in rights and r["licence_kind"]+":"+r["licence_mark"] in rights)
+                    who = who if who in opts else None
+                    which = which if vehicle and which in eqs else None
+                    if who and which and not allowed(who,which):
+                        if prefer=="equipment" and org.value in managed_orgs:
+                            who=None
+                        else:
+                            which=None
+                    possible_people = {k:v for k,v in opts.items() if not which or allowed(k,which)}
+                    possible_eqs = sorted(k for k in eqs if not who or allowed(who,k))
+                    if driver.options!=possible_people or driver.value!=who:
+                        driver.set_options(possible_people,value=who)
+                    if machine.options!=possible_eqs or machine.value!=which:
+                        machine.set_options(possible_eqs,value=which)
+                    msg = ("Нет сотрудников с подходящими допусками на дату смены." if which and not possible_people else
+                           "Нет подходящей техники. Проверьте допуски сотрудника и требования в карточке техники." if who and not possible_eqs else "")
+                    no_match.set_text(msg)
+                    no_match.set_visibility(vehicle and bool(msg))
+                finally:
+                    pairing = False
 
-            category.on_value_change(filter_people)
-            inputs["entry_type"].on_value_change(set_entry_type)
+            async def date_changed():
+                scope,day = org.value,inputs["work_date"].value
+                if not scope or not day:
+                    return
+                marks = await call(journal.qualifications,scope,work_date=day)
+                if (scope,day)==(org.value,inputs["work_date"].value):
+                    permits.clear()
+                    permits.update(marks)
+                    pair()
+
+            category.on_value_change(lambda:pair())
+            inputs["employee"].on_value_change(lambda:pair("employee"))
+            inputs["equipment"].on_value_change(lambda:pair("equipment"))
+            inputs["work_date"].on_value_change(date_changed)
+            def entry_changed():
+                set_entry_type()
+                pair()
+            inputs["entry_type"].on_value_change(entry_changed)
 
             async def choose_organization():
+                nonlocal pairing
                 selected_org = org.value
                 manager = selected_org in managed_orgs
                 save_button.disable()
@@ -287,11 +349,17 @@ def render_work_shifts(state: PageState) -> None:
                     for button in buttons:
                         button.set_visibility(manager)
                 people = await call(journal.users, organization_id=selected_org) if selected_org else {}
+                marks = await call(journal.qualifications,selected_org,work_date=inputs["work_date"].value) if selected_org else {}
                 if org.value != selected_org:
                     return
                 if row.get("employee") and row["employee"] not in people:
                     people[row["employee"]] = row["employee_name"] + " (архив)"
-                current = row.get("employee") or (state.current_user or {}).get("username")
+                people_options.clear()
+                people_options.update(people)
+                permits.clear()
+                permits.update(marks)
+                pairing=True
+                current = row.get("employee") or (None if manager else (state.current_user or {}).get("username"))
                 inputs["employee"].set_options(people, value=current if current in people else None)
                 inputs["employee"].set_enabled(manager)
                 category.set_visibility(manager)
@@ -308,6 +376,8 @@ def render_work_shifts(state: PageState) -> None:
                 for key in ("organization", "equipment", "workplace", "partner"):
                     set_reference(key, row.get(key) or None)
                 set_entry_type()
+                pairing=False
+                pair()
                 await refresh_rates()
                 save_button.set_text("Сохранить" if manager else "Сохранить и отправить")
                 save_button.set_enabled(bool(selected_org))
@@ -420,6 +490,28 @@ def render_work_shifts(state: PageState) -> None:
         offset = max(0, offset + delta * 50)
         await refresh()
 
+    async def load_journal():
+        root = Path(__file__).resolve().parents[3]
+        path = root / (state.cfg.get("work_shifts_db_path") or "data/work_shifts.db")
+        auth = await run.io_bound(_get_auth_db, state)
+        return await run.io_bound(WorkShiftJournal, path, auth)
+
+    financial = bool(state.current_user and state.current_user.get("is_payroll_owner"))
+    if not can_use_shifts(state.current_user):
+        if financial:
+            async def payroll_only():
+                nonlocal journal
+                try:
+                    if journal is None:
+                        journal = await load_journal()
+                    await open_payroll(journal, call, error)
+                except Exception as exc:
+                    error(exc)
+
+            ui.label("Зарплата").classes("text-xl font-semibold")
+            ui.button("Расчёт за месяц", icon="payments", on_click=payroll_only)
+        return
+
     with ui.column().classes("w-full min-w-0 gap-4"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Смены и путевые листы").classes("text-xl font-semibold")
@@ -430,6 +522,8 @@ def render_work_shifts(state: PageState) -> None:
                 if admin:
                     ui.button("Управление", icon="manage_accounts", on_click=lambda: show_shift_administration(state, journal))
                     ui.button("Табель",icon="calendar_month", on_click=lambda: show_month_sheet(journal,call,error))
+                if financial:
+                    ui.button("Расчёт за месяц",icon="payments",on_click=lambda:open_payroll(journal,call,error))
         with ui.row().classes("w-full items-end gap-3"):
             start = ui.input("С", value=date.today().replace(day=1).isoformat()).props("type=date")
             end = ui.input("По", value=date.today().isoformat()).props("type=date")
@@ -471,12 +565,7 @@ def render_work_shifts(state: PageState) -> None:
     async def initialize():
         nonlocal journal, users, managed_orgs
         try:
-            root = Path(__file__).resolve().parents[3]
-            path = Path(state.cfg.get("work_shifts_db_path") or root / "data" / "work_shifts.db")
-            if not path.is_absolute():
-                path = root / path
-            auth = await run.io_bound(_get_auth_db, state)
-            journal = await run.io_bound(WorkShiftJournal, path, auth)
+            journal = await load_journal()
             users = await call(journal.users)
             managed_orgs = await call(journal.organizations, manage=True)
             employee_filter.set_options({"": "Все сотрудники", **users})
