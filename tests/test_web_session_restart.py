@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from nicegui.storage import Storage
-from nicegui.testing.general import nicegui_reset_globals
 
 from rag_catalog.ui.auth_session import BrowserSessionStorage
 from scripts.pilot_ui_smoke import SRC, _browser_executable, _free_port, _prepare_contour, _wait_http
@@ -92,8 +91,13 @@ def test_cookie_restores_login_after_simulation_and_restart(tmp_path):
             assert Storage.path != server_storage
             persisted = set(server_storage.glob("storage-user-*.json"))
             assert persisted
-            with nicegui_reset_globals():
-                pass
+            # Simulate a separate test runner without clearing this runner's API routes.
+            subprocess.run(
+                [sys.executable, "-c", "from nicegui.testing.general import nicegui_reset_globals\n"
+                 "with nicegui_reset_globals(): pass"],
+                cwd=tmp_path, check=True, timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             assert all(p.is_file() for p in persisted)
 
             with running():
