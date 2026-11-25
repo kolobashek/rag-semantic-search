@@ -152,6 +152,44 @@ def test_reset_link_replaces_previous_invitation(db):
     assert not db.activate_account(token=replacement["token"], new_password="replayed-password")["ok"]
 
 
+def test_temporary_password_replaces_recovery_for_verified_user(db):
+    assert db.admin_create_user(username="returning", password="original-password", roles=["driver"])
+    link = db.create_account_activation(username="returning", display_name="", created_by="admin", reset_existing=True)
+    assert link["ok"]
+    assert db.admin_set_password(username="returning", new_password="temporary-password")
+    user = db.login_with_reason(username="returning", password="temporary-password")["user"]
+    assert user and user["must_change_password"] and user["roles"] == ["driver"]
+    assert not db.activate_account(token=link["token"], new_password="unwanted-password")["ok"]
+    assert db.change_password(username="returning", old_password="temporary-password", new_password="personal-password")
+    assert not db.login(username="returning", password="temporary-password")
+    assert not db.login(username="returning", password="personal-password")["must_change_password"]
+
+
+def test_temporary_password_cannot_replace_first_invitation_or_unblock(db):
+    link = invite(db)
+    assert not db.admin_set_password(username="staff", new_password="temporary-password")
+    assert db.activate_account(token=link["token"], new_password="personal-password")["ok"]
+    assert db.admin_create_user(username="blocked", password="original-password", status="blocked")
+    assert not db.admin_set_password(username="blocked", new_password="temporary-password")
+    assert db.get_user(username="blocked")["status"] == "blocked"
+
+
+@pytest.mark.parametrize("change", ["expired", "bound", "used"])
+def test_temporary_password_requires_current_unbound_recovery(db, change):
+    assert db.admin_create_user(username="returning", password="original-password", roles=["driver"])
+    link = db.create_account_activation(username="returning", display_name="", created_by="admin", reset_existing=True)
+    assert link["ok"]
+    with db._connect() as conn:
+        if change == "expired":
+            conn.execute("UPDATE account_activations SET expires_at='2000-01-01' WHERE username='returning'")
+        elif change == "bound":
+            conn.execute("UPDATE account_activations SET bound_provider='telegram' WHERE username='returning'")
+        else:
+            conn.execute("UPDATE account_activations SET used_at=created_at WHERE username='returning'")
+    assert not db.admin_set_password(username="returning", new_password="temporary-password")
+    assert db.get_user(username="returning")["status"] == "pending"
+
+
 @pytest.mark.parametrize("target", ["missing", "blocked"])
 def test_reset_does_not_create_or_unblock_accounts(db, target):
     if target == "blocked":

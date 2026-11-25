@@ -322,12 +322,20 @@ def render_settings_screen(
                         if "admin" not in user_roles(auth_db.get_user_by_session(state.auth_token)):
                             ui.notify("Недостаточно прав", type="negative")
                             return
+                        password = str(reset_password.value or "")
+                        if not 8 <= len(password) <= 128 or not password.strip():
+                            ui.notify("Временный пароль должен содержать от 8 до 128 символов и не состоять из пробелов.", type="warning")
+                            return
                         ok = auth_db.admin_set_password(
                             username=username,
-                            new_password=str(reset_password.value or ""),
+                            new_password=password,
                             must_change_password=True,
                         )
-                        ui.notify("Пароль обновлен." if ok else "Введите новый пароль.", type="positive" if ok else "warning")
+                        if not ok:
+                            ui.notify("Пароль не изменён. Проверьте статус сотрудника. Для активации используйте приглашение в кабинет.", type="warning")
+                            return
+                        reset_password.set_value("")
+                        ui.notify("Временный пароль установлен. При входе на сайт сотрудник задаст свой пароль.", type="positive")
                         render_fn()
 
                     user_actions = ui.row().classes("rag-dirty-actions")

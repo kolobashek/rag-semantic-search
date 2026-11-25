@@ -234,6 +234,34 @@ def test_invited_driver_only_sees_personal_telegram_and_public_qr(office, pages,
     employee.get_by_text("Telegram привязан к сотруднику web-invited.", exact=True).wait_for()
 
 
+def test_admin_temporary_password_after_recovery_then_fresh_web_login(office, pages):
+    browser, url, auth, password = office
+    admin, employee = pages
+    username = "recovery-web-driver"
+    assert auth.admin_create_user(username=username, password=password, roles=["driver"])
+    assert auth.create_account_activation(username=username, display_name="", created_by="pilot-smoke-admin",
+                                          reset_existing=True)["ok"]
+    sign_in(admin, url, "pilot-smoke-admin", password)
+    admin.get_by_role("button", name="Сотрудники").wait_for()
+    admin.goto(url + "/settings")
+    admin.get_by_text("Пользователи", exact=True).click()
+    admin.get_by_text(f"{username} · driver · pending", exact=False).click()
+    admin.get_by_label("Новый временный пароль", exact=True).locator("visible=true").fill("temporary-driver-pass")
+    admin.get_by_role("button", name="Сбросить пароль", exact=True).click()
+    admin.get_by_text("Временный пароль установлен.", exact=False).wait_for()
+    sign_in(employee, url, username, "temporary-driver-pass")
+    employee.get_by_label("Текущий пароль", exact=True).fill("temporary-driver-pass")
+    employee.get_by_label("Новый пароль", exact=True).fill("my-personal-driver-pass")
+    employee.get_by_label("Повторите новый пароль", exact=True).fill("my-personal-driver-pass")
+    employee.get_by_role("button", name="Сменить пароль").click()
+    employee.get_by_role("button", name="Аккаунт Telegram").wait_for()
+    with browser.new_context() as fresh:
+        page = fresh.new_page()
+        sign_in(page, url, username, "my-personal-driver-pass")
+        page.get_by_role("button", name="Аккаунт Telegram").wait_for()
+        assert not page.get_by_role("button", name="Сотрудники").is_visible()
+
+
 def test_scoped_admin_approves_web_application_with_default_driver(office, pages):
     _, url, auth, password = office
     admin, employee = pages

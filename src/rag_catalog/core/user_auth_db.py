@@ -1848,20 +1848,32 @@ class UserAuthDB(EmployeeOnboarding):
 
     def admin_set_password(self, *, username: str, new_password: str, must_change_password: bool = True) -> bool:
         usr = (username or "").strip().lower()
-        if not usr or not new_password:
+        if not usr or not isinstance(new_password, str) or not 8 <= len(new_password) <= 128 or not new_password.strip():
             return False
+        password_hash = _hash_password(new_password)
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                now = _utc_now()
+                # A verified employee awaiting web recovery can switch to a temporary
+                # password. Do not approve a new registration or reactivate a blocked user.
                 cur = conn.execute(
-                    "UPDATE users SET password_hash=?, must_change_password=? WHERE username=?",
-                    (_hash_password(new_password), 1 if must_change_password else 0, usr),
+                    """UPDATE users SET password_hash=?,
+                       must_change_password=CASE WHEN status='pending' THEN 1 ELSE ? END, status='active'
+                       WHERE username=? AND (status='active' OR
+                           (status='pending' AND verified_at IS NOT NULL AND verified_at<>''
+                            AND must_change_password=1 AND EXISTS (
+                                SELECT 1 FROM account_activations a WHERE a.username=users.username
+                                AND a.used_at IS NULL AND a.expires_at>? AND a.bound_provider='')))""",
+                    (password_hash, int(bool(must_change_password)), usr, now),
                 )
                 if not cur.rowcount:
                     return False
+                conn.execute("DELETE FROM account_activations WHERE username=? AND used_at IS NULL", (usr,))
                 for provider in ("telegram", "max"):
                     self._revoke_employee_channel(conn, usr, provider)
                 conn.execute("UPDATE user_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
-                             (_utc_now(), usr))
+                             (now, usr))
                 return True
 
     def admin_create_user(
