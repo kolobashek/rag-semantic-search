@@ -1304,24 +1304,6 @@ def _filter_cd_name_matches(
     return allowed_folders, allowed_files
 
 
-def _cd_file_jobs_map(registry: "Any", file_ids: "list[str]") -> "Dict[str, Dict[str, str]]":
-    """Single query: returns {file_id: {status, job_type, last_error}} for latest job per file."""
-    if not file_ids:
-        return {}
-    try:
-        jobs = registry.list_latest_jobs_for_files(file_ids, job_types=["reindex", "cleanup", "ocr", "preview"])
-        return {
-            str(file_id): {
-                "status": str(job.status or ""),
-                "job_type": str(job.job_type or ""),
-                "last_error": str(job.last_error or ""),
-            }
-            for file_id, job in jobs.items()
-        }
-    except Exception:
-        return {}
-
-
 def _cd_acl_allows(cfg: Dict[str, Any], user: Dict[str, Any] | None, path: str) -> bool:
     """Opt-in Cloud Drive ACL hook.
 

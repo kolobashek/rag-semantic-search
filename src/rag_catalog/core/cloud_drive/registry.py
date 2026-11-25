@@ -351,6 +351,7 @@ class CloudDriveRegistryDB:
                     CREATE INDEX IF NOT EXISTS idx_cloud_share_links_resource ON cloud_share_links(resource_type, resource_id);
                     CREATE INDEX IF NOT EXISTS idx_cloud_import_sources_enabled ON cloud_import_sources(enabled, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_status ON cloud_jobs(status, job_type, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_cloud_jobs_file_latest ON cloud_jobs(file_id, created_at DESC, id DESC);
                     CREATE INDEX IF NOT EXISTS idx_cloud_jobs_lease ON cloud_jobs(status, lease_until, next_run_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_clients_username ON cloud_sync_clients(username, status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_cloud_sync_pairs_client ON cloud_sync_pairs(client_id, enabled, cloud_path);
@@ -2455,29 +2456,37 @@ class CloudDriveRegistryDB:
         *,
         job_types: Optional[List[str]] = None,
     ) -> Dict[str, CloudDriveJob]:
-        ids = [str(file_id or '').strip() for file_id in file_ids if str(file_id or '').strip()]
-        if not ids:
-            return {}
-        types = [str(job_type or '').strip() for job_type in (job_types or ['reindex', 'cleanup', 'ocr', 'preview']) if str(job_type or '').strip()]
-        id_placeholders = ','.join('?' for _ in ids)
-        type_placeholders = ','.join('?' for _ in types)
-        params = [*ids, *types]
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT j.*
-                FROM cloud_jobs j
-                INNER JOIN (
-                    SELECT file_id, MAX(created_at) AS max_ts
-                    FROM cloud_jobs
-                    WHERE file_id IN ({id_placeholders})
-                      AND job_type IN ({type_placeholders})
-                    GROUP BY file_id
-                ) latest ON j.file_id = latest.file_id AND j.created_at = latest.max_ts
-                """,
-                params,
-            ).fetchall()
+        rows = self._latest_file_job_rows(file_ids, job_types=job_types, badges=False)
         return {str(row['file_id']): self._job_from_row(row) for row in rows}
+
+    def file_job_badges(self, file_ids: List[str]) -> Dict[str, Dict[str, str]]:
+        rows = self._latest_file_job_rows(file_ids, job_types=None, badges=True)
+        return {row["file_id"]: {key: row[key] for key in ("status", "job_type", "last_error")} for row in rows}
+
+    def _latest_file_job_rows(self, file_ids, *, job_types, badges):
+        ids = list(dict.fromkeys(str(file_id).strip() for file_id in file_ids if str(file_id or '').strip()))
+        if not ids:
+            return []
+        types = [str(job_type or '').strip() for job_type in (job_types or ['reindex', 'cleanup', 'ocr', 'preview']) if str(job_type or '').strip()]
+        if not types:
+            return []
+        type_placeholders = ','.join('?' for _ in types)
+        columns = "j.file_id, j.status, j.job_type, substr(j.last_error,1,160) AS last_error" if badges else "j.*"
+        with self._connect() as conn:
+            # Drive the lookup from the visible ids, not from the full job history.
+            return conn.execute(
+                f"""
+                SELECT {columns}
+                FROM json_each(?) AS wanted CROSS JOIN cloud_jobs AS j
+                WHERE j.rowid = (
+                    SELECT rowid FROM cloud_jobs
+                    WHERE file_id = wanted.value
+                      AND job_type IN ({type_placeholders})
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                )
+                """,
+                (json.dumps(ids), *types),
+            ).fetchall()
 
     def update_job(
         self,

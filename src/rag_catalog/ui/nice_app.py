@@ -47,6 +47,7 @@ from .auth_session import (
 )
 from .css import INTERACTION_JS_PATH, USAGE_JS_PATH, _install_css, _install_interaction_javascript
 from .employee_access import open_employee_desk, open_telegram_account
+from .file_job_badges import FileJobBadges
 from .helpers import (
     FILE_PREVIEW_EXTENSIONS,
     INLINE_IMAGE_EXTENSIONS,
@@ -55,7 +56,6 @@ from .helpers import (
     _cached_searcher_if_ready,
     _cd_acl_allows_local_file,
     _cd_acl_result_filter,
-    _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
     _cd_registry_node_for_search_item,
@@ -2119,7 +2119,7 @@ def _build_page(
             state.selection_summary_loading = False
         render()
 
-    def render_result(result: Dict[str, Any], index: int, cloud_jobs: Optional[Dict[str, Dict[str, str]]] = None) -> None:
+    def render_result(result: Dict[str, Any], index: int, badges: FileJobBadges) -> None:
         name = str(result.get("filename") or "Без имени")
         path = str(result.get("path") or "")
         full_path = str(result.get("full_path") or "")
@@ -2135,12 +2135,11 @@ def _build_page(
         cloud_path = str(result.get("cloud_path") or "")
         archive_member = str(result.get("archive_member") or (full_path.split("::", 1)[1] if "::" in full_path else ""))
         is_cloud_result = bool(cloud_file_id or cloud_path)
-        cloud_job = (cloud_jobs or {}).get(cloud_file_id) if cloud_file_id else None
 
         def go_cloud_explorer(cloud_item_path: str) -> None:
             go_cloud_explorer_path(cloud_item_path, is_folder=kind == "Каталог")
 
-        def render_cloud_job_badge() -> None:
+        def render_cloud_job_badge(cloud_job) -> None:
             if not cloud_job:
                 return
             status = str(cloud_job.get("status") or "")
@@ -2252,7 +2251,7 @@ def _build_page(
                         if cloud_version_id:
                             v_label = ui.label(f"v {cloud_version_id[:8]}").classes("rag-chip")
                             v_label.tooltip(f"Cloud Drive version_id: {cloud_version_id}")
-                        render_cloud_job_badge()
+                        badges.place(cloud_file_id, render_cloud_job_badge)
                     chip_text = kind
                     if chunk_index is not None:
                         chip_text += f" · фр.{chunk_index}"
@@ -2716,32 +2715,23 @@ def _build_page(
                 _all_groups.append((_r, []))
 
         groups_to_show = _all_groups[: state.displayed_count]
-        to_show_flat = [r for grp, extras in groups_to_show for r in [grp, *extras]]
+        badges = FileJobBadges()
 
-        cloud_result_jobs: Dict[str, Dict[str, str]] = {}
-        cloud_file_ids = [
-            str(r.get("cloud_file_id") or "")
-            for r in to_show_flat
-            if str(r.get("cloud_file_id") or "")
-        ]
-        if cloud_file_ids:
-            try:
-                svc = _cd_get_service(state.cfg)
-                if svc:
-                    cloud_result_jobs = _cd_file_jobs_map(svc.registry, list(dict.fromkeys(cloud_file_ids)))
-            except Exception:
-                cloud_result_jobs = {}
+        def read_badges(ids):
+            svc = _cd_get_service(state.cfg)
+            return svc.registry.file_job_badges(ids) if svc else {}
 
         with ui.column().classes("w-full gap-3"):
             for idx, (primary, extras) in enumerate(groups_to_show, 1):
-                render_result(primary, idx, cloud_result_jobs)
+                render_result(primary, idx, badges)
                 if extras:
                     with ui.expansion(f"{len(extras)} дополн. фрагм.", icon="unfold_more").classes(
                         "w-full border border-slate-200 dark:border-slate-700 rounded-lg -mt-2 mb-1 text-xs text-slate-500"
                     ):
                         with ui.column().classes("w-full gap-3 pt-1"):
                             for extra in extras:
-                                render_result(extra, idx, cloud_result_jobs)
+                                render_result(extra, idx, badges)
+        badges.schedule(read_badges)
 
         # Кнопка «Загрузить ещё»
         remaining_groups = len(_all_groups) - state.displayed_count

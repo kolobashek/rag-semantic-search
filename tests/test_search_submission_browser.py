@@ -19,6 +19,10 @@ def test_search_recovers_in_same_tab_after_index_becomes_available(tmp_path):
     except RuntimeError as exc:
         pytest.skip(str(exc))
     contour = _prepare_contour(tmp_path, qdrant_url='')
+    registry = contour['cloud_drive_service'].registry
+    card = registry.get_file_by_path('Документы/Карточка предприятия.txt')
+    assert card is not None
+    registry.queue_job(job_type='preview', status='failed', file_id=card.id)
     config = contour['config']
     config.update(qdrant_url='', qdrant_db_path=str(tmp_path / 'vectors'), embedding_collection_versioning=False)
     Path(contour['config_path']).write_text(json.dumps(config), encoding='utf-8')
@@ -85,6 +89,7 @@ nice_app.ui.run(host='127.0.0.1', port=int(sys.argv[1]), reload=False, show=Fals
                     folder.screenshot(path=str(tmp_path / 'folder-before.png'))
                     folder.dblclick(position={'x': 600, 'y': 20})
                     page.get_by_role('button', name='Карточка предприятия.txt', exact=True).wait_for()
+                    page.locator('.cd-status-badge', has_text='Ошибка preview').first.wait_for()
                     page.get_by_role('button', name='Поиск', exact=True).click()
                     box = page.locator('.rag-search-box input:not([type=checkbox]):visible').first
                     box.fill('Договор')
@@ -103,6 +108,7 @@ nice_app.ui.run(host='127.0.0.1', port=int(sys.argv[1]), reload=False, show=Fals
                     box.fill('Карточка предприятия')
                     box.press('Enter')
                     result = page.locator('.rag-result', has_text='Карточка предприятия.txt').first
+                    result.locator('.cd-status-badge', has_text='Ошибка preview').wait_for()
                     result.get_by_role('button', name='В Cloud Drive', exact=True).click()
                     page.get_by_role('button', name='Карточка предприятия.txt', exact=True).wait_for()
                     page.screenshot(path=str(tmp_path / 'explorer-location.png'), full_page=True)

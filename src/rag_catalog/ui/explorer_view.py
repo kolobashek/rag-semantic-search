@@ -19,12 +19,12 @@ from urllib.parse import quote
 from nicegui import events, run, ui
 
 from rag_catalog.core.cloud_drive import CloudDriveService
+from .file_job_badges import FileJobBadges
 
 from .helpers import (
     PAGE_SIZE,
     _apply_explorer_filter_input,
     _cd_breadcrumb_chain,
-    _cd_file_jobs_map,
     _cd_file_size,
     _cd_get_service,
     _cd_list_children,
@@ -1484,9 +1484,7 @@ def render_explorer_screen(
                 return "Считается..."
             return _cd_file_size(int(child_folder_sizes.get(str(folder.id), 0) or 0))
 
-        # Per-file job status map (single DB query for the current page)
-        _page_file_ids = [f.id for f in page_files]
-        _file_jobs = _cd_file_jobs_map(svc.registry, _page_file_ids)
+        badges = FileJobBadges()
 
         _JOB_ICON = {"pending": "hourglass_empty", "running": "sync", "completed": "check_circle", "failed": "error_outline"}
         _JOB_CSS  = {"pending": "cd-status-pending", "running": "cd-status-running", "completed": "cd-status-done", "failed": "cd-status-error"}
@@ -1503,8 +1501,10 @@ def render_explorer_screen(
             "preview": {"pending": "Preview в очереди", "running": "Создание preview…", "completed": "Preview готов", "failed": "Ошибка preview"},
         }
 
-        def _render_file_status(file_id: str) -> None:
-            job = _file_jobs.get(file_id)
+        def _render_file_status(job, *, table=False) -> None:
+            if table and job and job.get("status") == "completed":
+                ui.label("✓").classes("rag-file-table-index-ok")
+                return
             if not job:
                 return
             status = job.get("status", "")
@@ -1944,7 +1944,7 @@ def render_explorer_screen(
                                             on_click=lambda url=download_url: ui.navigate.to(url, new_tab=True),
                                             color=None,
                                         ).props("flat round dense").tooltip("Скачать файл")
-                                    _render_file_status(f.id)
+                                    badges.place(f.id, _render_file_status)
                                     with ui.button(icon="more_vert", color=None).props("flat round dense"):
                                         with ui.menu():
                                             ui.menu_item(
@@ -2060,10 +2060,7 @@ def render_explorer_screen(
                                 ui.label(_cd_file_size(f.size_bytes) if f.size_bytes else "—").classes("rag-meta text-xs")
                                 ui.label("admin").classes("rag-meta text-xs")
                                 with ui.element("div").classes("rag-file-table-index"):
-                                    if _file_jobs.get(f.id):
-                                        _render_file_status(f.id)
-                                    else:
-                                        ui.label("✓").classes("rag-file-table-index-ok")
+                                    badges.place(f.id, lambda job: _render_file_status(job, table=True))
                                 with ui.element("div").classes("rag-file-table-actions"):
                                     ui.button(
                                         icon="history",
@@ -2174,6 +2171,7 @@ def render_explorer_screen(
                         label="Перетащите файлы сюда для загрузки",
                     ).props("flat bordered").classes("w-full cd-drop-zone")
 
+        badges.schedule(svc.registry.file_job_badges)
         if folder_size_ids and folder_sizes_need_refresh and not page_state.explorer_folder_size_loading:
             requested_path = str(page_state.explorer_cd_path or "")
             requested_ids = list(folder_size_ids)

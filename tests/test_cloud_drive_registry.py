@@ -12,6 +12,47 @@ from rag_catalog.core.cloud_drive.service import CloudDriveJobCancelled, CloudDr
 from rag_catalog.core.cloud_drive.storage import LocalStorageAdapter
 
 
+def test_latest_file_jobs_use_per_file_index_and_do_not_decode_badge_payload(tmp_path, monkeypatch):
+    registry = CloudDriveRegistryDB(str(tmp_path / "cloud.db"))
+    with registry._connect() as conn:
+        conn.executemany(
+            """INSERT INTO cloud_jobs(id,job_type,status,file_id,payload_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?)""",
+            [
+                ("1", "reindex", "running", "a", "{}", "2026-01", ""),
+                ("2", "ocr", "completed", "a", '{"marker":true}', "2026-01", ""),
+                ("3", "unrelated", "pending", "a", "{}", "2026-01", ""),
+                ("4", "preview", "failed", "b", "not JSON", "2026-02", ""),
+            ],
+        )
+        conn.execute("UPDATE cloud_jobs SET last_error=? WHERE id='4'", ("x" * 250,))
+
+    assert registry.list_latest_jobs_for_files(["a"])["a"].id == "2"
+    assert registry.list_latest_jobs_for_files(["a"], job_types=["reindex"])["a"].id == "1"
+    with registry._connect() as conn:
+        conn.execute("DROP INDEX idx_cloud_jobs_file_latest")
+    registry = CloudDriveRegistryDB(str(registry.db_path))  # existing installations also get the index
+    statements = []
+    connect = registry._connect
+
+    def traced():
+        conn = connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(registry, "_connect", traced)
+    badges = registry.file_job_badges(["a", "a", "b", "missing"])
+    assert badges == {
+        "a": dict(status="completed", job_type="ocr", last_error=""),
+        "b": dict(status="failed", job_type="preview", last_error="x" * 160),
+    }
+    assert len(statements) == 1
+    with connect() as conn:
+        plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    assert any("idx_cloud_jobs_file_latest" in p and "SEARCH" in p for p in plan)
+    assert not any("SCAN cloud_jobs" in p or "SCAN j " in p or "TEMP B-TREE" in p for p in plan)
+
+
 def test_existing_home_folder_does_not_write_on_poll(tmp_path):
     registry = CloudDriveRegistryDB(str(tmp_path / 'home.db'))
     home = registry.ensure_user_home_folder(username='driver')

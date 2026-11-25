@@ -13,6 +13,60 @@ from fastapi import FastAPI
 from rag_catalog.ui import api
 
 
+def test_slow_page_badges_allow_range_download_and_ignore_removed_elements(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from rag_catalog.ui.file_job_badges import FileJobBadges
+
+    sample = tmp_path / "file.bin"
+    sample.write_bytes(b"A" * 8192)
+    monkeypatch.setattr(api, "load_config", lambda: {})
+    monkeypatch.setattr(api, "_require_cloud_drive_api_user", lambda *a, **kw: {"username": "test"})
+    monkeypatch.setattr(api, "_require_cloud_drive_path_access", lambda *a, **kw: None)
+    monkeypatch.setattr(api, "_audit_cloud_drive_api_event", lambda *a, **kw: None)
+    service = SimpleNamespace(
+        get_download_descriptor=lambda path: dict(
+            mode="local_file", file_path=sample, mime_type="application/octet-stream", filename=sample.name
+        )
+    )
+    monkeypatch.setattr(api.CloudDriveService, "from_config", lambda _: service)
+    app = FastAPI()
+    app.get("/ping")(api.api_ping)
+    app.get("/download")(api.api_cloud_drive_download)
+    entered, release = threading.Event(), threading.Event()
+    calls, painted = [], []
+
+    def fetch(ids):
+        calls.append(ids)
+        entered.set()
+        assert release.wait(5)
+        return {"a": {"status": "pending"}}
+
+    async def exercise():
+        badges = FileJobBadges()
+        old, current = nullcontext(), nullcontext()
+        old.is_deleted = current.is_deleted = False
+        badges.targets = [("a", old, lambda _: pytest.fail("painted removed element")), ("a", current, painted.append)]
+        pending = asyncio.create_task(badges.load(fetch))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            old.is_deleted = True
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+                ping, first = await asyncio.wait_for(
+                    asyncio.gather(
+                        client.get("/ping"), client.get("/download?path=file.bin", headers={"Range": "bytes=0-4095"})
+                    ),
+                    1,
+                )
+                assert ping.status_code == 200 and first.status_code == 206 and first.content == b"A" * 4096
+                assert not pending.done()
+        finally:
+            release.set()
+            await pending
+        assert calls == [["a"]] and painted == [{"status": "pending"}]
+
+    asyncio.run(exercise())
+
+
 def test_search_usage_record_does_not_copy_query_to_technical_log(monkeypatch, caplog):
     from rag_catalog.ui import state
 
