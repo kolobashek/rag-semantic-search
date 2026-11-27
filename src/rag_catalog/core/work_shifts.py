@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import csv
 import calendar
+import csv
 import io
 import json
 import sqlite3
@@ -116,6 +116,9 @@ def _payload(data: dict) -> dict:
 
 class WorkShiftJournal:
     def __init__(self, path: str | Path, auth_db: Any):
+        from .waybill_documents import migrate as migrate_waybill_documents
+        from .waybill_registers import migrate as migrate_waybill_registers
+
         self.path = Path(path)
         self.auth = auth_db
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,6 +193,8 @@ class WorkShiftJournal:
                 archived INTEGER NOT NULL DEFAULT 0)""")
             ops.migrate(conn)
             shift_payroll.migrate(conn)
+            migrate_waybill_documents(conn)
+            migrate_waybill_registers(conn)
             for kind in (REFERENCE_LABELS if seed_references else ()):
                 for org, value in conn.execute(f"SELECT DISTINCT organization_id,{kind} FROM shifts WHERE {kind}<>''"):
                     conn.execute("INSERT OR IGNORE INTO shift_references(organization_id,kind,name,name_key) VALUES(?,?,?,?)",

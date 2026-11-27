@@ -2,7 +2,7 @@
 
 import json
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from html import escape
 
 UNITS = {"hour": "ч", "km": "км", "trip": "ходка", "ton": "т"}
@@ -215,6 +215,11 @@ def conflicts(conn, rows, scope, params):
                     warnings.add(key[0])
                     break
         row["conflict"] = ", ".join(sorted(warnings))
+
+
+def describe_work_lines(lines):
+    units = {**UNITS, "trip": "ход."}
+    return ", ".join(f'{line["work"]} ({line["quantity"]} {units[line["unit"]]})' for line in lines)
 
 
 def printable_shift(row, status):

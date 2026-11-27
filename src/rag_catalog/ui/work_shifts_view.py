@@ -15,10 +15,11 @@ from rag_catalog.core.shift_attachments import ShiftAttachments
 from rag_catalog.core.shift_operations import CATEGORIES, printable_shift
 from rag_catalog.core.work_shifts import STATUS_LABELS, WorkShiftJournal
 
+from .shift_payroll_view import open_payroll
 from .state import PageState, _get_auth_db, _log_app_event
 from .work_shifts_admin import open_directory_editor, show_month_sheet, show_shift_administration, show_shift_history
+from .work_shifts_documents import show_shift_waybill, show_waybill_library, show_waybill_registers
 from .work_shifts_pay import shift_work_editor
-from .shift_payroll_view import open_payroll
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def render_work_shifts(state: PageState) -> None:
             "edit": status is not None, "submitted": manager and status == "draft", "delete": manager and status is not None,
             "approved": manager and status in {"draft", "submitted"}, "history": status is not None,
             "attachments": status is not None,
+            "waybill": status is not None and row.get("entry_type", "vehicle") == "vehicle",
             "print": status is not None,
             "draft": manager and status in {"submitted", "approved"},
         }
@@ -474,6 +476,11 @@ def render_work_shifts(state: PageState) -> None:
         except Exception as exc:
             error(exc)
 
+    async def issue_waybill():
+        row = selected()
+        if row and journal:
+            await show_shift_waybill(journal, call, row, refresh, error)
+
     async def export():
         if journal is None:
             return
@@ -518,8 +525,14 @@ def render_work_shifts(state: PageState) -> None:
             with ui.row():
                 new_button = ui.button("Новая смена", icon="add", on_click=lambda: edit(new=True)).props("data-rag-usage=shifts.create")
                 new_button.disable()
+                library_button = ui.button("Бланки путевых листов", icon="library_books",
+                                           on_click=lambda: show_waybill_library(journal, call, managed_orgs, error)).props("flat")
+                library_button.disable()
                 ui.button(icon="download", on_click=export).props('flat aria-label="Выгрузить CSV"').tooltip("Выгрузить CSV")
                 if admin:
+                    registers_button = ui.button("Реестры путевых листов", icon="summarize",
+                                                 on_click=lambda: show_waybill_registers(journal, call, managed_orgs, error))
+                    registers_button.disable()
                     ui.button("Управление", icon="manage_accounts", on_click=lambda: show_shift_administration(state, journal))
                     ui.button("Табель",icon="calendar_month", on_click=lambda: show_month_sheet(journal,call,error))
                 if financial:
@@ -553,6 +566,7 @@ def render_work_shifts(state: PageState) -> None:
                 action_buttons["draft"] = ui.button("В черновик", icon="undo", on_click=lambda: change("draft")).props("flat")
             action_buttons["history"] = ui.button(icon="history", on_click=history).props('flat aria-label="История изменений"').tooltip("История изменений")
             action_buttons["attachments"] = ui.button("Путевые листы", icon="attach_file", on_click=attachments).props("flat")
+            action_buttons["waybill"] = ui.button("Оформить путевой лист", icon="description", on_click=issue_waybill).props("flat")
             action_buttons["print"] = ui.button(icon="print",on_click=print_card).props('flat aria-label="Версия для печати"').tooltip("Скачать карточку для печати")
             if admin:
                 action_buttons["delete"] = ui.button(icon="delete", on_click=lambda: change("delete")).props('flat color=negative aria-label="Удалить смену"').tooltip("Удалить смену")
@@ -572,6 +586,9 @@ def render_work_shifts(state: PageState) -> None:
                 payroll_button.enable()
             users = await call(journal.users)
             managed_orgs = await call(journal.organizations, manage=True)
+            library_button.enable()
+            if admin:
+                registers_button.set_enabled(bool(managed_orgs))
             employee_filter.set_options({"": "Все сотрудники", **users})
             new_button.enable()
             await refresh()
