@@ -113,15 +113,20 @@ def render_work_shifts(state: PageState) -> None:
             return None
         return dict(table.selected[0])
 
-    async def edit(new=False):
+    async def edit(new=False, *, shift_id=None, expected_revision=None):
         if journal is None:
             return
-        row = {} if new else selected()
-        if row is None:
-            return
+        row = {}
         try:
             if not new:
-                row = await call(journal.get, row["id"])
+                if shift_id is None:
+                    selection = selected()
+                    if selection is None:
+                        return
+                    shift_id = selection["id"]
+                row = await call(journal.get, shift_id)
+                if expected_revision is not None and row["revision"] != expected_revision:
+                    raise ValueError("Смена уже изменилась. Откройте путевой лист заново.")
             organizations = await call(journal.organizations)
             initial_org = row.get("organization_id") or (next(iter(organizations)) if len(organizations) == 1 else None)
             references = await call(journal.references)
@@ -134,6 +139,8 @@ def render_work_shifts(state: PageState) -> None:
                 inputs = {}
                 inputs["entry_type"] = ui.select({"vehicle": "Смена с техникой", "attendance": "Явка без техники"},
                     label="Вид записи", value=row.get("entry_type","vehicle")).classes("w-full")
+                if expected_revision is not None:
+                    inputs["entry_type"].disable()
                 org = ui.select(organizations, label="Организация журнала", value=initial_org).classes("w-full")
                 org.set_enabled(new and len(organizations) > 1)
                 org.set_visibility(len(organizations) > 1)
@@ -245,9 +252,9 @@ def render_work_shifts(state: PageState) -> None:
                     if not inputs["employee"].value:
                         raise ValueError("Выберите фактического исполнителя")
                     values = {key: field.value for key, field in inputs.items()}
-                    await call(journal.save, dict(values, organization_id=org.value, work_lines=work_lines()),
-                               shift_id=row.get("id"), revision=row.get("revision"),require_equipment_category=True)
-                    dialog.close()
+                    saved = await call(journal.save, dict(values, organization_id=org.value, work_lines=work_lines()),
+                                       shift_id=row.get("id"), revision=row.get("revision"), require_equipment_category=True)
+                    dialog.submit(saved)
                     await refresh()
                     ui.notify("Смена сохранена", type="positive")
                 except Exception as exc:
@@ -267,9 +274,7 @@ def render_work_shifts(state: PageState) -> None:
                 if value:
                     options.add(value)
                 field.set_options(sorted(options), value=value)
-                field.set_enabled(bool(org.value))
-                if key == "organization":
-                    field.set_visibility(org.value == "default")
+                field.set_enabled(bool(org.value) and (key != "organization" or org.value == "default"))
                 if key == "equipment":
                     assigned = inputs["assigned_equipment"]
                     current = assigned.value or row.get("assigned_equipment") or None
@@ -347,9 +352,9 @@ def render_work_shifts(state: PageState) -> None:
                 selected_org = org.value
                 manager = selected_org in managed_orgs
                 save_button.disable()
-                for buttons in add_actions.values():
+                for kind, buttons in add_actions.items():
                     for button in buttons:
-                        button.set_visibility(manager)
+                        button.set_visibility(manager and (kind != "organization" or selected_org == "default"))
                 people = await call(journal.users, organization_id=selected_org) if selected_org else {}
                 marks = await call(journal.qualifications,selected_org,work_date=inputs["work_date"].value) if selected_org else {}
                 if org.value != selected_org:
@@ -386,7 +391,7 @@ def render_work_shifts(state: PageState) -> None:
 
             org.on_value_change(choose_organization)
             await choose_organization()
-        dialog.open()
+        return await dialog
 
     async def change(action):
         row = selected()
@@ -479,7 +484,7 @@ def render_work_shifts(state: PageState) -> None:
     async def issue_waybill():
         row = selected()
         if row and journal:
-            await show_shift_waybill(journal, call, row, refresh, error)
+            await show_shift_waybill(journal, call, row, edit, row["organization_id"] in managed_orgs, refresh, error)
 
     async def export():
         if journal is None:

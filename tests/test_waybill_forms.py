@@ -52,6 +52,37 @@ def test_invalid_values_rejected_before_excel_rendering():
         validate_values("unknown", {})
 
 
+@pytest.mark.parametrize(("form_id", "distance", "km_readings"), [
+    ("manipulator_distance", True, True),
+    ("manipulator_hours", False, False),
+    ("loader_distance", True, True),
+    ("bulldozer_distance", True, True),
+    ("excavator_mixed", False, True),
+    ("bulldozer_mixed", False, True),
+    ("dump_truck_mixed", False, True),
+])
+def test_machine_form_preserves_units_for_readings_and_work_separately(form_id, distance, km_readings):
+    counter = "odometer" if km_readings else "meter"
+    total = "distance" if distance else "meter_hours"
+    fields = form_fields(form_id)
+    assert set(fields) & {"distance", "meter_hours"} == {total}
+    if km_readings:
+        assert fields["odometer_start"].endswith("км") and fields["odometer_end"].endswith("км")
+    values = {counter + "_start": "12001", counter + "_end": "12046", total: "45" if distance else "7,5",
+              "hours": "8"}
+    sheet = load_workbook(BytesIO(render_form(form_id, values))).active
+    assert ("спидометра" in sheet["E11"].value) == km_readings
+    assert ("Пробег" in sheet["F11"].value) == distance
+    assert "осмотрел и принял" in sheet["G49"].value
+    if form_id.startswith("manipulator_"):
+        assert "манипулятором" in sheet["A2"].value
+        assert sheet["A51"].value == "Грузовой автомобиль принял"
+        assert sheet["I52"].value == "(подпись водителя)"
+        assert sheet["A51"].alignment.wrap_text and sheet["G51"].alignment.wrap_text
+    assert (sheet["E15"].value, sheet["E16"].value, sheet["F15"].value, sheet["J25"].value) == (
+        "12001", "12046", "45" if distance else "7,5", "8")
+
+
 def test_printed_forms_remain_independent_between_requests():
     assert "Второй" in str(load_workbook(BytesIO(render_form("grader", {"employee_name": "Второй"}))).active["A7"].value)
     assert "Второй" not in str(load_workbook(BytesIO(render_form("grader", {}))).active["A7"].value)

@@ -47,6 +47,8 @@ _LABELS = {
     "idle_hours": "Время простоя",
     "meter_start": "Показание счётчика при выезде",
     "meter_end": "Показание счётчика при возвращении",
+    "odometer_start": "Показание спидометра при выезде, км",
+    "odometer_end": "Показание спидометра при возвращении, км",
     "meter_hours": "Наработка моточасов",
     "fuel_grade": "Марка топлива",
     "fuel_issued": "Топливо выдано, л",
@@ -57,11 +59,14 @@ _LABELS = {
     "cargo": "Наименование груза",
     "trips": "Количество ездок",
     "tonnes": "Масса груза, т",
+    "planned_trips": "Ездок по заданию",
+    "actual_trips": "Выполнено ездок",
+    "actual_tonnes": "Перевезено по факту, т",
     "comment": "Особые отметки",
 }
 
 
-def _machine(sheet: str, header_rows: int = 1, *, odometer: bool = False) -> _Form:
+def _machine(sheet: str, header_rows: int = 1, *, meter: str = "meter", total: str = "meter_hours") -> _Form:
     # The dozer source has an extra date row above the validity period.
     def row(n: int) -> int:
         return n + header_rows
@@ -75,9 +80,9 @@ def _machine(sheet: str, header_rows: int = 1, *, odometer: bool = False) -> _Fo
         f"{'F' if header_rows else 'D'}{row(8)}": "Удостоверение № {licence_number}    Дата выдачи {licence_date}",
         f"D{row(14)}": "{time_from}",
         f"D{row(15)}": "{time_to}",
-        f"E{row(14)}": "{meter_start}",
-        f"E{row(15)}": "{meter_end}",
-        f"F{row(14)}": "{distance}" if odometer else "{meter_hours}",
+        f"E{row(14)}": "{" + meter + "_start}",
+        f"E{row(15)}": "{" + meter + "_end}",
+        f"F{row(14)}": "{" + total + "}",
         f"G{row(14)}": "{fuel_grade}",
         f"H{row(14)}": "{fuel_issued}",
         f"J{row(14)}": "{fuel_start}",
@@ -104,7 +109,7 @@ _FORMS = {
     "backhoe": _machine("Экскаватор-погрузчик"),
     "tractor": _machine("Трактор"),
     "crane": _machine("Автокран"),
-    "dump_truck": _machine("Самосвал (пробег)", odometer=True),
+    "dump_truck": _machine("Самосвал (пробег)", total="distance"),
     "dump_truck_hours": _machine("Самосвал (моточасы)"),
     "truck_4p": _Form(
         "Грузовой автомобиль (4-П)",
@@ -115,7 +120,7 @@ _FORMS = {
             "Q7": "{organization}", "P13": "{equipment}", "Z14": "{registration_number}",
             "CF14": "{fleet_number}", "I15": "{employee_name}", "AB17": "{licence_number}",
             "BH17": "{licence_date}", "Q18": "{insurance_number}", "A33": "{partner}",
-            "FJ14": "{time_from}", "FJ15": "{time_to}", "BW33": "{hours}", "EX14": "{meter_start}",
+            "FJ14": "{time_from}", "FJ15": "{time_to}", "BW33": "{hours}", "CF33": "{planned_trips}", "EX14": "{meter_start}",
             "EX15": "{meter_end}", "CS25": "{fuel_grade}", "DM25": "{fuel_issued}",
             "DW25": "{fuel_start}", "EF25": "{fuel_end}", "EU33": "{comment}",
         },
@@ -152,7 +157,8 @@ _FORMS = {
             "EG24": "{fuel_end}", "AT35": "{workplace}", "CE35": "{destination}",
             "DP35": "{cargo}", "FB35": "{trips}", "FV35": "{tonnes}",
         },
-        {"A7": "{workplace}", "A22": "{comment}", "I36": "{fuel_used}", "R36": "{hours}", "DI36": "{distance}"},
+        {"A7": "{workplace}", "A22": "{comment}", "I36": "{fuel_used}", "R36": "{hours}", "DI36": "{distance}",
+         "CQ36": "{actual_trips}", "EN36": "{actual_tonnes}"},
         (54, 188),
     ),
     "special_3": _Form(
@@ -190,6 +196,13 @@ _FORMS = {
         },
         (59, 186),
     ),
+    "manipulator_distance": _machine("Манипулятор (пробег)", meter="odometer", total="distance"),
+    "manipulator_hours": _machine("Манипулятор (моточасы)"),
+    "loader_distance": _machine("Погрузчик (пробег)", meter="odometer", total="distance"),
+    "bulldozer_distance": _machine("Бульдозер (пробег)", meter="odometer", total="distance"),
+    "excavator_mixed": _machine("Экскаватор (спидометр и мч)", meter="odometer"),
+    "bulldozer_mixed": _machine("Бульдозер (спидометр и мч)", meter="odometer"),
+    "dump_truck_mixed": _machine("Самосвал (спидометр и мч)", meter="odometer"),
 }
 
 _FIELD = re.compile(r"\{([a-z_]+)(?:\.(day|month|year))?\}")
@@ -199,10 +212,33 @@ def form_catalog() -> dict[str, str]:
     return {key: form.sheet for key, form in _FORMS.items()}
 
 
+def fields_usage(fields) -> str:
+    measures = {
+        "hours": "отработанные часы", "idle_hours": "простой", "meter_hours": "моточасы",
+        "odometer_start": "показания спидометра в км",
+        "distance": "пробег в км", "trips": "количество ездок", "tonnes": "масса груза в тоннах",
+        "planned_trips": "ездки по заданию", "actual_trips": "выполненные ездки",
+        "actual_tonnes": "фактически перевезённые тонны",
+    }
+    return ", ".join(label for key, label in measures.items() if key in fields)
+
+
+def form_usage(form_id: str) -> str:
+    if form_id == "truck_4p":
+        return "Повременный путевой 4-П. Часы работы у заказчика и отрывные талоны."
+    if form_id == "truck_4s":
+        return "Сдельный путевой 4-С. Груз, адреса погрузки и разгрузки, ездки и тонны."
+    return "Показатели формы — " + fields_usage(form_fields(form_id)) + "."
+
+
 def form_fields(form_id: str) -> dict[str, str]:
     form = _FORMS[form_id]
     used = {m[1] for pattern in (*form.front.values(), *form.reverse.values()) for m in _FIELD.finditer(pattern)}
-    return {key: label for key, label in _LABELS.items() if key in used}
+    labels = {key: label for key, label in _LABELS.items() if key in used}
+    if form_id == "truck_4s":
+        # Existing printed documents used these keys on the assignment side.
+        labels.update(trips="Ездок по заданию", tonnes="Перевезти по заданию, т")
+    return labels
 
 
 @lru_cache(maxsize=1)
@@ -287,6 +323,21 @@ def validate_values(form_id: str, values: dict) -> None:
     """Check printable fields without opening Excel files. Extra journal fields are ignored."""
     for _ in _filled_cells(form_id, values):
         pass
+
+
+def editable_form(form_id: str) -> bytes:
+    """Retain the printed layout and expose the same bindings as editable XLSX markers."""
+    form = _FORMS[form_id]
+    book = load_workbook(BytesIO(_single_sheet(form_id)))
+    for bindings, (rows, cols) in ((form.front, (0, 0)), (form.reverse, form.reverse_offset)):
+        for addresses, pattern in bindings.items():
+            marker_text = _FIELD.sub(lambda m: "{" + m[0] + "}", pattern)
+            for address in addresses.split():
+                row, col = coordinate_to_tuple(address)
+                book.active.cell(row + rows, col + cols).value = marker_text
+    output = BytesIO()
+    book.save(output)
+    return output.getvalue()
 
 
 def render_form(form_id: str, values: dict) -> bytes:

@@ -7,10 +7,18 @@ from pathlib import Path
 
 from nicegui import run, ui
 
-from rag_catalog.core.waybill_documents import WAYBILL_SHIFT_FIELDS, WaybillDocuments, print_pdf
+from rag_catalog.core.waybill_documents import WAYBILL_METRIC_FIELDS, WAYBILL_SHIFT_FIELDS, WaybillDocuments, print_pdf
 from rag_catalog.core.waybill_registers import WaybillRegisters
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _kind_label(key, title):
+    if key == "truck_4p":
+        return f"{title} · повременный, по часам"
+    if key == "truck_4s":
+        return f"{title} · сдельный, по ездкам и тоннам"
+    return title
 
 
 async def _deliver(workbook, name, preview):
@@ -48,7 +56,7 @@ def _organization_selector(organizations):
     return ui.select(organizations, label="Организация журнала", value=initial).classes("w-full")
 
 
-def _import_template(store, call, organization, added, report):
+def _import_template(store, call, organization, added, report, record=None):
     content = b""
 
     async def upload(event):
@@ -61,7 +69,8 @@ def _import_template(store, call, organization, added, report):
     async def save():
         save_button.disable()
         try:
-            template_id = await call(store.add_template, organization, name.value or "", content)
+            template_id = await call(store.add_template, organization, name.value or "", content,
+                                     replace=record["id"] if record else None)
             dialog.close()
             await added(template_id)
             ui.notify("Бланк добавлен", type="positive")
@@ -71,8 +80,8 @@ def _import_template(store, call, organization, added, report):
             save_button.enable()
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
-        ui.label("Импорт бланка Excel").classes("text-lg font-semibold")
-        name = ui.input("Название бланка").classes("w-full")
+        ui.label("Замена макета Excel" if record else "Импорт бланка Excel").classes("text-lg font-semibold")
+        name = ui.input("Название бланка", value=record["name"] if record else "").classes("w-full")
         ui.label("Загрузите XLSX с одним листом и настройте в Excel область печати. "
                  "В ячейках можно использовать маркеры. Например, {{маршрут}} добавит поле для ручного ввода.")
         with ui.expansion("Поля из карточки смены").classes("w-full"):
@@ -82,37 +91,155 @@ def _import_template(store, call, organization, added, report):
                   on_rejected=lambda: ui.notify("Выберите файл .xlsx до 4 МБ", type="warning"),
                   on_upload=upload).props('accept=".xlsx"').classes("w-full")
         with ui.row():
-            save_button = ui.button("Добавить бланк", on_click=save)
+            save_button = ui.button("Сохранить макет" if record else "Добавить бланк", on_click=save)
             save_button.disable()
             ui.button("Отмена", on_click=dialog.close).props("flat")
     dialog.on("hide", dialog.delete)
     dialog.open()
 
 
-def _create_template(store, call, organization, added, report):
-    async def save():
+def _excel_actions(store, call, organization, record, added, report):
+    async def download():
+        try:
+            workbook = await call(store.editable_template, organization, record["id"])
+            await _deliver(workbook, record["name"] + " — макет", False)
+        except Exception as exc:
+            report(exc)
+
+    with ui.row():
+        ui.button("Скачать макет с полями", icon="download", on_click=download).props("flat")
+        ui.button("Заменить из Excel", icon="upload_file",
+                  on_click=lambda: _import_template(store, call, organization, added, report, record)).props("flat")
+
+
+def _copy_name(save):
+    async def create():
+        button.disable()
+        try:
+            if await save(copy_name=name.value or ""):
+                dialog.close()
+        finally:
+            button.enable()
+
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm"):
+        ui.label("Новый вид путевого листа").classes("text-lg font-semibold")
+        name = ui.input("Название нового вида").classes("w-full")
+        with ui.row():
+            button = ui.button("Сохранить новый вид", on_click=create)
+            ui.button("Отмена", on_click=dialog.close).props("flat")
+    dialog.on("hide", dialog.delete)
+    dialog.open()
+
+
+def _create_template(store, call, organization, added, report, record=None):
+    old = record["fields"] if record else {}
+
+    async def finished(key):
+        dialog.close()
+        await added(key)
+
+    async def act(preview=False, copy_name=None):
         submit.disable()
         try:
             extra = [label.strip() for label in (manual.value or "").splitlines() if label.strip()]
-            template_id = await call(store.create_template, organization, name.value or "", fields.value or [], extra)
-            dialog.close()
-            await added(template_id)
-            ui.notify("Бланк создан", type="positive")
+            version = {"replace": record["id"]} if record else {}
+            if copy_name is not None:
+                version = {"copy_from": record["id"]}
+            title = (name.value or "") if copy_name is None else copy_name
+            result = await call(store.preview_builder if preview else store.create_template, organization,
+                                title, fields.value or [], extra, metric_fields=metrics.value or [], **version)
+            if preview:
+                await _deliver(result, name.value or "Бланк", True)
+            else:
+                await finished(result)
+                ui.notify("Макет сохранён", type="positive")
+            return True
         except Exception as exc:
             report(exc)
         finally:
             submit.enable()
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
-        ui.label("Создание бланка").classes("text-lg font-semibold")
-        name = ui.input("Название бланка").classes("w-full")
+        ui.label("Редактирование макета" if record else "Создание бланка").classes("text-lg font-semibold")
+        name = ui.input("Название бланка", value=record["name"] if record else "").classes("w-full")
+        checked = old if record else ("waybill_number", "work_date", "employee_name", "equipment")
         fields = ui.select(WAYBILL_SHIFT_FIELDS, label="Поля из смены", multiple=True,
-                           value=[k for k in ("waybill_number", "work_date", "employee_name", "equipment")
-                                  if k in WAYBILL_SHIFT_FIELDS]).classes("w-full").props("use-chips")
-        manual = ui.textarea("Поля для ручного ввода").classes("w-full").props("rows=3")
+                           value=[k for k in checked if k in WAYBILL_SHIFT_FIELDS]).classes("w-full").props("use-chips clearable")
+        metrics = ui.select(WAYBILL_METRIC_FIELDS, label="Показатели работы техники", multiple=True,
+                            value=[k for k in old if k in WAYBILL_METRIC_FIELDS]).classes("w-full").props("use-chips clearable")
+        extra = "\n".join(v for k, v in old.items() if k not in WAYBILL_SHIFT_FIELDS and k not in WAYBILL_METRIC_FIELDS)
+        manual = ui.textarea("Поля для ручного ввода", value=extra).classes("w-full").props("rows=3")
         ui.label("Введите каждое название на отдельной строке.").classes("text-sm")
+        if record:
+            _excel_actions(store, call, organization, record, finished, report)
         with ui.row():
-            submit = ui.button("Создать бланк", icon="add", on_click=save)
+            submit = ui.button("Сохранить макет" if record else "Создать бланк", icon="save" if record else "add",
+                               on_click=lambda: act())
+            if record:
+                ui.button("Сохранить как новый вид", icon="file_copy", on_click=lambda: _copy_name(act)).props("flat")
+            ui.button("Предпросмотр макета", icon="visibility", on_click=lambda: act(True)).props("flat")
+            ui.button("Отмена", on_click=dialog.close).props("flat")
+    dialog.on("hide", dialog.delete)
+    dialog.open()
+
+
+def _edit_layout(store, call, organization, record, added, report):
+    if record["builder"]:
+        _create_template(store, call, organization, added, report, record)
+        return
+    cells = record["cells"]
+    changes = {}
+    active = None
+
+    def remember():
+        if active:
+            value = entry.value or ""
+            if value == cells.get(active, ""):
+                changes.pop(active, None)
+            else:
+                changes[active] = value
+
+    def select():
+        nonlocal active
+        remember()
+        active = (address.value or "").strip().upper()
+        entry.set_value(changes.get(active, cells.get(active, "")))
+
+    async def finished(key):
+        dialog.close()
+        await added(key)
+
+    async def act(preview=False, copy_name=None):
+        remember()
+        try:
+            if preview:
+                workbook = await call(store.preview_cells, organization, record["id"], changes)
+                await _deliver(workbook, record["name"], True)
+            else:
+                key = await call(store.revise_cells, organization, record["id"], changes, copy_name=copy_name)
+                await finished(key)
+                ui.notify("Макет сохранён", type="positive")
+            return True
+        except Exception as exc:
+            report(exc)
+
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-xl"):
+        ui.label(f"Редактирование макета · {record['name']}").classes("text-lg font-semibold")
+        ui.label("Выберите ячейку по подписи или введите адрес и нажмите Enter. Маркеры в двойных фигурных скобках подставляют данные.")
+        options = {a: f"{a} — {value[:75]}" for a, value in cells.items()}
+        address = ui.select(options, with_input=True, new_value_mode="add-unique", key_generator=str,
+                            label="Ячейка макета").classes("w-full")
+        entry = ui.textarea("Содержимое ячейки").classes("w-full").props("rows=3")
+        entry.bind_enabled_from(address, "value", backward=bool)
+        address.on_value_change(select)
+        with ui.expansion("Поля автозаполнения").classes("w-full"):
+            for key, label in {**WAYBILL_SHIFT_FIELDS, **WAYBILL_METRIC_FIELDS}.items():
+                ui.label(f"{label} — {{{{{key}}}}}")
+        _excel_actions(store, call, organization, record, finished, report)
+        with ui.row():
+            ui.button("Сохранить макет", icon="save", on_click=lambda: act())
+            ui.button("Сохранить как новый вид", icon="file_copy", on_click=lambda: _copy_name(act)).props("flat")
+            ui.button("Предпросмотр макета", icon="visibility", on_click=lambda: act(True)).props("flat")
             ui.button("Отмена", on_click=dialog.close).props("flat")
     dialog.on("hide", dialog.delete)
     dialog.open()
@@ -134,7 +261,8 @@ async def show_waybill_library(journal, call, managed_orgs, report):
         try:
             options = await call(store.templates, scope) if scope else {}
             if organization.value == scope:
-                template.set_options(options, value=preferred if preferred in options else next(iter(options), None))
+                labels = {key: _kind_label(key, title) for key, title in options.items()}
+                template.set_options(labels, value=preferred if preferred in options else next(iter(options), None))
         except Exception as exc:
             report(exc)
 
@@ -144,6 +272,25 @@ async def show_waybill_library(journal, call, managed_orgs, report):
             await _deliver(workbook, "Бланки путевых листов", False)
         except Exception as exc:
             report(exc)
+
+    async def edit():
+        scope, choice = organization.value, template.value
+        try:
+            record = await call(store.template_editor, scope, choice)
+            _edit_layout(store, call, scope, record, refresh, report)
+        except Exception as exc:
+            report(exc)
+
+    async def describe():
+        scope, choice = organization.value, template.value
+        usage.set_text("")
+        if choice and scope:
+            try:
+                description = await call(store.usage, scope, choice)
+                if (scope, choice) == (organization.value, template.value):
+                    usage.set_text(description)
+            except Exception as exc:
+                report(exc)
 
     async def blank(preview):
         scope, choice = organization.value, template.value
@@ -160,11 +307,15 @@ async def show_waybill_library(journal, call, managed_orgs, report):
         ui.label("Бланки путевых листов").classes("text-lg font-semibold")
         organization = _organization_selector(organizations)
         template = ui.select({}, label="Бланк").classes("w-full")
+        usage = ui.label().classes("text-sm")
+        template.on_value_change(describe)
         with ui.row():
             for label, icon, preview in (("Скачать чистый бланк", "download", False), ("Печать бланка", "print", True)):
                 button = ui.button(label, icon=icon, on_click=lambda p=preview: blank(p))
                 button.bind_enabled_from(template, "value", backward=lambda v: v is not None)
         with ui.row() as manage:
+            ui.button("Изменить макет", icon="edit", on_click=edit).props("flat").bind_enabled_from(
+                template, "value", backward=bool)
             ui.button("Создать бланк", icon="add",
                       on_click=lambda: _create_template(store, call, organization.value, refresh, report)).props("flat")
             ui.button("Импорт из Excel", icon="upload_file",
@@ -177,18 +328,63 @@ async def show_waybill_library(journal, call, managed_orgs, report):
     await refresh()
 
 
-async def show_shift_waybill(journal, call, shift, refresh_journal, report):
+async def show_shift_waybill(journal, call, shift, edit_shift, manager, refresh_journal, report):
     scope = shift["organization_id"]
     try:
         store = await run.io_bound(WaybillDocuments, journal)
-        options = await call(store.templates, scope)
+        options = await call(store.templates, scope, shift["id"])
         issued = await call(store.issued_templates, shift["id"])
+        preferred = await call(store.preference, shift["id"])
+        current_options = await call(store.templates, scope) if manager and issued else options
     except Exception as exc:
         report(exc)
         return
 
     def mark_saved(keys):
-        return {key: f"{label} (сохранён)" if key in keys else label for key, label in options.items()}
+        return {key: _kind_label(key, label) + (" (сохранён)" if key in keys else "") for key, label in options.items()}
+
+    def preference_controls():
+        if manager:
+            rule_scope.set_text(f'{shift["equipment"]} · {shift["partner"] or "Без контрагента"}')
+            remember.set_text("Запомнить для техники и контрагента" if shift["partner"] else "Запомнить для техники без контрагента")
+            remember.set_enabled(template.value in current_options and template.value != preferred)
+            clear.set_visibility(bool(preferred))
+
+    async def selection_changed():
+        key = template.value
+        preference_controls()
+        usage.set_text("")
+        if key:
+            try:
+                description = await call(store.usage, scope, key)
+                if key == template.value:
+                    usage.set_text(description)
+            except Exception as exc:
+                report(exc)
+
+    async def set_preference(reset=False):
+        nonlocal preferred
+        try:
+            key = None if reset else template.value
+            await call(store.set_preference, shift["id"], key, expected_pair=(shift["equipment"], shift["partner"]))
+            preferred = key
+            preference_controls()
+            ui.notify("Выбор по умолчанию сброшен" if reset else "Выбор бланка сохранён", type="positive")
+        except Exception as exc:
+            report(exc)
+
+    async def edit_requisites(revision):
+        nonlocal preferred
+        saved = await edit_shift(shift_id=shift["id"], expected_revision=revision)
+        if saved:
+            shift.update(saved)
+            if manager:
+                try:
+                    preferred = await call(store.preference, shift["id"])
+                    preference_controls()
+                except Exception as exc:
+                    report(exc)
+        return saved
 
     async def after_save():
         await refresh_journal()
@@ -202,25 +398,56 @@ async def show_shift_waybill(journal, call, shift, refresh_journal, report):
         try:
             labels = await call(store.fields, scope, key)
             draft = await call(store.draft, shift["id"], key)
-            _waybill_editor(store, call, shift["id"], key, options[key], labels, draft, after_save, report)
+            _waybill_editor(store, call, shift["id"], key, options[key], labels, draft, edit_requisites, after_save, report)
         except Exception as exc:
             report(exc)
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
         ui.label(f"Путевой лист · смена №{shift['id']}").classes("text-lg font-semibold")
-        recent = next((key for key in issued if key in options), next(iter(options), None))
+        initial = preferred if preferred in options else next(iter(options), None)
+        recent = next((key for key in issued if key in options), initial)
         template = ui.select(mark_saved(issued), label="Бланк", value=recent).classes("w-full")
+        usage = ui.label().classes("text-sm")
+        if manager:
+            rule_scope = ui.label().classes("text-sm")
+            with ui.row():
+                remember = ui.button(on_click=lambda: set_preference()).props("flat")
+                clear = ui.button("Сбросить выбор по умолчанию", on_click=lambda: set_preference(True)).props("flat")
+        template.on_value_change(selection_changed)
         if not options:
             ui.label("Добавьте форму в разделе «Бланки путевых листов».")
         with ui.row():
             ui.button("Открыть бланк", on_click=open_editor).set_enabled(bool(options))
             ui.button("Закрыть", on_click=dialog.close).props("flat")
     dialog.open()
+    await selection_changed()
 
 
-def _waybill_editor(store, call, shift_id, key, title, labels, draft, refresh_journal, report):
+def _waybill_editor(store, call, shift_id, key, title, labels, draft, edit_requisites, refresh_journal, report):
     manual = {}
+    fields = {}
     busy = False
+
+    async def edit_record():
+        nonlocal draft, busy
+        if busy:
+            return
+        busy = True
+        try:
+            saved = await edit_requisites(draft["shift_revision"])
+            if saved is None:
+                return
+            latest = await call(store.draft, shift_id, key)
+            if latest["revision"] != draft["revision"] or latest["shift_revision"] != saved["revision"]:
+                raise ValueError("Документ уже изменился. Откройте его заново.")
+            for name, field in fields.items():
+                if name not in manual or (field.value or "") == draft["values"].get(name, ""):
+                    field.set_value(latest["values"].get(name, ""))
+            draft = latest
+        except Exception as exc:
+            report(exc)
+        finally:
+            busy = False
 
     async def act(output=None):
         nonlocal draft, busy
@@ -229,6 +456,10 @@ def _waybill_editor(store, call, shift_id, key, title, labels, draft, refresh_jo
         busy = True
         try:
             values = {k: field.value or "" for k, field in manual.items()}
+            if output == "preview":
+                workbook = await call(store.preview, shift_id, key, values, draft["revision"], draft["shift_revision"])
+                await _deliver(workbook, f"{title} — смена {shift_id}", True)
+                return
             if not draft["revision"] or any(value != draft["values"].get(k, "") for k, value in values.items()):
                 draft = await call(store.save, shift_id, key, values, draft["revision"], draft["shift_revision"])
                 await refresh_journal()
@@ -244,19 +475,20 @@ def _waybill_editor(store, call, shift_id, key, title, labels, draft, refresh_jo
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
         ui.label(f"{title} · смена №{shift_id}").classes("text-lg font-semibold")
-        if any(k in WAYBILL_SHIFT_FIELDS for k in labels):
-            ui.label("Для исправления данных из журнала откройте карточку смены.")
+        ui.button("Изменить данные смены", icon="edit", on_click=edit_record).props("flat")
         with ui.element("div").classes("grid grid-cols-1 sm:grid-cols-2 gap-2 w-full overflow-auto").style("max-height: 52vh"):
             for k, label in labels.items():
                 field = ui.input(label, value=draft["values"].get(k, "")).classes("w-full")
+                fields[k] = field
                 if k in WAYBILL_SHIFT_FIELDS:
                     field.props("readonly")
                 else:
                     manual[k] = field
         with ui.row():
             ui.button("Сохранить", icon="save", on_click=lambda: act())
+            ui.button("Предпросмотр", icon="visibility", on_click=lambda: act("preview")).props("flat")
             ui.button("Скачать Excel", icon="download", on_click=lambda: act("excel")).props("flat")
-            ui.button("Версия для печати", icon="print", on_click=lambda: act("print")).props("flat")
+            ui.button("Сохранить и распечатать", icon="print", on_click=lambda: act("print")).props("flat")
             ui.button("Закрыть", on_click=dialog.close).props("flat")
     dialog.open()
 

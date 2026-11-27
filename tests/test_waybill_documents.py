@@ -151,3 +151,73 @@ def test_suggestions_follow_shift_edits_until_overridden(service):
     state = store.draft("driver", sid, "bulldozer")
     assert state["values"]["fleet_number"] == "21"
     assert "5 ход." in state["values"]["work_description"]
+
+
+def test_preview_approved_waybill_is_read_only_and_rechecks_versions(service):
+    store, sid = service
+    key = store.add_template("dispatcher", "one", "Проверка", workbook_bytes(source_book()))
+    store.journal.transition("dispatcher", sid, 1, "approved")
+    content = store.preview("driver", sid, key, {"маршрут": "На погрузку"}, 0, 2)
+    assert load_workbook(BytesIO(content)).active["A2"].value == "На погрузку"
+    assert store.issued_templates("driver", sid) == []
+    assert store.journal.get("driver", sid)["status"] == "approved"
+    with pytest.raises(ValueError):
+        store.preview("driver", sid, key, {"hours": "5"}, 0, 2)
+    with pytest.raises(PermissionError):
+        store.preview("other", sid, key, {}, 0, 2)
+    store.save("driver", sid, key, {"маршрут": "Карьер"}, 0, 2)
+    with pytest.raises(ValueError):
+        store.preview("driver", sid, key, {}, 0, 2)
+    assert load_workbook(BytesIO(store.preview("driver", sid, key, {"маршрут": "База"}, 1, 3))).active["A2"].value == "База"
+    assert store.draft("driver", sid, key)["values"]["маршрут"] == "Карьер"
+
+
+def test_preferred_template_is_scoped_to_equipment_counterparty_and_organisation(service):
+    store, sid = service
+    def shift(token, org, partner, equipment):
+        return store.journal.save(token, dict(organization=org, partner=partner, equipment=equipment,
+                                  work_date="2026-11-16", workplace="Карьер", shift_number=1, hours=8))["id"]
+    other_day = shift("driver", "Первая", "заказчик", "экскаватор")
+    other_vehicle = shift("driver", "Первая", "Заказчик", "Самосвал")
+    other_client = shift("other", "Первая", "Иной заказчик", "Экскаватор")
+    other_org = shift("second", "Вторая", "Заказчик", "Экскаватор")
+    their_template = store.create_template("second", "two", "Их бланк", ["work_date"], [])
+    with pytest.raises(PermissionError):
+        store.set_preference("driver", sid, "truck_4s")
+    with pytest.raises(ValueError):
+        store.set_preference("dispatcher", sid, their_template)
+    with pytest.raises(ValueError, match="изменились"):
+        store.set_preference("dispatcher", sid, "truck_4s", expected_pair=("Другая машина", "Заказчик"))
+    store.set_preference("dispatcher", sid, "truck_4s")
+    assert store.preference("driver", other_day) == "truck_4s"
+    for token, rec in (("driver", other_vehicle), ("other", other_client), ("second", other_org)):
+        assert store.preference(token, rec) is None
+    store.set_preference("dispatcher", other_day, None)
+    assert store.preference("driver", sid) is None
+    assert "Повременный" in store.usage("driver", "one", "truck_4p")
+    assert "Сдельный" in store.usage("driver", "one", "truck_4s")
+
+
+def test_4s_keeps_dispatch_assignment_apart_from_completed_trips_on_both_versions(service):
+    store, sid = service
+    loan = store.revise_cells("dispatcher", "one", "truck_4s", {}, copy_name="Форма карьера")
+    store.set_preference("dispatcher", sid, loan)
+    key = store.revise_cells("dispatcher", "one", loan, {"DP35": "Груз {{cargo}}"})
+    assert store.preference("driver", sid) == key
+    assert "сдельная 4-С" in store.usage("driver", "one", key)
+    fields = store.fields("driver", "one", key)
+    assert "заданию" in fields["trips"] and "Выполнено" in fields["actual_trips"]
+    for template_id in ("truck_4s", key):
+        shift_revision = store.journal.get("driver", sid)["revision"]
+        with pytest.raises(ValueError, match="дат"):
+            store.save("driver", sid, template_id, {"valid_until": "завтра"}, 0, shift_revision)
+        state = store.save("driver", sid, template_id, {"trips": "8", "tonnes": "100"}, 0, shift_revision)
+        with store.journal._connection() as conn:
+            assert "trips" not in register_details(conn, sid)
+        preview = store.preview("driver", sid, template_id, {"actual_trips": "5", "actual_tonnes": "50"},
+                                state["revision"], state["shift_revision"])
+        sheet = load_workbook(BytesIO(preview)).active
+        assert [sheet[k].value for k in ("FB35", "FV35", "JW90", "LT90")] == ["8", "100", "5", "50"]
+    store.save("driver", sid, key, {"actual_trips": "5"}, 1, state["shift_revision"])
+    with store.journal._connection() as conn:
+        assert register_details(conn, sid)["trips"] == "5"

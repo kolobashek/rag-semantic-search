@@ -2,17 +2,18 @@
 
 import re
 from copy import copy
+from datetime import datetime
 from io import BytesIO
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.cell.cell import MergedCell
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, MergedCell
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.utils.exceptions import InvalidFileException
 
-MARKER = re.compile(r"\{\{([a-zа-яё][a-zа-яё0-9_]{0,59})\}\}", re.IGNORECASE)
+MARKER = re.compile(r"\{\{([a-zа-яё][a-zа-яё0-9_]{0,59})(?:\.(day|month|year))?\}\}", re.IGNORECASE)
 MAX_UPLOAD = 4 * 1024 * 1024
 _SHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
@@ -107,7 +108,9 @@ def import_template(content, name):
         keys = {}
         for cell in source._cells.values():
             if isinstance(cell.value, str):
-                for key in MARKER.findall(cell.value):
+                for key, part in MARKER.findall(cell.value):
+                    if part and key not in ("work_date", "valid_until", "licence_date"):
+                        raise ValueError("День, месяц и год можно указать у поля даты")
                     keys[key] = key.replace("_", " ").capitalize()
                 remainder = MARKER.sub("", cell.value)
                 if "{{" in remainder or "}}" in remainder:
@@ -123,11 +126,57 @@ def import_template(content, name):
         raise ValueError("Не удалось прочитать книгу XLSX") from exc
 
 
+def _marker_text(match, values):
+    key, part = match.groups()
+    value = str(values.get(key, ""))
+    if not value or (not part and key not in ("work_date", "valid_until", "licence_date")):
+        return value
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(value, fmt)
+            return parsed.strftime({"day": "%d", "month": "%m", "year": "%Y"}[part.lower()] if part else "%d.%m.%Y")
+        except ValueError:
+            continue
+    if part:
+        raise ValueError("Укажите дату в формате ДД.ММ.ГГГГ или ГГГГ-ММ-ДД")
+    return value
+
+
 def fill_sheet(sheet, values):
     for cell in sheet._cells.values():
         if cell.data_type == "s" and isinstance(cell.value, str) and "{{" in cell.value:
-            cell.value = MARKER.sub(lambda match: str(values.get(match[1], "")), cell.value)
+            cell.value = MARKER.sub(lambda match: _marker_text(match, values), cell.value)
             cell.data_type = "s"
+
+
+def matches_builder(sheet, fields):
+    """Recognize the constructor format stored before templates recorded their layout type."""
+    if (sheet.max_column != 2 or sheet.max_row != len(fields) + 5 or sheet["A1"].value != sheet.title
+            or sheet.cell(sheet.max_row, 1).value != "Подпись"):
+        return False
+    return all(sheet.cell(i, 1).value == label and sheet.cell(i, 2).value == "{{" + key + "}}"
+               for i, (key, label) in enumerate(fields.items(), 3))
+
+
+def edit_cells(content, changes):
+    if not isinstance(changes, dict) or not 0 < len(changes) <= 1000:
+        raise ValueError("Измените хотя бы одну ячейку макета")
+    book = load_workbook(BytesIO(content))
+    sheet = book.active
+    for address, value in changes.items():
+        if not isinstance(address, str) or not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]{0,3}", address):
+            raise ValueError("Введите адрес ячейки, например A1")
+        _check_extent(address)
+        if (not isinstance(value, str) or len(value) > 32767 or ILLEGAL_CHARACTERS_RE.search(value)
+                or re.search(r"[\ud800-\udfff\ufffe\uffff]", value)):
+            raise ValueError("Проверьте текст ячейки")
+        cell = sheet[address]
+        if isinstance(cell, MergedCell):
+            raise ValueError("Укажите левую верхнюю ячейку объединённой области")
+        cell.value = value or None
+        if value:
+            cell.data_type = "s"
+    return workbook_bytes(book)
 
 
 def new_template(name, fields):
